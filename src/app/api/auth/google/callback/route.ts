@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import crypto from "crypto"
+import { getPublicOrigin } from "@/lib/public-origin"
 import {
   createUser,
   findUserByEmail,
@@ -102,7 +103,7 @@ export async function GET(request: NextRequest) {
     )
   }
 
-  const origin = url.origin
+  const origin = getPublicOrigin(request)
   const callbackUrl = new URL("/api/auth/google/callback", origin).toString()
 
   try {

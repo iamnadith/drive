@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import crypto from "crypto"
+import { getPublicOrigin } from "@/lib/public-origin"
 
 function getEnv(name: string): string {
   const value = process.env[name]
@@ -28,7 +29,15 @@ export async function GET(request: Request) {
     const mode = url.searchParams.get("mode") ?? "login"
     const redirect = url.searchParams.get("redirect") ?? "/"
 
-    const origin = url.origin
+    const origin = getPublicOrigin(request)
+    const originUrl = new URL(origin)
+    const isLocalhost =
+      originUrl.hostname === "localhost" || originUrl.hostname === "127.0.0.1"
+    if (originUrl.protocol === "http:" && !isLocalhost) {
+      throw new Error(
+        `Google OAuth requires https redirect URIs (except localhost). Set APP_ORIGIN to your https site URL; current origin is ${origin}.`
+      )
+    }
     const callbackUrl = new URL("/api/auth/google/callback", origin).toString()
 
     const statePayload = JSON.stringify({
