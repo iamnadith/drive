@@ -88,6 +88,9 @@ async function generateTotp(secret: string, timeStepSeconds = 30, digits = 6) {
   const keyBytes = base32ToBytes(secret)
   if (!keyBytes.length) throw new Error("Invalid 2FA secret")
 
+  const keyData = new ArrayBuffer(keyBytes.byteLength)
+  new Uint8Array(keyData).set(keyBytes)
+
   const counter = Math.floor(Date.now() / 1000 / timeStepSeconds)
   const buffer = new ArrayBuffer(8)
   const view = new DataView(buffer)
@@ -95,7 +98,7 @@ async function generateTotp(secret: string, timeStepSeconds = 30, digits = 6) {
 
   const cryptoKey = await window.crypto.subtle.importKey(
     "raw",
-    keyBytes,
+    keyData,
     { name: "HMAC", hash: "SHA-1" },
     false,
     ["sign"]
@@ -417,6 +420,8 @@ export default function AccountsPage() {
         status: acc.status ?? "available",
         createdAt: acc.createdAt ?? "-",
         totalBuckets: acc.totalBuckets ?? 0,
+        totalObjects: acc.totalObjects ?? 0,
+        totalBytes: acc.totalBytes ?? 0,
       }
 
       setAccounts((prev) => [...prev, row])
@@ -527,6 +532,8 @@ export default function AccountsPage() {
                 status: updated.status ?? "available",
                 createdAt: updated.createdAt ?? acc.createdAt ?? "-",
                 totalBuckets: updated.totalBuckets ?? acc.totalBuckets,
+                totalObjects: updated.totalObjects ?? acc.totalObjects,
+                totalBytes: updated.totalBytes ?? acc.totalBytes,
                 syncStatus: updated.syncStatus ?? acc.syncStatus,
                 syncMessage: updated.syncMessage ?? acc.syncMessage,
                 lastSyncedAt: updated.lastSyncedAt ?? acc.lastSyncedAt,
@@ -579,6 +586,8 @@ export default function AccountsPage() {
                 status: updated.status ?? "available",
                 createdAt: updated.createdAt ?? acc.createdAt ?? "-",
                 totalBuckets: updated.totalBuckets ?? acc.totalBuckets,
+                totalObjects: updated.totalObjects ?? acc.totalObjects,
+                totalBytes: updated.totalBytes ?? acc.totalBytes,
               }
             : acc
         )
@@ -624,6 +633,8 @@ export default function AccountsPage() {
           status: acc.status ?? "available",
           createdAt: acc.createdAt ?? "-",
           totalBuckets: acc.totalBuckets ?? 0,
+          totalObjects: acc.totalObjects ?? 0,
+          totalBytes: acc.totalBytes ?? 0,
           syncStatus: acc.syncStatus ?? "idle",
           syncMessage: acc.syncMessage ?? "",
           lastSyncedAt: acc.lastSyncedAt ?? undefined,

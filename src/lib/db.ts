@@ -1,4 +1,5 @@
 import { Pool } from "pg"
+import type { QueryResultRow } from "pg"
 
 declare global {
   var __drivePgPool: Pool | undefined
@@ -80,7 +81,7 @@ function isTransientConnectionError(error: unknown): boolean {
   )
 }
 
-export async function queryDb<T = unknown>(
+export async function queryDb<T extends QueryResultRow = any>(
   text: string,
   params?: readonly unknown[]
 ) {

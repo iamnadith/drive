@@ -1432,14 +1432,14 @@ export default function UsersPage() {
                       </span>
                     </Label>
                     {formState.profileImageUrl && (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="xs"
-                        className="text-destructive hover:text-destructive hover:bg-destructive/10 px-2 h-7 text-xs"
-                        onClick={() =>
-                          setFormState((s) => ({
-                            ...s,
+	                      <Button
+	                        type="button"
+	                        variant="ghost"
+	                        size="sm"
+	                        className="text-destructive hover:text-destructive hover:bg-destructive/10 px-2 h-7 text-xs"
+	                        onClick={() =>
+	                          setFormState((s) => ({
+	                            ...s,
                             profileImageUrl: "",
                           }))
                         }
