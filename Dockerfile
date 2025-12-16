@@ -22,7 +22,11 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
+COPY docker-entrypoint.sh ./docker-entrypoint.sh
+RUN chmod 755 ./docker-entrypoint.sh
+
 COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/package-lock.json ./package-lock.json
 COPY --from=build /app/.env ./.env
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/public ./public
@@ -30,4 +34,5 @@ COPY --from=build /app/.next ./.next
 COPY --from=build /app/next.config.js ./next.config.js
 
 EXPOSE 3000
+ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["npm", "run", "start"]
