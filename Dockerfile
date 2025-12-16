@@ -11,6 +11,7 @@ FROM base AS build
 ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+COPY .env.production ./.env.production
 RUN npm run build
 RUN npm prune --omit=dev
 
