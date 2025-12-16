@@ -1,25 +1,21 @@
 FROM node:20-slim AS base
 WORKDIR /app
-
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm install -g npm@latest
 
 FROM base AS deps
-COPY package.json ./
-RUN npm install
+COPY package.json package-lock.json ./
+RUN npm ci
 
 FROM base AS build
 ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/package-lock.json ./package-lock.json
 COPY . .
-COPY .env ./.env
 RUN npm run build
 RUN npm prune --omit=dev
 
-FROM base AS runner
+FROM node:20-slim AS runner
 WORKDIR /app
-
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
