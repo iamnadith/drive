@@ -13,6 +13,7 @@ dist-ssr
 *.local
 package-lock.json
 pnpm-lock.yaml
+.env.*.local
 
 # Next.js / React
 .next
