@@ -27,6 +27,12 @@ const SCANS_TABLE = "drive_bucket_scans"
 const SCAN_OBJECTS_TABLE = "drive_bucket_scan_objects"
 const VERIFY_DIFFS_TABLE = "drive_bucket_verify_diffs"
 
+type ScanObjectRow = {
+  key: string
+  size: number
+  isDirMarker?: boolean
+}
+
 function supabaseErrorMessage(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {
     const message = (error as { message?: unknown }).message
@@ -281,6 +287,125 @@ export async function markBucketScanFailed(input: { scanId: string; error: strin
     .eq("id", input.scanId)
 }
 
+async function loadNonDirScanObjectsPage(
+  supabase: ReturnType<typeof getSupabaseServerClient>,
+  scanId: string,
+  afterKey: string | null
+): Promise<ScanObjectRow[]> {
+  // Prefer filtering server-side by is_dir_marker, but fall back if the column isn't present yet.
+  let query = supabase
+    .from(SCAN_OBJECTS_TABLE)
+    .select("key,size,is_dir_marker")
+    .eq("scan_id", scanId)
+    .eq("is_dir_marker", false)
+    .order("key", { ascending: true })
+    .limit(1000)
+
+  if (afterKey) query = query.gt("key", afterKey)
+
+  let result: any = await query
+  if (result.error && isSchemaCacheMissingColumn(result.error, "is_dir_marker")) {
+    let q2 = supabase
+      .from(SCAN_OBJECTS_TABLE)
+      .select("key,size")
+      .eq("scan_id", scanId)
+      .order("key", { ascending: true })
+      .limit(1000)
+    if (afterKey) q2 = q2.gt("key", afterKey)
+    result = await q2
+  }
+
+  if (result.error) throw new Error(supabaseErrorMessage(result.error) || "Unable to read scan objects")
+
+  const raw = Array.isArray(result.data) ? (result.data as any[]) : []
+  return raw
+    .map((r) => ({
+      key: String(r.key ?? ""),
+      size: typeof r.size === "number" ? r.size : Number(r.size ?? 0),
+      isDirMarker: typeof r.is_dir_marker === "boolean" ? r.is_dir_marker : undefined,
+    }))
+    .filter((r) => r.key)
+    .filter((r) => (typeof r.isDirMarker === "boolean" ? !r.isDirMarker : !isDirMarkerObject({ key: r.key, size: r.size })))
+}
+
+export async function inferVerifyDiffsFromScans(input: {
+  sourceScanId: string
+  destScanId: string
+  limit?: number
+  includeExtra?: boolean
+}): Promise<Array<{ kind: string; key: string; sourceSize?: number | null; destSize?: number | null }>> {
+  const supabase = getSupabaseServerClient()
+  const limit = Math.max(1, Math.min(5_000, input.limit ?? 500))
+  const includeExtra = input.includeExtra === true
+  const diffs: Array<{ kind: string; key: string; sourceSize?: number | null; destSize?: number | null }> = []
+
+  let after: string | null = null
+  while (diffs.length < limit) {
+    const page = await loadNonDirScanObjectsPage(supabase, input.sourceScanId, after)
+    if (page.length === 0) break
+
+    const keys = page.map((r) => r.key)
+    const { data: destMatches, error: destErr } = await supabase
+      .from(SCAN_OBJECTS_TABLE)
+      .select("key,size,is_dir_marker")
+      .eq("scan_id", input.destScanId)
+      .in("key", keys)
+    if (destErr) throw new Error(String((destErr as any)?.message ?? "Unable to read destination scan objects"))
+
+    const destMap = new Map<string, number>()
+    for (const r of Array.isArray(destMatches) ? (destMatches as any[]) : []) {
+      const key = String((r as any).key ?? "")
+      const size = typeof (r as any).size === "number" ? (r as any).size : Number((r as any).size ?? 0)
+      const isDirMarker =
+        typeof (r as any).is_dir_marker === "boolean"
+          ? Boolean((r as any).is_dir_marker)
+          : isDirMarkerObject({ key, size })
+      if (key && !isDirMarker) destMap.set(key, size)
+    }
+
+    for (const row of page) {
+      const destSize = destMap.get(row.key)
+      if (typeof destSize === "undefined") {
+        diffs.push({ kind: "missing", key: row.key, sourceSize: row.size, destSize: null })
+      } else if (destSize !== row.size) {
+        diffs.push({ kind: "size_mismatch", key: row.key, sourceSize: row.size, destSize })
+      }
+      if (diffs.length >= limit) break
+    }
+
+    after = page[page.length - 1]?.key ?? after
+  }
+
+  if (!includeExtra || diffs.length >= limit) return diffs
+
+  let afterDest: string | null = null
+  while (diffs.length < limit) {
+    const page = await loadNonDirScanObjectsPage(supabase, input.destScanId, afterDest)
+    if (page.length === 0) break
+
+    const keys = page.map((r) => r.key)
+    const { data: sourceMatches, error: sourceErr } = await supabase
+      .from(SCAN_OBJECTS_TABLE)
+      .select("key")
+      .eq("scan_id", input.sourceScanId)
+      .in("key", keys)
+    if (sourceErr) throw new Error(String((sourceErr as any)?.message ?? "Unable to read source scan objects"))
+
+    const sourceSet = new Set<string>(
+      (Array.isArray(sourceMatches) ? sourceMatches : []).map((row: any) => String(row.key ?? "")).filter(Boolean)
+    )
+
+    for (const row of page) {
+      if (!sourceSet.has(row.key)) diffs.push({ kind: "extra", key: row.key, sourceSize: null, destSize: row.size })
+      if (diffs.length >= limit) break
+    }
+
+    afterDest = page[page.length - 1]?.key ?? afterDest
+  }
+
+  return diffs
+}
+
 export async function computeAndStoreVerifyDiffs(input: {
   migrationItemId: string
   sourceScanId: string
@@ -321,45 +446,6 @@ export async function computeAndStoreVerifyDiffs(input: {
   const sampleMismatchedKeys: string[] = []
   const sampleExtraKeys: string[] = []
 
-  const loadScanObjectsPage = async (scanId: string, afterKey: string | null) => {
-    // Prefer filtering server-side by is_dir_marker, but fall back if the column isn't present yet.
-    let query = supabase
-      .from(SCAN_OBJECTS_TABLE)
-      .select("key,size,is_dir_marker")
-      .eq("scan_id", scanId)
-      .eq("is_dir_marker", false)
-      .order("key", { ascending: true })
-      .limit(1000)
-
-    if (afterKey) query = query.gt("key", afterKey)
-
-    let result: any = await query
-    if (result.error && isSchemaCacheMissingColumn(result.error, "is_dir_marker")) {
-      let q2 = supabase
-        .from(SCAN_OBJECTS_TABLE)
-        .select("key,size")
-        .eq("scan_id", scanId)
-        .order("key", { ascending: true })
-        .limit(1000)
-      if (afterKey) q2 = q2.gt("key", afterKey)
-      result = await q2
-    }
-
-    if (result.error) throw new Error(supabaseErrorMessage(result.error) || "Unable to read scan objects")
-
-    const raw = Array.isArray(result.data) ? (result.data as any[]) : []
-    const page = raw
-      .map((r) => ({
-        key: String(r.key ?? ""),
-        size: typeof r.size === "number" ? r.size : Number(r.size ?? 0),
-        isDirMarker: typeof r.is_dir_marker === "boolean" ? r.is_dir_marker : undefined,
-      }))
-      .filter((r) => r.key)
-      .filter((r) => (typeof r.isDirMarker === "boolean" ? !r.isDirMarker : !isDirMarkerObject({ key: r.key, size: r.size })))
-
-    return page
-  }
-
   const insertChunked = async (rows: any[]) => {
     for (let i = 0; i < rows.length; i += 500) {
       const chunk = rows.slice(i, i + 500)
@@ -371,7 +457,7 @@ export async function computeAndStoreVerifyDiffs(input: {
   // Walk source keys and check presence/size in dest.
   let after: string | null = null
   while (true) {
-    const page = await loadScanObjectsPage(input.sourceScanId, after)
+    const page = await loadNonDirScanObjectsPage(supabase, input.sourceScanId, after)
     if (page.length === 0) break
 
     const keys = page.map((r) => r.key)
@@ -414,7 +500,7 @@ export async function computeAndStoreVerifyDiffs(input: {
   if (input.strictDestination) {
     let afterD: string | null = null
     while (true) {
-      const page = await loadScanObjectsPage(input.destScanId, afterD)
+      const page = await loadNonDirScanObjectsPage(supabase, input.destScanId, afterD)
       if (page.length === 0) break
 
       const keys = page.map((r) => r.key)

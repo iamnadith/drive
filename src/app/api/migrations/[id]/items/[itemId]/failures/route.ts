@@ -1,10 +1,16 @@
 import { NextResponse } from "next/server"
 import { getAllAccounts } from "@/lib/accounts-store"
-import { listVerifyDiffsForItem } from "@/lib/bucket-scan-store"
+import {
+  ensureBucketScan,
+  getBucketScan,
+  inferVerifyDiffsFromScans,
+  listVerifyDiffsForItem,
+  runBucketScanBatch,
+} from "@/lib/bucket-scan-store"
 import { slurperListJobLogs } from "@/lib/cloudflare-r2-super-slurper"
 import { replaceMigrationItemFailureRecords } from "@/lib/migration-failure-records-store"
 import { getMigration, listMigrationItems, updateMigrationItem } from "@/lib/migrations-store"
-import { r2GetObjectStream, r2HeadObject } from "@/lib/r2-s3"
+import { r2GetObjectStream, r2HeadObject, r2ListAllObjects } from "@/lib/r2-s3"
 
 export const runtime = "nodejs"
 
@@ -461,6 +467,110 @@ function buildDiagnosisFromVerifyDiff(diff: InferredVerifyDiff): Diagnosis {
   }
 }
 
+async function ensureCompletedScan(input: {
+  scanId?: string
+  accountId: string
+  bucketName: string
+  kind: "source" | "dest"
+  migrationId: string
+  migrationItemId: string
+  prefix?: string | null
+  r2: {
+    accountId: string
+    accessKeyId: string
+    secretAccessKey: string
+  }
+}): Promise<string | null> {
+  let scan =
+    typeof input.scanId === "string" && input.scanId.trim().length > 0 ? await getBucketScan(input.scanId).catch(() => null) : null
+
+  if (!scan) {
+    scan = await ensureBucketScan({
+      accountId: input.accountId,
+      bucketName: input.bucketName,
+      kind: input.kind,
+      migrationId: input.migrationId,
+      migrationItemId: input.migrationItemId,
+      prefix: input.prefix ?? null,
+    })
+  }
+
+  let loops = 0
+  while (scan && scan.status !== "completed" && scan.status !== "failed" && loops < 60) {
+    scan = await runBucketScanBatch({
+      scanId: scan.id,
+      r2: input.r2,
+      bucketName: input.bucketName,
+      prefix: input.prefix ?? null,
+      maxObjects: 2_000,
+    })
+    loops += 1
+  }
+
+  return scan?.id ?? null
+}
+
+async function inferDiffsFromLiveBucketLists(input: {
+  source: { accountId: string; accessKeyId: string; secretAccessKey: string; bucket: string }
+  destination: { accountId: string; accessKeyId: string; secretAccessKey: string; bucket: string }
+  prefix?: string | null
+  limit?: number
+  includeExtra?: boolean
+}): Promise<InferredVerifyDiff[]> {
+  const [sourceObjects, destinationObjects] = await Promise.all([
+    r2ListAllObjects(
+      {
+        accountId: input.source.accountId,
+        accessKeyId: input.source.accessKeyId,
+        secretAccessKey: input.source.secretAccessKey,
+      },
+      input.source.bucket,
+      { prefix: input.prefix ?? undefined, maxObjects: 200_000 }
+    ),
+    r2ListAllObjects(
+      {
+        accountId: input.destination.accountId,
+        accessKeyId: input.destination.accessKeyId,
+        secretAccessKey: input.destination.secretAccessKey,
+      },
+      input.destination.bucket,
+      { prefix: input.prefix ?? undefined, maxObjects: 200_000 }
+    ),
+  ])
+
+  const limit = Math.max(1, Math.min(5_000, input.limit ?? 500))
+  const includeExtra = input.includeExtra === true
+  const diffs: InferredVerifyDiff[] = []
+  const destinationMap = new Map(destinationObjects.map((obj) => [obj.key, obj.size] as const))
+
+  for (const sourceObject of sourceObjects) {
+    const destinationSize = destinationMap.get(sourceObject.key)
+    if (typeof destinationSize === "undefined") {
+      diffs.push({ kind: "missing", key: sourceObject.key, sourceSize: sourceObject.size, destSize: null })
+    } else if (destinationSize !== sourceObject.size) {
+      diffs.push({
+        kind: "size_mismatch",
+        key: sourceObject.key,
+        sourceSize: sourceObject.size,
+        destSize: destinationSize,
+      })
+    }
+    if (diffs.length >= limit) return diffs
+  }
+
+  if (!includeExtra || diffs.length >= limit) return diffs
+
+  const sourceSet = new Set(sourceObjects.map((obj) => obj.key))
+  for (const destinationObject of destinationObjects) {
+    if (!sourceSet.has(destinationObject.key)) {
+      diffs.push({ kind: "extra", key: destinationObject.key, sourceSize: null, destSize: destinationObject.size })
+    }
+    if (diffs.length >= limit) break
+  }
+
+  return diffs
+}
+
 export async function GET(request: Request, context: { params: Promise<{ id: string; itemId: string }> }) {
   try {
     const { id, itemId } = await context.params
@@ -558,6 +668,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     )
 
     const diagnosticsByKey = new Set(diagnostics.map((entry) => entry.key))
+    const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
     let inferredDiagnostics: Array<{
       key: string
       message: string
@@ -575,8 +686,93 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
         migrationItemId: item.id,
         limit: Math.max(limit, reportedFailedObjects),
       }).catch(() => [])
+      let candidateDiffs = verifyDiffs.filter((diff) => diff.key && !diagnosticsByKey.has(diff.key))
 
-      const candidateDiffs = verifyDiffs.filter((diff) => diff.key && !diagnosticsByKey.has(diff.key))
+      if (candidateDiffs.length < reportedFailedObjects - diagnostics.length) {
+        const pathPrefix =
+          typeof migration.options?.pathPrefix === "string" && migration.options.pathPrefix.trim().length > 0
+            ? migration.options.pathPrefix
+            : null
+
+        const sourceScanId = await ensureCompletedScan({
+          scanId: typeof progress.sourceScanId === "string" ? progress.sourceScanId : undefined,
+          accountId: source.id,
+          bucketName: item.sourceBucket,
+          kind: "source",
+          migrationId: id,
+          migrationItemId: item.id,
+          prefix: pathPrefix,
+          r2: {
+            accountId: source.cloudflareAccountId!,
+            accessKeyId: source.r2AccessKeyId,
+            secretAccessKey: source.r2SecretAccessKey,
+          },
+        }).catch(() => null)
+
+        const destScanId = await ensureCompletedScan({
+          scanId: typeof progress.destScanId === "string" ? progress.destScanId : undefined,
+          accountId: target.id,
+          bucketName: item.targetBucket,
+          kind: "dest",
+          migrationId: id,
+          migrationItemId: item.id,
+          prefix: pathPrefix,
+          r2: {
+            accountId: target.cloudflareAccountId!,
+            accessKeyId: target.r2AccessKeyId,
+            secretAccessKey: target.r2SecretAccessKey,
+          },
+        }).catch(() => null)
+
+        if (sourceScanId && destScanId) {
+          const inferredDiffsFromScans = await inferVerifyDiffsFromScans({
+            sourceScanId,
+            destScanId,
+            limit: Math.max(limit, reportedFailedObjects),
+            includeExtra: migration.options?.verifyStrictDestination === true,
+          }).catch(() => [])
+
+          if (inferredDiffsFromScans.length > 0) {
+            const mergedByKey = new Map<string, InferredVerifyDiff>()
+            for (const diff of candidateDiffs) mergedByKey.set(diff.key, diff)
+            for (const diff of inferredDiffsFromScans) {
+              if (!diff.key || diagnosticsByKey.has(diff.key) || mergedByKey.has(diff.key)) continue
+              mergedByKey.set(diff.key, diff)
+            }
+            candidateDiffs = Array.from(mergedByKey.values())
+          }
+        }
+
+        if (candidateDiffs.length < reportedFailedObjects - diagnostics.length) {
+          const inferredDiffsFromLiveLists = await inferDiffsFromLiveBucketLists({
+            source: {
+              accountId: source.cloudflareAccountId!,
+              accessKeyId: source.r2AccessKeyId,
+              secretAccessKey: source.r2SecretAccessKey,
+              bucket: item.sourceBucket,
+            },
+            destination: {
+              accountId: target.cloudflareAccountId!,
+              accessKeyId: target.r2AccessKeyId,
+              secretAccessKey: target.r2SecretAccessKey,
+              bucket: item.targetBucket,
+            },
+            prefix: pathPrefix,
+            limit: Math.max(limit, reportedFailedObjects),
+            includeExtra: migration.options?.verifyStrictDestination === true,
+          }).catch(() => [])
+
+          if (inferredDiffsFromLiveLists.length > 0) {
+            const mergedByKey = new Map<string, InferredVerifyDiff>()
+            for (const diff of candidateDiffs) mergedByKey.set(diff.key, diff)
+            for (const diff of inferredDiffsFromLiveLists) {
+              if (!diff.key || diagnosticsByKey.has(diff.key) || mergedByKey.has(diff.key)) continue
+              mergedByKey.set(diff.key, diff)
+            }
+            candidateDiffs = Array.from(mergedByKey.values())
+          }
+        }
+      }
 
       inferredDiagnostics = await mapWithConcurrency(
         candidateDiffs.slice(0, Math.max(0, limit - diagnostics.length)),
@@ -603,12 +799,12 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
             key: diff.key,
             message:
               diff.kind === "missing"
-                ? "Inferred failure from verification: object missing in destination."
+                ? "Inferred failure from source/destination scan: object missing in destination."
                 : diff.kind === "size_mismatch"
-                  ? "Inferred failure from verification: object size mismatch."
-                  : "Inferred issue from verification.",
+                  ? "Inferred failure from source/destination scan: object size mismatch."
+                  : "Inferred failure from source/destination scan.",
             at: null,
-            rawLog: { source: "verify_diff", ...diff },
+            rawLog: { source: "scan_inference", ...diff },
             source: sourceProbe,
             destination: destinationProbe,
             diagnosis: buildDiagnosisFromVerifyDiff(diff),
