@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { Readable } from "stream"
 import { getAllAccounts } from "@/lib/accounts-store"
-import { r2PutObject } from "@/lib/r2-s3"
+import { r2ListObjectsPageWithDelimiter, r2PutObject } from "@/lib/r2-s3"
 
 type ActiveAccount = Awaited<ReturnType<typeof getAllAccounts>>[number] & {
   cloudflareAccountId: string
@@ -23,7 +23,7 @@ async function getActiveAccount() {
 }
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ name: string }> }
 ) {
   try {
@@ -36,59 +36,63 @@ export async function GET(
       )
     }
 
-    const encoded = encodeURIComponent(name)
-    const objectsRes = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${active.cloudflareAccountId}/r2/buckets/${encoded}/objects`,
-      {
-        headers: {
-          Authorization: `Bearer ${active.apiToken}`,
-        },
-      }
-    )
-
-    if (!objectsRes.ok) {
-      const body = await objectsRes.text().catch(() => "")
-      console.error("R2 list objects failed:", body)
+    if (!active.r2AccessKeyId || !active.r2SecretAccessKey) {
       return NextResponse.json(
-        {
-          error: "Unable to fetch bucket objects for active account",
-          details: body,
-          objects: [],
-        },
+        { error: "Active Cloudflare account is missing R2 access key pair", objects: [] },
         { status: 200 }
       )
     }
 
-    const objectsBody = await objectsRes.json()
-    const result = objectsBody?.result
-    const objectsArray = Array.isArray(result?.objects)
-      ? result.objects
-      : Array.isArray(result)
-      ? result
+    const url = new URL(request.url)
+    const prefix = url.searchParams.get("prefix") ?? undefined
+    const continuationToken = url.searchParams.get("continuationToken") ?? undefined
+    const maxKeysParam = url.searchParams.get("maxKeys")
+    const maxKeys = maxKeysParam ? Number(maxKeysParam) : 1000
+
+    const page = await r2ListObjectsPageWithDelimiter(
+      {
+        accountId: active.cloudflareAccountId,
+        accessKeyId: active.r2AccessKeyId,
+        secretAccessKey: active.r2SecretAccessKey,
+      },
+      name,
+      {
+        prefix,
+        continuationToken,
+        maxKeys: Number.isFinite(maxKeys) ? Math.max(1, Math.min(1000, maxKeys)) : 1000,
+        delimiter: "/",
+      }
+    )
+
+    const folders = Array.isArray(page.CommonPrefixes)
+      ? page.CommonPrefixes.map((p) => String(p?.Prefix ?? "")).filter(Boolean)
       : []
 
-    const objects = objectsArray.map((obj: any) => ({
-      id: String(obj?.key ?? obj?.name ?? ""),
-      name: String(obj?.key ?? obj?.name ?? "object"),
-      size:
-        typeof obj?.size === "number"
-          ? obj.size
-          : typeof obj?.bytes === "number"
-          ? obj.bytes
-          : 0,
-      contentType:
-        typeof obj?.http_metadata?.contentType === "string"
-          ? obj.http_metadata.contentType
-          : undefined,
-      uploaded:
-        typeof obj?.uploaded === "string"
-          ? obj.uploaded
-          : typeof obj?.uploaded_at === "string"
-          ? obj.uploaded_at
-          : undefined,
-    }))
+    const contents = Array.isArray(page.Contents) ? page.Contents : []
+    const objects = contents
+      .map((obj) => {
+        const key = typeof obj?.Key === "string" ? obj.Key : ""
+        if (!key) return null
+        return {
+          id: key,
+          key,
+          name: key,
+          size: typeof obj?.Size === "number" && Number.isFinite(obj.Size) ? obj.Size : 0,
+          uploaded: obj?.LastModified instanceof Date ? obj.LastModified.toISOString() : undefined,
+        }
+      })
+      .filter(Boolean)
 
-    return NextResponse.json({ objects })
+    const nextContinuationToken =
+      typeof page.NextContinuationToken === "string" ? page.NextContinuationToken : null
+
+    return NextResponse.json({
+      prefix: prefix ?? "",
+      folders,
+      objects,
+      nextContinuationToken,
+      isTruncated: Boolean(page.IsTruncated),
+    })
   } catch (error: any) {
     const message = error?.message ?? "Unable to list bucket objects"
     return NextResponse.json({ error: message, objects: [] }, { status: 200 })

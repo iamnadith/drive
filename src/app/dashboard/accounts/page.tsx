@@ -141,6 +141,14 @@ export type Account = {
   lastSyncedAt?: string
 }
 
+type AccountMigrationRecord = {
+  id: string
+  sourceAccountId: string
+  targetAccountId: string
+  status: string
+  createdAt: string
+}
+
 export default function AccountsPage() {
   const [accounts, setAccounts] = React.useState<Account[]>([])
   const [isAddOpen, setIsAddOpen] = React.useState(false)
@@ -197,6 +205,18 @@ export default function AccountsPage() {
     account: Account | null
   } | null>(null)
   const [enableAccount, setEnableAccount] = React.useState<Account | null>(null)
+  const [migrationCleanupAccount, setMigrationCleanupAccount] =
+    React.useState<Account | null>(null)
+  const [linkedMigrations, setLinkedMigrations] = React.useState<
+    AccountMigrationRecord[]
+  >([])
+  const [isLoadingLinkedMigrations, setIsLoadingLinkedMigrations] =
+    React.useState(false)
+  const [isDeletingLinkedMigrations, setIsDeletingLinkedMigrations] =
+    React.useState(false)
+  const [deletingMigrationIds, setDeletingMigrationIds] = React.useState<
+    Record<string, boolean>
+  >({})
   const hasAutoSyncedRef = React.useRef(false)
 
   React.useEffect(() => {
@@ -548,16 +568,104 @@ export default function AccountsPage() {
     }
   }
 
-  const handleDelete = async (id: string) => {
+  const handleOpenMigrationCleanup = async (account: Account) => {
+    try {
+      setIsLoadingLinkedMigrations(true)
+      const res = await fetch(`/api/accounts/${account.id}/migrations`)
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || "Unable to load linked migrations")
+
+      const rows: AccountMigrationRecord[] = (data.migrations ?? []).map((m: any) => ({
+        id: String(m.id ?? ""),
+        sourceAccountId: String(m.sourceAccountId ?? ""),
+        targetAccountId: String(m.targetAccountId ?? ""),
+        status: String(m.status ?? ""),
+        createdAt: String(m.createdAt ?? ""),
+      }))
+
+      setLinkedMigrations(rows)
+      setMigrationCleanupAccount(account)
+    } catch (err: any) {
+      console.error(err)
+      toast.error(err?.message || "Unable to load linked migrations")
+    } finally {
+      setIsLoadingLinkedMigrations(false)
+    }
+  }
+
+  const handleDelete = async (id: string, opts?: { silentBlockedError?: boolean }) => {
     try {
       const res = await fetch(`/api/accounts/${id}`, { method: "DELETE" })
-      const data = await res.json()
+      const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.error || "Unable to delete account")
       setAccounts((prev) => prev.filter((acc) => acc.id !== id))
       toast.success("Account removed")
+      return true
     } catch (err: any) {
       console.error(err)
-      toast.error(err?.message || "Unable to delete account")
+      const message = String(err?.message || "Unable to delete account")
+      const blockedByMigrations = message.includes(
+        "referenced by one or more migrations"
+      )
+
+      if (blockedByMigrations) {
+        const account = accounts.find((acc) => acc.id === id)
+        if (account) {
+          await handleOpenMigrationCleanup(account)
+        }
+      }
+
+      if (!(blockedByMigrations && opts?.silentBlockedError)) {
+        toast.error(message)
+      }
+      return false
+    }
+  }
+
+  const handleDeleteMigrationRecord = async (migrationId: string) => {
+    try {
+      setDeletingMigrationIds((prev) => ({ ...prev, [migrationId]: true }))
+      const res = await fetch(`/api/migrations/${migrationId}`, { method: "DELETE" })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || "Unable to delete migration")
+
+      setLinkedMigrations((prev) => prev.filter((m) => m.id !== migrationId))
+      toast.success("Migration deleted")
+    } catch (err: any) {
+      console.error(err)
+      toast.error(err?.message || "Unable to delete migration")
+    } finally {
+      setDeletingMigrationIds((prev) => {
+        const next = { ...prev }
+        delete next[migrationId]
+        return next
+      })
+    }
+  }
+
+  const handleDeleteLinkedMigrationsAndAccount = async () => {
+    if (!migrationCleanupAccount) return
+
+    try {
+      setIsDeletingLinkedMigrations(true)
+      const res = await fetch(`/api/accounts/${migrationCleanupAccount.id}/migrations`, {
+        method: "DELETE",
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || "Unable to delete linked migrations")
+
+      const deletedAccount = await handleDelete(migrationCleanupAccount.id, {
+        silentBlockedError: true,
+      })
+      if (deletedAccount) {
+        setMigrationCleanupAccount(null)
+        setLinkedMigrations([])
+      }
+    } catch (err: any) {
+      console.error(err)
+      toast.error(err?.message || "Unable to delete linked migrations")
+    } finally {
+      setIsDeletingLinkedMigrations(false)
     }
   }
 
@@ -2465,6 +2573,128 @@ export default function AccountsPage() {
                 </div>
               </div>
             </div>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {migrationCleanupAccount && (
+        <Dialog
+          open={!!migrationCleanupAccount}
+          onOpenChange={(open) => {
+            if (!open) {
+              setMigrationCleanupAccount(null)
+              setLinkedMigrations([])
+            }
+          }}
+        >
+          <DialogContent className="sm:max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>Delete linked migrations first</DialogTitle>
+              <DialogDescription>
+                The account{" "}
+                <span className="font-semibold">
+                  {migrationCleanupAccount.name || migrationCleanupAccount.email}
+                </span>{" "}
+                is referenced by migrations. Delete these records, then remove the account.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="max-h-[50vh] overflow-y-auto rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>ID</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Created</TableHead>
+                    <TableHead>Role</TableHead>
+                    <TableHead className="text-right">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {isLoadingLinkedMigrations ? (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
+                        Loading migrations...
+                      </TableCell>
+                    </TableRow>
+                  ) : linkedMigrations.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
+                        No linked migrations found.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    linkedMigrations.map((migration) => {
+                      const isSource = migration.sourceAccountId === migrationCleanupAccount.id
+                      const isTarget = migration.targetAccountId === migrationCleanupAccount.id
+                      return (
+                        <TableRow key={migration.id}>
+                          <TableCell className="font-mono text-xs">
+                            {migration.id.slice(0, 8)}...
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline">
+                              {migration.status || "-"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {migration.createdAt
+                              ? new Date(migration.createdAt).toLocaleString()
+                              : "-"}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {isSource && isTarget
+                              ? "Source + Target"
+                              : isSource
+                                ? "Source"
+                                : "Target"}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="destructive"
+                              disabled={
+                                !!deletingMigrationIds[migration.id] ||
+                                isDeletingLinkedMigrations
+                              }
+                              onClick={() => handleDeleteMigrationRecord(migration.id)}
+                            >
+                              {deletingMigrationIds[migration.id]
+                                ? "Deleting..."
+                                : "Delete"}
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setMigrationCleanupAccount(null)
+                  setLinkedMigrations([])
+                }}
+              >
+                Close
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={isLoadingLinkedMigrations || isDeletingLinkedMigrations}
+                onClick={handleDeleteLinkedMigrationsAndAccount}
+              >
+                {isDeletingLinkedMigrations
+                  ? "Deleting..."
+                  : "Delete all migrations and account"}
+              </Button>
+            </DialogFooter>
           </DialogContent>
         </Dialog>
       )}

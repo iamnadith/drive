@@ -15,6 +15,8 @@ import {
 } from "@/components/ui/breadcrumb"
 import { useAuth } from "@/components/auth-provider"
 
+type Crumb = { label: string; href?: string }
+
 export default function DashboardLayout({
   children,
 }: {
@@ -24,15 +26,43 @@ export default function DashboardLayout({
   const router = useRouter()
   const { user, loading } = useAuth()
 
-  const pageLabel = React.useMemo(() => {
-    if (!pathname) return "Overview"
-    if (pathname.startsWith("/dashboard/storage")) return "Storage"
-    if (pathname.startsWith("/dashboard/accounts")) return "Accounts"
-    if (pathname.startsWith("/dashboard/users")) return "Users"
-    if (pathname.startsWith("/dashboard/migrations")) return "Migrations"
-    if (pathname.startsWith("/dashboard/overview") || pathname === "/dashboard")
-      return "Overview"
-    return "Dashboard"
+  const crumbs = React.useMemo<Crumb[]>(() => {
+    const base: Crumb[] = [{ label: "Dashboard", href: "/dashboard/overview" }]
+    if (!pathname) return [...base, { label: "Overview" }]
+
+    if (pathname === "/dashboard" || pathname.startsWith("/dashboard/overview")) {
+      return [...base, { label: "Overview" }]
+    }
+
+    if (pathname.startsWith("/dashboard/storage")) {
+      return [...base, { label: "Storage" }]
+    }
+
+    if (pathname.startsWith("/dashboard/accounts")) {
+      return [...base, { label: "Accounts" }]
+    }
+
+    if (pathname.startsWith("/dashboard/users")) {
+      return [...base, { label: "Users" }]
+    }
+
+    if (pathname.startsWith("/dashboard/migrations")) {
+      const parts = pathname.split("/").filter(Boolean)
+      const sub = parts[2] ?? ""
+
+      if (!sub) {
+        return [...base, { label: "Migrations" }]
+      }
+
+      if (sub === "history") {
+        return [...base, { label: "Migrations", href: "/dashboard/migrations" }, { label: "History" }]
+      }
+
+      // /dashboard/migrations/[id]
+      return [...base, { label: "Migrations", href: "/dashboard/migrations" }, { label: sub }]
+    }
+
+    return [...base, { label: "Dashboard" }]
   }, [pathname])
 
   React.useEffect(() => {
@@ -56,13 +86,21 @@ export default function DashboardLayout({
             <Separator orientation="vertical" className="mr-2 h-4" />
             <Breadcrumb>
               <BreadcrumbList>
-                <BreadcrumbItem className="hidden md:block">
-                  <BreadcrumbLink href="/dashboard/overview">Dashboard</BreadcrumbLink>
-                </BreadcrumbItem>
-                <BreadcrumbSeparator className="hidden md:block" />
-                <BreadcrumbItem>
-                  <BreadcrumbPage>{pageLabel}</BreadcrumbPage>
-                </BreadcrumbItem>
+                {crumbs.map((c, index) => {
+                  const isLast = index === crumbs.length - 1
+                  return (
+                    <React.Fragment key={`${c.label}-${index}`}>
+                      {index > 0 ? <BreadcrumbSeparator className="hidden md:block" /> : null}
+                      <BreadcrumbItem className={index === 0 ? "hidden md:block" : undefined}>
+                        {isLast || !c.href ? (
+                          <BreadcrumbPage>{c.label}</BreadcrumbPage>
+                        ) : (
+                          <BreadcrumbLink href={c.href}>{c.label}</BreadcrumbLink>
+                        )}
+                      </BreadcrumbItem>
+                    </React.Fragment>
+                  )
+                })}
               </BreadcrumbList>
             </Breadcrumb>
           </div>

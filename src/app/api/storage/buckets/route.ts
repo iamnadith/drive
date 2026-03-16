@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
 import { getAllAccounts } from "@/lib/accounts-store"
+import { r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
 import { r2CreateBucket } from "@/lib/r2-s3"
+import { ensureBucketStatsRows, getBucketStatsMap } from "@/lib/bucket-stats-store"
 
 export async function GET() {
   try {
@@ -26,68 +28,54 @@ export async function GET() {
       )
     }
 
-    const bucketsRes = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${active.cloudflareAccountId}/r2/buckets`,
-      {
-        headers: {
-          Authorization: `Bearer ${active.apiToken}`,
-        },
-      }
-    )
-
-    if (!bucketsRes.ok) {
-      const body = await bucketsRes.text().catch(() => "")
-      return NextResponse.json(
-        {
-          error: "Unable to fetch R2 buckets for active account",
-          details: body,
-          buckets: [],
-          totalBytes: 0,
-        },
-        { status: 200 }
-      )
-    }
-
-    const bucketsBody = await bucketsRes.json()
-    const bucketsResult = bucketsBody?.result
-    const bucketsArray = Array.isArray(bucketsResult?.buckets)
-      ? bucketsResult.buckets
-      : Array.isArray(bucketsResult)
-      ? bucketsResult
-      : []
-
-    const buckets = bucketsArray.map((bucket: any) => {
-      const objects =
-        typeof bucket?.objects === "number"
-          ? bucket.objects
-          : typeof bucket?.object_count === "number"
-          ? bucket.object_count
-          : 0
-      const bytes =
-        typeof bucket?.size === "number"
-          ? bucket.size
-          : typeof bucket?.size_bytes === "number"
-          ? bucket.size_bytes
-          : 0
-
-      return {
-        id: String(bucket?.name ?? bucket?.id ?? ""),
-        name: String(bucket?.name ?? "Unnamed bucket"),
-        objects,
-        bytes,
-        createdAt:
-          typeof bucket?.creation_date === "string"
-            ? bucket.creation_date
-            : undefined,
-      }
+    const bucketsList = await r2ListBuckets({
+      accountId: active.cloudflareAccountId,
+      apiToken: active.apiToken,
     })
 
-    const totalBytes = buckets.reduce(
-      (sum: number, b: { bytes: number }) => sum + b.bytes,
-      0
-    )
+    const bucketNames = bucketsList.map((b) => b.name).filter(Boolean)
+    let statsMap = new Map<string, { objects: number; bytes: number; status: string; error?: string }>()
+    let statsError: string | null = null
+    try {
+      await ensureBucketStatsRows(active.id, bucketNames)
+      const map = await getBucketStatsMap(active.id)
+      statsMap = new Map(Array.from(map.entries()).map(([k, v]) => [k, v]))
+    } catch (e: unknown) {
+      statsError =
+        typeof e === "object" && e !== null && "message" in e
+          ? String((e as { message?: unknown }).message ?? "Unable to load bucket stats")
+          : "Unable to load bucket stats"
+    }
 
-    return NextResponse.json({ buckets, totalBytes })
+    const results = bucketNames
+      .map((name) => {
+        const bucket = bucketsList.find((b) => b.name === name)
+        const stats = statsMap.get(name)
+
+        const fallbackObjects = typeof bucket?.objects === "number" ? bucket.objects : 0
+        const fallbackBytes = typeof bucket?.size === "number" ? bucket.size : 0
+
+        // Prefer cached stats even while running so the UI shows non-zero progressively.
+        const objects =
+          typeof stats?.objects === "number" && stats.objects > 0 ? stats.objects : fallbackObjects
+        const bytes = typeof stats?.bytes === "number" && stats.bytes > 0 ? stats.bytes : fallbackBytes
+
+        return {
+          id: name,
+          name,
+          objects,
+          bytes,
+          statsStatus: stats?.status ?? "pending",
+          statsError: stats?.error ?? statsError ?? undefined,
+          createdAt: bucket?.creation_date,
+          jurisdiction: bucket?.jurisdiction,
+          storageClass: bucket?.storage_class,
+        }
+      })
+      .sort((a, b) => a.name.localeCompare(b.name))
+
+    const totalBytes = results.reduce((sum: number, b: { bytes: number }) => sum + (b.bytes ?? 0), 0)
+    return NextResponse.json({ buckets: results, totalBytes, ...(statsError ? { error: statsError } : {}) })
   } catch (error: any) {
     const message = error?.message ?? "Unable to list buckets"
     return NextResponse.json(

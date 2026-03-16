@@ -61,6 +61,7 @@ type Drive = {
   name: string
   usedBytes: number
   objects: number
+  statsStatus?: string
 }
 
 type FileItem = {
@@ -81,6 +82,14 @@ type RawObject = {
   uploaded?: string
 }
 
+type ObjectsResponse = {
+  prefix?: string
+  folders?: string[]
+  objects?: Array<{ id?: string; key?: string; name?: string; size?: number; uploaded?: string }>
+  nextContinuationToken?: string | null
+  isTruncated?: boolean
+}
+
 type PropertiesTarget =
   | { type: "drive"; drive: Drive }
   | { type: "item"; item: FileItem }
@@ -98,58 +107,49 @@ function formatBytes(value: number | undefined): string {
   return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unitIndex]}`
 }
 
-function buildItemsForPath(all: RawObject[], path: string[]): FileItem[] {
-  if (!path[0]) return []
-
-  const segments = path.slice(1)
-  const prefix = segments.length ? segments.join("/") + "/" : ""
-
-  const folders = new Map<string, FileItem>()
-  const files: FileItem[] = []
-
-  for (const obj of all) {
-    const key = obj.key
-    if (!key.startsWith(prefix)) continue
-
-    const rest = key.slice(prefix.length)
-    if (!rest) continue
-
-    const slashIndex = rest.indexOf("/")
-    if (slashIndex !== -1) {
-      const folderName = rest.slice(0, slashIndex)
-      if (!folders.has(folderName)) {
-        folders.set(folderName, {
-          id: `folder:${prefix}${folderName}`,
-          key: `${prefix}${folderName}/`,
-          name: folderName,
-          type: "folder",
-          fileType: "Folder",
-          size: undefined,
-          modified: obj.uploaded
-            ? new Date(obj.uploaded).toLocaleString()
-            : "",
-        })
+function buildItemsFromListing(input: {
+  prefix: string
+  folders: string[]
+  objects: RawObject[]
+}): FileItem[] {
+  const folderItems = input.folders
+    .map((fullPrefix) => {
+      const rest = fullPrefix.startsWith(input.prefix)
+        ? fullPrefix.slice(input.prefix.length)
+        : fullPrefix
+      const name = rest.replace(/\/+$/, "")
+      return {
+        id: `folder:${fullPrefix}`,
+        key: fullPrefix,
+        name,
+        type: "folder" as const,
+        fileType: "Folder",
+        size: undefined,
+        modified: "",
       }
-    } else {
-      files.push({
+    })
+    .filter((f) => f.name.length > 0)
+    .sort((a, b) => a.name.localeCompare(b.name))
+
+  const fileItems = input.objects
+    .map((obj) => {
+      const rest = obj.key.startsWith(input.prefix)
+        ? obj.key.slice(input.prefix.length)
+        : obj.key
+      return {
         id: obj.id,
-        key,
+        key: obj.key,
         name: rest,
-        type: "file",
+        type: "file" as const,
         fileType: obj.contentType ?? "application/octet-stream",
         size: formatBytes(obj.size),
-        modified: obj.uploaded
-          ? new Date(obj.uploaded).toLocaleString()
-          : "",
-      })
-    }
-  }
+        modified: obj.uploaded ? new Date(obj.uploaded).toLocaleString() : "",
+      }
+    })
+    .filter((f) => f.name.length > 0 && !f.name.includes("/"))
+    .sort((a, b) => a.name.localeCompare(b.name))
 
-  const folderList = Array.from(folders.values()).sort((a, b) =>
-    a.name.localeCompare(b.name)
-  )
-  const fileList = files.sort((a, b) => a.name.localeCompare(b.name))
-  return [...folderList, ...fileList]
+  return [...folderItems, ...fileItems]
 }
 
 export default function StoragePage() {
@@ -163,6 +163,7 @@ export default function StoragePage() {
   const [bucketObjects, setBucketObjects] = React.useState<RawObject[]>([])
   const [objects, setObjects] = React.useState<FileItem[]>([])
   const [objectsLoading, setObjectsLoading] = React.useState(false)
+  const [nextContinuationToken, setNextContinuationToken] = React.useState<string | null>(null)
   const [selectedDrives, setSelectedDrives] = React.useState<string[]>([])
   const [selectedItems, setSelectedItems] = React.useState<string[]>([])
   const fileInputRef = React.useRef<HTMLInputElement | null>(null)
@@ -207,6 +208,7 @@ export default function StoragePage() {
             name: String(b.name ?? "Bucket"),
             usedBytes: typeof b.bytes === "number" ? b.bytes : 0,
             objects: typeof b.objects === "number" ? b.objects : 0,
+            statsStatus: typeof b.statsStatus === "string" ? b.statsStatus : undefined,
           }))
         )
       } else {
@@ -222,12 +224,43 @@ export default function StoragePage() {
   React.useEffect(() => {
     loadActiveAndBuckets()
   }, [loadActiveAndBuckets])
+
+  const needsStatsSync = React.useMemo(() => {
+    if (!activeAccount?.id) return false
+    return drives.some((d) => d.statsStatus && d.statsStatus !== "completed")
+  }, [activeAccount?.id, drives])
+
+  React.useEffect(() => {
+    if (!needsStatsSync) return
+    let stopped = false
+
+    const tick = async () => {
+      if (stopped) return
+      try {
+        await fetch("/api/storage/buckets/stats/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ maxKeysTotal: 5_000 }),
+        })
+      } catch {
+        // ignore
+      }
+      if (!stopped) await loadActiveAndBuckets()
+    }
+
+    void tick()
+    const interval = setInterval(() => void tick(), 3_000)
+    return () => {
+      stopped = true
+      clearInterval(interval)
+    }
+  }, [needsStatsSync, loadActiveAndBuckets])
   
   const navigateToDrive = (driveName: string) => {
     setCurrentPath([driveName])
     setSelectedDrives([])
     setSelectedItems([])
-    loadObjectsForBucket(driveName)
+    loadObjectsForPath([driveName])
   }
 
   const navigateUp = () => {
@@ -236,8 +269,10 @@ export default function StoragePage() {
       setSelectedItems([])
       if (next.length === 0) {
         setObjects([])
+        setBucketObjects([])
+        setNextContinuationToken(null)
       } else {
-        setObjects(buildItemsForPath(bucketObjects, next))
+        void loadObjectsForPath(next)
       }
       return next
     })
@@ -246,7 +281,7 @@ export default function StoragePage() {
   const navigateToFolder = (folderName: string) => {
     setCurrentPath((prev) => {
       const next = [...prev, folderName]
-      setObjects(buildItemsForPath(bucketObjects, next))
+      void loadObjectsForPath(next)
       return next
     })
   }
@@ -298,42 +333,68 @@ export default function StoragePage() {
     // TODO: open file preview or download
   }
 
-  const loadObjectsForBucket = async (bucketName: string) => {
+  const loadMore = async () => {
+    if (!nextContinuationToken) return
+    if (!currentPath[0]) return
+    await loadObjectsForPath(currentPath, "append")
+  }
+
+  const loadObjectsForPath = async (path: string[], mode?: "append") => {
+    const bucketName = path[0] ?? ""
+    if (!bucketName) return
     setObjectsLoading(true)
     try {
+      const prefix = path.length > 1 ? path.slice(1).join("/") + "/" : ""
+      const qs = new URLSearchParams()
+      if (prefix) qs.set("prefix", prefix)
+      qs.set("maxKeys", "1000")
+      if (mode === "append" && nextContinuationToken) {
+        qs.set("continuationToken", nextContinuationToken)
+      }
+
       const res = await fetch(
-        `/api/storage/buckets/${encodeURIComponent(bucketName)}/objects`
+        `/api/storage/buckets/${encodeURIComponent(bucketName)}/objects?${qs.toString()}`
       )
       if (!res.ok) {
         setBucketObjects([])
         setObjects([])
+        setNextContinuationToken(null)
         return
       }
-      const data = await res.json()
-      const rawObjects: any[] = data.objects ?? []
-      const normalized: RawObject[] = rawObjects.map((obj) => ({
-        id: String(obj.id ?? obj.name ?? obj.key ?? ""),
-        key: String(obj.key ?? obj.name ?? ""),
-        size:
-          typeof obj.size === "number"
-            ? obj.size
-            : typeof obj.bytes === "number"
-            ? obj.bytes
-            : 0,
-        contentType:
-          typeof obj.contentType === "string"
-            ? obj.contentType
-            : undefined,
-        uploaded:
-          typeof obj.uploaded === "string"
-            ? obj.uploaded
-            : undefined,
-      }))
-      setBucketObjects(normalized)
-      setObjects(buildItemsForPath(normalized, [bucketName]))
+      const data: ObjectsResponse = await res.json()
+
+      const folders = Array.isArray(data.folders) ? data.folders.map(String).filter(Boolean) : []
+      const rawObjects = Array.isArray(data.objects) ? data.objects : []
+      const normalized: RawObject[] = rawObjects
+        .map((obj) => ({
+          id: String(obj?.id ?? obj?.key ?? obj?.name ?? ""),
+          key: String(obj?.key ?? obj?.name ?? ""),
+          size: typeof obj?.size === "number" ? obj.size : 0,
+          uploaded: typeof obj?.uploaded === "string" ? obj.uploaded : undefined,
+        }))
+        .filter((o) => o.key.length > 0)
+
+      const nextToken = typeof data.nextContinuationToken === "string" ? data.nextContinuationToken : null
+      setNextContinuationToken(nextToken)
+
+      if (mode === "append") {
+        setBucketObjects((prev) => [...prev, ...normalized])
+        setObjects((prev) => {
+          const existingFolders = prev.filter((i) => i.type === "folder")
+          const existingFiles = prev.filter((i) => i.type === "file")
+          const nextFiles = buildItemsFromListing({ prefix, folders: [], objects: normalized }).filter(
+            (i) => i.type === "file"
+          )
+          return [...existingFolders, ...existingFiles, ...nextFiles]
+        })
+      } else {
+        setBucketObjects(normalized)
+        setObjects(buildItemsFromListing({ prefix, folders, objects: normalized }))
+      }
     } catch {
       setBucketObjects([])
       setObjects([])
+      setNextContinuationToken(null)
     } finally {
       setObjectsLoading(false)
     }
@@ -518,7 +579,7 @@ export default function StoragePage() {
                        break
                      }
                    }
-                   await loadObjectsForBucket(bucketName)
+                   await loadObjectsForPath([bucketName])
                  } finally {
                    event.target.value = ""
                  }
@@ -593,7 +654,13 @@ export default function StoragePage() {
                     </div>
                     <Progress value={percent} className="h-1.5" />
                     <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                      <span>{drive.objects} objects</span>
+                      <span>
+                        {drive.statsStatus && drive.statsStatus !== "completed"
+                          ? drive.statsStatus === "error"
+                            ? "Error"
+                            : "Calculating..."
+                          : `${drive.objects} objects`}
+                      </span>
                       <span>{percent}% of total used</span>
                     </div>
                   </button>
@@ -622,7 +689,13 @@ export default function StoragePage() {
                       </div>
                       <Progress value={percent} className="h-1.5" />
                       <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                        <span>{drive.objects} objects</span>
+                        <span>
+                          {drive.statsStatus && drive.statsStatus !== "completed"
+                            ? drive.statsStatus === "error"
+                              ? "Error"
+                              : "Calculating..."
+                            : `${drive.objects} objects`}
+                        </span>
                         <span>{percent}% of total used</span>
                       </div>
                     </div>
@@ -792,7 +865,7 @@ export default function StoragePage() {
                               }),
                             }
                           )
-                          await loadObjectsForBucket(ctxBucket)
+                          await loadObjectsForPath([ctxBucket, ...currentPath.slice(1)])
                         }}
                       >
                         New folder
@@ -823,7 +896,7 @@ export default function StoragePage() {
                               }),
                             }
                           )
-                          await loadObjectsForBucket(ctxBucket)
+                          await loadObjectsForPath([ctxBucket, ...currentPath.slice(1)])
                         }}
                       >
                         New file
@@ -945,7 +1018,7 @@ export default function StoragePage() {
                               }),
                             }
                           )
-                          await loadObjectsForBucket(ctxBucket)
+                          await loadObjectsForPath([ctxBucket, ...currentPath.slice(1)])
                         }}
                       >
                         New folder
@@ -976,7 +1049,7 @@ export default function StoragePage() {
                               }),
                             }
                           )
-                          await loadObjectsForBucket(ctxBucket)
+                          await loadObjectsForPath([ctxBucket, ...currentPath.slice(1)])
                         }}
                       >
                         New file
@@ -1000,6 +1073,14 @@ export default function StoragePage() {
                       </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>
+                )}
+
+                {!isRoot && nextContinuationToken && (
+                  <div className="flex justify-center pt-2">
+                    <Button variant="outline" onClick={loadMore} disabled={objectsLoading}>
+                      Load more
+                    </Button>
+                  </div>
                 )}
               </>
             )}

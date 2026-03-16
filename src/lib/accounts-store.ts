@@ -50,6 +50,7 @@ type DriveAccountRow = {
 }
 
 const ACCOUNTS_TABLE = "drive_accounts"
+const MIGRATIONS_TABLE = "drive_migrations"
 
 function normalizeSupabaseError(error: { message: string }): Error {
   const message = String(error?.message ?? "Supabase error")
@@ -59,6 +60,15 @@ function normalizeSupabaseError(error: { message: string }): Error {
   ) {
     return new Error(
       `Supabase table '${ACCOUNTS_TABLE}' is missing. Create it by running 'supabase/drive_schema.sql' in the Supabase SQL editor for ${process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "your project"}.`
+    )
+  }
+  if (
+    message.includes("violates foreign key constraint") &&
+    (message.includes("drive_migrations_source_account_id_fkey") ||
+      message.includes("drive_migrations_target_account_id_fkey"))
+  ) {
+    return new Error(
+      "Cannot delete this account because it is referenced by one or more migrations. Delete/archive those migrations first."
     )
   }
   return new Error(message)
@@ -354,6 +364,24 @@ export async function deleteAccount(id: string): Promise<void> {
         throw new Error("Cannot delete the last active Cloudflare account")
       }
     }
+  }
+
+  const sourceRefs = await supabase
+    .from(MIGRATIONS_TABLE)
+    .select("id", { count: "exact", head: true })
+    .eq("source_account_id", id)
+  if (sourceRefs.error) throw normalizeSupabaseError(sourceRefs.error)
+
+  const targetRefs = await supabase
+    .from(MIGRATIONS_TABLE)
+    .select("id", { count: "exact", head: true })
+    .eq("target_account_id", id)
+  if (targetRefs.error) throw normalizeSupabaseError(targetRefs.error)
+
+  if ((sourceRefs.count ?? 0) > 0 || (targetRefs.count ?? 0) > 0) {
+    throw new Error(
+      "Cannot delete this account because it is referenced by one or more migrations. Delete/archive those migrations first."
+    )
   }
 
   const { error } = await supabase.from(ACCOUNTS_TABLE).delete().eq("id", id)

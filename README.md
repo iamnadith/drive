@@ -34,3 +34,18 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Migration Verification (Cloudflare R2)
+
+This project runs a post-copy verification step for each migrated bucket once Cloudflare Super Slurper marks it as `completed`:
+
+- Verifies every source object exists in destination (key + size).
+- Optionally hashes small objects (`sha256-small`) to catch same-size corruption.
+- Tracks progress in each migration item's `progress.verify` so repeated `/sync` polls can continue verification without timeouts.
+
+Migration creation options (POST `/api/migrations`):
+
+- `verifyAfterCopy` (boolean, default `true`)
+- `verifyStrictDestination` (boolean, default `false`)
+- `verifyMode` (`"keys-and-size"` | `"sha256-small"`, default `"keys-and-size"`)
+- `verifyHashMaxBytes` (number, bytes; used when `verifyMode="sha256-small"`)

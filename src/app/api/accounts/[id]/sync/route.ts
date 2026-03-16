@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server"
 import { getAllAccounts, updateAccount } from "@/lib/accounts-store"
+import { r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
+import { ensureBucketStatsRows, getBucketStatsMap } from "@/lib/bucket-stats-store"
 
 export async function POST(
   _request: Request,
@@ -66,46 +68,28 @@ export async function POST(
     let totalBuckets: number | undefined = undefined
     let totalObjects: number | undefined = undefined
     let totalBytes: number | undefined = undefined
+    let statsMessage: string | undefined = undefined
 
     try {
-      const bucketsRes = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${firstAccount.id}/r2/buckets`,
-        {
-          headers: {
-            Authorization: `Bearer ${account.apiToken}`,
-          },
-        }
-      )
+      const buckets = await r2ListBuckets({ accountId: firstAccount.id, apiToken: account.apiToken })
+      const bucketNames = buckets.map((b) => b.name).filter(Boolean)
+      totalBuckets = bucketNames.length
 
-      if (bucketsRes.ok) {
-        const bucketsBody = await bucketsRes.json()
-        const bucketsResult = bucketsBody?.result
-        const bucketsArray = Array.isArray(bucketsResult?.buckets)
-          ? bucketsResult.buckets
-          : Array.isArray(bucketsResult)
-          ? bucketsResult
-          : []
+      await ensureBucketStatsRows(account.id, bucketNames)
+      const statsMap = await getBucketStatsMap(account.id)
 
-        totalBuckets = bucketsArray.length
-        totalObjects = bucketsArray.reduce((sum: number, bucket: any) => {
-          const objects =
-            typeof bucket?.objects === "number"
-              ? bucket.objects
-              : typeof bucket?.object_count === "number"
-              ? bucket.object_count
-              : 0
-          return sum + objects
-        }, 0)
-        totalBytes = bucketsArray.reduce((sum: number, bucket: any) => {
-          const size =
-            typeof bucket?.size === "number"
-              ? bucket.size
-              : typeof bucket?.size_bytes === "number"
-              ? bucket.size_bytes
-              : 0
-          return sum + size
-        }, 0)
-      }
+      const completed = bucketNames
+        .map((n) => statsMap.get(n))
+        .filter((s) => s && s.status === "completed")
+
+      const objectsSum = completed.reduce((sum, s) => sum + (s?.objects ?? 0), 0)
+      const bytesSum = completed.reduce((sum, s) => sum + (s?.bytes ?? 0), 0)
+
+      totalObjects = objectsSum
+      totalBytes = bytesSum
+
+      const remaining = bucketNames.filter((n) => statsMap.get(n)?.status !== "completed").length
+      if (remaining > 0) statsMessage = `Bucket stats pending for ${remaining} bucket(s)`
     } catch {
       // Ignore bucket errors; we'll still save account id and mark sync ok.
     }
@@ -117,7 +101,7 @@ export async function POST(
       totalObjects: totalObjects ?? account.totalObjects ?? 0,
       totalBytes: totalBytes ?? account.totalBytes ?? 0,
       syncStatus: "ok",
-      syncMessage: "Last sync completed",
+      syncMessage: statsMessage ?? "Last sync completed",
       lastSyncedAt: new Date().toISOString(),
     })
 

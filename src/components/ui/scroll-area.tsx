@@ -5,13 +5,29 @@ import * as ScrollAreaPrimitive from "@radix-ui/react-scroll-area"
 
 import { cn } from "@/lib/utils"
 
-function ScrollArea({
-  className,
-  children,
-  ...props
-}: React.ComponentProps<typeof ScrollAreaPrimitive.Root>) {
+const ScrollArea = React.forwardRef<
+  HTMLDivElement,
+  React.ComponentProps<typeof ScrollAreaPrimitive.Root> & { hideScrollbar?: boolean }
+>(function ScrollArea({ className, children, hideScrollbar = false, ...props }, ref) {
+  if (hideScrollbar) {
+    return (
+      <div
+        ref={ref}
+        data-slot="scroll-area"
+        className={cn(
+          "relative overflow-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+          className
+        )}
+        {...(props as any)}
+      >
+        {children}
+      </div>
+    )
+  }
+
   return (
     <ScrollAreaPrimitive.Root
+      ref={ref as any}
       data-slot="scroll-area"
       className={cn("relative", className)}
       {...props}
@@ -26,7 +42,7 @@ function ScrollArea({
       <ScrollAreaPrimitive.Corner />
     </ScrollAreaPrimitive.Root>
   )
-}
+})
 
 function ScrollBar({
   className,

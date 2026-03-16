@@ -8,14 +8,18 @@
   },
   
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "set TURBOPACK=&& set NODE_OPTIONS=--dns-result-order=ipv4first&& node scripts/clean-next.mjs && next dev --webpack",
+    "dev:webpack": "set TURBOPACK=&& set NODE_OPTIONS=--dns-result-order=ipv4first&& node scripts/clean-next.mjs && next dev --webpack",
+    "dev:turbo": "set NODE_OPTIONS=&& node scripts/clean-next.mjs && next dev --turbo",
+    "dev:webpack:nosourcemap": "set TURBOPACK=&& set NODE_OPTIONS=&& node scripts/clean-next.mjs && next dev --webpack",
+    "build": "node scripts/clean-next.mjs && next build",
     "start": "next start -H 0.0.0.0 -p 3000",
     "lint": "eslint"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.948.0",
     "@aws-sdk/lib-storage": "^3.948.0",
+    "@aws-sdk/s3-request-presigner": "^3.948.0",
     "@hookform/resolvers": "^5.2.2",
     "@radix-ui/react-accordion": "^1.2.12",
     "@radix-ui/react-alert-dialog": "^1.1.15",

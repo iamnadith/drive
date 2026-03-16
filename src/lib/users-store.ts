@@ -53,6 +53,19 @@ function normalizeSupabaseError(error: { message: string }): Error {
       `Supabase table '${USERS_TABLE}' is missing. Create it by running 'supabase/drive_schema.sql' in the Supabase SQL editor for ${process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "your project"}.`
     )
   }
+
+  const lower = message.toLowerCase()
+  if (lower.includes("fetch failed") || lower.includes("failed to fetch")) {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? ""
+    const hintParts = [
+      "Supabase request failed (network).",
+      url ? `URL: ${url}` : "Missing SUPABASE_URL / NEXT_PUBLIC_SUPABASE_URL.",
+      "Check your internet/VPN/firewall and that the Supabase project is reachable.",
+      "If you're on Windows and IPv6/DNS is flaky, try: `set NODE_OPTIONS=--dns-result-order=ipv4first` before `npm run dev`.",
+    ]
+    return new Error(`${message} — ${hintParts.join(" ")}`)
+  }
+
   return new Error(message)
 }
 

@@ -71,6 +71,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const res = await fetch(`/api/users/${user.id}`)
       const data = await res.json()
       if (!res.ok) {
+        // Don't log out on transient server errors (dev reloads, DB hiccups, etc).
+        if (res.status >= 500 || res.status === 429) {
+          return
+        }
         if (typeof window !== "undefined") {
           window.localStorage.removeItem("authUser")
         }

@@ -290,6 +290,114 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(
         `create unique index if not exists drive_accounts_one_active_key on drive_accounts ((status)) where status = 'active';`
       )
+
+      await queryDb(`
+        create table if not exists drive_bucket_stats (
+          id uuid primary key,
+          account_id uuid not null references drive_accounts(id) on delete cascade,
+          bucket_name text not null,
+          objects bigint not null default 0,
+          bytes bigint not null default 0,
+          continuation_token text,
+          status text not null default 'pending',
+          error text,
+          updated_at timestamptz not null default now()
+        );
+      `)
+
+      await queryDb(
+        `create unique index if not exists drive_bucket_stats_unique on drive_bucket_stats (account_id, bucket_name);`
+      )
+      await queryDb(
+        `create index if not exists drive_bucket_stats_account_idx on drive_bucket_stats (account_id);`
+      )
+      await queryDb(
+        `create index if not exists drive_bucket_stats_status_idx on drive_bucket_stats (status);`
+      )
+
+      await queryDb(`
+        create table if not exists drive_migrations (
+          id uuid primary key,
+          source_account_id uuid not null references drive_accounts(id) on delete restrict,
+          target_account_id uuid not null references drive_accounts(id) on delete restrict,
+          status text not null default 'draft',
+          options jsonb not null default '{}'::jsonb,
+          created_at timestamptz not null default now(),
+          started_at timestamptz,
+          completed_at timestamptz,
+          last_synced_at timestamptz,
+          sync_status text default 'idle',
+          sync_message text,
+          updated_at timestamptz not null default now()
+        );
+      `)
+
+      await queryDb(
+        `create index if not exists drive_migrations_created_at_idx on drive_migrations (created_at desc);`
+      )
+      await queryDb(
+        `create index if not exists drive_migrations_status_idx on drive_migrations (status);`
+      )
+      await queryDb(
+        `create index if not exists drive_migrations_source_idx on drive_migrations (source_account_id);`
+      )
+      await queryDb(
+        `create index if not exists drive_migrations_target_idx on drive_migrations (target_account_id);`
+      )
+
+      await queryDb(`
+        create table if not exists drive_migration_items (
+          id uuid primary key,
+          migration_id uuid not null references drive_migrations(id) on delete cascade,
+          source_bucket text not null,
+          target_bucket text not null,
+          source_jurisdiction text,
+          source_storage_class text,
+          source_objects bigint,
+          source_bytes bigint,
+          slurper_job_id text,
+          slurper_status text,
+          progress jsonb not null default '{}'::jsonb,
+          last_progress_at timestamptz,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+      `)
+
+      await queryDb(
+        `create unique index if not exists drive_migration_items_unique_bucket on drive_migration_items (migration_id, source_bucket);`
+      )
+      await queryDb(
+        `create index if not exists drive_migration_items_migration_idx on drive_migration_items (migration_id);`
+      )
+      await queryDb(
+        `create index if not exists drive_migration_items_job_idx on drive_migration_items (slurper_job_id);`
+      )
+
+      await queryDb(`
+        create table if not exists drive_migration_item_failure_records (
+          id uuid primary key,
+          migration_item_id uuid not null references drive_migration_items(id) on delete cascade,
+          object_key text not null,
+          message text not null default '',
+          occurred_at_text text not null default '',
+          occurred_at timestamptz,
+          raw_log jsonb,
+          source_probe jsonb,
+          destination_probe jsonb,
+          diagnosis jsonb,
+          download jsonb,
+          fetched_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+      `)
+
+      await queryDb(
+        `create index if not exists drive_migration_item_failure_records_item_idx on drive_migration_item_failure_records (migration_item_id);`
+      )
+      await queryDb(
+        `create index if not exists drive_migration_item_failure_records_key_idx on drive_migration_item_failure_records (migration_item_id, object_key);`
+      )
     })()
   }
 
