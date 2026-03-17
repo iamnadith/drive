@@ -17,6 +17,10 @@ function asStatus(value: unknown): RepairJobStatus | undefined {
     : undefined
 }
 
+function isTerminalRepairStatus(value: RepairJobStatus | undefined): boolean {
+  return value === "completed" || value === "failed" || value === "canceled"
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
@@ -100,17 +104,19 @@ export async function POST(
           }
         : undefined
 
+    const effectiveStatus = isTerminalRepairStatus(current.status) && !isTerminalRepairStatus(status) ? current.status : status
+
     const updated = await updateRepairJob(jobId, {
-      ...(status ? { status } : {}),
+      ...(effectiveStatus ? { status: effectiveStatus } : {}),
       ...(mergedProgress ? { progress: mergedProgress } : {}),
       ...(mergedResult ? { result: mergedResult } : {}),
       ...(summary !== undefined ? { summary } : {}),
       ...(errorMessage !== undefined ? { error: errorMessage } : {}),
       lastHeartbeatAt: now,
-      ...(status === "completed" || status === "failed" || status === "canceled" ? { completedAt: now } : {}),
+      ...(effectiveStatus === "completed" || effectiveStatus === "failed" || effectiveStatus === "canceled" ? { completedAt: now } : {}),
     })
 
-    if (status === "completed" || status === "failed" || status === "canceled") {
+    if (effectiveStatus === "completed" || effectiveStatus === "failed" || effectiveStatus === "canceled") {
       const linkedRun = await getLatestAgentRunByJobReference(jobId).catch(() => null)
       if (
         agent.provider === "github_actions" &&
@@ -137,20 +143,20 @@ export async function POST(
 
       if (linkedRun) {
         await updateAgentRun(linkedRun.id, {
-          status: status === "completed" ? "completed" : status === "failed" ? "failed" : "canceled",
+          status: effectiveStatus === "completed" ? "completed" : effectiveStatus === "failed" ? "failed" : "canceled",
           completedAt: now,
           summary:
             summary ??
-            (status === "completed"
+            (effectiveStatus === "completed"
               ? "GitHub workflow completed successfully"
-              : status === "failed"
+              : effectiveStatus === "failed"
                 ? errorMessage ?? "GitHub workflow failed"
                 : "GitHub workflow was aborted"),
           payload: {
             ...(linkedRun.payload ?? {}),
-            githubStatus: status === "completed" ? "completed" : status === "canceled" ? "completed" : linkedRun.payload?.githubStatus ?? null,
+            githubStatus: effectiveStatus === "completed" ? "completed" : effectiveStatus === "canceled" ? "completed" : linkedRun.payload?.githubStatus ?? null,
             githubConclusion:
-              status === "completed" ? "success" : status === "canceled" ? "cancelled" : linkedRun.payload?.githubConclusion ?? null,
+              effectiveStatus === "completed" ? "success" : effectiveStatus === "canceled" ? "cancelled" : linkedRun.payload?.githubConclusion ?? null,
             githubUpdatedAt: now,
           },
         }).catch(() => undefined)
@@ -158,16 +164,16 @@ export async function POST(
 
       await updateAgent(id, {
         status: agent.provider === "github_actions" ? "offline" : agent.provider === "self_hosted" || agent.provider === "local" ? "online" : "offline",
-        lastError: status === "failed" ? errorMessage ?? summary ?? "Worker reconciliation failed" : null,
+        lastError: effectiveStatus === "failed" ? errorMessage ?? summary ?? "Worker reconciliation failed" : null,
         metadata: {
           ...(agent.metadata ?? {}),
           activeRepairJobId: null,
           githubRunStatus: agent.provider === "github_actions" ? "completed" : (agent.metadata ?? {}).githubRunStatus ?? null,
           githubRunConclusion:
             agent.provider === "github_actions"
-              ? status === "completed"
+              ? effectiveStatus === "completed"
                 ? "success"
-                : status === "canceled"
+                : effectiveStatus === "canceled"
                   ? "cancelled"
                   : "failure"
               : (agent.metadata ?? {}).githubRunConclusion ?? null,
@@ -176,20 +182,20 @@ export async function POST(
       }).catch(() => undefined)
     }
 
-    if (status === "completed") {
+    if (effectiveStatus === "completed") {
       await updateMigration(job.migrationId, {
         syncStatus: "ok",
         syncMessage: summary ?? "Worker reconciliation completed",
         lastSyncedAt: now,
       }).catch(() => undefined)
-    } else if (status === "failed") {
+    } else if (effectiveStatus === "failed") {
       await updateMigration(job.migrationId, {
         status: "failed",
         syncStatus: "error",
         syncMessage: errorMessage ?? summary ?? "Worker reconciliation failed",
         lastSyncedAt: now,
       }).catch(() => undefined)
-    } else if (status === "canceled") {
+    } else if (effectiveStatus === "canceled") {
       await updateMigration(job.migrationId, {
         syncStatus: "ok",
         syncMessage: summary ?? "Worker reconciliation aborted",

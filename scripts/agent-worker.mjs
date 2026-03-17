@@ -386,7 +386,6 @@ async function startHeartbeatLoop() {
       await heartbeat(currentJobId ? { currentJobId } : {})
       if (currentJobId) {
         await updateJob(currentJobId, {
-          status: "running",
           progress: { heartbeatAt: new Date().toISOString(), active: true },
         }).catch(() => {})
       }
