@@ -16,6 +16,18 @@ export type MigrationFailureRecordInput = {
   fetchedAt?: string
 }
 
+export type MigrationFailureRecord = {
+  objectKey: string
+  message: string
+  occurredAtText?: string | null
+  rawLog?: unknown
+  sourceProbe?: unknown
+  destinationProbe?: unknown
+  diagnosis?: unknown
+  download?: unknown
+  fetchedAt?: string
+}
+
 function toIsoOrNull(value: string | null | undefined): string | null {
   if (!value || !value.trim()) return null
   const ms = Date.parse(value)
@@ -55,4 +67,31 @@ export async function replaceMigrationItemFailureRecords(
 
   const { error: insertError } = await supabase.from(FAILURE_RECORDS_TABLE).insert(rows)
   if (insertError) throw new Error(String(insertError.message ?? "Unable to store failure records"))
+}
+
+export async function listMigrationItemFailureRecords(
+  migrationItemId: string,
+  limit = 500
+): Promise<MigrationFailureRecord[]> {
+  const supabase = getSupabaseServerClient()
+  const { data, error } = await supabase
+    .from(FAILURE_RECORDS_TABLE)
+    .select("*")
+    .eq("migration_item_id", migrationItemId)
+    .order("occurred_at", { ascending: false, nullsFirst: false })
+    .limit(Math.max(1, Math.min(1000, limit)))
+
+  if (error) throw new Error(String(error.message ?? "Unable to load failure records"))
+
+  return (Array.isArray(data) ? data : []).map((row: any) => ({
+    objectKey: typeof row.object_key === "string" ? row.object_key : "",
+    message: typeof row.message === "string" ? row.message : "",
+    occurredAtText: typeof row.occurred_at_text === "string" ? row.occurred_at_text : null,
+    rawLog: row.raw_log ?? null,
+    sourceProbe: row.source_probe ?? null,
+    destinationProbe: row.destination_probe ?? null,
+    diagnosis: row.diagnosis ?? null,
+    download: row.download ?? null,
+    fetchedAt: typeof row.fetched_at === "string" ? row.fetched_at : undefined,
+  }))
 }

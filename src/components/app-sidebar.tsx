@@ -3,6 +3,7 @@
 import * as React from "react"
 import {
   ArrowRightLeft,
+  Bot,
   FolderOpen,
   HardDrive,
   LayoutDashboard,
@@ -61,6 +62,11 @@ const items = [
     title: "Migrations",
     url: "/dashboard/migrations",
     icon: ArrowRightLeft,
+  },
+  {
+    title: "Workers",
+    url: "/dashboard/workers",
+    icon: Bot,
   },
   {
     title: "Settings",

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { deleteMigration, getMigration, listMigrationItems } from "@/lib/migrations-store"
+import { listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 
 export async function GET(
   _request: Request,
@@ -11,8 +12,8 @@ export async function GET(
     if (!migration) {
       return NextResponse.json({ error: "Migration not found" }, { status: 404 })
     }
-    const items = await listMigrationItems(id)
-    return NextResponse.json({ migration, items }, { status: 200 })
+    const [items, repairJobs] = await Promise.all([listMigrationItems(id), listRepairJobsByMigration(id, 20)])
+    return NextResponse.json({ migration, items, repairJobs }, { status: 200 })
   } catch (error: unknown) {
     const message =
       typeof error === "object" && error !== null && "message" in error

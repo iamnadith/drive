@@ -8,7 +8,7 @@ import {
   runBucketScanBatch,
 } from "@/lib/bucket-scan-store"
 import { slurperListJobLogs } from "@/lib/cloudflare-r2-super-slurper"
-import { replaceMigrationItemFailureRecords } from "@/lib/migration-failure-records-store"
+import { listMigrationItemFailureRecords, replaceMigrationItemFailureRecords } from "@/lib/migration-failure-records-store"
 import { getMigration, listMigrationItems, updateMigrationItem } from "@/lib/migrations-store"
 import { r2GetObjectStream, r2HeadObject, r2ListAllObjects } from "@/lib/r2-s3"
 
@@ -577,6 +577,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     const url = new URL(request.url)
     const limitRaw = Number(url.searchParams.get("limit") ?? "150")
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.floor(limitRaw))) : 150
+    const forceRefresh = url.searchParams.get("refresh") === "1"
 
     const migration = await getMigration(id)
     if (!migration) return NextResponse.json({ error: "Migration not found" }, { status: 404 })
@@ -584,6 +585,92 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     const items = await listMigrationItems(id)
     const item = items.find((i) => i.id === itemId)
     if (!item) return NextResponse.json({ error: "Migration item not found" }, { status: 404 })
+
+    const itemProgress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
+    const storedSnapshot = isRecord(itemProgress.failedDiagnosticsSnapshot)
+      ? (itemProgress.failedDiagnosticsSnapshot as Record<string, unknown>)
+      : null
+    const reportedFailedObjects = readReportedFailedObjects(itemProgress)
+
+    if (!forceRefresh) {
+      const storedRecords = await listMigrationItemFailureRecords(item.id, limit).catch(() => [])
+      const storedSummary = storedSnapshot && isRecord(storedSnapshot.summary) ? (storedSnapshot.summary as Record<string, unknown>) : null
+
+      const storedFailures = storedRecords
+        .map((entry) => ({
+          key: entry.objectKey,
+          message: entry.message,
+          at: entry.occurredAtText ?? null,
+          rawLog: entry.rawLog ?? null,
+          source: isRecord(entry.sourceProbe) ? entry.sourceProbe : {},
+          destination: isRecord(entry.destinationProbe) ? entry.destinationProbe : {},
+          diagnosis: isRecord(entry.diagnosis) ? entry.diagnosis : {},
+          download: isRecord(entry.download) ? entry.download : {},
+        }))
+        .filter((entry) => entry.key && entry.message)
+
+      const totalFailedEntries =
+        storedSummary && typeof storedSummary.totalFailedEntries === "number"
+          ? storedSummary.totalFailedEntries
+          : Math.max(reportedFailedObjects, storedFailures.length)
+
+      if (storedFailures.length > 0 || totalFailedEntries > 0) {
+        return NextResponse.json(
+          {
+            ok: true,
+            cached: true,
+            item: {
+              id: item.id,
+              sourceBucket: item.sourceBucket,
+              targetBucket: item.targetBucket,
+              jobId: item.slurperJobId ?? null,
+              status: item.slurperStatus ?? null,
+            },
+            summary: {
+              totalFailedEntries,
+              detailedFailedEntries:
+                storedSummary && typeof storedSummary.detailedFailedEntries === "number"
+                  ? storedSummary.detailedFailedEntries
+                  : storedFailures.length,
+              cloudflareDetailedEntries:
+                storedSummary && typeof storedSummary.cloudflareDetailedEntries === "number"
+                  ? storedSummary.cloudflareDetailedEntries
+                  : storedFailures.length,
+              inferredDetailedEntries:
+                storedSummary && typeof storedSummary.inferredDetailedEntries === "number"
+                  ? storedSummary.inferredDetailedEntries
+                  : 0,
+              missingDetailedEntries:
+                storedSummary && typeof storedSummary.missingDetailedEntries === "number"
+                  ? storedSummary.missingDetailedEntries
+                  : Math.max(0, totalFailedEntries - storedFailures.length),
+              sourceMissing:
+                storedSummary && typeof storedSummary.sourceMissing === "number"
+                  ? storedSummary.sourceMissing
+                  : storedFailures.filter((d) => isRecord(d.diagnosis) && d.diagnosis.category === "source_missing").length,
+              sourceAccessIssues:
+                storedSummary && typeof storedSummary.sourceAccessIssues === "number"
+                  ? storedSummary.sourceAccessIssues
+                  : storedFailures.filter((d) => isRecord(d.diagnosis) && d.diagnosis.category === "source_access_issue").length,
+              destinationExists:
+                storedSummary && typeof storedSummary.destinationExists === "number"
+                  ? storedSummary.destinationExists
+                  : storedFailures.filter((d) => isRecord(d.diagnosis) && d.diagnosis.category === "destination_exists").length,
+              transientOrProviderIssues:
+                storedSummary && typeof storedSummary.transientOrProviderIssues === "number"
+                  ? storedSummary.transientOrProviderIssues
+                  : storedFailures.filter((d) => isRecord(d.diagnosis) && d.diagnosis.category === "transient_or_provider_issue").length,
+              unknown:
+                storedSummary && typeof storedSummary.unknown === "number"
+                  ? storedSummary.unknown
+                  : storedFailures.filter((d) => isRecord(d.diagnosis) && d.diagnosis.category === "unknown").length,
+            },
+            failures: storedFailures,
+          },
+          { status: 200 }
+        )
+      }
+    }
 
     const accounts = await getAllAccounts()
     const source = accounts.find((a) => a.id === migration.sourceAccountId)
@@ -607,9 +694,6 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
 
     const failedEntries = extractFailedEntries(logsPayloads).slice(0, limit)
     const downloadBase = `/api/migrations/${encodeURIComponent(id)}/items/${encodeURIComponent(itemId)}/failed-object`
-    const reportedFailedObjects = readReportedFailedObjects(
-      isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
-    )
 
     const diagnostics = await mapWithConcurrency(
       failedEntries,
@@ -668,7 +752,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     )
 
     const diagnosticsByKey = new Set(diagnostics.map((entry) => entry.key))
-    const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
+    const progress = itemProgress
     let inferredDiagnostics: Array<{
       key: string
       message: string

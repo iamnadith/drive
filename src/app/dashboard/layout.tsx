@@ -62,6 +62,10 @@ export default function DashboardLayout({
       return [...base, { label: "Migrations", href: "/dashboard/migrations" }, { label: sub }]
     }
 
+    if (pathname.startsWith("/dashboard/agents") || pathname.startsWith("/dashboard/workers")) {
+      return [...base, { label: "Workers" }]
+    }
+
     return [...base, { label: "Dashboard" }]
   }, [pathname])
 

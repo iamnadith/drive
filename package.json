@@ -2,11 +2,9 @@
   "name": "drive",
   "version": "0.1.0",
   "private": true,
-
   "engines": {
     "node": ">=20"
   },
-  
   "scripts": {
     "dev": "set TURBOPACK=&& set NODE_OPTIONS=--dns-result-order=ipv4first&& node scripts/clean-next.mjs && next dev --webpack",
     "dev:webpack": "set TURBOPACK=&& set NODE_OPTIONS=--dns-result-order=ipv4first&& node scripts/clean-next.mjs && next dev --webpack",
@@ -14,7 +12,8 @@
     "dev:webpack:nosourcemap": "set TURBOPACK=&& set NODE_OPTIONS=&& node scripts/clean-next.mjs && next dev --webpack",
     "build": "node scripts/clean-next.mjs && next build",
     "start": "next start -H 0.0.0.0 -p 3000",
-    "lint": "eslint"
+    "lint": "eslint",
+    "worker:run": "node scripts/agent-worker.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.948.0",
@@ -55,6 +54,7 @@
     "date-fns": "^4.1.0",
     "embla-carousel-react": "^8.6.0",
     "input-otp": "^1.4.2",
+    "libsodium-wrappers": "^0.8.2",
     "lucide-react": "^0.554.0",
     "next": "16.0.10",
     "next-themes": "^0.4.6",
@@ -67,9 +67,9 @@
     "recharts": "2.15.4",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.4.0",
+    "typescript": "^5",
     "vaul": "^1.1.2",
-    "zod": "^4.1.12",
-    "typescript": "^5"
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

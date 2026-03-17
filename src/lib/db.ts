@@ -398,6 +398,85 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(
         `create index if not exists drive_migration_item_failure_records_key_idx on drive_migration_item_failure_records (migration_item_id, object_key);`
       )
+
+      await queryDb(`
+        create table if not exists drive_agents (
+          id uuid primary key,
+          name text not null,
+          category text not null default 'worker',
+          provider text not null default 'self_hosted',
+          status text not null default 'pending_registration',
+          capabilities jsonb not null default '[]'::jsonb,
+          endpoint_domain text,
+          endpoint_ip text,
+          github_repo_owner text,
+          github_repo_name text,
+          github_workflow_file text,
+          github_ref text,
+          github_repository_id text,
+          github_token text,
+          notes text,
+          registration_token text,
+          registration_token_hash text,
+          last_heartbeat_at timestamptz,
+          last_seen_ip text,
+          last_seen_host text,
+          last_seen_version text,
+          last_error text,
+          metadata jsonb not null default '{}'::jsonb,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+      `)
+
+      await queryDb(`create index if not exists drive_agents_status_idx on drive_agents (status);`)
+      await queryDb(`create index if not exists drive_agents_provider_idx on drive_agents (provider);`)
+      await queryDb(`create index if not exists drive_agents_category_idx on drive_agents (category);`)
+
+      await queryDb(`
+        create table if not exists drive_agent_runs (
+          id uuid primary key,
+          agent_id uuid not null references drive_agents(id) on delete cascade,
+          run_type text not null default 'manual',
+          status text not null default 'pending',
+          external_run_id text,
+          job_reference text,
+          summary text,
+          payload jsonb not null default '{}'::jsonb,
+          started_at timestamptz,
+          completed_at timestamptz,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+      `)
+
+      await queryDb(`create index if not exists drive_agent_runs_agent_idx on drive_agent_runs (agent_id, created_at desc);`)
+
+      await queryDb(`
+        create table if not exists drive_repair_jobs (
+          id uuid primary key,
+          migration_id uuid not null references drive_migrations(id) on delete cascade,
+          requested_by_agent_id uuid references drive_agents(id) on delete set null,
+          claimed_by_agent_id uuid references drive_agents(id) on delete set null,
+          status text not null default 'pending',
+          mode text not null default 'repair_and_verify',
+          payload jsonb not null default '{}'::jsonb,
+          progress jsonb not null default '{}'::jsonb,
+          result jsonb not null default '{}'::jsonb,
+          summary text,
+          error text,
+          claimed_at timestamptz,
+          started_at timestamptz,
+          completed_at timestamptz,
+          last_heartbeat_at timestamptz,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+      `)
+
+      await queryDb(`create index if not exists drive_repair_jobs_status_idx on drive_repair_jobs (status, created_at);`)
+      await queryDb(`create index if not exists drive_repair_jobs_migration_idx on drive_repair_jobs (migration_id, created_at desc);`)
+      await queryDb(`create index if not exists drive_repair_jobs_claimed_idx on drive_repair_jobs (claimed_by_agent_id, status);`)
     })()
   }
 
