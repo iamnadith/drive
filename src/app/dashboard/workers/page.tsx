@@ -9,6 +9,16 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -269,6 +279,7 @@ export default function WorkersPage() {
   const [abortingJobId, setAbortingJobId] = React.useState<string | null>(null)
   const [dispatchOpen, setDispatchOpen] = React.useState(false)
   const [dispatchAgent, setDispatchAgent] = React.useState<AgentRow | null>(null)
+  const [confirmDeleteWorker, setConfirmDeleteWorker] = React.useState<AgentRow | null>(null)
   const [dispatchMigrationId, setDispatchMigrationId] = React.useState("")
   const [dispatchSearch, setDispatchSearch] = React.useState("")
   const [dispatchMode, setDispatchMode] = React.useState<"verify_only" | "repair_only" | "repair_and_verify">("repair_and_verify")
@@ -528,14 +539,16 @@ export default function WorkersPage() {
   }, [])
 
   const startGitHubConnect = React.useCallback(() => {
+    const connectUrl = new URL("/api/github/connect?popup=1", window.location.origin).toString()
+    const fallbackUrl = new URL("/api/github/connect", window.location.origin).toString()
     const popup = window.open(
-      "/api/github/connect?popup=1",
+      connectUrl,
       "github-worker-connect",
       "popup=yes,width=720,height=760,resizable=yes,scrollbars=yes"
     )
 
     if (!popup) {
-      window.location.href = "/api/github/connect"
+      window.location.href = fallbackUrl
     }
   }, [])
 
@@ -598,13 +611,35 @@ export default function WorkersPage() {
     async (worker: AgentRow) => {
       setDeletingWorkerId(worker.id)
       try {
+        const activeWorkerJobs = repairJobs.filter(
+          (job) =>
+            !["completed", "failed", "canceled"].includes(job.status) &&
+            (job.claimedByAgentId === worker.id || job.requestedByAgentId === worker.id)
+        )
+
+        for (const job of activeWorkerJobs) {
+          const abortRes = await fetch(`/api/repair-jobs/${encodeURIComponent(job.id)}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "abort" }),
+          })
+          const abortJson: unknown = await abortRes.json().catch(() => ({}))
+          if (!abortRes.ok) {
+            const message =
+              typeof abortJson === "object" && abortJson !== null && "error" in abortJson
+                ? String((abortJson as any).error)
+                : "Unable to abort worker jobs before deleting the worker"
+            throw new Error(message)
+          }
+        }
+
         const res = await fetch(`/api/workers/${encodeURIComponent(worker.id)}`, { method: "DELETE" })
         const json: unknown = await res.json().catch(() => ({}))
         if (!res.ok) {
           const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to delete worker"
           throw new Error(message)
         }
-        toast.success("Worker deleted")
+        toast.success(activeWorkerJobs.length > 0 ? "Worker jobs aborted and worker deleted" : "Worker deleted")
         await loadAgents()
         await loadRepairJobs()
       } catch (error) {
@@ -613,7 +648,7 @@ export default function WorkersPage() {
         setDeletingWorkerId(null)
       }
     },
-    [loadAgents, loadRepairJobs]
+    [loadAgents, loadRepairJobs, repairJobs]
   )
 
   const viewRepairJob = React.useCallback(async (jobId: string) => {
@@ -1449,7 +1484,7 @@ export default function WorkersPage() {
                       variant="outline"
                       size="sm"
                       disabled={deletingWorkerId === worker.id}
-                      onClick={() => void deleteWorker(worker)}
+                      onClick={() => setConfirmDeleteWorker(worker)}
                     >
                       <Trash2 className="mr-1 h-4 w-4" />
                       {deletingWorkerId === worker.id ? "Deleting..." : "Delete"}
@@ -1491,6 +1526,37 @@ export default function WorkersPage() {
           })}
         </CardContent>
       </Card>
+
+      <AlertDialog open={!!confirmDeleteWorker} onOpenChange={(open: boolean) => !open && setConfirmDeleteWorker(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete worker?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {confirmDeleteWorker
+                ? repairJobs.some(
+                    (job) =>
+                      !["completed", "failed", "canceled"].includes(job.status) &&
+                      (job.claimedByAgentId === confirmDeleteWorker.id || job.requestedByAgentId === confirmDeleteWorker.id)
+                  )
+                  ? "This worker has active jobs. Confirming will abort those jobs first, then stop the GitHub worker run if needed, and finally delete the worker."
+                  : "This will remove the worker from the system." 
+                : "This will remove the worker from the system."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setConfirmDeleteWorker(null)}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event: React.MouseEvent<HTMLButtonElement>) => {
+                event.preventDefault()
+                if (!confirmDeleteWorker) return
+                void deleteWorker(confirmDeleteWorker).finally(() => setConfirmDeleteWorker(null))
+              }}
+            >
+              Confirm
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Card>
         <CardHeader>

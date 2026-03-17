@@ -66,12 +66,13 @@ export function getGitHubOAuthConfig() {
   }
 }
 
-export function buildGitHubOAuthUrl(state: string): string {
+export function buildGitHubOAuthUrl(state: string, appUrlOverride?: string): string {
   const { clientId, appUrl } = getGitHubOAuthConfig()
-  if (!appUrl) throw new Error("Missing NEXT_PUBLIC_APP_URL or APP_URL")
+  const resolvedAppUrl = (appUrlOverride || appUrl || "").replace(/\/+$/, "")
+  if (!resolvedAppUrl) throw new Error("Missing NEXT_PUBLIC_APP_URL or APP_URL")
   const url = new URL("https://github.com/login/oauth/authorize")
   url.searchParams.set("client_id", clientId)
-  url.searchParams.set("redirect_uri", `${appUrl}/api/github/callback`)
+  url.searchParams.set("redirect_uri", `${resolvedAppUrl}/api/github/callback`)
   url.searchParams.set("scope", "repo workflow admin:repo_hook")
   url.searchParams.set("state", state)
   return url.toString()
@@ -97,9 +98,10 @@ async function githubApi<T>(path: string, token: string, init?: RequestInit): Pr
   return json as T
 }
 
-export async function exchangeGitHubCode(code: string): Promise<string> {
+export async function exchangeGitHubCode(code: string, appUrlOverride?: string): Promise<string> {
   const { clientId, clientSecret, appUrl } = getGitHubOAuthConfig()
-  if (!appUrl) throw new Error("Missing NEXT_PUBLIC_APP_URL or APP_URL")
+  const resolvedAppUrl = (appUrlOverride || appUrl || "").replace(/\/+$/, "")
+  if (!resolvedAppUrl) throw new Error("Missing NEXT_PUBLIC_APP_URL or APP_URL")
   const response = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
     headers: {
@@ -110,7 +112,7 @@ export async function exchangeGitHubCode(code: string): Promise<string> {
       client_id: clientId,
       client_secret: clientSecret,
       code,
-      redirect_uri: `${appUrl}/api/github/callback`,
+      redirect_uri: `${resolvedAppUrl}/api/github/callback`,
     }),
   })
   const json = (await response.json().catch(() => ({}))) as Record<string, unknown>

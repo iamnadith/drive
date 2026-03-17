@@ -237,7 +237,7 @@ export default function WorkerJobDetailsPage() {
               onClick={() => void stopGitHubRun()}
               disabled={stoppingGitHubRun}
             >
-              {stoppingGitHubRun ? "Stopping GitHub run..." : "Stop GitHub worker"}
+              {stoppingGitHubRun ? "Stopping..." : "Abort"}
             </Button>
           ) : null}
           {typeof job.linkedRun?.payload?.htmlUrl === "string" ? (

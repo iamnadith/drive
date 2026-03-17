@@ -1,9 +1,11 @@
 import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
 import { exchangeGitHubCode, GITHUB_FLOW_COOKIE, GITHUB_STATE_COOKIE, GITHUB_TOKEN_COOKIE } from "@/lib/github-oauth"
+import { getPublicOrigin } from "@/lib/public-origin"
 
 export async function GET(request: Request) {
   const url = new URL(request.url)
+  const publicOrigin = getPublicOrigin(request)
   const code = url.searchParams.get("code") ?? ""
   const state = url.searchParams.get("state") ?? ""
   const cookieState = (await cookies()).get(GITHUB_STATE_COOKIE)?.value ?? ""
@@ -12,12 +14,12 @@ export async function GET(request: Request) {
   const errorRedirect = flow === "popup" ? "/dashboard/workers/github-complete?status=error" : "/dashboard/workers?github=error"
 
   if (!code || !state || !cookieState || state !== cookieState) {
-    return NextResponse.redirect(new URL(errorRedirect, request.url))
+    return NextResponse.redirect(new URL(errorRedirect, publicOrigin))
   }
 
   try {
-    const token = await exchangeGitHubCode(code)
-    const response = NextResponse.redirect(new URL(successRedirect, request.url))
+    const token = await exchangeGitHubCode(code, publicOrigin)
+    const response = NextResponse.redirect(new URL(successRedirect, publicOrigin))
     response.cookies.set(GITHUB_TOKEN_COOKIE, token, {
       httpOnly: true,
       sameSite: "lax",
@@ -41,6 +43,6 @@ export async function GET(request: Request) {
     })
     return response
   } catch {
-    return NextResponse.redirect(new URL(errorRedirect, request.url))
+    return NextResponse.redirect(new URL(errorRedirect, publicOrigin))
   }
 }

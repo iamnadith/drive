@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server"
 import { buildGitHubOAuthUrl, createGitHubOAuthState, GITHUB_FLOW_COOKIE, GITHUB_STATE_COOKIE } from "@/lib/github-oauth"
+import { getPublicOrigin } from "@/lib/public-origin"
 
 export async function GET(request: Request) {
   try {
     const url = new URL(request.url)
     const popup = url.searchParams.get("popup") === "1"
     const state = createGitHubOAuthState()
-    const response = NextResponse.redirect(buildGitHubOAuthUrl(state))
+    const response = NextResponse.redirect(buildGitHubOAuthUrl(state, getPublicOrigin(request)))
     response.cookies.set(GITHUB_STATE_COOKIE, state, {
       httpOnly: true,
       sameSite: "lax",

@@ -4,6 +4,16 @@ import * as React from "react"
 import Link from "next/link"
 import { Eye, RefreshCw, Square, Trash2, Workflow } from "lucide-react"
 import { toast } from "sonner"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -90,6 +100,8 @@ export default function WorkerJobsPage() {
   const [loading, setLoading] = React.useState(true)
   const [deletingJobId, setDeletingJobId] = React.useState<string | null>(null)
   const [abortingJobId, setAbortingJobId] = React.useState<string | null>(null)
+  const [stoppingGitHubRunJobId, setStoppingGitHubRunJobId] = React.useState<string | null>(null)
+  const [confirmDeleteJob, setConfirmDeleteJob] = React.useState<RepairJobRow | null>(null)
 
   const loadJobs = React.useCallback(async () => {
     try {
@@ -140,6 +152,25 @@ export default function WorkerJobsPage() {
       toast.error(error instanceof Error ? error.message : "Unable to abort repair job")
     } finally {
       setAbortingJobId(null)
+    }
+  }, [loadJobs])
+
+  const stopGitHubRun = React.useCallback(async (job: RepairJobRow) => {
+    setStoppingGitHubRunJobId(job.id)
+    try {
+      const res = await fetch(`/api/repair-jobs/${encodeURIComponent(job.id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop_github_run" }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json.error || "Unable to stop GitHub worker")
+      toast.success("GitHub worker stopped")
+      await loadJobs()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to stop GitHub worker")
+    } finally {
+      setStoppingGitHubRunJobId(null)
     }
   }, [loadJobs])
 
@@ -199,7 +230,18 @@ export default function WorkerJobsPage() {
                     Details
                   </Link>
                 </Button>
-                <Button variant="outline" size="sm" disabled={deletingJobId === job.id} onClick={() => void deleteJob(job)}>
+                {typeof job.linkedRun?.payload?.htmlUrl === "string" ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={stoppingGitHubRunJobId === job.id}
+                    onClick={() => void stopGitHubRun(job)}
+                  >
+                    <Square className="mr-1 h-4 w-4" />
+                    {stoppingGitHubRunJobId === job.id ? "Stopping..." : "Abort"}
+                  </Button>
+                ) : null}
+                <Button variant="outline" size="sm" disabled={deletingJobId === job.id} onClick={() => setConfirmDeleteJob(job)}>
                   <Trash2 className="mr-1 h-4 w-4" />
                   {deletingJobId === job.id ? "Deleting..." : "Delete"}
                 </Button>
@@ -208,6 +250,29 @@ export default function WorkerJobsPage() {
           </Card>
         ))}
       </div>
+      <AlertDialog open={!!confirmDeleteJob} onOpenChange={(open) => !open && setConfirmDeleteJob(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete repair job?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will remove the repair job record for{" "}
+              <span className="font-mono text-xs">{confirmDeleteJob?.id}</span>.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setConfirmDeleteJob(null)}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault()
+                if (!confirmDeleteJob) return
+                void deleteJob(confirmDeleteJob).finally(() => setConfirmDeleteJob(null))
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
