@@ -1,9 +1,11 @@
 import { getMigration, listMigrationItems, mergeMigrationItemProgressState, updateMigration } from "./migrations-store"
 import { listRepairJobsByMigration, type DriveRepairJob } from "./repair-jobs-store"
 import {
+  getBucketDisplayStatusRank,
   getEffectiveRepairStatus,
   getItemDisplayStatus,
   isAbortedStatus,
+  isTerminalBucketDisplayStatus,
   isCompletedStatus,
   isFailedLikeStatus,
   isRecord,
@@ -130,6 +132,35 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
         sourceScanStatus: sourceScanStatus || null,
         workerStage: repairState?.stage ?? null,
         workerStatus: effectiveRepairStatus ?? null,
+        slurperJobId: item.slurperJobId ?? null,
+        repairJobId: latestRepairJob?.id ?? null,
+      }
+
+      const sameSlurperJob = (currentLive?.slurperJobId ?? null) === live.slurperJobId
+      const sameRepairJob = (currentLive?.repairJobId ?? null) === live.repairJobId
+      const sameCycle = sameSlurperJob && sameRepairJob
+      const currentStatus = currentLive && typeof currentLive.status === "string" ? currentLive.status : null
+      const nextStatus = live.status
+
+      if (currentLive && sameCycle) {
+        live.totalObjects = Math.max(currentLive.totalObjects === undefined ? 0 : Number(currentLive.totalObjects), live.totalObjects)
+
+        if (!isTerminalBucketDisplayStatus(nextStatus)) {
+          live.transferredObjects = Math.max(currentLive.transferredObjects === undefined ? 0 : Number(currentLive.transferredObjects), live.transferredObjects)
+          live.skippedObjects = Math.max(currentLive.skippedObjects === undefined ? 0 : Number(currentLive.skippedObjects), live.skippedObjects)
+          live.failedObjects = Math.max(currentLive.failedObjects === undefined ? 0 : Number(currentLive.failedObjects), live.failedObjects)
+          live.verifyIssues = Math.max(currentLive.verifyIssues === undefined ? 0 : Number(currentLive.verifyIssues), live.verifyIssues)
+        }
+
+        if (isTerminalBucketDisplayStatus(currentStatus) && !isTerminalBucketDisplayStatus(nextStatus)) {
+          live.status = currentStatus
+        } else if (
+          !isTerminalBucketDisplayStatus(currentStatus) &&
+          !isTerminalBucketDisplayStatus(nextStatus) &&
+          getBucketDisplayStatusRank(currentStatus) > getBucketDisplayStatusRank(nextStatus)
+        ) {
+          live.status = currentStatus
+        }
       }
 
       const same =

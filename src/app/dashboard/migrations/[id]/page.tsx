@@ -38,14 +38,17 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
+  getBucketDisplayStatusRank,
   getMergedBucketSnapshot,
   getItemDisplayStatus,
   getItemStatus,
   isAbortedStatus,
   isCompletedStatus,
   isFailedLikeStatus,
+  isTerminalBucketDisplayStatus,
   isRecord,
   normalizeStatus,
+  readLiveBucketState,
   readRepairWorkerState,
   readSlurperResult,
   readVerifyState,
@@ -276,6 +279,65 @@ function repairJobBadge(status: RepairJob["status"] | undefined) {
   if (status === "failed") return <Badge className="bg-red-600">Worker failed</Badge>
   if (status === "canceled") return <Badge variant="outline">Worker aborted</Badge>
   return <Badge variant="outline">No worker run</Badge>
+}
+
+function mergeIncomingItem(prev: MigrationItem | undefined, next: MigrationItem): MigrationItem {
+  if (!prev) return next
+
+  const prevProgress = isRecord(prev.progress) ? (prev.progress as Record<string, unknown>) : {}
+  const nextProgress = isRecord(next.progress) ? (next.progress as Record<string, unknown>) : {}
+  const prevLive = readLiveBucketState(prevProgress)
+  const nextLive = readLiveBucketState(nextProgress)
+
+  if (!prevLive || !nextLive) return next
+
+  const sameSlurperJob = (prevLive.slurperJobId ?? prev.slurperJobId ?? null) === (nextLive.slurperJobId ?? next.slurperJobId ?? null)
+  const sameRepairJob = (prevLive.repairJobId ?? null) === (nextLive.repairJobId ?? null)
+  const sameCycle = sameSlurperJob && sameRepairJob
+  if (!sameCycle) return next
+
+  const mergedLive = {
+    ...nextLive,
+    totalObjects: Math.max(prevLive.totalObjects, nextLive.totalObjects),
+    transferredObjects: isTerminalBucketDisplayStatus(nextLive.status)
+      ? nextLive.transferredObjects
+      : Math.max(prevLive.transferredObjects, nextLive.transferredObjects),
+    skippedObjects: isTerminalBucketDisplayStatus(nextLive.status)
+      ? nextLive.skippedObjects
+      : Math.max(prevLive.skippedObjects, nextLive.skippedObjects),
+    failedObjects: isTerminalBucketDisplayStatus(nextLive.status)
+      ? nextLive.failedObjects
+      : Math.max(prevLive.failedObjects, nextLive.failedObjects),
+    verifyIssues: isTerminalBucketDisplayStatus(nextLive.status)
+      ? nextLive.verifyIssues
+      : Math.max(prevLive.verifyIssues, nextLive.verifyIssues),
+  }
+
+  if (isTerminalBucketDisplayStatus(prevLive.status) && !isTerminalBucketDisplayStatus(nextLive.status)) {
+    mergedLive.status = prevLive.status
+  } else if (
+    !isTerminalBucketDisplayStatus(prevLive.status) &&
+    !isTerminalBucketDisplayStatus(nextLive.status) &&
+    getBucketDisplayStatusRank(prevLive.status) > getBucketDisplayStatusRank(nextLive.status)
+  ) {
+    mergedLive.status = prevLive.status
+  }
+
+  return {
+    ...next,
+    progress: {
+      ...nextProgress,
+      live: {
+        ...(nextProgress.live && isRecord(nextProgress.live) ? (nextProgress.live as Record<string, unknown>) : {}),
+        ...mergedLive,
+      },
+    },
+  }
+}
+
+function mergeIncomingItems(prevItems: MigrationItem[], nextItems: MigrationItem[]): MigrationItem[] {
+  const prevById = new Map(prevItems.map((item) => [item.id, item]))
+  return nextItems.map((item) => mergeIncomingItem(prevById.get(item.id), item))
 }
 
 async function postJsonWithTimeout(input: {
@@ -837,7 +899,7 @@ export default function MigrationDetailsPage() {
       const nextRepairJobs =
         isRecord(detailsJson) && Array.isArray(detailsJson.repairJobs) ? (detailsJson.repairJobs as RepairJob[]) : []
       setMigration(nextMigration)
-      setItems(nextItems)
+      setItems((prev) => mergeIncomingItems(prev, nextItems))
       setRepairJobs(nextRepairJobs)
     } catch (e: unknown) {
       const message =
@@ -909,7 +971,10 @@ export default function MigrationDetailsPage() {
         try {
           const data: unknown = JSON.parse(String(event.data ?? "{}"))
           if (isRecord(data) && isRecord(data.migration)) setMigration(data.migration as Migration)
-          if (isRecord(data) && Array.isArray(data.items)) setItems(data.items as MigrationItem[])
+          if (isRecord(data) && Array.isArray(data.items)) {
+            const nextItems = data.items as MigrationItem[]
+            setItems((prev) => mergeIncomingItems(prev, nextItems))
+          }
           if (isRecord(data) && Array.isArray(data.repairJobs)) setRepairJobs(data.repairJobs as RepairJob[])
         } catch {
           // ignore
@@ -967,7 +1032,7 @@ export default function MigrationDetailsPage() {
     }
 
     void tick()
-    const interval = setInterval(() => void tick(), 5_000)
+    const interval = setInterval(() => void tick(), 3_000)
     return () => {
       stopped = true
       clearInterval(interval)
