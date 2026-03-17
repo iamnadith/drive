@@ -1,142 +1,18 @@
-import { getMigration, listMigrationItems, mergeMigrationItemProgressState, updateMigration, type DriveMigrationItem } from "./migrations-store"
+import { getMigration, listMigrationItems, mergeMigrationItemProgressState, updateMigration } from "./migrations-store"
 import { listRepairJobsByMigration, type DriveRepairJob } from "./repair-jobs-store"
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null
-}
-
-function normalizeStatus(value: unknown): string {
-  return String(value ?? "").trim().toLowerCase()
-}
-
-function isCompletedStatus(value: unknown): boolean {
-  const s = normalizeStatus(value)
-  return s === "completed" || s === "copy_completed" || s === "complete" || s === "finished" || s === "success" || s === "succeeded"
-}
-
-function isAbortedStatus(value: unknown): boolean {
-  const s = normalizeStatus(value)
-  return s === "aborted" || s === "canceled" || s === "copy_aborted"
-}
-
-function isFailedLikeStatus(value: unknown): boolean {
-  const s = normalizeStatus(value)
-  return s === "precheck_failed" || s === "bucket_create_failed" || s === "job_create_failed" || s.endsWith("_failed") || s.includes("failed") || s.includes("error")
-}
-
-function readRepairWorkerState(progress: Record<string, unknown>) {
-  if (!isRecord(progress.repairWorker)) return null
-  const repair = progress.repairWorker as Record<string, unknown>
-  return {
-    stage: typeof repair.stage === "string" ? repair.stage : undefined,
-    status: typeof repair.status === "string" ? repair.status : undefined,
-    transferred: typeof repair.transferred === "number" ? repair.transferred : 0,
-    failed: typeof repair.failed === "number" ? repair.failed : 0,
-    skipped: typeof repair.skipped === "number" ? repair.skipped : 0,
-    details: isRecord(repair.details) ? repair.details : null,
-  }
-}
-
-function readSlurperResult(progress: Record<string, unknown>) {
-  const candidates = [progress.slurperCumulative, progress.slurperNormalized, isRecord(progress.slurper) ? (progress.slurper as Record<string, unknown>).result : null]
-  for (const candidate of candidates) {
-    if (!isRecord(candidate)) continue
-    return {
-      objects: typeof candidate.objects === "number" ? candidate.objects : 0,
-      transferredObjects: typeof candidate.transferredObjects === "number" ? candidate.transferredObjects : 0,
-      skippedObjects: typeof candidate.skippedObjects === "number" ? candidate.skippedObjects : 0,
-      failedObjects: typeof candidate.failedObjects === "number" ? candidate.failedObjects : 0,
-      status: typeof candidate.status === "string" ? candidate.status : undefined,
-    }
-  }
-  return null
-}
-
-function readVerifyState(progress: Record<string, unknown>) {
-  const verify = isRecord(progress.verify) ? (progress.verify as Record<string, unknown>) : null
-  if (!verify) return null
-  const status = typeof verify.status === "string" ? verify.status : ""
-  if (status !== "pending" && status !== "running" && status !== "ok" && status !== "error") return null
-  return {
-    status,
-    missingInDest: typeof verify.missingInDest === "number" ? verify.missingInDest : 0,
-    sizeMismatched: typeof verify.sizeMismatched === "number" ? verify.sizeMismatched : 0,
-    extraInDest: typeof verify.extraInDest === "number" ? verify.extraInDest : 0,
-    note: typeof verify.note === "string" ? verify.note : "",
-  }
-}
-
-function readLiveRepairVerificationIssues(input: {
-  repairStatus?: string
-  finalMissing: number
-  finalMismatched: number
-  verify?: { status: string; missingInDest: number; sizeMismatched: number; extraInDest: number } | null
-}): number {
-  const repairStatus = normalizeStatus(input.repairStatus)
-  const workerIssues = input.finalMissing + input.finalMismatched
-  if (repairStatus === "completed" || repairStatus === "failed" || repairStatus === "error") {
-    return workerIssues
-  }
-  return input.verify?.status === "error" ? input.verify.missingInDest + input.verify.sizeMismatched + input.verify.extraInDest : 0
-}
-
-function getItemStatus(item: DriveMigrationItem): string | undefined {
-  const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
-  const stage = typeof progress.stage === "string" ? progress.stage : ""
-  const sourceScanStatus = typeof progress.sourceScanStatus === "string" ? progress.sourceScanStatus : ""
-  if (
-    !item.slurperJobId &&
-    (stage === "scan_seeded" ||
-      ((stage === "scanning_source" || sourceScanStatus === "pending" || sourceScanStatus === "running") &&
-        sourceScanStatus !== "completed" &&
-        sourceScanStatus !== "failed"))
-  ) {
-    return "scanning"
-  }
-  if (!item.slurperJobId && stage === "scan_failed") return "failed"
-  if (typeof item.slurperStatus === "string" && item.slurperStatus.length > 0) return item.slurperStatus
-  if (typeof progress.slurperStatus === "string" && progress.slurperStatus.length > 0) return String(progress.slurperStatus)
-  return readSlurperResult(progress)?.status
-}
-
-function getItemDisplayStatus(
-  item: DriveMigrationItem,
-  repairResultItem?: Record<string, unknown>,
-  repairStatusOverride?: string
-): string | undefined {
-  const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
-  const repairState = readRepairWorkerState(progress)
-  const repairStatus = normalizeStatus(repairStatusOverride || repairState?.status)
-  const repairStage = normalizeStatus(repairState?.stage)
-  const repairDetails = repairState?.details
-  const finalMissing =
-    (repairResultItem && typeof repairResultItem.finalMissing === "number" ? repairResultItem.finalMissing : 0) +
-    (repairDetails && typeof repairDetails.finalMissing === "number" ? Number(repairDetails.finalMissing) : 0)
-  const finalMismatched =
-    (repairResultItem && typeof repairResultItem.finalMismatched === "number" ? repairResultItem.finalMismatched : 0) +
-    (repairDetails && typeof repairDetails.finalMismatched === "number" ? Number(repairDetails.finalMismatched) : 0)
-  const resolvedAllObjects = repairResultItem?.resolvedAllObjects === true || (repairStatus === "completed" && finalMissing === 0 && finalMismatched === 0)
-
-  if (repairStatus === "running") {
-    if (repairStage.includes("scan")) return "scanning"
-    if (repairStage.includes("verify")) return "verifying"
-    return "running"
-  }
-  if (repairStatus === "claimed" || repairStatus === "pending") return "running"
-  if (repairStatus === "completed") return resolvedAllObjects ? "completed" : finalMissing > 0 || finalMismatched > 0 ? "failed" : "completed"
-  if (repairStatus === "failed" || repairStatus === "error") return "failed"
-  if (repairStatus === "canceled" || repairStatus === "aborted") return "aborted"
-
-  const base = getItemStatus(item)
-  if (base === "scanning") return "scanning"
-  if (base === "scan_failed") return "failed"
-  if (!isCompletedStatus(base)) return base
-  const verify = readVerifyState(progress)
-  if (verify?.status === "pending" || verify?.status === "running") return "verifying"
-  if (verify?.status === "error") return "verification_failed"
-  if (verify?.status === "ok" && verify.note === "no_source_objects") return "no_files"
-  return base
-}
+import {
+  getEffectiveRepairStatus,
+  getItemDisplayStatus,
+  isAbortedStatus,
+  isCompletedStatus,
+  isFailedLikeStatus,
+  isRecord,
+  normalizeStatus,
+  readLiveRepairVerificationIssues,
+  readRepairWorkerState,
+  readSlurperResult,
+  readVerifyState,
+} from "./migration-bucket-state"
 
 function readRepairItems(job: DriveRepairJob | null | undefined): Array<Record<string, unknown>> {
   if (!job || !isRecord(job.result) || !Array.isArray(job.result.items)) return []
@@ -152,16 +28,6 @@ function readRepairPayloadItemIds(job: DriveRepairJob | null | undefined): Set<s
     if (itemId) ids.add(itemId)
   }
   return ids
-}
-
-function isTerminalRepairJobStatus(value: string | undefined): boolean {
-  const status = normalizeStatus(value)
-  return status === "completed" || status === "failed" || status === "canceled"
-}
-
-function isActiveRepairWorkerStatus(value: string | undefined): boolean {
-  const status = normalizeStatus(value)
-  return status === "running" || status === "claimed" || status === "pending"
 }
 
 function getLatestRepairJob(jobs: DriveRepairJob[]): DriveRepairJob | null {
@@ -192,26 +58,26 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
       const repairState = readRepairWorkerState(progress)
       const repairResultItem = latestRepairItemsById.get(item.id)
       const verify = readVerifyState(progress)
-      const latestRepairJobStatus = normalizeStatus(latestRepairJob?.status)
-      const repairAppliesToItem = latestRepairItemIds.has(item.id)
-      const currentRepairStatus = normalizeStatus(repairState?.status)
-      const effectiveRepairStatus =
-        isTerminalRepairJobStatus(latestRepairJobStatus) &&
-        isActiveRepairWorkerStatus(currentRepairStatus) &&
-        (repairAppliesToItem || !latestRepairJob || latestRepairItemIds.size === 0)
-          ? latestRepairJobStatus === "canceled"
-            ? "failed"
-            : latestRepairJobStatus
-          : repairState?.status
+      const effectiveRepairStatus = getEffectiveRepairStatus({
+        repairWorkerStatus: repairState?.status,
+        latestRepairJobStatus: latestRepairJob?.status,
+        repairAppliesToItem: latestRepairItemIds.has(item.id),
+        latestRepairJobExists: Boolean(latestRepairJob),
+        latestRepairItemCount: latestRepairItemIds.size,
+      })
       const displayStatus = getItemDisplayStatus(item, repairResultItem, effectiveRepairStatus)
       const sourceScanStatus = typeof progress.sourceScanStatus === "string" ? progress.sourceScanStatus : ""
       const scanComplete = sourceScanStatus === "completed"
-      const total =
+      const currentLive = isRecord(progress.live) ? (progress.live as Record<string, unknown>) : null
+      const previousTotal = currentLive && typeof currentLive.totalObjects === "number" ? currentLive.totalObjects : 0
+      const total = Math.max(
+        previousTotal,
         scanComplete && typeof item.sourceObjects === "number"
           ? item.sourceObjects
           : typeof slurper?.objects === "number"
             ? slurper.objects
             : 0
+      )
       const workerTransferred = Math.max(
         typeof repairState?.transferred === "number" ? repairState.transferred : 0,
         repairResultItem && typeof repairResultItem.transferred === "number" ? repairResultItem.transferred : 0
@@ -266,7 +132,6 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
         workerStatus: effectiveRepairStatus ?? null,
       }
 
-      const currentLive = isRecord(progress.live) ? (progress.live as Record<string, unknown>) : null
       const same =
         currentLive &&
         currentLive.status === live.status &&
