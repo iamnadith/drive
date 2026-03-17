@@ -176,15 +176,37 @@ function readRepairTotals(job: RepairJob | null | undefined): {
   const resultTotals = job && isRecord(job.result) && isRecord(job.result.totals) ? (job.result.totals as Record<string, unknown>) : null
   const progressTotals = job && isRecord(job.progress) && isRecord(job.progress.totals) ? (job.progress.totals as Record<string, unknown>) : null
   const totals = resultTotals ?? progressTotals
-  if (!totals) {
-    return { transferred: 0, failed: 0, skipped: 0, missing: 0, mismatched: 0 }
+  const base = {
+    transferred: totals && typeof totals.transferred === "number" ? totals.transferred : 0,
+    failed: totals && typeof totals.failed === "number" ? totals.failed : 0,
+    skipped: totals && typeof totals.skipped === "number" ? totals.skipped : 0,
+    missing: totals && typeof totals.missing === "number" ? totals.missing : 0,
+    mismatched: totals && typeof totals.mismatched === "number" ? totals.mismatched : 0,
   }
+
+  const itemTotals = readRepairItems(job).reduce<{
+    transferred: number
+    failed: number
+    skipped: number
+    missing: number
+    mismatched: number
+  }>(
+    (sum, item) => ({
+      transferred: sum.transferred + (typeof item.transferred === "number" ? item.transferred : 0),
+      failed: sum.failed + (typeof item.failed === "number" ? item.failed : 0),
+      skipped: sum.skipped + (typeof item.skipped === "number" ? item.skipped : 0),
+      missing: sum.missing + (typeof item.finalMissing === "number" ? item.finalMissing : 0),
+      mismatched: sum.mismatched + (typeof item.finalMismatched === "number" ? item.finalMismatched : 0),
+    }),
+    { transferred: 0, failed: 0, skipped: 0, missing: 0, mismatched: 0 }
+  )
+
   return {
-    transferred: typeof totals.transferred === "number" ? totals.transferred : 0,
-    failed: typeof totals.failed === "number" ? totals.failed : 0,
-    skipped: typeof totals.skipped === "number" ? totals.skipped : 0,
-    missing: typeof totals.missing === "number" ? totals.missing : 0,
-    mismatched: typeof totals.mismatched === "number" ? totals.mismatched : 0,
+    transferred: Math.max(base.transferred, itemTotals.transferred),
+    failed: Math.max(base.failed, itemTotals.failed),
+    skipped: Math.max(base.skipped, itemTotals.skipped),
+    missing: Math.max(base.missing, itemTotals.missing),
+    mismatched: Math.max(base.mismatched, itemTotals.mismatched),
   }
 }
 
@@ -313,7 +335,7 @@ function repairJobBadge(status: RepairJob["status"] | undefined) {
   if (status === "claimed") return <Badge className="bg-sky-600">Worker claimed</Badge>
   if (status === "pending") return <Badge variant="secondary">Worker queued</Badge>
   if (status === "failed") return <Badge className="bg-red-600">Worker failed</Badge>
-  if (status === "canceled") return <Badge variant="outline">Worker canceled</Badge>
+  if (status === "canceled") return <Badge variant="outline">Worker aborted</Badge>
   return <Badge variant="outline">No worker run</Badge>
 }
 
@@ -379,6 +401,16 @@ function isAbortedStatus(value: string | undefined): boolean {
   return s === "aborted" || s === "canceled" || s === "copy_aborted"
 }
 
+function isTerminalRepairJobStatus(value: string | undefined): boolean {
+  const status = normalizeStatus(value)
+  return status === "completed" || status === "failed" || status === "canceled"
+}
+
+function isActiveRepairWorkerStatus(value: string | undefined): boolean {
+  const status = normalizeStatus(value)
+  return status === "running" || status === "claimed" || status === "pending"
+}
+
 function readVerifyState(progress: Record<string, unknown>): {
   status: "pending" | "running" | "ok" | "error"
   note?: string
@@ -401,6 +433,24 @@ function readVerifyState(progress: Record<string, unknown>): {
 
 function getItemDisplayStatus(item: MigrationItem | null | undefined): string | undefined {
   if (!item) return undefined
+  const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
+  const repairState = readRepairWorkerState(progress)
+  const repairStatus = normalizeStatus(repairState?.status)
+  const repairStage = normalizeStatus(repairState?.stage)
+  const repairDetails = repairState?.details && isRecord(repairState.details) ? repairState.details : null
+  const finalMissing = repairDetails && typeof repairDetails.finalMissing === "number" ? repairDetails.finalMissing : 0
+  const finalMismatched = repairDetails && typeof repairDetails.finalMismatched === "number" ? repairDetails.finalMismatched : 0
+  const resolvedAllObjects = repairDetails?.resolvedAllObjects === true || (repairStatus === "completed" && finalMissing === 0 && finalMismatched === 0)
+  if (repairStatus === "running") {
+    if (repairStage.includes("scan")) return "scanning"
+    if (repairStage.includes("verify")) return "verifying"
+    return "running"
+  }
+  if (repairStatus === "claimed" || repairStatus === "pending") return "running"
+  if (repairStatus === "completed") return resolvedAllObjects ? "completed" : finalMissing > 0 || finalMismatched > 0 ? "failed" : "completed"
+  if (repairStatus === "failed" || repairStatus === "error") return "failed"
+  if (repairStatus === "canceled" || repairStatus === "aborted") return "aborted"
+
   const base = getItemStatus(item)
   if (base === "scanning") return "scanning"
   if (base === "scan_failed") return "failed"
@@ -410,6 +460,180 @@ function getItemDisplayStatus(item: MigrationItem | null | undefined): string | 
   if (v?.status === "error") return "verification_failed"
   if (v?.status === "ok" && v.note === "no_source_objects") return "no_files"
   return base
+}
+
+function readRepairResultItemMetrics(itemResult: Record<string, unknown> | undefined): {
+  transferred: number
+  failed: number
+  skipped: number
+  finalMissing: number
+  finalMismatched: number
+} {
+  return {
+    transferred: typeof itemResult?.transferred === "number" ? itemResult.transferred : 0,
+    failed: typeof itemResult?.failed === "number" ? itemResult.failed : 0,
+    skipped: typeof itemResult?.skipped === "number" ? itemResult.skipped : 0,
+    finalMissing: typeof itemResult?.finalMissing === "number" ? itemResult.finalMissing : 0,
+    finalMismatched: typeof itemResult?.finalMismatched === "number" ? itemResult.finalMismatched : 0,
+  }
+}
+
+function readLiveBucketState(progress: Record<string, unknown>): {
+  status?: string
+  transferredObjects: number
+  skippedObjects: number
+  failedObjects: number
+  unaccountedObjects: number
+  verifyIssues: number
+  totalObjects: number
+} | null {
+  const live = isRecord(progress.live) ? (progress.live as Record<string, unknown>) : null
+  if (!live) return null
+  return {
+    status: typeof live.status === "string" ? live.status : undefined,
+    transferredObjects: typeof live.transferredObjects === "number" ? live.transferredObjects : 0,
+    skippedObjects: typeof live.skippedObjects === "number" ? live.skippedObjects : 0,
+    failedObjects: typeof live.failedObjects === "number" ? live.failedObjects : 0,
+    unaccountedObjects: typeof live.unaccountedObjects === "number" ? live.unaccountedObjects : 0,
+    verifyIssues: typeof live.verifyIssues === "number" ? live.verifyIssues : 0,
+    totalObjects: typeof live.totalObjects === "number" ? live.totalObjects : 0,
+  }
+}
+
+function getEffectiveVerifyIssues(input: {
+  repairStatus?: string
+  finalMissing: number
+  finalMismatched: number
+  verify?: { status: "pending" | "running" | "ok" | "error"; missingInDest?: number; sizeMismatched?: number; extraInDest?: number } | null
+}): number {
+  const repairStatus = normalizeStatus(input.repairStatus)
+  const workerIssues = input.finalMissing + input.finalMismatched
+  if (repairStatus === "completed" || repairStatus === "failed" || repairStatus === "error") return workerIssues
+  return input.verify?.status === "error"
+    ? (typeof input.verify.missingInDest === "number" ? input.verify.missingInDest : 0) +
+        (typeof input.verify.sizeMismatched === "number" ? input.verify.sizeMismatched : 0) +
+        (typeof input.verify.extraInDest === "number" ? input.verify.extraInDest : 0)
+    : 0
+}
+
+function getMergedBucketSnapshot(
+  item: MigrationItem,
+  repairResultItem?: Record<string, unknown>,
+  options?: {
+    latestRepairJobStatus?: string
+    repairAppliesToItem?: boolean
+    latestRepairJobExists?: boolean
+    latestRepairItemCount?: number
+  }
+): {
+  displayStatus: string | undefined
+  total: number
+  transferred: number
+  skipped: number
+  failed: number
+  unaccounted: number
+  verifyIssues: number
+} {
+  const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
+  const live = readLiveBucketState(progress)
+  if (live) {
+    return {
+      displayStatus: live.status ?? getItemDisplayStatus(item),
+      total: live.totalObjects,
+      transferred: live.transferredObjects,
+      skipped: live.skippedObjects,
+      failed: live.failedObjects,
+      unaccounted: live.unaccountedObjects,
+      verifyIssues: live.verifyIssues,
+    }
+  }
+  const slurper = readSlurperResult(progress)
+  const repairState = readRepairWorkerState(progress)
+  const repairResult = readRepairResultItemMetrics(repairResultItem)
+  const verify = readVerifyState(progress)
+  const effectiveRepairStatus =
+    isTerminalRepairJobStatus(options?.latestRepairJobStatus) &&
+    isActiveRepairWorkerStatus(repairState?.status) &&
+    (options?.repairAppliesToItem || !options?.latestRepairJobExists || !options?.latestRepairItemCount)
+      ? options?.latestRepairJobStatus === "canceled"
+        ? "failed"
+        : options?.latestRepairJobStatus
+      : repairState?.status
+  const displayStatus = (() => {
+    const patchedProgress = {
+      ...progress,
+      repairWorker: isRecord(progress.repairWorker)
+        ? {
+            ...(progress.repairWorker as Record<string, unknown>),
+            ...(effectiveRepairStatus ? { status: effectiveRepairStatus } : {}),
+          }
+        : progress.repairWorker,
+    }
+    return getItemDisplayStatus({ ...item, progress: patchedProgress })
+  })()
+
+  const sourceScanStatus = typeof progress.sourceScanStatus === "string" ? progress.sourceScanStatus : ""
+  const scanComplete = sourceScanStatus === "completed"
+  const total =
+    scanComplete && typeof item.sourceObjects === "number"
+      ? item.sourceObjects
+      : typeof slurper?.objects === "number"
+        ? slurper.objects
+        : 0
+
+  const slurperTransferred = typeof slurper?.transferredObjects === "number" ? slurper.transferredObjects : 0
+  const slurperSkipped = typeof slurper?.skippedObjects === "number" ? slurper.skippedObjects : 0
+  const slurperFailed = typeof slurper?.failedObjects === "number" ? slurper.failedObjects : 0
+
+  const workerTransferred = Math.max(
+    typeof repairState?.transferred === "number" ? repairState.transferred : 0,
+    repairResult.transferred
+  )
+  const workerSkipped = Math.max(typeof repairState?.skipped === "number" ? repairState.skipped : 0, repairResult.skipped)
+  const workerFailed = Math.max(typeof repairState?.failed === "number" ? repairState.failed : 0, repairResult.failed)
+  const finalMissing =
+    repairResult.finalMissing ||
+    (repairState?.details && typeof repairState.details.finalMissing === "number" ? repairState.details.finalMissing : 0)
+  const finalMismatched =
+    repairResult.finalMismatched ||
+    (repairState?.details && typeof repairState.details.finalMismatched === "number" ? repairState.details.finalMismatched : 0)
+  const resolvedAllObjects =
+    repairResultItem?.resolvedAllObjects === true ||
+    (normalizeStatus(effectiveRepairStatus) === "completed" && finalMissing === 0 && finalMismatched === 0)
+
+  let remainingFixed = Math.max(0, workerTransferred)
+  const resolvedFailed = Math.min(slurperFailed, remainingFixed)
+  remainingFixed -= resolvedFailed
+
+  const baseDone = slurperTransferred + slurperSkipped + slurperFailed
+  const baseUnaccounted = Math.max(0, total - baseDone)
+  const resolvedUnaccounted = Math.min(baseUnaccounted, remainingFixed)
+
+  const skipped = Math.max(slurperSkipped, workerSkipped)
+  const transferred = resolvedAllObjects
+    ? Math.max(total > 0 ? total - skipped : 0, slurperTransferred + workerTransferred)
+    : total > 0
+      ? Math.min(total, slurperTransferred + workerTransferred)
+      : slurperTransferred + workerTransferred
+  const failed = resolvedAllObjects ? 0 : Math.max(0, slurperFailed - resolvedFailed + workerFailed + finalMissing + finalMismatched)
+
+  const verifyIssues = getEffectiveVerifyIssues({
+    repairStatus: effectiveRepairStatus,
+    finalMissing,
+    finalMismatched,
+    verify,
+  })
+  const unaccounted = resolvedAllObjects ? 0 : Math.max(0, baseUnaccounted - resolvedUnaccounted - verifyIssues)
+
+  return {
+    displayStatus,
+    total,
+    transferred,
+    skipped,
+    failed,
+    unaccounted,
+    verifyIssues,
+  }
 }
 
 async function postJsonWithTimeout(input: {
@@ -475,7 +699,7 @@ function buildMigrationLogDump(items: MigrationItem[]): string {
     const entry: Record<string, unknown> = {
       bucket: item.sourceBucket,
       jobId: item.slurperJobId ?? null,
-      status: getItemStatus(item) ?? null,
+      status: getItemDisplayStatus(item) ?? getItemStatus(item) ?? null,
       lastProgressAt: progress.lastProgressAt ?? null,
       stage: progress.stage ?? null,
       error: progress.error ?? progress.lastError ?? null,
@@ -508,7 +732,7 @@ function mergeItemLogsFull(item: MigrationItem | null): string {
   const dump: Record<string, unknown> = {
     bucket: item.sourceBucket,
     jobId: item.slurperJobId ?? null,
-    status: getItemStatus(item) ?? null,
+    status: getItemDisplayStatus(item) ?? getItemStatus(item) ?? null,
     events,
     cloudflareLogs: progress.logs ?? null,
     slurper: progress.slurper ?? null,
@@ -550,7 +774,7 @@ function collectLogLines(items: MigrationItem[]): LogLine[] {
 
     if (events.length === 0) {
       const stage = typeof progress.stage === "string" ? progress.stage : ""
-      const status = String(getItemStatus(item) ?? "")
+      const status = String(getItemDisplayStatus(item) ?? getItemStatus(item) ?? "")
       const message =
         typeof progress.error === "string"
           ? (progress.error as string)
@@ -778,118 +1002,6 @@ export default function MigrationDetailsPage() {
     el.scrollTop = el.scrollHeight
   }, [bucketLogLines.length, logsOpen])
 
-  const bucketCounts = React.useMemo(() => {
-    let completed = 0
-    let failed = 0
-    let aborted = 0
-    let running = 0
-
-    for (const item of items) {
-      const s = getItemStatus(item)
-      if (isCompletedStatus(s)) completed += 1
-      else if (isAbortedStatus(s)) aborted += 1
-      else if (isFailedLikeStatus(s)) failed += 1
-      else if (normalizeStatus(s)) running += 1
-    }
-
-    return { completed, failed, aborted, running, total: items.length }
-  }, [items])
-
-  const failedBuckets = React.useMemo(
-    () =>
-      items.filter((item) => {
-        const s = String(getItemStatus(item) ?? "").toLowerCase()
-        const slurper = readSlurperResult(item.progress)
-        const failedObjects = typeof slurper?.failedObjects === "number" ? slurper.failedObjects : 0
-        return failedObjects > 0 || s.includes("failed") || s.includes("error")
-      }),
-    [items]
-  )
-
-  const totals = React.useMemo(() => {
-    let totalObjects = 0
-    let transferred = 0
-    let skipped = 0
-    let copyFailed = 0
-    let verifyIssues = 0
-    let totalBytes = 0
-
-    for (const item of items) {
-      const result = readSlurperResult(item.progress)
-      const objects = result?.objects
-      const transferredObjects = result?.transferredObjects
-      const skippedObjects = result?.skippedObjects
-      const failedObjects = result?.failedObjects
-      const status = result?.status ?? getItemStatus(item)
-      const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
-      const sourceScanStatus = typeof progress.sourceScanStatus === "string" ? progress.sourceScanStatus : ""
-      const scanComplete = sourceScanStatus === "completed"
-      const verify = readVerifyState(item.progress)
-
-      const itemTotal =
-        scanComplete && typeof item.sourceObjects === "number"
-          ? item.sourceObjects
-          : typeof objects === "number"
-            ? objects
-            : 0
-
-      const rawTransferred = typeof transferredObjects === "number" ? transferredObjects : 0
-      const rawSkipped = typeof skippedObjects === "number" ? skippedObjects : 0
-      // Only trust Cloudflare's explicit failedObjects counter. Do not infer failures from status strings,
-      // because transient polling errors can otherwise inflate failed counts.
-      const rawCopyFailed = typeof failedObjects === "number" ? failedObjects : 0
-
-      // Cloudflare progress counters can overlap while a job is running (leading to >100% totals).
-      // Clamp transferred so transferred+skipped+failed never exceeds total when total is known.
-      const effectiveTransferred =
-        itemTotal > 0 && rawSkipped + rawCopyFailed <= itemTotal && rawTransferred + rawSkipped + rawCopyFailed > itemTotal
-          ? Math.max(0, itemTotal - rawSkipped - rawCopyFailed)
-          : rawTransferred
-
-      totalObjects += itemTotal
-      transferred += effectiveTransferred
-      skipped += rawSkipped
-      copyFailed += rawCopyFailed
-
-      if (verify?.status === "error") {
-        verifyIssues +=
-          (typeof verify.missingInDest === "number" ? verify.missingInDest : 0) +
-          (typeof verify.sizeMismatched === "number" ? verify.sizeMismatched : 0) +
-          (typeof verify.extraInDest === "number" ? verify.extraInDest : 0)
-      }
-
-      if (scanComplete && typeof item.sourceBytes === "number") totalBytes += item.sourceBytes
-    }
-
-    const done = transferred + skipped + copyFailed
-    const unaccounted = Math.max(0, totalObjects - done)
-    const allBucketsCompleted = items.length > 0 && items.every((item) => isCompletedStatus(getItemStatus(item)))
-    const percent =
-      migration?.status === "completed" || allBucketsCompleted
-        ? 100
-        : totalObjects > 0
-          ? Math.max(0, Math.min(100, (done / totalObjects) * 100))
-          : 0
-    const transferredPct = totalObjects > 0 ? Math.max(0, Math.min(100, (transferred / totalObjects) * 100)) : 0
-    const skippedPct = totalObjects > 0 ? Math.max(0, Math.min(100, (skipped / totalObjects) * 100)) : 0
-    const copyFailedPct = totalObjects > 0 ? Math.max(0, Math.min(100, (copyFailed / totalObjects) * 100)) : 0
-    const unaccountedPct = totalObjects > 0 ? Math.max(0, Math.min(100, (unaccounted / totalObjects) * 100)) : 0
-    return {
-      totalObjects,
-      transferred,
-      skipped,
-      copyFailed,
-      unaccounted,
-      verifyIssues,
-      percent,
-      transferredPct,
-      skippedPct,
-      copyFailedPct,
-      unaccountedPct,
-      totalBytes,
-    }
-  }, [items, migration?.status])
-
   const latestRepairJob = React.useMemo(() => {
     if (repairJobs.length === 0) return null
 
@@ -917,106 +1029,144 @@ export default function MigrationDetailsPage() {
     return map
   }, [latestRepairJob])
 
-  const repairOverview = React.useMemo(() => {
-    const totals = readRepairTotals(latestRepairJob)
-    const progress = latestRepairJob && isRecord(latestRepairJob.progress) ? latestRepairJob.progress : {}
-    const currentBucket = typeof progress.currentBucket === "string" ? progress.currentBucket : undefined
-    const stage = typeof progress.stage === "string" ? progress.stage : undefined
-    const active = progress.active === true
-    const itemsFromResult = readRepairItems(latestRepairJob)
+  const latestRepairItemIds = React.useMemo(() => {
+    const ids = new Set<string>()
+    const payloadItems =
+      isRecord(latestRepairJob?.payload) && Array.isArray(latestRepairJob.payload.items) ? latestRepairJob.payload.items : []
+    for (const raw of payloadItems) {
+      if (!isRecord(raw)) continue
+      const itemId = typeof raw.id === "string" ? raw.id : typeof raw.itemId === "string" ? raw.itemId : ""
+      if (itemId) ids.add(itemId)
+    }
+    for (const itemId of latestRepairItemsById.keys()) ids.add(itemId)
+    return ids
+  }, [latestRepairItemsById, latestRepairJob])
 
-    let bucketCompleted = 0
-    let bucketFailed = 0
-    let bucketRunning = 0
-    let bucketPending = 0
+  const getBucketSnapshot = React.useCallback(
+    (item: MigrationItem) =>
+      getMergedBucketSnapshot(item, latestRepairItemsById.get(item.id), {
+        latestRepairJobStatus: latestRepairJob?.status,
+        repairAppliesToItem: latestRepairItemIds.has(item.id),
+        latestRepairJobExists: Boolean(latestRepairJob),
+        latestRepairItemCount: latestRepairItemIds.size,
+      }),
+    [latestRepairItemIds, latestRepairItemsById, latestRepairJob]
+  )
+
+  const bucketCounts = React.useMemo(() => {
+    let completed = 0
+    let failed = 0
+    let aborted = 0
+    let running = 0
+    let scanning = 0
+    let verifying = 0
 
     for (const item of items) {
-      const workerState = readRepairWorkerState(item.progress)
-      const resultItem = latestRepairItemsById.get(item.id)
-      const resultStatus = typeof resultItem?.completed === "boolean" ? (resultItem.completed ? "completed" : "failed") : undefined
-      const state = normalizeStatus(workerState?.status || resultStatus)
-
-      if (state === "completed") bucketCompleted += 1
-      else if (state === "failed" || state === "error") bucketFailed += 1
-      else if (state === "running" || state === "claimed" || state === "repairing") bucketRunning += 1
-      else if (latestRepairJob) bucketPending += 1
+      const s = getBucketSnapshot(item).displayStatus
+      if (normalizeStatus(s) === "scanning") scanning += 1
+      else if (normalizeStatus(s) === "verifying") verifying += 1
+      else if (isCompletedStatus(s)) completed += 1
+      else if (isAbortedStatus(s)) aborted += 1
+      else if (isFailedLikeStatus(s)) failed += 1
+      else if (normalizeStatus(s)) running += 1
     }
 
-    return {
-      ...totals,
-      currentBucket,
-      stage,
-      active,
-      itemsReported: itemsFromResult.length,
-      bucketCompleted,
-      bucketFailed,
-      bucketRunning,
-      bucketPending,
+    return { completed, failed, aborted, running, scanning, verifying, total: items.length }
+  }, [getBucketSnapshot, items])
+
+  const failedBuckets = React.useMemo(
+    () =>
+      items.filter((item) => {
+        const snapshot = getBucketSnapshot(item)
+        const s = String(snapshot.displayStatus ?? getItemStatus(item) ?? "").toLowerCase()
+        return snapshot.failed > 0 || snapshot.verifyIssues > 0 || s.includes("failed") || s.includes("error")
+      }),
+    [getBucketSnapshot, items]
+  )
+
+  const totals = React.useMemo(() => {
+    let totalObjects = 0
+    let transferred = 0
+    let skipped = 0
+    let copyFailed = 0
+    let unaccounted = 0
+    let verifyIssues = 0
+    let totalBytes = 0
+
+    for (const item of items) {
+      const snapshot = getBucketSnapshot(item)
+      totalObjects += snapshot.total
+      transferred += snapshot.transferred
+      skipped += snapshot.skipped
+      copyFailed += snapshot.failed
+      unaccounted += snapshot.unaccounted
+      verifyIssues += snapshot.verifyIssues
+      if (typeof item.sourceBytes === "number") totalBytes += item.sourceBytes
     }
-  }, [items, latestRepairItemsById, latestRepairJob])
 
-  const overviewProgress = React.useMemo(() => {
-    if (!latestRepairJob) return totals
-
-    let remainingRepaired = Math.max(0, repairOverview.transferred)
-    const resolvedFromFailed = Math.min(totals.copyFailed, remainingRepaired)
-    remainingRepaired -= resolvedFromFailed
-    const resolvedFromUnaccounted = Math.min(totals.unaccounted, remainingRepaired)
-
-    const transferred = Math.min(totals.totalObjects, totals.transferred + repairOverview.transferred)
-    const skipped = Math.max(totals.skipped, repairOverview.skipped)
-    const copyFailed = Math.max(
-      0,
-      latestRepairJob.status === "completed"
-        ? repairOverview.failed + repairOverview.missing + repairOverview.mismatched
-        : totals.copyFailed - resolvedFromFailed + repairOverview.failed + repairOverview.missing + repairOverview.mismatched
-    )
-    const unaccounted = Math.max(0, totals.unaccounted - resolvedFromUnaccounted)
-    const done = transferred + skipped + copyFailed + unaccounted
-    const percent = totals.totalObjects > 0 ? Math.max(0, Math.min(100, (done / totals.totalObjects) * 100)) : totals.percent
-
+    const done = transferred + skipped + copyFailed
+    const allBucketsCompleted =
+      items.length > 0 &&
+      items.every((item) => isCompletedStatus(getBucketSnapshot(item).displayStatus))
+    const percent =
+      allBucketsCompleted
+        ? 100
+        : totalObjects > 0
+          ? Math.max(0, Math.min(100, (done / totalObjects) * 100))
+          : 0
+    const transferredPct = totalObjects > 0 ? Math.max(0, Math.min(100, (transferred / totalObjects) * 100)) : 0
+    const skippedPct = totalObjects > 0 ? Math.max(0, Math.min(100, (skipped / totalObjects) * 100)) : 0
+    const copyFailedPct = totalObjects > 0 ? Math.max(0, Math.min(100, (copyFailed / totalObjects) * 100)) : 0
+    const unaccountedPct = totalObjects > 0 ? Math.max(0, Math.min(100, (unaccounted / totalObjects) * 100)) : 0
     return {
-      ...totals,
+      totalObjects,
       transferred,
       skipped,
       copyFailed,
       unaccounted,
+      verifyIssues,
       percent,
-      transferredPct: totals.totalObjects > 0 ? Math.max(0, Math.min(100, (transferred / totals.totalObjects) * 100)) : 0,
-      skippedPct: totals.totalObjects > 0 ? Math.max(0, Math.min(100, (skipped / totals.totalObjects) * 100)) : 0,
-      copyFailedPct: totals.totalObjects > 0 ? Math.max(0, Math.min(100, (copyFailed / totals.totalObjects) * 100)) : 0,
-      unaccountedPct: totals.totalObjects > 0 ? Math.max(0, Math.min(100, (unaccounted / totals.totalObjects) * 100)) : 0,
+      transferredPct,
+      skippedPct,
+      copyFailedPct,
+      unaccountedPct,
+      totalBytes,
     }
-  }, [latestRepairJob, repairOverview, totals])
+  }, [getBucketSnapshot, items])
+
+  const overviewProgress = totals
+
+  const overviewBadgeStatus = React.useMemo(() => {
+    if (bucketCounts.scanning > 0) return "scanning"
+    if (bucketCounts.verifying > 0) return "verifying"
+    if (bucketCounts.running > 0) return "running"
+    if (bucketCounts.failed > 0 && bucketCounts.completed + bucketCounts.failed + bucketCounts.aborted === bucketCounts.total) return "failed"
+    if (bucketCounts.aborted > 0 && bucketCounts.completed + bucketCounts.failed + bucketCounts.aborted === bucketCounts.total && bucketCounts.failed === 0)
+      return "aborted"
+    if (bucketCounts.completed === bucketCounts.total && bucketCounts.total > 0) return "completed"
+    return migration?.status ?? "draft"
+  }, [bucketCounts, migration?.status])
 
   const overviewStatus = React.useMemo(() => {
-    if (!latestRepairJob) {
-      return {
-        message: migration?.syncMessage ?? "",
-        completed: bucketCounts.completed,
-        failed: bucketCounts.failed,
-        aborted: bucketCounts.aborted,
-        pending: 0,
-      }
-    }
-
     const message =
-      latestRepairJob.status === "pending"
-        ? "Worker job queued"
-        : latestRepairJob.status === "claimed" || latestRepairJob.status === "running"
-          ? latestRepairJob.summary || "Worker reconciliation in progress"
-          : latestRepairJob.status === "completed"
-            ? latestRepairJob.summary || "Worker reconciliation completed"
-            : latestRepairJob.error || latestRepairJob.summary || "Worker reconciliation failed"
+      bucketCounts.scanning > 0
+        ? `${bucketCounts.scanning} bucket${bucketCounts.scanning === 1 ? "" : "s"} scanning`
+        : bucketCounts.verifying > 0
+          ? `${bucketCounts.verifying} bucket${bucketCounts.verifying === 1 ? "" : "s"} verifying`
+          : bucketCounts.running > 0
+            ? `${bucketCounts.running} bucket${bucketCounts.running === 1 ? "" : "s"} running`
+            : latestRepairJob && (latestRepairJob.status === "pending" || latestRepairJob.status === "claimed" || latestRepairJob.status === "running")
+              ? latestRepairJob.summary || "Worker reconciliation in progress"
+              : migration?.syncMessage ?? ""
 
     return {
       message,
-      completed: repairOverview.bucketCompleted,
-      failed: repairOverview.bucketFailed,
-      aborted: latestRepairJob.status === "canceled" ? 1 : 0,
-      pending: repairOverview.bucketPending + repairOverview.bucketRunning,
+      completed: bucketCounts.completed,
+      failed: bucketCounts.failed,
+      aborted: bucketCounts.aborted,
+      pending: bucketCounts.running + bucketCounts.scanning + bucketCounts.verifying,
     }
-  }, [bucketCounts, latestRepairJob, migration?.syncMessage, repairOverview])
+  }, [bucketCounts, latestRepairJob, migration?.syncMessage])
 
   const loadInitial = React.useCallback(async () => {
     if (!id) return
@@ -1155,7 +1305,7 @@ export default function MigrationDetailsPage() {
   React.useEffect(() => {
     if (!id) return
     if (!migration) return
-    if (migration.status !== "running" && migration.status !== "verifying") return
+    if (bucketCounts.scanning === 0 && bucketCounts.running === 0 && bucketCounts.verifying === 0) return
 
     let stopped = false
 
@@ -1180,7 +1330,7 @@ export default function MigrationDetailsPage() {
       stopped = true
       clearInterval(interval)
     }
-  }, [id, migration?.status])
+  }, [bucketCounts.running, bucketCounts.scanning, bucketCounts.verifying, id, migration])
 
   const syncNow = async () => {
     if (!id) return
@@ -1523,11 +1673,11 @@ export default function MigrationDetailsPage() {
   }
 
   const activeIcon =
-    migration.status === "completed" ? (
+    overviewBadgeStatus === "completed" ? (
       <CheckCircle2 className="h-4 w-4 text-green-600" />
-    ) : migration.status === "running" ? (
+    ) : overviewBadgeStatus === "running" || overviewBadgeStatus === "scanning" || overviewBadgeStatus === "verifying" ? (
       <Clock className="h-4 w-4 text-blue-600" />
-    ) : migration.status === "failed" ? (
+    ) : overviewBadgeStatus === "failed" ? (
       <AlertCircle className="h-4 w-4 text-red-600" />
     ) : (
       <Clock className="h-4 w-4 text-muted-foreground" />
@@ -1562,7 +1712,7 @@ export default function MigrationDetailsPage() {
         <CardHeader>
           <CardTitle className="flex items-center justify-between gap-3">
             <span>Overview</span>
-            {statusBadge(migration.status, { syncStatus: migration.syncStatus })}
+            {statusBadge(overviewBadgeStatus, { syncStatus: migration.syncStatus })}
           </CardTitle>
           <CardDescription>
             {sourceLabel} → {targetLabel} • {migration.options.overwrite ? "Overwrite on destination" : "No overwrite"} •{" "}
@@ -1629,15 +1779,11 @@ export default function MigrationDetailsPage() {
               const allBucketsTerminal =
                 items.length > 0 &&
                 items.every((i) => {
-                  const s = getItemStatus(i)
+                  const s = getBucketSnapshot(i).displayStatus
                   return isCompletedStatus(s) || isAbortedStatus(s) || isFailedLikeStatus(s)
                 })
-              const anyRunning = items.some(
-                (i) => Boolean(i.slurperJobId) && String(getItemStatus(i) ?? "").toLowerCase() === "running"
-              )
-              const anyPaused = items.some(
-                (i) => Boolean(i.slurperJobId) && String(getItemStatus(i) ?? "").toLowerCase() === "paused"
-              )
+              const anyRunning = items.some((i) => normalizeStatus(getBucketSnapshot(i).displayStatus) === "running")
+              const anyPaused = items.some((i) => Boolean(i.slurperJobId) && String(getItemStatus(i) ?? "").toLowerCase() === "paused")
               const showCancel = !allBucketsTerminal && !["completed", "failed", "canceled"].includes(String(migration.status))
               const showMarkCompleted =
                 allBucketsTerminal && String(migration.status) !== "completed" && String(migration.status) !== "verifying"
@@ -1814,10 +1960,12 @@ export default function MigrationDetailsPage() {
                   const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
                   const repairState = readRepairWorkerState(progress)
                   const repairResultItem = latestRepairItemsById.get(item.id)
+                  const snapshot = getBucketSnapshot(item)
                   const sourceScanStatus = typeof progress.sourceScanStatus === "string" ? progress.sourceScanStatus : ""
                   const scanComplete = sourceScanStatus === "completed"
                   const status = String(getItemStatus(item) ?? "").toLowerCase()
-                  const displayStatus = getItemDisplayStatus(item)
+                  const displayStatus = snapshot.displayStatus
+                  const normalizedDisplayStatus = normalizeStatus(displayStatus)
                   const hasKnownEmpty =
                     typeof item.sourceObjects === "number" &&
                     item.sourceObjects === 0 &&
@@ -1836,10 +1984,10 @@ export default function MigrationDetailsPage() {
                       : hasKnownEmpty
                         ? 0
                         : undefined
-                  const transferred = typeof slurper?.transferredObjects === "number" ? slurper.transferredObjects : 0
+                  const transferred = snapshot.transferred
                   const skipped = typeof slurper?.skippedObjects === "number" ? slurper.skippedObjects : 0
                   const failed = typeof slurper?.failedObjects === "number" ? slurper.failedObjects : 0
-                  const hadProgress = transferred > 0 || skipped > 0 || failed > 0
+                  const hadProgress = snapshot.transferred > 0 || snapshot.skipped > 0 || snapshot.failed > 0
                   const itemBusy = busyItemAction[item.id]
                   const canPause = Boolean(item.slurperJobId) && status === "running"
                   const canResume = Boolean(item.slurperJobId) && status === "paused"
@@ -1848,15 +1996,18 @@ export default function MigrationDetailsPage() {
                   const canRetryFromVerifyFailure = verifyStatus === "error"
                   const canRetry =
                     canRetryFromVerifyFailure ||
-                    status === "queued" ||
-                    status === "job_id_pending" ||
-                    status.endsWith("_failed") ||
-                    status.includes("failed")
+                    normalizedDisplayStatus === "queued" ||
+                    normalizedDisplayStatus === "job_id_pending" ||
+                    normalizedDisplayStatus.endsWith("_failed") ||
+                    normalizedDisplayStatus.includes("failed") ||
+                    normalizedDisplayStatus.includes("error")
                   const canAbort =
-                    (Boolean(item.slurperJobId) || canRetry) && !["completed", "aborted", "failed"].includes(status)
+                    (Boolean(item.slurperJobId) || canRetry) &&
+                    !["completed", "aborted", "failed", "verification_failed", "no_files"].includes(normalizedDisplayStatus)
                   const canVerify =
-                    isCompletedStatus(getItemStatus(item)) && verifyStatus !== "pending" && verifyStatus !== "running"
-                  const canInspectFailures = failed > 0 || status.includes("failed") || status.includes("error")
+                    isCompletedStatus(displayStatus) && verifyStatus !== "pending" && verifyStatus !== "running"
+                  const canInspectFailures =
+                    snapshot.failed > 0 || snapshot.verifyIssues > 0 || normalizedDisplayStatus.includes("failed") || normalizedDisplayStatus.includes("error")
                   const lifecycleAction: "pause" | "resume" | "retry" | null = canPause
                     ? "pause"
                     : canRetry
@@ -1892,19 +2043,10 @@ export default function MigrationDetailsPage() {
                       <TableCell className="text-center">
                         <div className="space-y-1">
                           <div>{statusBadge(displayStatus, { hadProgress })}</div>
-                          {repairState?.status ? (
-                            <div className="text-[11px] text-muted-foreground">
-                              Worker {repairState.status}
-                              {repairState.stage ? ` - ${repairState.stage}` : ""}
-                            </div>
-                          ) : null}
                         </div>
                       </TableCell>
                       <TableCell className="text-center font-mono text-xs">
                         <div>{formatNumber(transferred)}</div>
-                        {typeof repairState?.transferred === "number" && repairState.transferred > 0 ? (
-                          <div className="text-[11px] text-muted-foreground">worker {formatNumber(repairState.transferred)}</div>
-                        ) : null}
                       </TableCell>
                       <TableCell
                         className="text-center font-mono text-xs"
@@ -1917,11 +2059,6 @@ export default function MigrationDetailsPage() {
                         }
                       >
                         <div>{typeof total === "number" ? formatNumber(total) : "—"}</div>
-                        {typeof repairFinalMissing === "number" || typeof repairFinalMismatched === "number" ? (
-                          <div className="mt-1 text-[11px] text-muted-foreground">
-                            miss {formatNumber(repairFinalMissing ?? 0)} / mismatch {formatNumber(repairFinalMismatched ?? 0)}
-                          </div>
-                        ) : null}
                       </TableCell>
                       <TableCell className="text-center font-mono text-xs">
                         {displayStatus === "no_files" ? "0 B" : scanComplete ? formatBytes(item.sourceBytes) : "—"}
@@ -1948,7 +2085,7 @@ export default function MigrationDetailsPage() {
                             onClick={(e) => {
                               setLogsItemId(item.id)
                               setLogsOpen(true)
-                              if (migration.status === "running" || migration.status === "verifying") {
+                              if (bucketCounts.scanning > 0 || bucketCounts.running > 0 || bucketCounts.verifying > 0) {
                                 void runItemAction(item.id, "logs")
                               }
                             }}
@@ -2454,7 +2591,7 @@ export default function MigrationDetailsPage() {
           <DialogHeader>
             <DialogTitle>Run with worker</DialogTitle>
             <DialogDescription>
-              Queue repair and verification for failed, missing, skipped, or verification-broken files using a configured GitHub worker.
+              Run a worker across all buckets. It scans every bucket, repairs what it can, then verifies destination against source bucket-by-bucket before completion.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">

@@ -1,7 +1,8 @@
 "use client"
 
 import * as React from "react"
-import { Bot, CircleDot, Eye, Github, HardDrive, Play, Plus, RefreshCw, Server, Shield, Square, Trash2, Workflow } from "lucide-react"
+import Link from "next/link"
+import { Activity, Bot, CircleDot, Clock3, Copy, Eye, Github, HardDrive, Play, Plus, RefreshCw, Search, Server, Shield, Square, Trash2, Workflow } from "lucide-react"
 import { toast } from "sonner"
 import { useSearchParams } from "next/navigation"
 import { Badge } from "@/components/ui/badge"
@@ -20,7 +21,9 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
+import { cn } from "@/lib/utils"
 
 type AgentProvider = "self_hosted" | "github_actions" | "local"
 type AgentStatus = "pending_registration" | "online" | "offline" | "busy" | "dispatch_ready" | "disabled" | "error"
@@ -74,6 +77,62 @@ type RepairJobRow = {
   lastHeartbeatAt?: string
   createdAt: string
   updatedAt: string
+  linkedRun?: {
+    id: string
+    status: "pending" | "running" | "completed" | "failed" | "canceled"
+    runType: string
+    summary?: string
+    externalRunId?: string
+    payload?: Record<string, unknown>
+    createdAt: string
+    updatedAt: string
+  } | null
+}
+
+type MigrationRow = {
+  id: string
+  status: string
+  createdAt: string
+}
+
+function normalizeAgentRow(input: unknown): AgentRow | null {
+  if (typeof input !== "object" || input === null) return null
+  const row = input as Record<string, unknown>
+  return {
+    id: typeof row.id === "string" ? row.id : "",
+    name: typeof row.name === "string" ? row.name : "",
+    provider:
+      row.provider === "github_actions" || row.provider === "self_hosted" || row.provider === "local"
+        ? row.provider
+        : "self_hosted",
+    status:
+      row.status === "pending_registration" ||
+      row.status === "online" ||
+      row.status === "offline" ||
+      row.status === "busy" ||
+      row.status === "dispatch_ready" ||
+      row.status === "disabled" ||
+      row.status === "error"
+        ? row.status
+        : "offline",
+    capabilities: Array.isArray(row.capabilities) ? (row.capabilities.filter((value): value is AgentCapability => typeof value === "string") as AgentCapability[]) : [],
+    endpointDomain: typeof row.endpointDomain === "string" ? row.endpointDomain : undefined,
+    endpointIp: typeof row.endpointIp === "string" ? row.endpointIp : undefined,
+    githubRepoOwner: typeof row.githubRepoOwner === "string" ? row.githubRepoOwner : undefined,
+    githubRepoName: typeof row.githubRepoName === "string" ? row.githubRepoName : undefined,
+    githubWorkflowFile: typeof row.githubWorkflowFile === "string" ? row.githubWorkflowFile : undefined,
+    githubRef: typeof row.githubRef === "string" ? row.githubRef : undefined,
+    githubRepositoryId: typeof row.githubRepositoryId === "string" ? row.githubRepositoryId : undefined,
+    notes: typeof row.notes === "string" ? row.notes : undefined,
+    lastHeartbeatAt: typeof row.lastHeartbeatAt === "string" ? row.lastHeartbeatAt : undefined,
+    lastSeenIp: typeof row.lastSeenIp === "string" ? row.lastSeenIp : undefined,
+    lastSeenHost: typeof row.lastSeenHost === "string" ? row.lastSeenHost : undefined,
+    lastSeenVersion: typeof row.lastSeenVersion === "string" ? row.lastSeenVersion : undefined,
+    lastError: typeof row.lastError === "string" ? row.lastError : undefined,
+    createdAt: typeof row.createdAt === "string" ? row.createdAt : "",
+    updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : "",
+    latestRun: typeof row.latestRun === "object" && row.latestRun !== null ? (row.latestRun as AgentRow["latestRun"]) : null,
+  }
 }
 
 const capabilityOptions: Array<{ value: AgentCapability; label: string }> = [
@@ -92,6 +151,10 @@ function formatDate(value?: string): string {
 }
 
 function getEffectiveStatus(agent: AgentRow): AgentStatus {
+  if (agent.provider === "github_actions") {
+    return agent.status === "online" || agent.status === "busy" ? "online" : "offline"
+  }
+  if (agent.status === "error") return "offline"
   if ((agent.provider === "self_hosted" || agent.provider === "local") && agent.status === "online") {
     if (!agent.lastHeartbeatAt) return "offline"
     const last = new Date(agent.lastHeartbeatAt).getTime()
@@ -117,8 +180,64 @@ function providerLabel(provider: AgentProvider): string {
   return "Self-hosted"
 }
 
+function jobStatusBadge(status: RepairJobRow["status"]) {
+  if (status === "completed") return <Badge>Completed</Badge>
+  if (status === "failed") return <Badge variant="destructive">Failed</Badge>
+  if (status === "running") return <Badge className="bg-blue-600">Running</Badge>
+  if (status === "claimed") return <Badge className="bg-cyan-600">Claimed</Badge>
+  if (status === "pending") return <Badge variant="secondary">Pending</Badge>
+  return <Badge variant="outline">Aborted</Badge>
+}
+
+function jobStatusLabel(status: RepairJobRow["status"]): string {
+  return status === "canceled" ? "Aborted" : status
+}
+
+function agentRunStatusLabel(status?: "pending" | "running" | "completed" | "failed" | "canceled"): string {
+  if (!status) return "-"
+  return status === "canceled" ? "aborted" : status
+}
+
+function readLogLines(job: RepairJobRow): string[] {
+  const lines: string[] = []
+  const pushLine = (value: unknown) => {
+    if (typeof value !== "string") return
+    const trimmed = value.trim()
+    if (!trimmed || lines.includes(trimmed)) return
+    lines.push(trimmed)
+  }
+
+  pushLine(job.summary)
+  pushLine(job.error)
+
+  const linkedRunPayload = job.linkedRun?.payload ?? {}
+  const githubLogLines = Array.isArray(linkedRunPayload.githubLogLines) ? linkedRunPayload.githubLogLines : []
+  for (const line of githubLogLines) pushLine(line)
+  pushLine(linkedRunPayload.failureReason)
+
+  const resultItems =
+    job.result && typeof job.result === "object" && Array.isArray((job.result as { items?: unknown[] }).items)
+      ? ((job.result as { items: Array<Record<string, unknown>> }).items)
+      : []
+  for (const item of resultItems) {
+    if (typeof item.summary === "string") pushLine(item.summary)
+    if (Array.isArray(item.failureSamples)) {
+      for (const sample of item.failureSamples.slice(0, 6)) {
+        if (sample && typeof sample === "object") {
+          const key = typeof sample.key === "string" ? sample.key : "item"
+          const error = typeof sample.error === "string" ? sample.error : ""
+          pushLine(error ? `${key}: ${error}` : key)
+        }
+      }
+    }
+  }
+
+  return lines.slice(0, 12)
+}
+
 export default function WorkersPage() {
-  const LIVE_REFRESH_MS = 3_000
+  const ACTIVE_REFRESH_MS = 8_000
+  const IDLE_REFRESH_MS = 20_000
   const searchParams = useSearchParams()
   const [agents, setAgents] = React.useState<AgentRow[]>([])
   const [loading, setLoading] = React.useState(true)
@@ -129,8 +248,7 @@ export default function WorkersPage() {
   const [name, setName] = React.useState("")
   const [provider, setProvider] = React.useState<AgentProvider>("github_actions")
   const [capabilities, setCapabilities] = React.useState<AgentCapability[]>(["scan", "verify", "repair"])
-  const [endpointDomain, setEndpointDomain] = React.useState("")
-  const [endpointIp, setEndpointIp] = React.useState("")
+  const [workerUrl, setWorkerUrl] = React.useState("")
   const [githubRepoOwner, setGithubRepoOwner] = React.useState("")
   const [githubRepoName, setGithubRepoName] = React.useState("")
   const [githubWorkflowFile, setGithubWorkflowFile] = React.useState("")
@@ -139,10 +257,10 @@ export default function WorkersPage() {
   const [githubToken, setGithubToken] = React.useState("")
   const [notes, setNotes] = React.useState("")
   const [githubConnected, setGithubConnected] = React.useState(false)
+  const [githubSessionReady, setGithubSessionReady] = React.useState(false)
   const [githubRepos, setGithubRepos] = React.useState<Array<{ id: string; owner: string; name: string; fullName: string; defaultBranch?: string }>>([])
   const [githubWorkflows, setGithubWorkflows] = React.useState<Array<{ id: string; name: string; path: string }>>([])
   const [repairJobs, setRepairJobs] = React.useState<RepairJobRow[]>([])
-  const [showAllJobs, setShowAllJobs] = React.useState(false)
   const [selectedJob, setSelectedJob] = React.useState<RepairJobRow | null>(null)
   const [jobDetailsOpen, setJobDetailsOpen] = React.useState(false)
   const [dispatchingAgentId, setDispatchingAgentId] = React.useState<string | null>(null)
@@ -152,10 +270,27 @@ export default function WorkersPage() {
   const [dispatchOpen, setDispatchOpen] = React.useState(false)
   const [dispatchAgent, setDispatchAgent] = React.useState<AgentRow | null>(null)
   const [dispatchMigrationId, setDispatchMigrationId] = React.useState("")
+  const [dispatchSearch, setDispatchSearch] = React.useState("")
   const [dispatchMode, setDispatchMode] = React.useState<"verify_only" | "repair_only" | "repair_and_verify">("repair_and_verify")
+  const [migrations, setMigrations] = React.useState<MigrationRow[]>([])
+  const [loadingMigrations, setLoadingMigrations] = React.useState(false)
+  const [selectedWorker, setSelectedWorker] = React.useState<AgentRow | null>(null)
+  const [workerDetailsOpen, setWorkerDetailsOpen] = React.useState(false)
+  const [workerTokenLoading, setWorkerTokenLoading] = React.useState<string | null>(null)
+  const [workerTokenValue, setWorkerTokenValue] = React.useState<string | null>(null)
+  const [workerTokenWorkerId, setWorkerTokenWorkerId] = React.useState<string | null>(null)
+  const [createdWorkerId, setCreatedWorkerId] = React.useState<string | null>(null)
   const refreshInFlightRef = React.useRef(false)
+  const shouldLiveRefresh =
+    agents.some((agent) => {
+      const status = getEffectiveStatus(agent)
+      return status === "online"
+    }) ||
+    repairJobs.some((job) => !["completed", "failed", "canceled"].includes(job.status)) ||
+    jobDetailsOpen ||
+    dispatchOpen
 
-  const loadAgents = React.useCallback(async () => {
+  const loadAgents = React.useCallback(async (notify = false) => {
     try {
       const res = await fetch("/api/workers", { cache: "no-store" })
       const json: unknown = await res.json().catch(() => ({}))
@@ -163,16 +298,21 @@ export default function WorkersPage() {
         const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to load workers"
         throw new Error(message)
       }
-      const rows = typeof json === "object" && json !== null && Array.isArray((json as any).agents) ? ((json as any).agents as AgentRow[]) : []
+      const rows =
+        typeof json === "object" && json !== null && Array.isArray((json as any).agents)
+          ? ((json as any).agents as unknown[]).map(normalizeAgentRow).filter((row): row is AgentRow => Boolean(row?.id))
+          : []
       setAgents(rows)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to load workers")
+      if (notify) {
+        toast.error(error instanceof Error ? error.message : "Unable to load workers")
+      }
     } finally {
       setLoading(false)
     }
   }, [])
 
-  const loadRepairJobs = React.useCallback(async () => {
+  const loadRepairJobs = React.useCallback(async (notify = false) => {
     try {
       const res = await fetch("/api/repair-jobs", { cache: "no-store" })
       const json: unknown = await res.json().catch(() => ({}))
@@ -182,15 +322,17 @@ export default function WorkersPage() {
       }
       setRepairJobs(typeof json === "object" && json !== null && Array.isArray((json as any).jobs) ? (json as any).jobs : [])
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to load repair jobs")
+      if (notify) {
+        toast.error(error instanceof Error ? error.message : "Unable to load repair jobs")
+      }
     }
   }, [])
 
-  const refreshAll = React.useCallback(async () => {
+  const refreshAll = React.useCallback(async (notify = false) => {
     if (refreshInFlightRef.current) return
     refreshInFlightRef.current = true
     try {
-      await Promise.all([loadAgents(), loadRepairJobs()])
+      await Promise.all([loadAgents(notify), loadRepairJobs(notify)])
       if (selectedJob?.id) {
         const res = await fetch(`/api/repair-jobs/${encodeURIComponent(selectedJob.id)}`, { cache: "no-store" })
         const json: unknown = await res.json().catch(() => ({}))
@@ -206,9 +348,10 @@ export default function WorkersPage() {
 
   React.useEffect(() => {
     void refreshAll()
+    const refreshIntervalMs = shouldLiveRefresh ? ACTIVE_REFRESH_MS : IDLE_REFRESH_MS
     const timer = window.setInterval(() => {
       void refreshAll()
-    }, LIVE_REFRESH_MS)
+    }, refreshIntervalMs)
 
     const onFocus = () => void refreshAll()
     const onVisibilityChange = () => {
@@ -223,16 +366,37 @@ export default function WorkersPage() {
       window.removeEventListener("focus", onFocus)
       document.removeEventListener("visibilitychange", onVisibilityChange)
     }
-  }, [refreshAll])
+  }, [ACTIVE_REFRESH_MS, IDLE_REFRESH_MS, refreshAll, shouldLiveRefresh])
 
   React.useEffect(() => {
     const status = searchParams.get("github")
     if (status === "connected") {
       toast.success("GitHub connected")
+      setGithubConnected(true)
+      setGithubSessionReady(true)
     } else if (status === "error") {
       toast.error("GitHub connection failed")
     }
   }, [searchParams])
+
+  React.useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return
+      const data = event.data
+      if (!data || typeof data !== "object" || (data as { type?: string }).type !== "github-oauth") return
+
+      if ((data as { status?: string }).status === "connected") {
+        setGithubConnected(true)
+        setGithubSessionReady(true)
+        toast.success("GitHub connected")
+      } else {
+        toast.error("GitHub connection failed")
+      }
+    }
+
+    window.addEventListener("message", onMessage)
+    return () => window.removeEventListener("message", onMessage)
+  }, [])
 
   const loadGitHubRepos = React.useCallback(async () => {
     try {
@@ -255,9 +419,14 @@ export default function WorkersPage() {
   }, [])
 
   React.useEffect(() => {
-    if (provider !== "github_actions" || !open) return
+    if (provider !== "github_actions" || !open || !githubSessionReady) return
     void loadGitHubRepos()
-  }, [provider, open, loadGitHubRepos])
+  }, [provider, open, loadGitHubRepos, githubSessionReady])
+
+  React.useEffect(() => {
+    if (!githubConnected || !githubSessionReady || provider !== "github_actions" || !open) return
+    void loadGitHubRepos()
+  }, [githubConnected, githubSessionReady, loadGitHubRepos, open, provider])
 
   React.useEffect(() => {
     if (!githubRepoOwner || !githubRepoName || provider !== "github_actions") {
@@ -283,8 +452,7 @@ export default function WorkersPage() {
     setName("")
     setProvider("github_actions")
     setCapabilities(["scan", "verify", "repair"])
-    setEndpointDomain("")
-    setEndpointIp("")
+    setWorkerUrl("")
     setGithubRepoOwner("")
     setGithubRepoName("")
     setGithubWorkflowFile("")
@@ -293,6 +461,82 @@ export default function WorkersPage() {
     setGithubToken("")
     setNotes("")
     setCreatedToken(null)
+    setCreatedWorkerId(null)
+    setGithubConnected(false)
+    setGithubSessionReady(false)
+    setGithubRepos([])
+    setGithubWorkflows([])
+  }, [])
+
+  const loadMigrations = React.useCallback(async () => {
+    try {
+      setLoadingMigrations(true)
+      const res = await fetch("/api/migrations", { cache: "no-store" })
+      const json: unknown = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to load migrations"
+        throw new Error(message)
+      }
+      const rows =
+        typeof json === "object" && json !== null && Array.isArray((json as any).migrations)
+          ? ((json as any).migrations as MigrationRow[])
+          : []
+      setMigrations(rows)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load migrations")
+    } finally {
+      setLoadingMigrations(false)
+    }
+  }, [])
+
+  const copyText = React.useCallback(async (value: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      toast.success(`${label} copied`)
+    } catch {
+      toast.error(`Unable to copy ${label.toLowerCase()}`)
+    }
+  }, [])
+
+  const loadWorkerToken = React.useCallback(async (worker: AgentRow) => {
+    setWorkerTokenLoading(worker.id)
+    try {
+      const res = await fetch(`/api/workers/${encodeURIComponent(worker.id)}/token`, { cache: "no-store" })
+      const json: unknown = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to load worker token"
+        throw new Error(message)
+      }
+      const token =
+        typeof json === "object" && json !== null && typeof (json as any).token === "string"
+          ? String((json as any).token)
+          : null
+      const workerId =
+        typeof json === "object" && json !== null && typeof (json as any).workerId === "string"
+          ? String((json as any).workerId)
+          : worker.id
+
+      setWorkerTokenValue(token)
+      setWorkerTokenWorkerId(workerId)
+      setSelectedWorker(worker)
+      setWorkerDetailsOpen(true)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load worker token")
+    } finally {
+      setWorkerTokenLoading(null)
+    }
+  }, [])
+
+  const startGitHubConnect = React.useCallback(() => {
+    const popup = window.open(
+      "/api/github/connect?popup=1",
+      "github-worker-connect",
+      "popup=yes,width=720,height=760,resizable=yes,scrollbars=yes"
+    )
+
+    if (!popup) {
+      window.location.href = "/api/github/connect"
+    }
   }, [])
 
   const toggleCapability = (value: AgentCapability, checked: boolean) => {
@@ -312,8 +556,8 @@ export default function WorkersPage() {
           name,
           provider,
           capabilities,
-          endpointDomain,
-          endpointIp,
+          endpointDomain: provider === "self_hosted" ? workerUrl : "",
+          endpointIp: "",
           githubRepoOwner,
           githubRepoName,
           githubWorkflowFile,
@@ -335,6 +579,7 @@ export default function WorkersPage() {
           : null
 
       if (created) setAgents((current) => [created, ...current])
+      setCreatedWorkerId(created?.id ?? null)
       setCreatedToken(provider === "github_actions" ? null : registrationToken)
       toast.success("Worker saved")
       if (provider === "github_actions" || !registrationToken) {
@@ -444,26 +689,81 @@ export default function WorkersPage() {
     [loadAgents, loadRepairJobs, selectedJob]
   )
 
-  const totalOnline = agents.filter((agent) => getEffectiveStatus(agent) === "online" || getEffectiveStatus(agent) === "busy").length
+  const totalOnline = agents.filter((agent) => getEffectiveStatus(agent) === "online").length
   const totalGithub = agents.filter((agent) => agent.provider === "github_actions").length
   const totalSelfHosted = agents.filter((agent) => agent.provider === "self_hosted" || agent.provider === "local").length
-  const visibleRepairJobs = showAllJobs ? repairJobs : repairJobs.slice(0, 3)
+  const totalWorkers = agents.length
+  const activeJobs = repairJobs.filter((job) => !["completed", "failed", "canceled"].includes(job.status)).length
+  const pendingRegistration = agents.filter((agent) => getEffectiveStatus(agent) === "pending_registration").length
+  const visibleWorkers = agents.slice(0, 3)
+  const visibleRepairJobs = repairJobs.slice(0, 3)
+  const filteredMigrations = migrations.filter((migration) => {
+    const query = dispatchSearch.trim().toLowerCase()
+    if (!query) return true
+    return migration.id.toLowerCase().includes(query) || migration.status.toLowerCase().includes(query)
+  })
+
+  const openDispatchDialog = React.useCallback((worker: AgentRow) => {
+    setDispatchAgent(worker)
+    setDispatchMigrationId("")
+    setDispatchSearch("")
+    setDispatchMode("repair_and_verify")
+    setDispatchOpen(true)
+    void loadMigrations()
+  }, [loadMigrations])
+
+  const handleDispatch = React.useCallback(async () => {
+    if (!dispatchAgent) return
+    setDispatchingAgentId(dispatchAgent.id)
+    try {
+      const res = await fetch(`/api/workers/${encodeURIComponent(dispatchAgent.id)}/dispatch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          migrationId: dispatchMigrationId.trim(),
+          mode: dispatchMode,
+          workflowSupportsRuntimeInputs: false,
+        }),
+      })
+      const json: unknown = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const message =
+          typeof json === "object" && json !== null && "error" in json
+            ? String((json as any).error)
+            : "Unable to dispatch GitHub worker"
+        throw new Error(message)
+      }
+      toast.success("Repair job queued and GitHub workflow dispatched")
+      setDispatchOpen(false)
+      setDispatchMigrationId("")
+      setDispatchAgent(null)
+      await loadAgents()
+      await loadRepairJobs()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to dispatch GitHub worker")
+    } finally {
+      setDispatchingAgentId(null)
+    }
+  }, [dispatchAgent, dispatchMigrationId, dispatchMode, loadAgents, loadRepairJobs])
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-3">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold flex items-center gap-2">
-            <Bot className="h-5 w-5" />
-            Workers
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            Configure GitHub-triggered and self-hosted workers, then track their repair and verification jobs.
-          </p>
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Bot className="h-4 w-4" />
+            Worker orchestration
+          </div>
+          <div className="space-y-1">
+            <h1 className="text-3xl font-bold tracking-tight">Workers</h1>
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              Manage GitHub-triggered and token-based workers, monitor heartbeat health, and keep repair jobs visible from one place.
+            </p>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => void refreshAll()} disabled={loading}>
-            <RefreshCw className="mr-1 h-4 w-4" />
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" onClick={() => void refreshAll(true)} disabled={loading}>
+            <RefreshCw className={cn("mr-2 h-4 w-4", loading && "animate-spin")} />
             Refresh
           </Button>
           <Dialog
@@ -474,8 +774,8 @@ export default function WorkersPage() {
             }}
           >
             <DialogTrigger asChild>
-              <Button>
-                <Plus className="mr-1 h-4 w-4" />
+              <Button className="h-8 px-3 text-sm">
+                <Plus className="mr-1 h-3.5 w-3.5" />
                 Add worker
               </Button>
             </DialogTrigger>
@@ -504,18 +804,15 @@ export default function WorkersPage() {
                           <SelectContent>
                             <SelectItem value="github_actions">GitHub Actions</SelectItem>
                             <SelectItem value="self_hosted">Self-hosted</SelectItem>
-                            <SelectItem value="local">Local</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="endpoint-domain">Optional domain</Label>
-                        <Input id="endpoint-domain" value={endpointDomain} onChange={(e) => setEndpointDomain(e.target.value)} placeholder="worker.example.com" />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="endpoint-ip">Optional IP</Label>
-                        <Input id="endpoint-ip" value={endpointIp} onChange={(e) => setEndpointIp(e.target.value)} placeholder="203.0.113.10" />
-                      </div>
+                      {provider === "self_hosted" ? (
+                        <div className="space-y-2 md:col-span-2">
+                          <Label htmlFor="worker-url">Worker URL</Label>
+                          <Input id="worker-url" value={workerUrl} onChange={(e) => setWorkerUrl(e.target.value)} placeholder="https://worker.example.com" />
+                        </div>
+                      ) : null}
                     </div>
                   </div>
 
@@ -540,15 +837,15 @@ export default function WorkersPage() {
                     <Button
                       type="button"
                       variant={githubConnected ? "outline" : "default"}
-                      onClick={() => {
-                        window.location.href = "/api/github/connect"
-                      }}
+                      onClick={startGitHubConnect}
                     >
                       <Github className="mr-1 h-4 w-4" />
                       {githubConnected ? "Reconnect GitHub" : "Connect GitHub"}
                     </Button>
                     <span className="text-xs text-muted-foreground">
-                      {githubConnected ? "Connected. Repository secrets will be provisioned automatically on save." : "Connect once, then select the repository and workflow."}
+                      {githubConnected
+                        ? "Connected in a separate window. Repository secrets will be provisioned automatically on save."
+                        : "Open a small GitHub window, complete OAuth, and continue this form without interruption."}
                     </span>
                   </div>
                   <div className="space-y-2">
@@ -629,8 +926,29 @@ export default function WorkersPage() {
 
               {createdToken ? (
                 <div className="rounded-md border border-green-500/30 bg-green-500/10 p-3 text-sm text-green-100">
-                  <div className="font-medium">Registration token</div>
-                  <div className="mt-1 break-all font-mono text-xs">{createdToken}</div>
+                  <div className="font-medium">Worker credentials</div>
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    <div className="rounded-md border border-green-500/20 bg-black/10 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-xs text-green-200">Worker ID</div>
+                        {createdWorkerId ? (
+                          <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-green-50 hover:bg-green-500/10" onClick={() => void copyText(createdWorkerId, "Worker ID")}>
+                            <Copy className="h-3.5 w-3.5" />
+                          </Button>
+                        ) : null}
+                      </div>
+                      <div className="mt-1 break-all font-mono text-xs">{createdWorkerId || "-"}</div>
+                    </div>
+                    <div className="rounded-md border border-green-500/20 bg-black/10 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-xs text-green-200">Token</div>
+                        <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-green-50 hover:bg-green-500/10" onClick={() => void copyText(createdToken, "Worker token")}>
+                          <Copy className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                      <div className="mt-1 break-all font-mono text-xs">{createdToken}</div>
+                    </div>
+                  </div>
                   <div className="mt-2 text-xs text-green-200">
                     Send heartbeats to <span className="font-mono">/api/workers/&lt;workerId&gt;/heartbeat</span> with this token. It is shown only once.
                   </div>
@@ -689,7 +1007,7 @@ export default function WorkersPage() {
                     </div>
                     <div className="rounded-md border p-3">
                       <div className="text-muted-foreground">Status</div>
-                      <div className="mt-1">{selectedJob.status}</div>
+                    <div className="mt-1">{jobStatusLabel(selectedJob.status)}</div>
                     </div>
                     <div className="rounded-md border p-3">
                       <div className="text-muted-foreground">Mode</div>
@@ -721,6 +1039,42 @@ export default function WorkersPage() {
                   <div className="rounded-md border p-3">
                     <div className="text-muted-foreground">Error</div>
                     <div className="mt-1 whitespace-pre-wrap">{selectedJob.error || "-"}</div>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="rounded-md border p-3">
+                      <div className="text-muted-foreground">Run source</div>
+                      <div className="mt-1">{selectedJob.linkedRun?.runType === "github_dispatch" ? "GitHub workflow" : "Self-hosted worker"}</div>
+                    </div>
+                    <div className="rounded-md border p-3">
+                      <div className="text-muted-foreground">Run status</div>
+                      <div className="mt-1">{agentRunStatusLabel(selectedJob.linkedRun?.status)}</div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-md border p-3">
+                    <div className="text-muted-foreground">Logs</div>
+                    <div className="mt-2 space-y-2">
+                      {readLogLines(selectedJob).length > 0 ? (
+                        readLogLines(selectedJob).map((line, index) => (
+                          <div key={`${index}-${line}`} className="rounded bg-muted px-3 py-2 font-mono text-xs">
+                            {line}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-sm text-muted-foreground">No logs captured yet.</div>
+                      )}
+                    </div>
+                    {typeof selectedJob.linkedRun?.payload?.htmlUrl === "string" ? (
+                      <a
+                        href={selectedJob.linkedRun.payload.htmlUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-3 inline-flex text-xs text-primary underline-offset-4 hover:underline"
+                      >
+                        Open GitHub run
+                      </a>
+                    ) : null}
                   </div>
 
                   <div className="grid gap-4 md:grid-cols-4">
@@ -778,242 +1132,401 @@ export default function WorkersPage() {
         </DialogContent>
       </Dialog>
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <Dialog
+        open={workerDetailsOpen}
+        onOpenChange={(next) => {
+          setWorkerDetailsOpen(next)
+          if (!next) {
+            setSelectedWorker(null)
+            setWorkerTokenValue(null)
+            setWorkerTokenWorkerId(null)
+          }
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{selectedWorker?.name || "Worker details"}</DialogTitle>
+            <DialogDescription>Review the worker id, current connection details, and token.</DialogDescription>
+          </DialogHeader>
+          {selectedWorker ? (
+            <div className="space-y-4 text-sm">
+              <div className="rounded-xl border p-4">
+                <div className="text-muted-foreground">Worker ID</div>
+                <div className="mt-1 break-all font-mono text-xs">{workerTokenWorkerId || selectedWorker.id}</div>
+                <div className="mt-3 flex justify-end">
+                  <Button variant="outline" size="sm" onClick={() => void copyText(workerTokenWorkerId || selectedWorker.id, "Worker ID")}>
+                    <Copy className="mr-1 h-4 w-4" />
+                    Copy ID
+                  </Button>
+                </div>
+              </div>
+              <div className="rounded-xl border p-4">
+                <div className="text-muted-foreground">Connection</div>
+                <div className="mt-1">
+                  {selectedWorker.provider === "github_actions"
+                    ? `${selectedWorker.githubRepoOwner || "-"} / ${selectedWorker.githubRepoName || "-"}`
+                    : selectedWorker.endpointDomain || "-"}
+                </div>
+                <div className="mt-2 text-xs text-muted-foreground">
+                  {selectedWorker.provider === "github_actions"
+                    ? `Workflow: ${selectedWorker.githubWorkflowFile || "-"}`
+                    : `Last heartbeat: ${formatDate(selectedWorker.lastHeartbeatAt)}`}
+                </div>
+              </div>
+              <div className="rounded-xl border p-4">
+                <div className="text-muted-foreground">Registration token</div>
+                <div className="mt-1 break-all font-mono text-xs">{workerTokenValue || "No token loaded"}</div>
+                <div className="mt-3 flex justify-end gap-2">
+                  <Button variant="outline" size="sm" disabled={workerTokenLoading === selectedWorker.id} onClick={() => void loadWorkerToken(selectedWorker)}>
+                    <RefreshCw className={cn("mr-1 h-4 w-4", workerTokenLoading === selectedWorker.id && "animate-spin")} />
+                    {workerTokenValue ? "Refresh token" : "Get token"}
+                  </Button>
+                  {workerTokenValue ? (
+                    <Button variant="outline" size="sm" onClick={() => void copyText(workerTokenValue, "Worker token")}>
+                      <Copy className="mr-1 h-4 w-4" />
+                      Copy token
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Connected now</CardDescription>
-            <CardTitle className="text-2xl">{loading ? "-" : totalOnline}</CardTitle>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Total Workers</CardTitle>
+            <Bot className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{loading ? "-" : totalWorkers}</div>
+            <p className="text-xs text-muted-foreground">{pendingRegistration} pending registration</p>
+          </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>GitHub-backed</CardDescription>
-            <CardTitle className="text-2xl">{loading ? "-" : totalGithub}</CardTitle>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Connected Now</CardTitle>
+            <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{loading ? "-" : totalOnline}</div>
+            <p className="text-xs text-muted-foreground">Online and busy workers</p>
+          </CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Token-based</CardDescription>
-            <CardTitle className="text-2xl">{loading ? "-" : totalSelfHosted}</CardTitle>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">GitHub-backed</CardTitle>
+            <Github className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{loading ? "-" : totalGithub}</div>
+            <p className="text-xs text-muted-foreground">{totalSelfHosted} token-based workers</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Active Queue</CardTitle>
+            <Clock3 className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{loading ? "-" : activeJobs}</div>
+            <p className="text-xs text-muted-foreground">{repairJobs.length} repair jobs total</p>
+          </CardContent>
         </Card>
       </div>
 
           <Dialog open={dispatchOpen} onOpenChange={setDispatchOpen}>
-            <DialogContent className="max-w-md">
-              <DialogHeader>
+          <DialogContent className="max-h-[92vh] max-w-4xl overflow-hidden p-0">
+            <div className="flex max-h-[92vh] min-h-0 flex-col">
+              <DialogHeader className="border-b px-6 py-5 pr-16">
                 <DialogTitle>Dispatch GitHub worker</DialogTitle>
                 <DialogDescription>
-                  Create a repair job and trigger the configured workflow for {dispatchAgent?.name || "the selected worker"}.
+                  Queue a repair job and trigger the configured workflow for {dispatchAgent?.name || "the selected worker"}.
                 </DialogDescription>
               </DialogHeader>
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="dispatch-migration-id">Migration id</Label>
-                  <Input
-                    id="dispatch-migration-id"
-                    value={dispatchMigrationId}
-                    onChange={(e) => setDispatchMigrationId(e.target.value)}
-                    placeholder="9d8d6c1d-..."
-                  />
+
+              <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                <div className="space-y-5">
+                <div className="space-y-3">
+                  <div className="space-y-1">
+                    <Label>Select migration</Label>
+                    <p className="text-xs text-muted-foreground">Choose from the migration list instead of entering an ID manually.</p>
+                  </div>
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      value={dispatchSearch}
+                      onChange={(e) => setDispatchSearch(e.target.value)}
+                      placeholder="Search by migration id or status"
+                      className="pl-9"
+                    />
+                  </div>
+                    <div className="overflow-hidden rounded-xl border bg-card">
+                      <Table className="table-fixed border-b">
+                        <colgroup>
+                          <col className="w-[46%]" />
+                          <col className="w-[18%]" />
+                          <col className="w-[36%]" />
+                        </colgroup>
+                        <TableHeader>
+                          <TableRow className="hover:bg-transparent">
+                            <TableHead className="h-9 text-xs">Migration ID</TableHead>
+                            <TableHead className="h-9 text-center text-xs">Status</TableHead>
+                            <TableHead className="h-9 text-center text-xs">Created</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                      </Table>
+                      <div className="max-h-[220px] overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                        <Table className="table-fixed">
+                          <colgroup>
+                            <col className="w-[46%]" />
+                            <col className="w-[18%]" />
+                            <col className="w-[36%]" />
+                          </colgroup>
+                          <TableBody>
+                          {loadingMigrations ? (
+                            <TableRow>
+                              <TableCell colSpan={3} className="py-8 text-center text-sm text-muted-foreground">
+                                Loading migrations...
+                              </TableCell>
+                            </TableRow>
+                          ) : filteredMigrations.length === 0 ? (
+                            <TableRow>
+                              <TableCell colSpan={3} className="py-8 text-center text-sm text-muted-foreground">
+                                No migrations matched your search.
+                              </TableCell>
+                            </TableRow>
+                          ) : (
+                              filteredMigrations.map((migration) => (
+                                <TableRow
+                                  key={migration.id}
+                                  data-state={dispatchMigrationId === migration.id ? "selected" : undefined}
+                                  className="h-11 cursor-pointer"
+                                  onClick={() => setDispatchMigrationId(migration.id)}
+                                >
+                                  <TableCell className="py-2 align-middle">
+                                    <div className="truncate font-mono text-xs" title={migration.id}>
+                                      {migration.id}
+                                    </div>
+                                  </TableCell>
+                                  <TableCell className="py-2 text-center align-middle">
+                                    <Badge variant="outline">{migration.status}</Badge>
+                                  </TableCell>
+                                  <TableCell className="py-2 text-center align-middle text-xs text-muted-foreground">
+                                    <div className="truncate" title={formatDate(migration.createdAt)}>
+                                      {formatDate(migration.createdAt)}
+                                    </div>
+                                  </TableCell>
+                                </TableRow>
+                              ))
+                          )}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <Label>Mode</Label>
-                  <Select value={dispatchMode} onValueChange={(value) => setDispatchMode(value as typeof dispatchMode)}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="repair_and_verify">Repair and verify</SelectItem>
-                      <SelectItem value="repair_only">Repair only</SelectItem>
-                      <SelectItem value="verify_only">Verify only</SelectItem>
-                    </SelectContent>
-                  </Select>
+
+                <div className="space-y-3">
+                  <div className="rounded-xl border bg-muted/30 p-3">
+                    <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Selected migration</div>
+                    <div className="mt-1 break-all font-mono text-xs">{dispatchMigrationId || "No migration selected"}</div>
+                  </div>
+                </div>
+
                 </div>
               </div>
-              <DialogFooter>
-                <Button
-                  disabled={!dispatchAgent || !dispatchMigrationId.trim() || dispatchingAgentId === dispatchAgent?.id}
-                  onClick={async () => {
-                    if (!dispatchAgent) return
-                    setDispatchingAgentId(dispatchAgent.id)
-                    try {
-                      const res = await fetch(`/api/workers/${encodeURIComponent(dispatchAgent.id)}/dispatch`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          migrationId: dispatchMigrationId.trim(),
-                          mode: dispatchMode,
-                        }),
-                      })
-                      const json: unknown = await res.json().catch(() => ({}))
-                      if (!res.ok) {
-                        const message =
-                          typeof json === "object" && json !== null && "error" in json
-                            ? String((json as any).error)
-                            : "Unable to dispatch GitHub worker"
-                        throw new Error(message)
-                      }
-                      toast.success("Repair job queued and GitHub workflow dispatched")
-                      setDispatchOpen(false)
-                      setDispatchMigrationId("")
-                      setDispatchAgent(null)
-                      await loadAgents()
-                      await loadRepairJobs()
-                    } catch (error) {
-                      toast.error(error instanceof Error ? error.message : "Unable to dispatch GitHub worker")
-                    } finally {
-                      setDispatchingAgentId(null)
-                    }
-                  }}
-                >
-                  {dispatchingAgentId === dispatchAgent?.id ? "Dispatching..." : "Dispatch"}
-                </Button>
+
+              <DialogFooter className="border-t px-6 py-4">
+                <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center gap-3">
+                    <Select value={dispatchMode} onValueChange={(value) => setDispatchMode(value as typeof dispatchMode)}>
+                      <SelectTrigger className="h-9 w-[220px]">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="repair_and_verify">Repair and verify</SelectItem>
+                        <SelectItem value="repair_only">Repair only</SelectItem>
+                        <SelectItem value="verify_only">Verify only</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Mode</Label>
+                  </div>
+                  <Button
+                    disabled={!dispatchAgent || !dispatchMigrationId.trim() || dispatchingAgentId === dispatchAgent?.id}
+                    onClick={() => void handleDispatch()}
+                  >
+                    {dispatchingAgentId === dispatchAgent?.id ? "Dispatching..." : "Dispatch"}
+                  </Button>
+                </div>
               </DialogFooter>
-            </DialogContent>
+            </div>
+          </DialogContent>
           </Dialog>
 
-      <div className="grid gap-4">
-        {agents.map((worker) => {
-          const effectiveStatus = getEffectiveStatus(worker)
-          return (
-            <Card key={worker.id}>
-              <CardHeader className="flex flex-row items-start justify-between gap-3">
-                <div className="space-y-1">
-                  <CardTitle className="text-lg flex items-center gap-2">
-                                    <div className="md:col-span-2 xl:col-span-4 flex justify-end gap-2">
-                  {worker.provider === "github_actions" ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        setDispatchAgent(worker)
-                        setDispatchMigrationId("")
-                        setDispatchMode("repair_and_verify")
-                        setDispatchOpen(true)
-                      }}
-                    >
-                      <Play className="mr-1 h-4 w-4" />
-                      Dispatch GitHub worker
-                    </Button>
-                  ) : null}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={deletingWorkerId === worker.id}
-                    onClick={() => void deleteWorker(worker)}
-                  >
-                    <Trash2 className="mr-1 h-4 w-4" />
-                    {deletingWorkerId === worker.id ? "Deleting..." : "Delete"}
-                  </Button>
-                </div>
-                    {worker.name}
-                  </CardTitle>
-                  <CardDescription>
-                    {providerLabel(worker.provider)} - {worker.capabilities.join(", ") || "No capabilities"}
-                  </CardDescription>
-                </div>
-                {statusBadge(effectiveStatus)}
-              </CardHeader>
-              <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <div className="space-y-1 text-sm">
-                  <div className="text-muted-foreground">Connection</div>
-                  <div>{worker.endpointDomain || worker.endpointIp || "-"}</div>
-                  <div className="text-xs text-muted-foreground">Last heartbeat: {formatDate(worker.lastHeartbeatAt)}</div>
-                  <div className="text-xs text-muted-foreground">Last seen host: {worker.lastSeenHost || "-"}</div>
-                </div>
-                <div className="space-y-1 text-sm">
-                  <div className="text-muted-foreground">GitHub / repo</div>
-                  <div>{worker.githubRepoOwner && worker.githubRepoName ? `${worker.githubRepoOwner}/${worker.githubRepoName}` : "-"}</div>
-                  <div className="text-xs text-muted-foreground">Workflow: {worker.githubWorkflowFile || "-"}</div>
-                  <div className="text-xs text-muted-foreground">Ref: {worker.githubRef || "-"}</div>
-                </div>
-                <div className="space-y-1 text-sm">
-                  <div className="text-muted-foreground">Runtime</div>
-                  <div>Version: {worker.lastSeenVersion || "-"}</div>
-                  <div className="text-xs text-muted-foreground">Last seen IP: {worker.lastSeenIp || worker.endpointIp || "-"}</div>
-                  <div className="text-xs text-muted-foreground">Created: {formatDate(worker.createdAt)}</div>
-                </div>
-                <div className="space-y-1 text-sm">
-                  <div className="text-muted-foreground">Latest run</div>
-                  <div>{worker.latestRun ? `${worker.latestRun.runType} - ${worker.latestRun.status}` : "No runs yet"}</div>
-                  <div className="text-xs text-muted-foreground">{worker.latestRun?.summary || worker.lastError || worker.notes || "-"}</div>
-                </div>
-                <div className="md:col-span-2 xl:col-span-4 flex justify-end gap-2">
-                  {worker.provider === "github_actions" ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        setDispatchAgent(worker)
-                        setDispatchMigrationId("")
-                        setDispatchMode("repair_and_verify")
-                        setDispatchOpen(true)
-                      }}
-                    >
-                      <Play className="mr-1 h-4 w-4" />
-                      Dispatch GitHub worker
-                    </Button>
-                  ) : null}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={deletingWorkerId === worker.id}
-                    onClick={() => void deleteWorker(worker)}
-                  >
-                    <Trash2 className="mr-1 h-4 w-4" />
-                    {deletingWorkerId === worker.id ? "Deleting..." : "Delete"}
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          )
-        })}
-
-        {!loading && agents.length === 0 ? (
-          <Card>
-            <CardContent className="py-10 text-sm text-muted-foreground">
+      <Card>
+        <CardHeader className="flex flex-col gap-3 border-b pb-5 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <CardTitle>Worker Fleet</CardTitle>
+            <CardDescription>Current registration, routing, and runtime signals for the latest three workers.</CardDescription>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge variant="outline" className="gap-1">
+              <Server className="h-3.5 w-3.5" />
+              {totalSelfHosted} token-based
+            </Badge>
+            <Badge variant="outline" className="gap-1">
+              <Github className="h-3.5 w-3.5" />
+              {totalGithub} GitHub
+            </Badge>
+            {agents.length > 3 ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href="/dashboard/workers/all">View all</Link>
+              </Button>
+            ) : null}
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4 pt-1">
+          {!loading && agents.length === 0 ? (
+            <div className="rounded-xl border border-dashed p-10 text-center text-sm text-muted-foreground">
               No workers configured yet. Add one to register a self-hosted worker or connect a GitHub worker repository.
-            </CardContent>
-          </Card>
-        ) : null}
-      </div>
+            </div>
+          ) : null}
+
+          {visibleWorkers.map((worker) => {
+            const effectiveStatus = getEffectiveStatus(worker)
+            const summary = worker.latestRun?.summary || worker.lastError || worker.notes || "No notes yet"
+
+            return (
+              <div key={worker.id} className="rounded-xl border bg-card p-4 shadow-sm">
+                <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="space-y-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex h-10 w-10 items-center justify-center rounded-lg border bg-muted">
+                        {worker.provider === "github_actions" ? <Github className="h-4 w-4" /> : <HardDrive className="h-4 w-4" />}
+                      </div>
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="text-base font-semibold">{worker.name}</h3>
+                          {statusBadge(effectiveStatus)}
+                          <Badge variant="outline">{providerLabel(worker.provider)}</Badge>
+                        </div>
+                        <p className="mt-1 font-mono text-xs text-muted-foreground">{worker.id}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      {(Array.isArray(worker.capabilities) ? worker.capabilities : []).map((capability) => (
+                        <Badge key={capability} variant="secondary" className="font-normal">
+                          {capabilityOptions.find((option) => option.value === capability)?.label ?? capability}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+                    {worker.provider === "github_actions" ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openDispatchDialog(worker)}
+                      >
+                        <Play className="mr-1 h-4 w-4" />
+                        Dispatch job
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={workerTokenLoading === worker.id}
+                      onClick={() => void loadWorkerToken(worker)}
+                    >
+                      <Eye className="mr-1 h-4 w-4" />
+                      {workerTokenLoading === worker.id ? "Loading..." : "Details"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={deletingWorkerId === worker.id}
+                      onClick={() => void deleteWorker(worker)}
+                    >
+                      <Trash2 className="mr-1 h-4 w-4" />
+                      {deletingWorkerId === worker.id ? "Deleting..." : "Delete"}
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+                    <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Connection</div>
+                    <div className="font-medium">{worker.endpointDomain || worker.endpointIp || "-"}</div>
+                    <div className="mt-2 text-xs text-muted-foreground">Heartbeat: {formatDate(worker.lastHeartbeatAt)}</div>
+                    <div className="text-xs text-muted-foreground">Host: {worker.lastSeenHost || "-"}</div>
+                  </div>
+                  <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+                    <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Repository</div>
+                    <div className="font-medium">
+                      {worker.githubRepoOwner && worker.githubRepoName ? `${worker.githubRepoOwner}/${worker.githubRepoName}` : "-"}
+                    </div>
+                    <div className="mt-2 text-xs text-muted-foreground">Workflow: {worker.githubWorkflowFile || "-"}</div>
+                    <div className="text-xs text-muted-foreground">Ref: {worker.githubRef || "-"}</div>
+                  </div>
+                  <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+                    <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Runtime</div>
+                    <div className="font-medium">Version: {worker.lastSeenVersion || "-"}</div>
+                    <div className="mt-2 text-xs text-muted-foreground">Last seen IP: {worker.lastSeenIp || worker.endpointIp || "-"}</div>
+                    <div className="text-xs text-muted-foreground">Created: {formatDate(worker.createdAt)}</div>
+                  </div>
+                  <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+                    <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Latest run</div>
+                    <div className="font-medium">
+                      {worker.latestRun ? `${worker.latestRun.runType} - ${agentRunStatusLabel(worker.latestRun.status)}` : "No runs yet"}
+                    </div>
+                    <div className="mt-2 text-xs text-muted-foreground">{summary}</div>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <div>
-              <CardTitle className="text-base">Repair jobs</CardTitle>
-              <CardDescription>Queue and runtime state for worker-based repair and verification jobs.</CardDescription>
+              <CardTitle className="text-base">Repair Jobs</CardTitle>
+              <CardDescription>Latest three repair and verification jobs from the worker queue.</CardDescription>
             </div>
             {repairJobs.length > 3 ? (
-              <Button variant="outline" size="sm" onClick={() => setShowAllJobs((current) => !current)}>
-                {showAllJobs ? "Show last 3" : "View all"}
+              <Button asChild variant="outline" size="sm">
+                <Link href="/dashboard/workers/jobs">View all</Link>
               </Button>
             ) : null}
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
           {repairJobs.length === 0 ? (
-            <div className="text-sm text-muted-foreground">No repair jobs yet.</div>
+            <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">No repair jobs yet.</div>
           ) : (
             <div className="space-y-2">
               {visibleRepairJobs.map((job) => (
-                <div key={job.id} className="rounded-md border p-3 text-sm">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="font-mono text-xs">{job.id}</div>
-                    <Badge variant={job.status === "completed" ? "default" : job.status === "failed" ? "destructive" : "outline"}>
-                      {job.status}
-                    </Badge>
+                <div key={job.id} className="rounded-xl border p-4 text-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate font-mono text-xs text-muted-foreground">{job.id}</div>
+                      <div className="mt-2 font-medium">Migration {job.migrationId}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">Mode: {job.mode}</div>
+                    </div>
+                    {jobStatusBadge(job.status)}
                   </div>
-                  <div className="mt-2 text-muted-foreground">
-                    Migration: <span className="font-mono">{job.migrationId}</span> - Mode: {job.mode}
+                  <div className="mt-3 rounded-lg bg-muted/40 p-3 text-xs text-muted-foreground">
+                    <div>Claimed by: {job.claimedByAgentId || "-"}</div>
+                    <div>Updated: {formatDate(job.updatedAt)}</div>
                   </div>
-                  <div className="mt-1 text-muted-foreground">
-                    Claimed by: {job.claimedByAgentId || "-"} - Updated: {formatDate(job.updatedAt)}
-                  </div>
-                  <div className="mt-2">{job.summary || job.error || "-"}</div>
-                  <div className="mt-3 flex justify-end gap-2">
+                  <div className="mt-3">{job.summary || job.error || readLogLines(job)[0] || "-"}</div>
+                  <div className="mt-4 flex flex-wrap justify-end gap-2">
                     {!["completed", "failed", "canceled"].includes(job.status) ? (
                       <Button
                         variant="outline"
@@ -1052,17 +1565,17 @@ export default function WorkersPage() {
           <CardDescription>How entries are identified and how they connect.</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3 text-sm md:grid-cols-3">
-          <div className="rounded-md border p-3">
+          <div className="rounded-xl border p-4">
             <div className="flex items-center gap-2 font-medium"><Shield className="h-4 w-4" /> Identity</div>
-            <div className="mt-2 text-muted-foreground">Self-hosted and local workers use agent id + registration token. IP/domain are optional metadata only.</div>
+            <div className="mt-2 text-muted-foreground">Self-hosted and local workers use agent id + registration token. IP/domain are descriptive metadata only.</div>
           </div>
-          <div className="rounded-md border p-3">
+          <div className="rounded-xl border p-4">
             <div className="flex items-center gap-2 font-medium"><Workflow className="h-4 w-4" /> GitHub</div>
             <div className="mt-2 text-muted-foreground">GitHub entries store repo, workflow, and ref so the website can dispatch jobs against the configured repository.</div>
           </div>
-          <div className="rounded-md border p-3">
+          <div className="rounded-xl border p-4">
             <div className="flex items-center gap-2 font-medium"><CircleDot className="h-4 w-4" /> Live status</div>
-            <div className="mt-2 text-muted-foreground">Heartbeat timestamps are polled every 10 seconds. Online status turns offline when heartbeats go stale.</div>
+            <div className="mt-2 text-muted-foreground">This page uses adaptive refresh and turns token-based workers offline when heartbeats are stale for more than 60 seconds.</div>
           </div>
         </CardContent>
       </Card>

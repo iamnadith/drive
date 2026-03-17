@@ -266,6 +266,8 @@ export async function buildRepairJobExecutionPayload(job: DriveRepairJob): Promi
       id: job.id,
       mode: job.mode,
       migrationId: migration.id,
+      verifyAllBuckets: true,
+      strictCompletion: true,
     },
     migration: {
       id: migration.id,

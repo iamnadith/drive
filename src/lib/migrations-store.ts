@@ -475,6 +475,42 @@ export async function updateMigrationItem(
   return mapMigrationItemRow(data as DriveMigrationItemRow)
 }
 
+export async function mergeMigrationItemProgressState(
+  id: string,
+  patch: Record<string, unknown>,
+  lastProgressAt?: string | null
+): Promise<DriveMigrationItem> {
+  const supabase = getSupabaseServerClient()
+  const { data: currentRows, error: currentErr } = await supabase
+    .from(MIGRATION_ITEMS_TABLE)
+    .select("*")
+    .eq("id", id)
+    .limit(1)
+
+  if (currentErr) throw normalizeSupabaseError(currentErr)
+  const currentRow = Array.isArray(currentRows) ? (currentRows[0] as DriveMigrationItemRow | undefined) : undefined
+  if (!currentRow) throw new Error("Migration item not found")
+
+  const currentProgress =
+    currentRow.progress && typeof currentRow.progress === "object" ? (currentRow.progress as Record<string, unknown>) : {}
+  const nextProgress = { ...currentProgress, ...patch }
+  const now = new Date().toISOString()
+
+  const { data, error } = await supabase
+    .from(MIGRATION_ITEMS_TABLE)
+    .update({
+      progress: nextProgress,
+      updated_at: now,
+      ...(lastProgressAt !== undefined ? { last_progress_at: lastProgressAt ?? null } : {}),
+    })
+    .eq("id", id)
+    .select("*")
+    .single()
+
+  if (error) throw normalizeSupabaseError(error)
+  return mapMigrationItemRow(data as DriveMigrationItemRow)
+}
+
 export async function claimMigrationItemJobCreation(input: {
   itemId: string
   progress: Record<string, unknown>

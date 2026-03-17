@@ -385,6 +385,41 @@ export async function updateAgentRun(
   return mapRunRow(data as DriveAgentRunRow)
 }
 
+export async function getLatestAgentRunByJobReference(jobReference: string): Promise<DriveAgentRun | null> {
+  const supabase = getSupabaseServerClient()
+  const { data, error } = await supabase
+    .from(AGENT_RUNS_TABLE)
+    .select("*")
+    .eq("job_reference", jobReference)
+    .order("created_at", { ascending: false })
+    .limit(1)
+
+  if (error) throw normalizeSupabaseError(error)
+  const row = Array.isArray(data) ? (data[0] as DriveAgentRunRow | undefined) : undefined
+  return row ? mapRunRow(row) : null
+}
+
+export async function updateAgent(
+  id: string,
+  updates: Partial<{
+    status: AgentStatus
+    lastError: string | null
+    metadata: Record<string, unknown>
+    lastHeartbeatAt: string | null
+  }>
+): Promise<DriveAgent> {
+  const supabase = getSupabaseServerClient()
+  const dbUpdates: Record<string, unknown> = { updated_at: new Date().toISOString() }
+  if (updates.status !== undefined) dbUpdates.status = updates.status
+  if (updates.lastError !== undefined) dbUpdates.last_error = updates.lastError ?? null
+  if (updates.metadata !== undefined) dbUpdates.metadata = updates.metadata
+  if (updates.lastHeartbeatAt !== undefined) dbUpdates.last_heartbeat_at = updates.lastHeartbeatAt ?? null
+
+  const { data, error } = await supabase.from(AGENTS_TABLE).update(dbUpdates).eq("id", id).select("*").single()
+  if (error) throw normalizeSupabaseError(error)
+  return mapAgentRow(data as DriveAgentRow)
+}
+
 export async function authenticateAgent(input: { agentId: string; token: string }): Promise<DriveAgent> {
   const supabase = getSupabaseServerClient()
   const { data, error } = await supabase.from(AGENTS_TABLE).select("*").eq("id", input.agentId).limit(1)

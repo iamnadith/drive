@@ -12,6 +12,12 @@ on:
       agent_id:
         description: Agent id requesting dispatch
         required: false
+      server_url:
+        description: Drive server URL
+        required: false
+      agent_token:
+        description: Agent registration token
+        required: false
   repository_dispatch:
     types: [drive-agent-worker]
 
@@ -34,9 +40,9 @@ jobs:
 
       - name: Run agent worker
         env:
-          SERVER_URL: ${{ secrets.DRIVE_SERVER_URL }}
-          AGENT_ID: ${{ secrets.DRIVE_AGENT_ID }}
-          TOKEN: ${{ secrets.DRIVE_AGENT_TOKEN }}
+          SERVER_URL: ${{ inputs.server_url || github.event.client_payload.server_url || vars.DRIVE_SERVER_URL || secrets.DRIVE_SERVER_URL }}
+          AGENT_ID: ${{ inputs.agent_id || github.event.client_payload.agent_id || vars.DRIVE_AGENT_ID || secrets.DRIVE_AGENT_ID }}
+          TOKEN: ${{ inputs.agent_token || github.event.client_payload.agent_token || secrets.DRIVE_AGENT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           POLL_MS: "15000"

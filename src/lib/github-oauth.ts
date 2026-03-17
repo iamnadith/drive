@@ -2,6 +2,7 @@ import crypto from "crypto"
 
 export const GITHUB_TOKEN_COOKIE = "githubOAuthToken"
 export const GITHUB_STATE_COOKIE = "githubOAuthState"
+export const GITHUB_FLOW_COOKIE = "githubOAuthFlow"
 
 type GitHubRepo = {
   id: number
@@ -32,6 +33,23 @@ type GitHubWorkflowRun = {
   display_title?: string
   name?: string
   run_number?: number
+}
+
+type GitHubWorkflowRunJob = {
+  id: number
+  name?: string
+  status?: string
+  conclusion?: string | null
+  started_at?: string | null
+  completed_at?: string | null
+  steps?: Array<{
+    name?: string
+    status?: string
+    conclusion?: string | null
+    number?: number
+    started_at?: string | null
+    completed_at?: string | null
+  }>
 }
 
 function requireEnv(name: string): string {
@@ -148,29 +166,51 @@ export async function setGitHubActionsSecret(input: {
   name: string
   value: string
 }): Promise<void> {
-  const sodiumModule = await import("libsodium-wrappers")
-  const sodium = (sodiumModule as { default?: typeof sodiumModule } & typeof sodiumModule).default ?? sodiumModule
-  const keyResponse = await githubApi<{ key: string; key_id: string }>(
-    `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/actions/secrets/public-key`,
-    input.token
-  )
-  await sodium.ready
-  const publicKey = sodium.from_base64(keyResponse.key, sodium.base64_variants.ORIGINAL)
-  const encryptedBytes = sodium.crypto_box_seal(input.value, publicKey)
-  const encryptedValue = sodium.to_base64(encryptedBytes, sodium.base64_variants.ORIGINAL)
-
-  await githubApi(
-    `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/actions/secrets/${encodeURIComponent(input.name)}`,
-    input.token,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        encrypted_value: encryptedValue,
-        key_id: keyResponse.key_id,
-      }),
+  try {
+    const sodiumModule = await import("libsodium-wrappers")
+    const sodium = (sodiumModule as { default?: typeof sodiumModule } & typeof sodiumModule).default ?? sodiumModule
+    const keyResponse = await githubApi<{ key: string; key_id: string }>(
+      `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/actions/secrets/public-key`,
+      input.token
+    )
+    if (typeof keyResponse?.key !== "string" || !keyResponse.key.trim()) {
+      throw new Error("GitHub did not return a repository secrets public key")
     }
-  )
+    if (typeof keyResponse?.key_id !== "string" || !keyResponse.key_id.trim()) {
+      throw new Error("GitHub did not return a repository secrets key id")
+    }
+    if (!("ready" in sodium) || !("from_base64" in sodium) || !("crypto_box_seal" in sodium) || !("to_base64" in sodium)) {
+      throw new Error("libsodium-wrappers did not load correctly")
+    }
+
+    await sodium.ready
+    const variants = (sodium as { base64_variants?: { ORIGINAL?: number | null } }).base64_variants
+    if (!variants || typeof variants.ORIGINAL === "undefined") {
+      throw new Error("libsodium base64 helpers are unavailable")
+    }
+    const originalVariant = variants.ORIGINAL ?? undefined
+
+    const publicKey = sodium.from_base64(keyResponse.key, originalVariant)
+    if (!publicKey) throw new Error("Unable to decode GitHub repository public key")
+    const encryptedBytes = sodium.crypto_box_seal(input.value, publicKey)
+    const encryptedValue = sodium.to_base64(encryptedBytes, originalVariant)
+
+    await githubApi(
+      `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/actions/secrets/${encodeURIComponent(input.name)}`,
+      input.token,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          encrypted_value: encryptedValue,
+          key_id: keyResponse.key_id,
+        }),
+      }
+    )
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`Unable to set GitHub Actions secret '${input.name}': ${message}`)
+  }
 }
 
 export async function listGitHubWorkflowRuns(input: {
@@ -253,6 +293,100 @@ export async function getGitHubWorkflowRun(input: {
     name: typeof run.name === "string" ? run.name : undefined,
     runNumber: typeof run.run_number === "number" ? run.run_number : undefined,
   }
+}
+
+export async function cancelGitHubWorkflowRun(input: {
+  token: string
+  owner: string
+  repo: string
+  runId: string
+}): Promise<void> {
+  await mutateGitHubWorkflowRun(input, "cancel")
+}
+
+export async function forceCancelGitHubWorkflowRun(input: {
+  token: string
+  owner: string
+  repo: string
+  runId: string
+}): Promise<void> {
+  await mutateGitHubWorkflowRun(input, "force-cancel")
+}
+
+async function mutateGitHubWorkflowRun(
+  input: {
+    token: string
+    owner: string
+    repo: string
+    runId: string
+  },
+  action: "cancel" | "force-cancel"
+): Promise<void> {
+  const response = await fetch(
+    `https://api.github.com/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/actions/runs/${encodeURIComponent(input.runId)}/${action}`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${input.token}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    }
+  )
+
+  if (response.status === 202 || response.status === 409) return
+
+  const text = await response.text().catch(() => "")
+  let message = `GitHub workflow ${action} failed (${response.status})`
+  try {
+    const json = text ? (JSON.parse(text) as { message?: unknown }) : {}
+    if (typeof json.message === "string" && json.message.trim()) message = json.message.trim()
+  } catch {}
+  throw new Error(message)
+}
+
+export async function listGitHubWorkflowRunJobs(input: {
+  token: string
+  owner: string
+  repo: string
+  runId: string
+}): Promise<Array<{
+  id: string
+  name?: string
+  status?: string
+  conclusion?: string | null
+  startedAt?: string | null
+  completedAt?: string | null
+  steps: Array<{
+    name?: string
+    status?: string
+    conclusion?: string | null
+    number?: number
+    startedAt?: string | null
+    completedAt?: string | null
+  }>
+}>> {
+  const response = await githubApi<{ jobs?: GitHubWorkflowRunJob[] }>(
+    `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/actions/runs/${encodeURIComponent(input.runId)}/jobs?per_page=100`,
+    input.token
+  )
+
+  return (Array.isArray(response.jobs) ? response.jobs : []).map((job) => ({
+    id: String(job.id),
+    name: typeof job.name === "string" ? job.name : undefined,
+    status: typeof job.status === "string" ? job.status : undefined,
+    conclusion: typeof job.conclusion === "string" || job.conclusion === null ? job.conclusion : undefined,
+    startedAt: typeof job.started_at === "string" || job.started_at === null ? job.started_at : undefined,
+    completedAt: typeof job.completed_at === "string" || job.completed_at === null ? job.completed_at : undefined,
+    steps: (Array.isArray(job.steps) ? job.steps : []).map((step) => ({
+      name: typeof step.name === "string" ? step.name : undefined,
+      status: typeof step.status === "string" ? step.status : undefined,
+      conclusion: typeof step.conclusion === "string" || step.conclusion === null ? step.conclusion : undefined,
+      number: typeof step.number === "number" ? step.number : undefined,
+      startedAt: typeof step.started_at === "string" || step.started_at === null ? step.started_at : undefined,
+      completedAt: typeof step.completed_at === "string" || step.completed_at === null ? step.completed_at : undefined,
+    })),
+  }))
 }
 
 export function createGitHubOAuthState(): string {

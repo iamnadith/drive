@@ -33,6 +33,7 @@ import {
   updateMigrationItem,
   claimMigrationItemJobCreation,
 } from "@/lib/migrations-store"
+import { syncMigrationLiveState } from "@/lib/migration-live-state"
 
 export const runtime = "nodejs"
 
@@ -117,6 +118,71 @@ function isTerminalSlurperStatus(value: string | undefined): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
+}
+
+function readLiveStatus(item: { progress?: unknown }): string | undefined {
+  const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
+  const live = isRecord(progress.live) ? (progress.live as Record<string, unknown>) : null
+  return live && typeof live.status === "string" ? live.status : undefined
+}
+
+function readMergedItemStatus(item: { progress?: unknown; slurperJobId?: string | null; slurperStatus?: string | null }): string {
+  const liveStatus = readLiveStatus(item)
+  if (liveStatus) return normalizeSlurperStatus(liveStatus)
+
+  const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
+  const stage = typeof progress.stage === "string" ? progress.stage : ""
+  const sourceScanStatus = typeof progress.sourceScanStatus === "string" ? progress.sourceScanStatus : ""
+  if (
+    !item.slurperJobId &&
+    (stage === "scan_seeded" ||
+      ((stage === "scanning_source" || sourceScanStatus === "pending" || sourceScanStatus === "running") &&
+        sourceScanStatus !== "completed" &&
+        sourceScanStatus !== "failed"))
+  ) {
+    return "scanning"
+  }
+  if (!item.slurperJobId && stage === "scan_failed") return "failed"
+
+  const slurperStatus =
+    typeof item.slurperStatus === "string" && item.slurperStatus.trim()
+      ? item.slurperStatus
+      : typeof progress.slurperStatus === "string" && progress.slurperStatus.trim()
+        ? String(progress.slurperStatus)
+        : ""
+  const normalizedSlurperStatus = normalizeSlurperStatus(slurperStatus)
+  if (normalizedSlurperStatus && normalizedSlurperStatus !== "completed" && normalizedSlurperStatus !== "copy_completed") {
+    return normalizedSlurperStatus
+  }
+
+  const verify = isRecord(progress.verify) ? (progress.verify as Record<string, unknown>) : null
+  const verifyStatus = typeof verify?.status === "string" ? normalizeSlurperStatus(verify.status) : ""
+  if (verifyStatus === "pending" || verifyStatus === "running") return "verifying"
+  if (verifyStatus === "error") return "verification_failed"
+  if (verifyStatus === "ok" && typeof verify?.note === "string" && verify.note === "no_source_objects") return "no_files"
+
+  return normalizedSlurperStatus
+}
+
+function isCompletedLikeMergedStatus(status: string): boolean {
+  return isTerminalSlurperStatus(status) && !isAbortedLikeMergedStatus(status) && !isFailedLikeMergedStatus(status)
+}
+
+function isAbortedLikeMergedStatus(status: string): boolean {
+  return status === "aborted" || status === "canceled" || status === "cancelled" || status === "copy_aborted"
+}
+
+function isFailedLikeMergedStatus(status: string): boolean {
+  return (
+    status === "verification_failed" ||
+    status === "precheck_failed" ||
+    status === "bucket_create_failed" ||
+    status === "job_create_failed" ||
+    status.endsWith("_failed") ||
+    status.includes("failed") ||
+    status.includes("error") ||
+    status === "copy_failed"
+  )
 }
 
 function getNumberFromRecord(rec: Record<string, unknown>, keys: string[]): number | undefined {
@@ -1297,91 +1363,28 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
       }
     }
 
-    const isTerminal = (s: string | undefined) => {
-      const status = String(s ?? "").toLowerCase()
-      return isTerminalSlurperStatus(status) || isLegacyCopy(status) || failedLike(status) || status.endsWith("_failed")
-    }
-    const isFailure = (s: string | undefined) => {
-      const status = String(s ?? "").toLowerCase()
-      return failedLike(status) || status.endsWith("_failed") || status === "copy_failed"
-    }
+    await syncMigrationLiveState(id).catch(() => undefined)
+    items = await listMigrationItems(id)
 
-    const isVerifiedOk = (item: (typeof items)[number]): boolean => {
-      if (!verifyEnabled) return true
-      if (!isSuccessStatus(item.slurperStatus)) return true
-      const v = readBucketVerifyState(item.progress)
-      return v?.status === "ok"
-    }
-    const isVerifyFailure = (item: (typeof items)[number]): boolean => {
-      if (!verifyEnabled) return false
-      if (!isSuccessStatus(item.slurperStatus)) return false
-      const v = readBucketVerifyState(item.progress)
-      return v?.status === "error"
-    }
-    const isVerifyRunning = (item: (typeof items)[number]): boolean => {
-      if (!verifyEnabled) return false
-      if (!isSuccessStatus(item.slurperStatus)) return false
-      const v = readBucketVerifyState(item.progress)
-      return v?.status === "pending" || v?.status === "running" || v === null
-    }
+    const mergedStatuses = items.map((item) => readMergedItemStatus(item))
+    const anyScanning = mergedStatuses.some((status) => status === "scanning")
+    const anyRunning = mergedStatuses.some((status) => status === "running")
+    const anyVerifying = mergedStatuses.some((status) => status === "verifying")
+    const anyFailed = mergedStatuses.some((status) => isFailedLikeMergedStatus(status))
+    const anyVerifyFailure = mergedStatuses.some((status) => status === "verification_failed")
+    const anyAborted = mergedStatuses.some((status) => isAbortedLikeMergedStatus(status))
+    const allTerminal = mergedStatuses.length > 0 && mergedStatuses.every((status) => isCompletedLikeMergedStatus(status) || isFailedLikeMergedStatus(status) || isAbortedLikeMergedStatus(status) || status === "no_files")
+    const allCompleted = mergedStatuses.length > 0 && mergedStatuses.every((status) => isCompletedLikeMergedStatus(status) || status === "no_files")
 
-    const isTerminalWithVerify = (item: (typeof items)[number]): boolean => {
-      const s = String(item.slurperStatus ?? "").toLowerCase()
-      if (isSuccessStatus(s)) {
-        if (!verifyEnabled) return true
-        return isVerifiedOk(item) || isVerifyFailure(item)
-      }
-      return isTerminal(item.slurperStatus)
-    }
-    const anyAborted = items.some((i) => {
-      const s = String(i.slurperStatus ?? "").toLowerCase()
-      return s === "aborted" || s === "canceled" || s === "cancelled" || s === "copy_aborted"
-    })
-    const anySlurperFailure = items.some((i) => isFailure(i.slurperStatus))
-    const allTerminalWithVerify = items.length > 0 && items.every((i) => isTerminalWithVerify(i))
-    const allSuccess =
-      items.length > 0 &&
-      items.every((i) => {
-        const s = String(i.slurperStatus ?? "").toLowerCase()
-        return isSuccessStatus(s) && isVerifiedOk(i)
-      })
-    const anyVerifyRunning = items.some((i) => isVerifyRunning(i))
-    const anyVerifyFailure = items.some((i) => isVerifyFailure(i))
-    const allSlurperTerminal = items.length > 0 && items.every((i) => isTerminal(i.slurperStatus))
-    const allSlurperSuccess =
-      items.length > 0 &&
-      items.every((i) => {
-        const s = String(i.slurperStatus ?? "").toLowerCase()
-        return isSuccessStatus(s)
-      })
-
-    if (allSlurperTerminal && anySlurperFailure) {
+    if (anyScanning || anyRunning) {
       await updateMigration(id, {
-        status: "failed",
-        syncStatus: "error",
-        syncMessage: "One or more buckets failed",
-        completedAt: new Date().toISOString(),
-        lastSyncedAt: new Date().toISOString(),
-      })
-    } else if (allSlurperTerminal && anyAborted) {
-      await updateMigration(id, {
-        status: "canceled",
+        status: "running",
         syncStatus: "ok",
-        syncMessage: "Migration aborted",
-        completedAt: new Date().toISOString(),
+        syncMessage: anyScanning ? "Scanning source buckets" : "Progress updated",
+        completedAt: null,
         lastSyncedAt: new Date().toISOString(),
       })
-    } else if (allSlurperTerminal && allSlurperSuccess && verifyEnabled && anyVerifyFailure) {
-      // Copy finished, verification finished, but verification reported issues.
-      // Treat verification issues as terminal failure to avoid status oscillation.
-      await updateMigration(id, {
-        status: "failed",
-        syncStatus: "error",
-        syncMessage: "Verification failed for one or more buckets",
-        completedAt: new Date().toISOString(),
-        lastSyncedAt: new Date().toISOString(),
-      })
-    } else if (allSlurperTerminal && allSlurperSuccess && verifyEnabled && anyVerifyRunning) {
+    } else if (anyVerifying) {
       await updateMigration(id, {
         status: "verifying",
         syncStatus: "ok",
@@ -1389,20 +1392,27 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
         completedAt: null,
         lastSyncedAt: new Date().toISOString(),
       })
-    } else if (allTerminalWithVerify && allSuccess) {
+    } else if (allCompleted) {
       await updateMigration(id, {
         status: "completed",
         syncStatus: "ok",
-        // Keep completed as completed everywhere; no extra message needed.
         syncMessage: "",
         completedAt: new Date().toISOString(),
         lastSyncedAt: new Date().toISOString(),
       })
-    } else if (allSlurperTerminal && allSlurperSuccess && !verifyEnabled) {
+    } else if (allTerminal && anyFailed) {
       await updateMigration(id, {
-        status: "completed",
+        status: "failed",
+        syncStatus: "error",
+        syncMessage: anyVerifyFailure ? "Verification failed for one or more buckets" : "One or more buckets failed",
+        completedAt: new Date().toISOString(),
+        lastSyncedAt: new Date().toISOString(),
+      })
+    } else if (allTerminal && anyAborted && !anyFailed) {
+      await updateMigration(id, {
+        status: "canceled",
         syncStatus: "ok",
-        syncMessage: "",
+        syncMessage: "Migration aborted",
         completedAt: new Date().toISOString(),
         lastSyncedAt: new Date().toISOString(),
       })
@@ -1410,7 +1420,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
       await updateMigration(id, {
         status: migration.status === "draft" ? "running" : migration.status,
         syncStatus: "ok",
-        syncMessage: anyVerifyRunning ? "Verifying migrated objects" : items.some((i) => Boolean(i.slurperJobId)) ? "Progress updated" : "Queued",
+        syncMessage: items.some((i) => Boolean(i.slurperJobId)) ? "Progress updated" : "Queued",
         lastSyncedAt: new Date().toISOString(),
       })
     }

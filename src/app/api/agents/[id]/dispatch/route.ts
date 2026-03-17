@@ -1,8 +1,8 @@
 import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
-import { createAgentRun, ensureAgentRegistrationToken, getAgentById, getAgentGithubToken, updateAgentRun } from "@/lib/agents-store"
+import { createAgentRun, ensureAgentRegistrationToken, getAgentById, getAgentGithubToken, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { createRepairJob, type RepairJobMode } from "@/lib/repair-jobs-store"
-import { GITHUB_TOKEN_COOKIE, listGitHubWorkflowRuns, setGitHubActionsSecret } from "@/lib/github-oauth"
+import { GITHUB_TOKEN_COOKIE, listGitHubWorkflowRuns } from "@/lib/github-oauth"
 
 function getGitHubTokenFallback(): string {
   return (
@@ -34,6 +34,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     ) as RepairJobMode
     const dispatchInputs =
       typeof body.inputs === "object" && body.inputs !== null ? (body.inputs as Record<string, unknown>) : {}
+    const workflowSupportsRuntimeInputs = body.workflowSupportsRuntimeInputs === true
 
     if (!migrationId) return NextResponse.json({ error: "migrationId is required" }, { status: 400 })
 
@@ -48,28 +49,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const registrationToken = await ensureAgentRegistrationToken(id)
 
     const serverUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || new URL(request.url).origin).replace(/\/+$/, "")
-    await setGitHubActionsSecret({
-      token: githubToken,
-      owner: agent.githubRepoOwner,
-      repo: agent.githubRepoName,
-      name: "DRIVE_SERVER_URL",
-      value: serverUrl,
-    })
-    await setGitHubActionsSecret({
-      token: githubToken,
-      owner: agent.githubRepoOwner,
-      repo: agent.githubRepoName,
-      name: "DRIVE_AGENT_ID",
-      value: agent.id,
-    })
-    await setGitHubActionsSecret({
-      token: githubToken,
-      owner: agent.githubRepoOwner,
-      repo: agent.githubRepoName,
-      name: "DRIVE_AGENT_TOKEN",
-      value: registrationToken,
-    })
-
+    const dispatchRequestedAt = new Date().toISOString()
     const job = await createRepairJob({
       migrationId,
       mode,
@@ -83,9 +63,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const run = await createAgentRun({
       agentId: id,
       runType: "github_dispatch",
-      status: "running",
+      status: "pending",
       jobReference: job.id,
-      summary: `Dispatching workflow for repair job ${job.id}`,
+      summary: `Queued GitHub dispatch for repair job ${job.id}`,
       payload: {
         migrationId,
         mode,
@@ -93,30 +73,47 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         repoName: agent.githubRepoName,
         workflowFile: agent.githubWorkflowFile,
         ref: agent.githubRef || "main",
+        dispatchRequestedAt,
       },
     })
 
-    const response = await fetch(
-      `https://api.github.com/repos/${encodeURIComponent(agent.githubRepoOwner)}/${encodeURIComponent(agent.githubRepoName)}/actions/workflows/${encodeURIComponent(agent.githubWorkflowFile)}/dispatches`,
-      {
-        method: "POST",
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${githubToken}`,
-          "X-GitHub-Api-Version": "2022-11-28",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          ref: agent.githubRef || "main",
+    await updateAgent(id, {
+      status: "offline",
+      lastError: null,
+      metadata: {
+        ...(agent.metadata ?? {}),
+        activeRepairJobId: job.id,
+        githubDispatchRequestedAt: dispatchRequestedAt,
+      },
+    }).catch(() => undefined)
+
+    let response: Response
+    try {
+      response = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(agent.githubRepoOwner)}/${encodeURIComponent(agent.githubRepoName)}/actions/workflows/${encodeURIComponent(agent.githubWorkflowFile)}/dispatches`,
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/vnd.github+json",
+            Authorization: `Bearer ${githubToken}`,
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            ref: agent.githubRef || "main",
           inputs: {
             migration_id: migrationId,
             repair_job_id: job.id,
             agent_id: id,
+            ...(workflowSupportsRuntimeInputs ? { server_url: serverUrl, agent_token: registrationToken } : {}),
             ...dispatchInputs,
           },
         }),
-      }
-    )
+        }
+      )
+    } catch (error: any) {
+      return NextResponse.json({ error: error?.message ?? "Unable to send GitHub workflow dispatch request" }, { status: 400 })
+    }
 
     if (!response.ok) {
       const text = await response.text().catch(() => "")
@@ -125,6 +122,14 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         summary: `GitHub dispatch failed: ${response.status}`,
         payload: { errorBody: text },
         completedAt: new Date().toISOString(),
+      }).catch(() => undefined)
+      await updateAgent(id, {
+        status: "offline",
+        lastError: `GitHub dispatch failed: ${response.status}`,
+        metadata: {
+          ...(agent.metadata ?? {}),
+          activeRepairJobId: null,
+        },
       }).catch(() => undefined)
       return NextResponse.json(
         { error: `GitHub dispatch failed (${response.status}). ${text || "Check token/repo/workflow access."}` },
@@ -142,14 +147,20 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       perPage: 10,
     }).catch(() => [])
 
-    const matchedRun = recentRuns[0]
+    const matchedRun =
+      recentRuns.find((candidate) => {
+        const createdAt = Date.parse(candidate.createdAt || "")
+        const requestedAt = Date.parse(dispatchRequestedAt)
+        if (!Number.isFinite(createdAt) || !Number.isFinite(requestedAt)) return false
+        return createdAt >= requestedAt - 60_000
+      }) ?? recentRuns[0]
 
     const updatedRun = await updateAgentRun(run.id, {
-      status: matchedRun?.status === "completed" ? "completed" : "running",
+      status: matchedRun ? (matchedRun.status === "completed" ? "completed" : "running") : "pending",
       externalRunId: matchedRun?.id ?? null,
       summary: matchedRun
         ? `Workflow dispatched for repair job ${job.id} (run #${matchedRun.runNumber ?? matchedRun.id})`
-        : `Workflow dispatched for repair job ${job.id}`,
+        : `Workflow dispatch queued for repair job ${job.id}; waiting for GitHub to start the run`,
       payload: {
         migrationId,
         mode,
@@ -157,10 +168,25 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         repoName: agent.githubRepoName,
         workflowFile: agent.githubWorkflowFile,
         ref: agent.githubRef || "main",
+        dispatchRequestedAt,
         ...(matchedRun?.htmlUrl ? { htmlUrl: matchedRun.htmlUrl } : {}),
       },
       ...(matchedRun?.status === "completed" ? { completedAt: new Date().toISOString() } : {}),
     })
+
+    await updateAgent(id, {
+      status: matchedRun && matchedRun.status !== "completed" ? "online" : "offline",
+      lastError: null,
+      metadata: {
+        ...(agent.metadata ?? {}),
+        activeRepairJobId: matchedRun && matchedRun.status !== "completed" ? job.id : null,
+        githubDispatchRequestedAt: dispatchRequestedAt,
+        ...(matchedRun?.id ? { githubRunId: matchedRun.id } : {}),
+        ...(matchedRun?.status ? { githubRunStatus: matchedRun.status } : {}),
+        ...(matchedRun?.conclusion ? { githubRunConclusion: matchedRun.conclusion } : {}),
+        ...(matchedRun?.htmlUrl ? { githubRunUrl: matchedRun.htmlUrl } : {}),
+      },
+    }).catch(() => undefined)
 
     return NextResponse.json({ ok: true, job, run: updatedRun }, { status: 200 })
   } catch (error: any) {

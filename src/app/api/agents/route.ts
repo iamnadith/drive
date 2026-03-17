@@ -1,7 +1,7 @@
 import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
 import { createAgent, listAgents, type AgentCapability, type AgentCategory, type AgentProvider } from "@/lib/agents-store"
-import { GITHUB_TOKEN_COOKIE, setGitHubActionsSecret } from "@/lib/github-oauth"
+import { GITHUB_TOKEN_COOKIE } from "@/lib/github-oauth"
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value : ""
@@ -67,37 +67,6 @@ export async function POST(request: Request) {
       githubToken: githubTokenToUse,
       notes: asString(body.notes).trim() || undefined,
     })
-
-    if (
-      provider === "github_actions" &&
-      githubTokenToUse &&
-      result.agent.githubRepoOwner &&
-      result.agent.githubRepoName &&
-      result.registrationToken
-    ) {
-      const serverUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || new URL(request.url).origin).replace(/\/+$/, "")
-      await setGitHubActionsSecret({
-        token: githubTokenToUse,
-        owner: result.agent.githubRepoOwner,
-        repo: result.agent.githubRepoName,
-        name: "DRIVE_SERVER_URL",
-        value: serverUrl,
-      })
-      await setGitHubActionsSecret({
-        token: githubTokenToUse,
-        owner: result.agent.githubRepoOwner,
-        repo: result.agent.githubRepoName,
-        name: "DRIVE_AGENT_ID",
-        value: result.agent.id,
-      })
-      await setGitHubActionsSecret({
-        token: githubTokenToUse,
-        owner: result.agent.githubRepoOwner,
-        repo: result.agent.githubRepoName,
-        name: "DRIVE_AGENT_TOKEN",
-        value: result.registrationToken,
-      })
-    }
 
     return NextResponse.json(result, { status: 201 })
   } catch (error: any) {
