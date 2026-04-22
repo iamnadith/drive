@@ -199,6 +199,13 @@ function providerLabel(provider: AgentProvider): string {
   return "Self-hosted"
 }
 
+function getWorkerConnectionLabel(worker: Pick<AgentRow, "provider" | "githubRepoOwner" | "githubRepoName" | "lastSeenHost" | "endpointDomain" | "lastSeenIp" | "endpointIp">): string {
+  if (worker.provider === "github_actions") {
+    return worker.githubRepoOwner && worker.githubRepoName ? `${worker.githubRepoOwner} / ${worker.githubRepoName}` : "-"
+  }
+  return worker.lastSeenHost || worker.endpointDomain || worker.lastSeenIp || worker.endpointIp || "-"
+}
+
 function jobStatusBadge(status: RepairJobRow["status"]) {
   if (status === "completed") return <Badge>Completed</Badge>
   if (status === "failed") return <Badge variant="destructive">Failed</Badge>
@@ -1063,12 +1070,10 @@ export default function WorkersPage() {
                   </Button>
                 </div>
               </div>
-              <div className="rounded-xl border p-4">
+                <div className="rounded-xl border p-4">
                 <div className="text-muted-foreground">Connection</div>
                 <div className="mt-1">
-                  {selectedWorker.provider === "github_actions"
-                    ? `${selectedWorker.githubRepoOwner || "-"} / ${selectedWorker.githubRepoName || "-"}`
-                    : selectedWorker.endpointDomain || "-"}
+                  {getWorkerConnectionLabel(selectedWorker)}
                 </div>
                 <div className="mt-2 text-xs text-muted-foreground">
                   {selectedWorker.provider === "github_actions"
@@ -1375,7 +1380,7 @@ export default function WorkersPage() {
                 <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                   <div className="rounded-lg border bg-muted/30 p-3 text-sm">
                     <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Connection</div>
-                    <div className="font-medium">{worker.endpointDomain || worker.endpointIp || "-"}</div>
+                    <div className="font-medium">{getWorkerConnectionLabel(worker)}</div>
                     <div className="mt-2 text-xs text-muted-foreground">Heartbeat: {formatDate(worker.lastHeartbeatAt)}</div>
                     <div className="text-xs text-muted-foreground">Host: {worker.lastSeenHost || "-"}</div>
                   </div>

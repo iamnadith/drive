@@ -1067,6 +1067,7 @@ export default function MigrationDetailsPage() {
   )
 
   const overviewBadgeStatus = React.useMemo(() => {
+    if (migration?.status === "completed" && migration.options?.manualCompleted === true) return "completed"
     if (bucketCounts.scanning > 0) return "scanning"
     if (bucketCounts.running > 0) return "running"
     if (bucketCounts.verifying > 0) return "verifying"
@@ -1084,7 +1085,9 @@ export default function MigrationDetailsPage() {
 
   const overviewStatus = React.useMemo(() => {
     const message =
-      bucketCounts.scanning > 0
+      migration?.status === "completed" && migration.options?.manualCompleted === true
+        ? "Migration marked completed manually"
+        : bucketCounts.scanning > 0
         ? `${bucketCounts.scanning} bucket${bucketCounts.scanning === 1 ? "" : "s"} scanning`
         : bucketCounts.running > 0
           ? `${bucketCounts.running} bucket${bucketCounts.running === 1 ? "" : "s"} running`
@@ -1103,7 +1106,7 @@ export default function MigrationDetailsPage() {
       aborted: bucketCounts.aborted,
       pending: bucketCounts.running + bucketCounts.scanning + bucketCounts.verifying,
     }
-  }, [bucketCounts, latestRepairJob, migration?.syncMessage])
+  }, [bucketCounts, latestRepairJob, migration?.options?.manualCompleted, migration?.status, migration?.syncMessage])
 
   const loadInitial = React.useCallback(async () => {
     if (!id) return
@@ -1524,7 +1527,12 @@ export default function MigrationDetailsPage() {
       }
       const rows =
         isRecord(json) && Array.isArray(json.agents)
-          ? (json.agents as WorkerOption[]).filter((worker) => worker.provider === "github_actions" && Array.isArray(worker.capabilities) && worker.capabilities.includes("repair"))
+          ? (json.agents as WorkerOption[]).filter(
+              (worker) =>
+                (worker.provider === "github_actions" || worker.provider === "self_hosted" || worker.provider === "local") &&
+                Array.isArray(worker.capabilities) &&
+                worker.capabilities.includes("repair")
+            )
           : []
       setWorkers(rows)
       setSelectedWorkerId(rows[0]?.id ?? "")

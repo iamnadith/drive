@@ -344,6 +344,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         syncStatus: "ok",
         syncMessage: `Migration canceled${cancelRepairResult.abortedJobs > 0 ? `; aborted ${cancelRepairResult.abortedJobs} worker job(s)` : ""}`,
         lastSyncedAt: now,
+        options: { ...migration.options, manualCompleted: false },
       })
       return NextResponse.json({ ok: true, abortedRepairJobs: cancelRepairResult.abortedJobs, abortedSlurperJobs: candidates.length }, { status: 200 })
     }
@@ -362,6 +363,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         // Keep completed as completed everywhere; no extra message needed.
         syncMessage: "",
         lastSyncedAt: now,
+        options: { ...migration.options, manualCompleted: true },
       })
       return NextResponse.json({ ok: true }, { status: 200 })
     }
@@ -391,6 +393,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         syncStatus: "ok",
         syncMessage: candidates.length > 0 ? `Verification started for ${candidates.length} bucket(s)` : "No completed buckets to verify",
         lastSyncedAt: now,
+        options: { ...migration.options, manualCompleted: false },
       })
 
       return NextResponse.json({ ok: true, verifying: candidates.length }, { status: 200 })
@@ -452,6 +455,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
             ? `Retry queued for ${candidates.length} bucket(s) with overwrite disabled`
             : "No buckets require retry",
         lastSyncedAt: now,
+        options: { ...migration.options, manualCompleted: false },
       })
 
       return NextResponse.json({ ok: true, retried: candidates.length }, { status: 200 })

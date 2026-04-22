@@ -42,6 +42,7 @@ function getLatestRepairJob(jobs: DriveRepairJob[]): DriveRepairJob | null {
 export async function syncMigrationLiveState(migrationId: string): Promise<void> {
   const migration = await getMigration(migrationId)
   if (!migration) return
+  if (migration.status === "completed" && migration.options?.manualCompleted === true) return
 
   const [items, repairJobs] = await Promise.all([listMigrationItems(migrationId), listRepairJobsByMigration(migrationId, 20)])
   const latestRepairJob = getLatestRepairJob(repairJobs)

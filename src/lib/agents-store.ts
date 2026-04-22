@@ -142,6 +142,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
 
+function normalizeEndpointDomain(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  try {
+    if (trimmed.includes("://")) {
+      return new URL(trimmed).hostname || null
+    }
+  } catch {
+    // Fall back to the raw host-ish value below.
+  }
+  return trimmed
+}
+
 function mapAgentRow(row: DriveAgentRow): DriveAgent {
   return {
     id: row.id,
@@ -504,6 +518,8 @@ export async function recordAgentHeartbeat(input: {
     .update({
       status: nextStatus,
       last_heartbeat_at: now,
+      endpoint_ip: input.remoteIp ?? row.endpoint_ip,
+      endpoint_domain: normalizeEndpointDomain(input.host) ?? row.endpoint_domain,
       last_seen_ip: input.remoteIp ?? row.last_seen_ip,
       last_seen_host: input.host ?? row.last_seen_host,
       last_seen_version: input.version ?? row.last_seen_version,

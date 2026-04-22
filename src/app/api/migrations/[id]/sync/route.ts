@@ -353,6 +353,9 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     // But we still reconcile stale terminal states from item-level truth.
     if (migration.status === "completed" || migration.status === "failed" || migration.status === "canceled") {
       const items = await listMigrationItems(id)
+      if (migration.status === "completed" && migration.options?.manualCompleted === true) {
+        return NextResponse.json({ migration, items, skipped: "manual_completed" }, { status: 200 })
+      }
       if (migration.status === "completed") {
         const verifyEnabled = migration.options?.verifyAfterCopy !== false
         const isSuccessStatus = (s: string | undefined) => {

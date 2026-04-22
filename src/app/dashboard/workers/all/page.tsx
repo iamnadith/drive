@@ -20,12 +20,15 @@ type AgentRow = {
   status: AgentStatus
   capabilities: AgentCapability[]
   endpointDomain?: string
+  endpointIp?: string
   githubRepoOwner?: string
   githubRepoName?: string
   githubWorkflowFile?: string
   githubRef?: string
   notes?: string
   lastHeartbeatAt?: string
+  lastSeenIp?: string
+  lastSeenHost?: string
   lastSeenVersion?: string
 }
 
@@ -53,6 +56,13 @@ function providerLabel(provider: AgentProvider) {
   if (provider === "github_actions") return "GitHub Actions"
   if (provider === "local") return "Local"
   return "Self-hosted"
+}
+
+function getWorkerConnectionLabel(worker: AgentRow) {
+  if (worker.provider === "github_actions") {
+    return worker.githubRepoOwner && worker.githubRepoName ? `${worker.githubRepoOwner} / ${worker.githubRepoName}` : "-"
+  }
+  return worker.lastSeenHost || worker.endpointDomain || worker.lastSeenIp || worker.endpointIp || "-"
 }
 
 function statusBadge(status: AgentStatus) {
@@ -152,7 +162,7 @@ export default function AllWorkersPage() {
               </div>
               <div className="rounded-lg border p-3 text-sm">
                 <div className="text-muted-foreground">Connection</div>
-                <div className="mt-1">{worker.provider === "github_actions" ? `${worker.githubRepoOwner || "-"} / ${worker.githubRepoName || "-"}` : worker.endpointDomain || "-"}</div>
+                <div className="mt-1">{getWorkerConnectionLabel(worker)}</div>
                 <div className="mt-1 text-xs text-muted-foreground">{worker.provider === "github_actions" ? worker.githubWorkflowFile || "-" : `Heartbeat: ${formatDate(worker.lastHeartbeatAt)}`}</div>
               </div>
               <div className="rounded-lg border p-3 text-sm">

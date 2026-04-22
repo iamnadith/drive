@@ -68,15 +68,6 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const { id } = await context.params
     const agent = await getAgentById(id)
     if (!agent) return NextResponse.json({ error: "Agent not found" }, { status: 404 })
-    if (agent.provider !== "github_actions") {
-      return NextResponse.json({ error: "This agent is not configured for GitHub Actions" }, { status: 400 })
-    }
-    if (!agent.githubRepoOwner || !agent.githubRepoName || !agent.githubWorkflowFile) {
-      return NextResponse.json({ error: "GitHub repo owner, repo name, and workflow file are required" }, { status: 400 })
-    }
-    const githubRepoOwner = agent.githubRepoOwner
-    const githubRepoName = agent.githubRepoName
-    const githubWorkflowFile = agent.githubWorkflowFile
 
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
     const migrationId = typeof body.migrationId === "string" ? body.migrationId.trim() : ""
@@ -104,6 +95,36 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         { status: 409 }
       )
     }
+
+    if (agent.provider !== "github_actions") {
+      const job = await createRepairJob({
+        migrationId,
+        mode,
+        requestedByAgentId: id,
+        payload: {
+          source: agent.provider,
+          agentId: id,
+        },
+      })
+
+      await updateAgent(id, {
+        status: agent.provider === "self_hosted" || agent.provider === "local" ? "online" : agent.status,
+        lastError: null,
+        metadata: {
+          ...(agent.metadata ?? {}),
+          activeRepairJobId: job.id,
+        },
+      }).catch(() => undefined)
+
+      return NextResponse.json({ ok: true, job }, { status: 200 })
+    }
+
+    if (!agent.githubRepoOwner || !agent.githubRepoName || !agent.githubWorkflowFile) {
+      return NextResponse.json({ error: "GitHub repo owner, repo name, and workflow file are required" }, { status: 400 })
+    }
+    const githubRepoOwner = agent.githubRepoOwner
+    const githubRepoName = agent.githubRepoName
+    const githubWorkflowFile = agent.githubWorkflowFile
 
     const activeWorkerJobs = (await listRepairJobs(100)).filter(
       (job) =>
