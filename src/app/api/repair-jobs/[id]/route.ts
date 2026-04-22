@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
-import { getAgentById, getAgentGithubToken, getLatestAgentRunByJobReference, updateAgent, updateAgentRun } from "@/lib/agents-store"
+import { getAgentById, getAgentGithubToken, getLatestAgentRunByJobReference, listAgentRunsByAgentId, listAgents, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import {
   cancelGitHubWorkflowRun,
   forceCancelGitHubWorkflowRun,
@@ -121,6 +121,48 @@ async function resolveGitHubRunIdForAbort(input: {
   return active?.id ?? runs[0]?.id ?? null
 }
 
+async function resolveGitHubRunIdsForAbort(input: {
+  agentId: string
+  jobId: string
+  owner: string
+  repo: string
+  token: string
+  workflow?: string
+  branch?: string
+  linkedRun?: Awaited<ReturnType<typeof getLatestAgentRunByJobReference>> | null
+}): Promise<string[]> {
+  const allWorkers = await listAgents().catch(() => [])
+  const workerWithRun = allWorkers.find((entry) => entry.id === input.agentId) ?? null
+  const agentRuns = await listAgentRunsByAgentId(input.agentId, 50).catch(() => [])
+
+  const relevantRuns = agentRuns.filter((run) => {
+    if (run.runType !== "github_dispatch") return false
+    if (run.jobReference === input.jobId) return true
+    return run.status === "pending" || run.status === "running"
+  })
+
+  const runIds = new Set<string>()
+  if (input.linkedRun?.externalRunId) runIds.add(input.linkedRun.externalRunId)
+  if (workerWithRun?.latestRun?.externalRunId) runIds.add(workerWithRun.latestRun.externalRunId)
+  for (const run of relevantRuns) {
+    if (run.externalRunId) runIds.add(run.externalRunId)
+  }
+
+  if (runIds.size === 0) {
+    const fallbackRunId = await resolveGitHubRunIdForAbort({
+      token: input.token,
+      owner: input.owner,
+      repo: input.repo,
+      workflow: input.workflow,
+      branch: input.branch,
+      externalRunId: input.linkedRun?.externalRunId,
+    })
+    if (fallbackRunId) runIds.add(fallbackRunId)
+  }
+
+  return Array.from(runIds)
+}
+
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params
@@ -150,7 +192,6 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const agent = agentId ? await getAgentById(agentId).catch(() => null) : null
 
     if (
-      linkedRun &&
       agent &&
       agent.provider === "github_actions" &&
       agent.githubRepoOwner &&
@@ -165,45 +206,55 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         return NextResponse.json({ error: "No GitHub token available to cancel the workflow run" }, { status: 400 })
       }
 
-      const runId = await resolveGitHubRunIdForAbort({
+      const runIds = await resolveGitHubRunIdsForAbort({
+        agentId: agent.id,
+        jobId: id,
         token: githubToken,
         owner: agent.githubRepoOwner,
         repo: agent.githubRepoName,
-        workflow: agent.githubWorkflowFile || (typeof linkedRun.payload?.workflowFile === "string" ? linkedRun.payload.workflowFile : undefined),
-        branch: agent.githubRef || (typeof linkedRun.payload?.ref === "string" ? linkedRun.payload.ref : undefined),
-        externalRunId: linkedRun.externalRunId,
+        workflow: agent.githubWorkflowFile || (typeof linkedRun?.payload?.workflowFile === "string" ? linkedRun.payload.workflowFile : undefined),
+        branch: agent.githubRef || (typeof linkedRun?.payload?.ref === "string" ? linkedRun.payload.ref : undefined),
+        linkedRun,
       })
 
-      if (!runId) {
+      if (runIds.length === 0) {
         return NextResponse.json({ error: "Could not find the GitHub workflow run to cancel" }, { status: 404 })
       }
 
-      const cancelResult = await ensureGitHubRunCanceled({
-        token: githubToken,
-        owner: agent.githubRepoOwner,
-        repo: agent.githubRepoName,
-        runId,
-      })
+      const cancelResults = []
+      for (const runId of runIds) {
+        cancelResults.push(
+          await ensureGitHubRunCanceled({
+            token: githubToken,
+            owner: agent.githubRepoOwner,
+            repo: agent.githubRepoName,
+            runId,
+          })
+        )
+      }
 
-      if (cancelResult.status !== "canceled") {
-        await updateAgentRun(linkedRun.id, {
-          summary: "GitHub workflow abort requested, but GitHub has not confirmed cancellation yet",
-          payload: {
-            ...(linkedRun.payload ?? {}),
-            githubAbortRequestedAt: new Date().toISOString(),
-            githubStatus: cancelResult.githubStatus ?? null,
-            githubConclusion: cancelResult.githubConclusion ?? null,
-            githubUpdatedAt: cancelResult.updatedAt ?? null,
-            ...(cancelResult.htmlUrl ? { htmlUrl: cancelResult.htmlUrl } : {}),
-          },
-        }).catch(() => undefined)
+      const uncanceled = cancelResults.find((result) => result.status !== "canceled")
+      if (uncanceled) {
+        if (linkedRun) {
+          await updateAgentRun(linkedRun.id, {
+            summary: "GitHub workflow abort requested, but GitHub has not confirmed cancellation yet",
+            payload: {
+              ...(linkedRun.payload ?? {}),
+              githubAbortRequestedAt: new Date().toISOString(),
+              githubStatus: uncanceled.githubStatus ?? null,
+              githubConclusion: uncanceled.githubConclusion ?? null,
+              githubUpdatedAt: uncanceled.updatedAt ?? null,
+              ...(uncanceled.htmlUrl ? { htmlUrl: uncanceled.htmlUrl } : {}),
+            },
+          }).catch(() => undefined)
+        }
 
         return NextResponse.json(
           {
             error:
-              cancelResult.status === "running"
+              uncanceled.status === "running"
                 ? "GitHub accepted the abort request, but the workflow run is still running. Try again in a few seconds."
-                : cancelResult.status === "failed"
+                : uncanceled.status === "failed"
                   ? "GitHub workflow ended as failed instead of canceled."
                   : "GitHub workflow completed before it could be canceled.",
           },
@@ -211,20 +262,39 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         )
       }
 
-      await updateAgentRun(linkedRun.id, {
-        status: "canceled",
-        completedAt: new Date().toISOString(),
-        summary: "GitHub workflow abort requested by user",
-        payload: {
-          ...(linkedRun.payload ?? {}),
-          githubRunId: runId,
-          githubAbortRequestedAt: new Date().toISOString(),
-          githubStatus: cancelResult.githubStatus ?? null,
-          githubConclusion: cancelResult.githubConclusion ?? null,
-          githubUpdatedAt: cancelResult.updatedAt ?? null,
-          ...(cancelResult.htmlUrl ? { htmlUrl: cancelResult.htmlUrl } : {}),
-        },
-      }).catch(() => undefined)
+      const now = new Date().toISOString()
+      if (linkedRun) {
+        const lastCancelResult = cancelResults[cancelResults.length - 1]
+        await updateAgentRun(linkedRun.id, {
+          status: "canceled",
+          completedAt: now,
+          summary: "GitHub workflow abort requested by user",
+          payload: {
+            ...(linkedRun.payload ?? {}),
+            githubRunId: runIds[0] ?? null,
+            githubAbortRequestedAt: now,
+            githubStatus: lastCancelResult?.githubStatus ?? null,
+            githubConclusion: lastCancelResult?.githubConclusion ?? null,
+            githubUpdatedAt: lastCancelResult?.updatedAt ?? null,
+            ...(lastCancelResult?.htmlUrl ? { htmlUrl: lastCancelResult.htmlUrl } : {}),
+          },
+        }).catch(() => undefined)
+      }
+
+      const agentRuns = await listAgentRunsByAgentId(agent.id, 50).catch(() => [])
+      for (const run of agentRuns) {
+        if (run.runType !== "github_dispatch") continue
+        if (run.jobReference !== id && run.status !== "pending" && run.status !== "running") continue
+        await updateAgentRun(run.id, {
+          status: "canceled",
+          completedAt: now,
+          summary: "GitHub worker aborted by user",
+          payload: {
+            ...(run.payload ?? {}),
+            githubAbortRequestedAt: now,
+          },
+        }).catch(() => undefined)
+      }
 
       await updateAgent(agent.id, {
         status: "offline",
@@ -232,12 +302,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         metadata: {
           ...(agent.metadata ?? {}),
           activeRepairJobId: null,
-          lastRepairJobAbortAt: new Date().toISOString(),
-          githubAbortRequestedAt: new Date().toISOString(),
-          githubRunStatus: cancelResult.githubStatus ?? null,
-          githubRunConclusion: cancelResult.githubConclusion ?? null,
-          githubRunUpdatedAt: cancelResult.updatedAt ?? null,
-          ...(cancelResult.htmlUrl ? { githubRunUrl: cancelResult.htmlUrl } : {}),
+          lastRepairJobAbortAt: now,
+          githubAbortRequestedAt: now,
         },
       }).catch(() => undefined)
 

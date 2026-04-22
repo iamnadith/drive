@@ -1,12 +1,25 @@
 import { NextResponse } from "next/server"
 import { createRepairJob, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
 import { getAgentById } from "@/lib/agents-store"
+import { listMigrationItems } from "@/lib/migrations-store"
 
 function isRecentIso(value: string | undefined, maxAgeMs: number): boolean {
   if (!value) return false
   const time = new Date(value).getTime()
   if (!Number.isFinite(time)) return false
   return Date.now() - time <= maxAgeMs
+}
+
+function normalizeStatus(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase()
+}
+
+function hasActiveSuperSlurper(items: Array<{ slurperJobId?: string; slurperStatus?: string | null }>): boolean {
+  const activeStatuses = new Set(["queued", "pending", "creating_job", "job_id_pending", "running", "scanning", "verifying"])
+  return items.some((item) => {
+    const status = normalizeStatus(item.slurperStatus)
+    return activeStatuses.has(status)
+  })
 }
 
 export async function GET() {
@@ -30,6 +43,10 @@ export async function POST(request: Request) {
     const requestedByAgentId = typeof body.requestedByAgentId === "string" ? body.requestedByAgentId : undefined
 
     if (!migrationId) return NextResponse.json({ error: "migrationId is required" }, { status: 400 })
+    const items = await listMigrationItems(migrationId)
+    if (hasActiveSuperSlurper(items)) {
+      return NextResponse.json({ error: "Cannot run with worker while Super Slurper is still active for this migration." }, { status: 409 })
+    }
     if (requestedByAgentId) {
       const agent = await getAgentById(requestedByAgentId)
       if (!agent) return NextResponse.json({ error: "Worker not found" }, { status: 404 })

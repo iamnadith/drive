@@ -30,6 +30,36 @@ export type BucketSnapshot = {
   verifyIssues: number
 }
 
+function normalizeBucketSnapshot(snapshot: BucketSnapshot): BucketSnapshot {
+  const total = Number.isFinite(snapshot.total) ? Math.max(0, Math.floor(snapshot.total)) : 0
+  if (total <= 0) return snapshot
+
+  const transferred = Number.isFinite(snapshot.transferred)
+    ? Math.max(0, Math.min(total, Math.floor(snapshot.transferred)))
+    : 0
+  const skippedCapacity = Math.max(0, total - transferred)
+  const skipped = Number.isFinite(snapshot.skipped)
+    ? Math.max(0, Math.min(skippedCapacity, Math.floor(snapshot.skipped)))
+    : 0
+  const failedCapacity = Math.max(0, total - transferred - skipped)
+  const failed = Number.isFinite(snapshot.failed)
+    ? Math.max(0, Math.min(failedCapacity, Math.floor(snapshot.failed)))
+    : 0
+  const unaccountedCapacity = Math.max(0, total - transferred - skipped - failed)
+  const unaccounted = Number.isFinite(snapshot.unaccounted)
+    ? Math.max(0, Math.min(unaccountedCapacity, Math.floor(snapshot.unaccounted)))
+    : 0
+
+  return {
+    ...snapshot,
+    total,
+    transferred,
+    skipped,
+    failed,
+    unaccounted,
+  }
+}
+
 function isActiveBucketDisplayStatus(value: unknown): boolean {
   const s = normalizeStatus(value)
   return s === "scanning" || s === "queued" || s === "running" || s === "verifying" || s === "creating_job" || s === "job_id_pending"
@@ -64,7 +94,7 @@ export function normalizeStatus(value: unknown): string {
 
 export function isCompletedStatus(value: unknown): boolean {
   const s = normalizeStatus(value)
-  return s === "completed" || s === "copy_completed" || s === "complete" || s === "finished" || s === "success" || s === "succeeded"
+  return s === "completed" || s === "copy_completed" || s === "complete" || s === "finished" || s === "success" || s === "succeeded" || s === "no_files"
 }
 
 export function isAbortedStatus(value: unknown): boolean {
@@ -135,6 +165,7 @@ export function readLiveBucketState(progress: Record<string, unknown>) {
   const live = isRecord(progress.live) ? (progress.live as Record<string, unknown>) : null
   if (!live) return null
   return {
+    updatedAt: typeof live.updatedAt === "string" ? live.updatedAt : null,
     status: typeof live.status === "string" ? live.status : undefined,
     transferredObjects: typeof live.transferredObjects === "number" ? live.transferredObjects : 0,
     skippedObjects: typeof live.skippedObjects === "number" ? live.skippedObjects : 0,
@@ -148,6 +179,24 @@ export function readLiveBucketState(progress: Record<string, unknown>) {
     slurperJobId: typeof live.slurperJobId === "string" ? live.slurperJobId : null,
     repairJobId: typeof live.repairJobId === "string" ? live.repairJobId : null,
   }
+}
+
+export function shouldUseLiveBucketState(
+  item: Pick<BucketLikeItem, "slurperJobId">,
+  live: ReturnType<typeof readLiveBucketState>,
+  options?: { latestRepairJobId?: string | null }
+): boolean {
+  if (!live) return false
+
+  const currentSlurperJobId = item.slurperJobId ?? null
+  const currentRepairJobId = options?.latestRepairJobId ?? null
+  const liveSlurperJobId = live.slurperJobId ?? null
+  const liveRepairJobId = live.repairJobId ?? null
+  const hasCurrentCycle = Boolean(currentSlurperJobId || currentRepairJobId)
+  const hasLiveCycle = Boolean(liveSlurperJobId || liveRepairJobId)
+
+  if (!hasCurrentCycle && !hasLiveCycle) return false
+  return currentSlurperJobId === liveSlurperJobId && currentRepairJobId === liveRepairJobId
 }
 
 export function readRepairResultItemMetrics(itemResult?: Record<string, unknown>): RepairResultItemMetrics {
@@ -171,9 +220,14 @@ export function getEffectiveRepairStatus(input: {
   const workerStatus = normalizeStatus(input.repairWorkerStatus)
   const latestJobStatus = normalizeStatus(input.latestRepairJobStatus)
   const jobTargetsThisItem = Boolean(input.repairAppliesToItem || !input.latestRepairJobExists || !input.latestRepairItemCount)
+  const latestJobActive = isActiveRepairWorkerStatus(latestJobStatus)
 
   if (isTerminalRepairJobStatus(latestJobStatus) && isActiveRepairWorkerStatus(workerStatus) && jobTargetsThisItem) {
     return latestJobStatus === "canceled" ? "failed" : latestJobStatus
+  }
+
+  if (latestJobActive && jobTargetsThisItem && !isActiveRepairWorkerStatus(workerStatus)) {
+    return "queued"
   }
 
   if (isActiveRepairWorkerStatus(workerStatus)) {
@@ -197,6 +251,9 @@ export function getItemStatus(item: BucketLikeItem): string | undefined {
     return "scanning"
   }
   if (!item.slurperJobId && stage === "scan_failed") return "scan_failed"
+  if (item.slurperJobId && typeof item.slurperStatus === "string" && normalizeStatus(item.slurperStatus) === "progress_fetch_failed") {
+    return "running"
+  }
   if (typeof item.slurperStatus === "string" && item.slurperStatus.length > 0) return item.slurperStatus
   if (typeof progress.slurperStatus === "string" && progress.slurperStatus.length > 0) return String(progress.slurperStatus)
   return readSlurperResult(progress)?.status
@@ -210,7 +267,7 @@ export function getItemDisplayStatus(
   const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
   const repairState = readRepairWorkerState(progress)
   const repairStatus = normalizeStatus(repairStatusOverride || repairState?.status)
-  const repairStage = normalizeStatus(repairState?.stage)
+  const repairStage = isActiveRepairWorkerStatus(repairState?.status) ? normalizeStatus(repairState?.stage) : ""
   const repairDetails = repairState?.details
   const verify = readVerifyState(progress)
   const base = getItemStatus(item)
@@ -225,13 +282,13 @@ export function getItemDisplayStatus(
   if (repairStatus === "completed") return resolvedAllObjects ? "completed" : finalMissing > 0 || finalMismatched > 0 ? "failed" : "completed"
   if (repairStatus === "failed" || repairStatus === "error") return "failed"
   if (repairStatus === "canceled" || repairStatus === "aborted") return "aborted"
+  if (repairStatus === "queued" || repairStatus === "claimed" || repairStatus === "pending") return "queued"
   if (repairStatus === "running") {
     if (repairStage.includes("scan")) return "scanning"
     if (repairStage.includes("verify")) return "verifying"
     return "running"
   }
-  if (repairStatus === "claimed" || repairStatus === "pending") return "running"
-  if (verify?.status === "ok" && verify.note === "no_source_objects") return "no_files"
+  if (verify?.status === "ok" && verify.note === "no_source_objects") return "completed"
   if ((verify?.status === "pending" || verify?.status === "running") && (repairStage.includes("verify") || isCompletedStatus(base))) {
     return "verifying"
   }
@@ -260,6 +317,7 @@ export function getMergedBucketSnapshot(
   item: BucketLikeItem,
   repairResultItem?: Record<string, unknown>,
   options?: {
+    latestRepairJobId?: string
     latestRepairJobStatus?: string
     repairAppliesToItem?: boolean
     latestRepairJobExists?: boolean
@@ -268,26 +326,47 @@ export function getMergedBucketSnapshot(
 ): BucketSnapshot {
   const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
   const live = readLiveBucketState(progress)
-  if (live) {
-    return {
-      displayStatus: live.status ?? getItemDisplayStatus(item, repairResultItem, live.workerStatus ?? undefined),
-      total: live.totalObjects,
-      transferred: live.transferredObjects,
-      skipped: live.skippedObjects,
-      failed: live.failedObjects,
-      unaccounted: live.unaccountedObjects,
-      verifyIssues: live.verifyIssues,
-    }
+  const repairState = readRepairWorkerState(progress)
+  const latestRepairJobStatus = normalizeStatus(options?.latestRepairJobStatus)
+  const canceledRepairWithoutResult =
+    latestRepairJobStatus === "canceled" &&
+    !repairResultItem &&
+    isActiveRepairWorkerStatus(repairState?.status)
+  const canceledRepairScanOnly =
+    canceledRepairWithoutResult &&
+    normalizeStatus(repairState?.stage).includes("scan")
+  if (live && shouldUseLiveBucketState(item, live, { latestRepairJobId: options?.latestRepairJobId ?? null })) {
+    const stableLive = live
+    return normalizeBucketSnapshot({
+      displayStatus:
+        canceledRepairWithoutResult
+          ? canceledRepairScanOnly
+            ? getItemStatus(item)
+            : "failed"
+          : stableLive.status ?? getItemDisplayStatus(item, repairResultItem, stableLive.workerStatus ?? undefined),
+      total: stableLive.totalObjects,
+      transferred: stableLive.transferredObjects,
+      skipped: stableLive.skippedObjects,
+      failed: stableLive.failedObjects,
+      unaccounted: stableLive.unaccountedObjects,
+      verifyIssues: stableLive.verifyIssues,
+    })
   }
 
   const slurper = readSlurperResult(progress)
-  const repairState = readRepairWorkerState(progress)
   const repairResult = readRepairResultItemMetrics(repairResultItem)
   const verify = readVerifyState(progress)
+  const latestRepairJobActive = isActiveRepairWorkerStatus(latestRepairJobStatus)
+  const repairTargetsThisItem = Boolean(options?.repairAppliesToItem || !options?.latestRepairJobExists || !options?.latestRepairItemCount)
+  const suppressStaleRepairFailureState =
+    latestRepairJobActive &&
+    repairTargetsThisItem &&
+    !isActiveRepairWorkerStatus(repairState?.status) &&
+    !repairResultItem
   const effectiveRepairStatus = getEffectiveRepairStatus({
-    repairWorkerStatus: repairState?.status,
-    latestRepairJobStatus: options?.latestRepairJobStatus,
-    repairAppliesToItem: options?.repairAppliesToItem,
+    repairWorkerStatus: canceledRepairWithoutResult ? (canceledRepairScanOnly ? undefined : "failed") : repairState?.status,
+    latestRepairJobStatus,
+    repairAppliesToItem: repairTargetsThisItem,
     latestRepairJobExists: options?.latestRepairJobExists,
     latestRepairItemCount: options?.latestRepairItemCount,
   })
@@ -295,19 +374,43 @@ export function getMergedBucketSnapshot(
 
   const sourceScanStatus = typeof progress.sourceScanStatus === "string" ? progress.sourceScanStatus : ""
   const scanComplete = sourceScanStatus === "completed"
-  const total =
-    scanComplete && typeof item.sourceObjects === "number"
-      ? item.sourceObjects
-      : typeof slurper?.objects === "number"
-        ? slurper.objects
+  const scannedSourceTotal = typeof item.sourceObjects === "number" ? item.sourceObjects : 0
+  const workerSourceTotal =
+    repairResultItem && typeof repairResultItem.sourceObjectCount === "number"
+      ? repairResultItem.sourceObjectCount
+      : repairState?.details && typeof repairState.details.sourceObjectCount === "number"
+        ? Number(repairState.details.sourceObjectCount)
         : 0
+  const total =
+    workerSourceTotal > 0
+      ? workerSourceTotal
+      : scanComplete || scannedSourceTotal > 0
+        ? scannedSourceTotal
+        : typeof slurper?.objects === "number"
+          ? slurper.objects
+          : 0
 
   const slurperTransferred = typeof slurper?.transferredObjects === "number" ? slurper.transferredObjects : 0
   const slurperSkipped = typeof slurper?.skippedObjects === "number" ? slurper.skippedObjects : 0
-  const slurperFailed = typeof slurper?.failedObjects === "number" ? slurper.failedObjects : 0
+  const slurperFailed = suppressStaleRepairFailureState ? 0 : typeof slurper?.failedObjects === "number" ? slurper.failedObjects : 0
+  const workerInitialMissing =
+    suppressStaleRepairFailureState
+      ? 0
+      : repairResultItem && typeof repairResultItem.initialMissing === "number"
+      ? repairResultItem.initialMissing
+      : repairState?.details && typeof repairState.details.initialMissing === "number"
+        ? Number(repairState.details.initialMissing)
+        : 0
+  const workerInitialMismatched =
+    suppressStaleRepairFailureState
+      ? 0
+      : repairResultItem && typeof repairResultItem.initialMismatched === "number"
+      ? repairResultItem.initialMismatched
+      : repairState?.details && typeof repairState.details.initialMismatched === "number"
+        ? Number(repairState.details.initialMismatched)
+        : 0
   const workerTransferred = Math.max(typeof repairState?.transferred === "number" ? repairState.transferred : 0, repairResult.transferred)
   const workerSkipped = Math.max(typeof repairState?.skipped === "number" ? repairState.skipped : 0, repairResult.skipped)
-  const workerFailed = Math.max(typeof repairState?.failed === "number" ? repairState.failed : 0, repairResult.failed)
   const finalMissing =
     repairResult.finalMissing ||
     (repairState?.details && typeof repairState.details.finalMissing === "number" ? Number(repairState.details.finalMissing) : 0)
@@ -316,29 +419,40 @@ export function getMergedBucketSnapshot(
     (repairState?.details && typeof repairState.details.finalMismatched === "number" ? Number(repairState.details.finalMismatched) : 0)
   const resolvedAllObjects = repairResult.resolvedAllObjects || (normalizeStatus(effectiveRepairStatus) === "completed" && finalMissing === 0 && finalMismatched === 0)
 
+  const baselineFailedCount = Math.max(slurperFailed, workerInitialMissing + workerInitialMismatched)
   let remainingFixed = Math.max(0, workerTransferred)
-  const resolvedFailed = Math.min(slurperFailed, remainingFixed)
+  const resolvedFailed = Math.min(baselineFailedCount, remainingFixed)
   remainingFixed -= resolvedFailed
-  const baseUnaccounted = Math.max(0, total - (slurperTransferred + slurperSkipped + slurperFailed))
+  const baseUnaccounted = Math.max(0, total - (slurperTransferred + slurperSkipped + baselineFailedCount))
   const resolvedUnaccounted = Math.min(baseUnaccounted, remainingFixed)
   const verifyIssues = readLiveRepairVerificationIssues({
     repairStatus: effectiveRepairStatus,
-    finalMissing,
-    finalMismatched,
-    verify,
+    finalMissing: suppressStaleRepairFailureState ? 0 : finalMissing,
+    finalMismatched: suppressStaleRepairFailureState ? 0 : finalMismatched,
+    verify: suppressStaleRepairFailureState ? null : verify,
   })
+  const transferredValue = resolvedAllObjects
+    ? Math.max(total > 0 ? total - Math.max(slurperSkipped, workerSkipped) : 0, slurperTransferred + workerTransferred)
+    : total > 0
+      ? Math.min(total, slurperTransferred + workerTransferred)
+      : slurperTransferred + workerTransferred
+  const skippedValue = Math.max(slurperSkipped, workerSkipped)
+  const estimatedOutstandingFailed = Math.max(0, baselineFailedCount - resolvedFailed)
+  const reportedOutstandingFailed = finalMissing + finalMismatched
+  const failedValueRaw = resolvedAllObjects
+    ? 0
+    : reportedOutstandingFailed > 0
+      ? Math.min(reportedOutstandingFailed, estimatedOutstandingFailed > 0 ? estimatedOutstandingFailed : reportedOutstandingFailed)
+      : estimatedOutstandingFailed
+  const remainingCapacity = total > 0 ? Math.max(0, total - Math.min(total, transferredValue + skippedValue)) : failedValueRaw
 
-  return {
+  return normalizeBucketSnapshot({
     displayStatus,
     total,
-    transferred: resolvedAllObjects
-      ? Math.max(total > 0 ? total - Math.max(slurperSkipped, workerSkipped) : 0, slurperTransferred + workerTransferred)
-      : total > 0
-        ? Math.min(total, slurperTransferred + workerTransferred)
-        : slurperTransferred + workerTransferred,
-    skipped: Math.max(slurperSkipped, workerSkipped),
-    failed: resolvedAllObjects ? 0 : Math.max(0, slurperFailed - resolvedFailed + workerFailed + finalMissing + finalMismatched),
+    transferred: transferredValue,
+    skipped: skippedValue,
+    failed: total > 0 ? Math.min(remainingCapacity, failedValueRaw) : failedValueRaw,
     unaccounted: resolvedAllObjects ? 0 : Math.max(0, baseUnaccounted - resolvedUnaccounted - verifyIssues),
     verifyIssues,
-  }
+  })
 }

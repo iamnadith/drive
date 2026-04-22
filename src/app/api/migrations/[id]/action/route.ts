@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server"
+import { getAgentById, getAgentGithubToken, getLatestAgentRunByJobReference, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { getAllAccounts } from "@/lib/accounts-store"
 import { slurperAbortJob, slurperPauseJob, slurperResumeJob } from "@/lib/cloudflare-r2-super-slurper"
+import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflowRun, listGitHubWorkflowRuns } from "@/lib/github-oauth"
 import { getMigration, listMigrationItems, updateMigration, updateMigrationItem } from "@/lib/migrations-store"
+import { abortRepairJob, listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 import { createInitialBucketVerifyState } from "@/lib/bucket-verifier"
 
 export const runtime = "nodejs"
@@ -32,6 +35,221 @@ function readVerifyStatus(progress: Record<string, unknown>): "pending" | "runni
   const status = typeof verify.status === "string" ? verify.status : ""
   if (status === "pending" || status === "running" || status === "ok" || status === "error") return status
   return null
+}
+
+function getGitHubTokenFallback(): string {
+  return (
+    process.env.GITHUB_TOKEN ||
+    process.env.GITHUB_PERSONAL_ACCESS_TOKEN ||
+    process.env.GH_TOKEN ||
+    ""
+  ).trim()
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function normalizeGitHubRunTerminalStatus(status: string, conclusion: string): "completed" | "failed" | "canceled" | "running" {
+  if (status !== "completed") return "running"
+  if (conclusion === "success") return "completed"
+  if (conclusion === "cancelled" || conclusion === "cancelled_by_user") return "canceled"
+  return "failed"
+}
+
+async function ensureGitHubRunCanceled(input: {
+  token: string
+  owner: string
+  repo: string
+  runId: string
+}): Promise<{
+  terminal: boolean
+  status: "completed" | "failed" | "canceled" | "running"
+  githubStatus?: string
+  githubConclusion?: string
+  htmlUrl?: string
+  updatedAt?: string
+}> {
+  await cancelGitHubWorkflowRun(input)
+  await forceCancelGitHubWorkflowRun(input).catch(() => undefined)
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    await sleep(attempt === 0 ? 1200 : 2500)
+    const run = await getGitHubWorkflowRun(input)
+    const currentStatus = String(run.status ?? "").toLowerCase()
+    const conclusion = String(run.conclusion ?? "").toLowerCase()
+    const status = normalizeGitHubRunTerminalStatus(currentStatus, conclusion)
+    if (status === "canceled" || status === "completed" || status === "failed") {
+      return {
+        terminal: true,
+        status,
+        githubStatus: currentStatus,
+        githubConclusion: conclusion,
+        htmlUrl: run.htmlUrl,
+        updatedAt: run.updatedAt,
+      }
+    }
+    if (attempt < 8 && (attempt === 1 || attempt === 3 || attempt === 5 || attempt === 7)) {
+      await cancelGitHubWorkflowRun(input).catch(() => undefined)
+      await forceCancelGitHubWorkflowRun(input).catch(() => undefined)
+    }
+  }
+
+  const finalRun = await getGitHubWorkflowRun(input)
+  const currentStatus = String(finalRun.status ?? "").toLowerCase()
+  const conclusion = String(finalRun.conclusion ?? "").toLowerCase()
+  return {
+    terminal: currentStatus === "completed",
+    status: normalizeGitHubRunTerminalStatus(currentStatus, conclusion),
+    githubStatus: currentStatus,
+    githubConclusion: conclusion,
+    htmlUrl: finalRun.htmlUrl,
+    updatedAt: finalRun.updatedAt,
+  }
+}
+
+async function resolveGitHubRunIdForAbort(input: {
+  token: string
+  owner: string
+  repo: string
+  workflow?: string
+  branch?: string
+  externalRunId?: string
+}): Promise<string | null> {
+  if (input.externalRunId) return input.externalRunId
+  if (!input.workflow) return null
+
+  const runs = await listGitHubWorkflowRuns({
+    token: input.token,
+    owner: input.owner,
+    repo: input.repo,
+    workflow: input.workflow,
+    branch: input.branch,
+    event: "workflow_dispatch",
+    perPage: 20,
+  }).catch(() => [])
+
+  const active = runs.find((run) => {
+    const status = String(run.status ?? "").toLowerCase()
+    return status === "queued" || status === "in_progress" || status === "waiting" || status === "requested" || status === "pending"
+  })
+
+  return active?.id ?? runs[0]?.id ?? null
+}
+
+async function abortRepairJobsForMigration(migrationId: string): Promise<{
+  abortedJobs: number
+  blockedJobs: Array<{ jobId: string; reason: string }>
+}> {
+  const repairJobs = await listRepairJobsByMigration(migrationId, 50).catch(() => [])
+  const activeJobs = repairJobs.filter((job) => !["completed", "failed"].includes(String(job.status)))
+  const blockedJobs: Array<{ jobId: string; reason: string }> = []
+  let abortedJobs = 0
+
+  for (const job of activeJobs) {
+    const linkedRun = await getLatestAgentRunByJobReference(job.id).catch(() => null)
+    const agentId = job.claimedByAgentId || job.requestedByAgentId
+    const agent = agentId ? await getAgentById(agentId).catch(() => null) : null
+
+    if (
+      linkedRun &&
+      agent &&
+      agent.provider === "github_actions" &&
+      agent.githubRepoOwner &&
+      agent.githubRepoName
+    ) {
+      const githubToken =
+        (await getAgentGithubToken(agent.id).catch(() => null)) ||
+        getGitHubTokenFallback()
+
+      if (!githubToken) {
+        blockedJobs.push({ jobId: job.id, reason: "No GitHub token available to cancel the workflow run" })
+        continue
+      }
+
+      const runId = await resolveGitHubRunIdForAbort({
+        token: githubToken,
+        owner: agent.githubRepoOwner,
+        repo: agent.githubRepoName,
+        workflow: agent.githubWorkflowFile || (typeof linkedRun.payload?.workflowFile === "string" ? linkedRun.payload.workflowFile : undefined),
+        branch: agent.githubRef || (typeof linkedRun.payload?.ref === "string" ? linkedRun.payload.ref : undefined),
+        externalRunId: linkedRun.externalRunId,
+      })
+
+      if (!runId) {
+        blockedJobs.push({ jobId: job.id, reason: "Could not find the GitHub workflow run to cancel" })
+        continue
+      }
+
+      const cancelResult = await ensureGitHubRunCanceled({
+        token: githubToken,
+        owner: agent.githubRepoOwner,
+        repo: agent.githubRepoName,
+        runId,
+      }).catch(() => null)
+
+      if (!cancelResult) {
+        blockedJobs.push({ jobId: job.id, reason: "Unable to confirm GitHub workflow cancellation" })
+        continue
+      }
+
+      if (cancelResult.status !== "canceled") {
+        await updateAgentRun(linkedRun.id, {
+          summary: "GitHub workflow abort requested by migration cancel, but cancellation is not confirmed yet",
+          payload: {
+            ...(linkedRun.payload ?? {}),
+            githubRunId: runId,
+            githubAbortRequestedAt: new Date().toISOString(),
+            githubStatus: cancelResult.githubStatus ?? null,
+            githubConclusion: cancelResult.githubConclusion ?? null,
+            githubUpdatedAt: cancelResult.updatedAt ?? null,
+            ...(cancelResult.htmlUrl ? { htmlUrl: cancelResult.htmlUrl } : {}),
+          },
+        }).catch(() => undefined)
+
+        blockedJobs.push({
+          jobId: job.id,
+          reason:
+            cancelResult.status === "running"
+              ? "GitHub accepted the abort request, but the workflow run is still running"
+              : cancelResult.status === "failed"
+                ? "GitHub workflow ended as failed instead of canceled"
+                : "GitHub workflow completed before it could be canceled",
+        })
+        continue
+      }
+
+      await updateAgentRun(linkedRun.id, {
+        status: "canceled",
+        completedAt: new Date().toISOString(),
+        summary: "GitHub workflow abort requested by migration cancel",
+        payload: {
+          ...(linkedRun.payload ?? {}),
+          githubRunId: runId,
+          githubAbortRequestedAt: new Date().toISOString(),
+          githubStatus: cancelResult.githubStatus ?? null,
+          githubConclusion: cancelResult.githubConclusion ?? null,
+          githubUpdatedAt: cancelResult.updatedAt ?? null,
+          ...(cancelResult.htmlUrl ? { htmlUrl: cancelResult.htmlUrl } : {}),
+        },
+      }).catch(() => undefined)
+
+      await updateAgent(agent.id, {
+        status: "offline",
+        lastError: null,
+        metadata: {
+          ...(agent.metadata ?? {}),
+          activeRepairJobId: null,
+          lastRepairJobAbortAt: new Date().toISOString(),
+        },
+      }).catch(() => undefined)
+    }
+
+    await abortRepairJob(job.id).catch(() => undefined)
+    abortedJobs += 1
+  }
+
+  return { abortedJobs, blockedJobs }
 }
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
@@ -83,6 +301,21 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     if (action === "cancel_migration") {
+      const cancelRepairResult = await abortRepairJobsForMigration(id)
+      if (cancelRepairResult.blockedJobs.length > 0) {
+        const first = cancelRepairResult.blockedJobs[0]
+        return NextResponse.json(
+          {
+            error:
+              cancelRepairResult.blockedJobs.length === 1
+                ? `Worker job ${first.jobId} is still running: ${first.reason}`
+                : `${cancelRepairResult.blockedJobs.length} worker job(s) are still running; first issue: ${first.reason}`,
+            abortedRepairJobs: cancelRepairResult.abortedJobs,
+            blockedRepairJobs: cancelRepairResult.blockedJobs,
+          },
+          { status: 409 }
+        )
+      }
       const candidates = items.filter(
         (i) => Boolean(i.slurperJobId) && !["completed", "aborted", "failed", "copy_completed", "copy_failed"].includes(normalizeStatus(i.slurperStatus))
       )
@@ -109,10 +342,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         status: "canceled",
         completedAt: now,
         syncStatus: "ok",
-        syncMessage: "Migration canceled",
+        syncMessage: `Migration canceled${cancelRepairResult.abortedJobs > 0 ? `; aborted ${cancelRepairResult.abortedJobs} worker job(s)` : ""}`,
         lastSyncedAt: now,
       })
-      return NextResponse.json({ ok: true }, { status: 200 })
+      return NextResponse.json({ ok: true, abortedRepairJobs: cancelRepairResult.abortedJobs, abortedSlurperJobs: candidates.length }, { status: 200 })
     }
 
     if (action === "mark_completed") {

@@ -117,6 +117,18 @@ function normalizeSupabaseError(error: { message: string }): Error {
   return new Error(message)
 }
 
+function wrapSupabaseQueryError(error: unknown, context: string): Error {
+  if (error instanceof SyntaxError) {
+    return new Error(
+      `Supabase returned invalid or empty JSON while ${context}. This usually means the upstream response was truncated or an HTML/error page was returned instead of JSON.`
+    )
+  }
+  if (error && typeof error === "object" && "message" in error) {
+    return normalizeSupabaseError(error as { message: string })
+  }
+  return error instanceof Error ? error : new Error(`${context} failed`)
+}
+
 function sanitizeCapabilities(value: unknown): AgentCapability[] {
   if (!Array.isArray(value)) return []
   return value
@@ -204,20 +216,36 @@ function deriveInitialStatus(input: {
 
 export async function listAgents(): Promise<Array<DriveAgent & { latestRun: DriveAgentRun | null }>> {
   const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase.from(AGENTS_TABLE).select("*").order("created_at", { ascending: false })
+  let data: unknown
+  let error: { message: string } | null = null
+  try {
+    const response = await supabase.from(AGENTS_TABLE).select("*").order("created_at", { ascending: false })
+    data = response.data
+    error = response.error
+  } catch (caughtError) {
+    throw wrapSupabaseQueryError(caughtError, `reading '${AGENTS_TABLE}'`)
+  }
   if (error) throw normalizeSupabaseError(error)
 
   const agents = (Array.isArray(data) ? (data as DriveAgentRow[]) : []).map(mapAgentRow)
   if (agents.length === 0) return []
 
-  const { data: runs, error: runsError } = await supabase
-    .from(AGENT_RUNS_TABLE)
-    .select("*")
-    .in(
-      "agent_id",
-      agents.map((agent) => agent.id)
-    )
-    .order("created_at", { ascending: false })
+  let runs: unknown
+  let runsError: { message: string } | null = null
+  try {
+    const response = await supabase
+      .from(AGENT_RUNS_TABLE)
+      .select("*")
+      .in(
+        "agent_id",
+        agents.map((agent) => agent.id)
+      )
+      .order("created_at", { ascending: false })
+    runs = response.data
+    runsError = response.error
+  } catch (caughtError) {
+    throw wrapSupabaseQueryError(caughtError, `reading '${AGENT_RUNS_TABLE}' for latest worker runs`)
+  }
   if (runsError) throw new Error(runsError.message)
 
   const latestByAgent = new Map<string, DriveAgentRun>()
@@ -397,6 +425,19 @@ export async function getLatestAgentRunByJobReference(jobReference: string): Pro
   if (error) throw normalizeSupabaseError(error)
   const row = Array.isArray(data) ? (data[0] as DriveAgentRunRow | undefined) : undefined
   return row ? mapRunRow(row) : null
+}
+
+export async function listAgentRunsByAgentId(agentId: string, limit = 20): Promise<DriveAgentRun[]> {
+  const supabase = getSupabaseServerClient()
+  const { data, error } = await supabase
+    .from(AGENT_RUNS_TABLE)
+    .select("*")
+    .eq("agent_id", agentId)
+    .order("created_at", { ascending: false })
+    .limit(limit)
+
+  if (error) throw normalizeSupabaseError(error)
+  return (Array.isArray(data) ? (data as DriveAgentRunRow[]) : []).map(mapRunRow)
 }
 
 export async function updateAgent(

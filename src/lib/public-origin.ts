@@ -29,15 +29,6 @@ function normalizeOrigin(input: string): string {
 }
 
 export function getPublicOrigin(request: Request): string {
-  const envOrigin =
-    process.env.APP_ORIGIN ??
-    process.env.NEXT_PUBLIC_APP_ORIGIN ??
-    process.env.NEXT_PUBLIC_APP_URL
-
-  if (envOrigin) {
-    return normalizeOrigin(envOrigin)
-  }
-
   const proto = firstHeaderValue(request.headers, "x-forwarded-proto")
   const host = firstHeaderValue(request.headers, "x-forwarded-host")
   if (proto && host) {
@@ -46,5 +37,18 @@ export function getPublicOrigin(request: Request): string {
     return normalizeOrigin(`${proto}://${host}`)
   }
 
-  return new URL(request.url).origin
+  const requestOrigin = new URL(request.url).origin
+  if (requestOrigin && requestOrigin !== "null") {
+    return normalizeOrigin(requestOrigin)
+  }
+
+  const fallbackOrigin =
+    process.env.APP_ORIGIN ??
+    process.env.NEXT_PUBLIC_APP_ORIGIN ??
+    process.env.NEXT_PUBLIC_APP_URL
+  if (fallbackOrigin) {
+    return normalizeOrigin(fallbackOrigin)
+  }
+
+  return requestOrigin
 }

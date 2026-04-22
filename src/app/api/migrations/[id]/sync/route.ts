@@ -34,6 +34,7 @@ import {
   claimMigrationItemJobCreation,
 } from "@/lib/migrations-store"
 import { syncMigrationLiveState } from "@/lib/migration-live-state"
+import { readLiveBucketState, shouldUseLiveBucketState } from "@/lib/migration-bucket-state"
 
 export const runtime = "nodejs"
 
@@ -120,10 +121,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
 
-function readLiveStatus(item: { progress?: unknown }): string | undefined {
+function readLiveStatus(item: { progress?: unknown; slurperJobId?: string | null }): string | undefined {
   const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
-  const live = isRecord(progress.live) ? (progress.live as Record<string, unknown>) : null
-  return live && typeof live.status === "string" ? live.status : undefined
+  const live = readLiveBucketState(progress)
+  return shouldUseLiveBucketState({ slurperJobId: item.slurperJobId ?? undefined }, live) && typeof live?.status === "string" ? live.status : undefined
 }
 
 function readMergedItemStatus(item: { progress?: unknown; slurperJobId?: string | null; slurperStatus?: string | null }): string {
@@ -159,9 +160,16 @@ function readMergedItemStatus(item: { progress?: unknown; slurperJobId?: string 
   const verifyStatus = typeof verify?.status === "string" ? normalizeSlurperStatus(verify.status) : ""
   if (verifyStatus === "pending" || verifyStatus === "running") return "verifying"
   if (verifyStatus === "error") return "verification_failed"
-  if (verifyStatus === "ok" && typeof verify?.note === "string" && verify.note === "no_source_objects") return "no_files"
+  if (verifyStatus === "ok" && typeof verify?.note === "string" && verify.note === "no_source_objects") return "completed"
 
   return normalizedSlurperStatus
+}
+
+function shouldPollSlurperProgress(item: { progress?: unknown; slurperJobId?: string | null; slurperStatus?: string | null }): boolean {
+  if (!item.slurperJobId) return false
+  const mergedStatus = readMergedItemStatus(item)
+  if (!mergedStatus) return true
+  return !isTerminalSlurperStatus(mergedStatus) && !isFailedLikeMergedStatus(mergedStatus)
 }
 
 function isCompletedLikeMergedStatus(status: string): boolean {
@@ -565,7 +573,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
 
     // Refresh progress for any created jobs.
     await promisePool(
-      items.filter((i) => Boolean(i.slurperJobId)),
+      items.filter((i) => shouldPollSlurperProgress(i)),
       3,
       async (item) => {
         if (!item.slurperJobId) return
@@ -687,16 +695,24 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
               slurper: progress,
               slurperNormalized: normalized,
               slurperCumulative,
+              pollingWarning: null,
+              pollingWarningAt: null,
               ...(liveLogs ? { logs: liveLogs, logsFetchedAt: new Date().toISOString() } : {}),
             },
             lastProgressAt: new Date().toISOString(),
           })
         } catch (error: unknown) {
           const message = formatCloudflareError(error, "Unable to fetch job progress")
+          if (!shouldPollSlurperProgress(item)) return
           await updateMigrationItem(item.id, {
-            // Keep the last-known slurperStatus (do not replace it with "progress_error"),
-            // otherwise completed/running buckets can get stuck and verification won't start.
-            progress: { ...item.progress, stage: "progress_fetch_failed", lastError: message },
+            // Progress polling failures do not mean the Cloudflare copy job itself failed.
+            // Keep the last real bucket status and record this as a warning only.
+            progress: {
+              ...item.progress,
+              stage: "progress_poll_warning",
+              pollingWarning: message,
+              pollingWarningAt: new Date().toISOString(),
+            },
             lastProgressAt: new Date().toISOString(),
           })
         }
@@ -996,11 +1012,11 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
           }
           if (isCloudflareTransientError(error)) {
             const delayMs = typeof error.retryAfterMs === "number" ? error.retryAfterMs : 5_000
-            const message = `${formatCloudflareError(error, "Cloudflare transient error")} (retry in ~${Math.ceil(delayMs / 1000)}s)`
+            const message = `${formatCloudflareError(error, "Cloudflare transient error")} (stopped after error; retry manually)`
             await updateMigrationItem(item.id, {
               slurperJobId: null,
-              slurperStatus: "queued",
-              progress: { ...item.progress, stage: "cloudflare_transient_error", error: message },
+              slurperStatus: "job_create_failed",
+              progress: { ...item.progress, stage: "cloudflare_transient_error", error: message, lastError: message },
               lastProgressAt: new Date().toISOString(),
             })
             continue
@@ -1365,67 +1381,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
 
     await syncMigrationLiveState(id).catch(() => undefined)
     items = await listMigrationItems(id)
-
-    const mergedStatuses = items.map((item) => readMergedItemStatus(item))
-    const anyScanning = mergedStatuses.some((status) => status === "scanning")
-    const anyRunning = mergedStatuses.some((status) => status === "running")
-    const anyVerifying = mergedStatuses.some((status) => status === "verifying")
-    const anyFailed = mergedStatuses.some((status) => isFailedLikeMergedStatus(status))
-    const anyVerifyFailure = mergedStatuses.some((status) => status === "verification_failed")
-    const anyAborted = mergedStatuses.some((status) => isAbortedLikeMergedStatus(status))
-    const allTerminal = mergedStatuses.length > 0 && mergedStatuses.every((status) => isCompletedLikeMergedStatus(status) || isFailedLikeMergedStatus(status) || isAbortedLikeMergedStatus(status) || status === "no_files")
-    const allCompleted = mergedStatuses.length > 0 && mergedStatuses.every((status) => isCompletedLikeMergedStatus(status) || status === "no_files")
-
-    if (anyScanning || anyRunning) {
-      await updateMigration(id, {
-        status: "running",
-        syncStatus: "ok",
-        syncMessage: anyScanning ? "Scanning source buckets" : "Progress updated",
-        completedAt: null,
-        lastSyncedAt: new Date().toISOString(),
-      })
-    } else if (anyVerifying) {
-      await updateMigration(id, {
-        status: "verifying",
-        syncStatus: "ok",
-        syncMessage: "Verifying migrated objects",
-        completedAt: null,
-        lastSyncedAt: new Date().toISOString(),
-      })
-    } else if (allCompleted) {
-      await updateMigration(id, {
-        status: "completed",
-        syncStatus: "ok",
-        syncMessage: "",
-        completedAt: new Date().toISOString(),
-        lastSyncedAt: new Date().toISOString(),
-      })
-    } else if (allTerminal && anyFailed) {
-      await updateMigration(id, {
-        status: "failed",
-        syncStatus: "error",
-        syncMessage: anyVerifyFailure ? "Verification failed for one or more buckets" : "One or more buckets failed",
-        completedAt: new Date().toISOString(),
-        lastSyncedAt: new Date().toISOString(),
-      })
-    } else if (allTerminal && anyAborted && !anyFailed) {
-      await updateMigration(id, {
-        status: "canceled",
-        syncStatus: "ok",
-        syncMessage: "Migration aborted",
-        completedAt: new Date().toISOString(),
-        lastSyncedAt: new Date().toISOString(),
-      })
-    } else {
-      await updateMigration(id, {
-        status: migration.status === "draft" ? "running" : migration.status,
-        syncStatus: "ok",
-        syncMessage: items.some((i) => Boolean(i.slurperJobId)) ? "Progress updated" : "Queued",
-        lastSyncedAt: new Date().toISOString(),
-      })
-    }
-
-    return NextResponse.json({ migration: await getMigration(id), items: await listMigrationItems(id) }, { status: 200 })
+    return NextResponse.json({ migration: await getMigration(id), items }, { status: 200 })
   } catch (error: unknown) {
     const message = formatCloudflareError(error, "Unable to sync migration")
     try {

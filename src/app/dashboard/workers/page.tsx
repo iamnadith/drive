@@ -4,7 +4,7 @@ import * as React from "react"
 import Link from "next/link"
 import { Activity, Bot, CircleDot, Clock3, Copy, Eye, Github, HardDrive, Play, Plus, RefreshCw, Search, Server, Shield, Square, Trash2, Workflow } from "lucide-react"
 import { toast } from "sonner"
-import { useSearchParams } from "next/navigation"
+import { useRouter, useSearchParams } from "next/navigation"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -65,6 +65,9 @@ type AgentRow = {
     status: "pending" | "running" | "completed" | "failed" | "canceled"
     runType: string
     summary?: string
+    externalRunId?: string
+    jobReference?: string
+    payload?: Record<string, unknown>
     createdAt: string
   } | null
 }
@@ -153,6 +156,8 @@ const capabilityOptions: Array<{ value: AgentCapability; label: string }> = [
   { value: "diagnostics", label: "Diagnostics" },
 ]
 
+const defaultCapabilities = capabilityOptions.map((capability) => capability.value)
+
 function formatDate(value?: string): string {
   if (!value) return "-"
   const date = new Date(value)
@@ -162,6 +167,10 @@ function formatDate(value?: string): string {
 
 function getEffectiveStatus(agent: AgentRow): AgentStatus {
   if (agent.provider === "github_actions") {
+    if (agent.lastHeartbeatAt) {
+      const last = new Date(agent.lastHeartbeatAt).getTime()
+      if (Number.isFinite(last) && Date.now() - last <= 90_000) return "online"
+    }
     return agent.status === "online" || agent.status === "busy" ? "online" : "offline"
   }
   if (agent.status === "error") return "offline"
@@ -248,6 +257,7 @@ function readLogLines(job: RepairJobRow): string[] {
 export default function WorkersPage() {
   const ACTIVE_REFRESH_MS = 8_000
   const IDLE_REFRESH_MS = 20_000
+  const router = useRouter()
   const searchParams = useSearchParams()
   const [agents, setAgents] = React.useState<AgentRow[]>([])
   const [loading, setLoading] = React.useState(true)
@@ -257,8 +267,7 @@ export default function WorkersPage() {
 
   const [name, setName] = React.useState("")
   const [provider, setProvider] = React.useState<AgentProvider>("github_actions")
-  const [capabilities, setCapabilities] = React.useState<AgentCapability[]>(["scan", "verify", "repair"])
-  const [workerUrl, setWorkerUrl] = React.useState("")
+  const [capabilities, setCapabilities] = React.useState<AgentCapability[]>(defaultCapabilities)
   const [githubRepoOwner, setGithubRepoOwner] = React.useState("")
   const [githubRepoName, setGithubRepoName] = React.useState("")
   const [githubWorkflowFile, setGithubWorkflowFile] = React.useState("")
@@ -271,18 +280,18 @@ export default function WorkersPage() {
   const [githubRepos, setGithubRepos] = React.useState<Array<{ id: string; owner: string; name: string; fullName: string; defaultBranch?: string }>>([])
   const [githubWorkflows, setGithubWorkflows] = React.useState<Array<{ id: string; name: string; path: string }>>([])
   const [repairJobs, setRepairJobs] = React.useState<RepairJobRow[]>([])
-  const [selectedJob, setSelectedJob] = React.useState<RepairJobRow | null>(null)
-  const [jobDetailsOpen, setJobDetailsOpen] = React.useState(false)
   const [dispatchingAgentId, setDispatchingAgentId] = React.useState<string | null>(null)
   const [deletingWorkerId, setDeletingWorkerId] = React.useState<string | null>(null)
   const [deletingJobId, setDeletingJobId] = React.useState<string | null>(null)
   const [abortingJobId, setAbortingJobId] = React.useState<string | null>(null)
+  const [stoppingWorkerId, setStoppingWorkerId] = React.useState<string | null>(null)
   const [dispatchOpen, setDispatchOpen] = React.useState(false)
   const [dispatchAgent, setDispatchAgent] = React.useState<AgentRow | null>(null)
   const [confirmDeleteWorker, setConfirmDeleteWorker] = React.useState<AgentRow | null>(null)
+  const [confirmStopWorker, setConfirmStopWorker] = React.useState<AgentRow | null>(null)
   const [dispatchMigrationId, setDispatchMigrationId] = React.useState("")
   const [dispatchSearch, setDispatchSearch] = React.useState("")
-  const [dispatchMode, setDispatchMode] = React.useState<"verify_only" | "repair_only" | "repair_and_verify">("repair_and_verify")
+  const [dispatchMode, setDispatchMode] = React.useState<"verify_only" | "repair_and_verify">("repair_and_verify")
   const [migrations, setMigrations] = React.useState<MigrationRow[]>([])
   const [loadingMigrations, setLoadingMigrations] = React.useState(false)
   const [selectedWorker, setSelectedWorker] = React.useState<AgentRow | null>(null)
@@ -298,7 +307,6 @@ export default function WorkersPage() {
       return status === "online"
     }) ||
     repairJobs.some((job) => !["completed", "failed", "canceled"].includes(job.status)) ||
-    jobDetailsOpen ||
     dispatchOpen
 
   const loadAgents = React.useCallback(async (notify = false) => {
@@ -344,18 +352,10 @@ export default function WorkersPage() {
     refreshInFlightRef.current = true
     try {
       await Promise.all([loadAgents(notify), loadRepairJobs(notify)])
-      if (selectedJob?.id) {
-        const res = await fetch(`/api/repair-jobs/${encodeURIComponent(selectedJob.id)}`, { cache: "no-store" })
-        const json: unknown = await res.json().catch(() => ({}))
-        if (res.ok) {
-          const job = typeof json === "object" && json !== null && "job" in json ? ((json as any).job as RepairJobRow) : null
-          if (job) setSelectedJob(job)
-        }
-      }
     } finally {
       refreshInFlightRef.current = false
     }
-  }, [loadAgents, loadRepairJobs, selectedJob?.id])
+  }, [loadAgents, loadRepairJobs])
 
   React.useEffect(() => {
     void refreshAll()
@@ -462,8 +462,7 @@ export default function WorkersPage() {
   const resetForm = React.useCallback(() => {
     setName("")
     setProvider("github_actions")
-    setCapabilities(["scan", "verify", "repair"])
-    setWorkerUrl("")
+    setCapabilities(defaultCapabilities)
     setGithubRepoOwner("")
     setGithubRepoName("")
     setGithubWorkflowFile("")
@@ -569,7 +568,7 @@ export default function WorkersPage() {
           name,
           provider,
           capabilities,
-          endpointDomain: provider === "self_hosted" ? workerUrl : "",
+          endpointDomain: "",
           endpointIp: "",
           githubRepoOwner,
           githubRepoName,
@@ -651,22 +650,9 @@ export default function WorkersPage() {
     [loadAgents, loadRepairJobs, repairJobs]
   )
 
-  const viewRepairJob = React.useCallback(async (jobId: string) => {
-    try {
-      const res = await fetch(`/api/repair-jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" })
-      const json: unknown = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to load repair job"
-        throw new Error(message)
-      }
-      const job = typeof json === "object" && json !== null && "job" in json ? ((json as any).job as RepairJobRow) : null
-      if (!job) throw new Error("Repair job details are missing")
-      setSelectedJob(job)
-      setJobDetailsOpen(true)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to load repair job")
-    }
-  }, [])
+  const viewRepairJob = React.useCallback((jobId: string) => {
+    router.push(`/dashboard/workers/jobs/${encodeURIComponent(jobId)}`)
+  }, [router])
 
   const deleteRepairJobRecord = React.useCallback(
     async (job: RepairJobRow) => {
@@ -678,10 +664,6 @@ export default function WorkersPage() {
           const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to delete repair job"
           throw new Error(message)
         }
-        if (selectedJob?.id === job.id) {
-          setJobDetailsOpen(false)
-          setSelectedJob(null)
-        }
         toast.success("Repair job deleted")
         await loadRepairJobs()
       } catch (error) {
@@ -690,7 +672,7 @@ export default function WorkersPage() {
         setDeletingJobId(null)
       }
     },
-    [loadRepairJobs, selectedJob]
+    [loadRepairJobs]
   )
 
   const abortRepairJobRecord = React.useCallback(
@@ -709,10 +691,6 @@ export default function WorkersPage() {
           throw new Error(message)
         }
         toast.success("Repair job aborted")
-        if (selectedJob?.id === job.id) {
-          const updatedJob = typeof json === "object" && json !== null && "job" in json ? ((json as any).job as RepairJobRow) : null
-          if (updatedJob) setSelectedJob(updatedJob)
-        }
         await loadRepairJobs()
         await loadAgents()
       } catch (error) {
@@ -721,7 +699,36 @@ export default function WorkersPage() {
         setAbortingJobId(null)
       }
     },
-    [loadAgents, loadRepairJobs, selectedJob]
+    [loadAgents, loadRepairJobs]
+  )
+
+  const stopGithubWorkerRun = React.useCallback(
+    async (worker: AgentRow) => {
+      setStoppingWorkerId(worker.id)
+      try {
+        const res = await fetch(`/api/workers/${encodeURIComponent(worker.id)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "stop" }),
+        })
+        const json: unknown = await res.json().catch(() => ({}))
+        if (!res.ok) {
+          const message =
+            typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to stop GitHub worker"
+          throw new Error(message)
+        }
+        const abortedCount =
+          typeof json === "object" && json !== null && Array.isArray((json as any).abortedJobIds) ? (json as any).abortedJobIds.length : 0
+        toast.success(abortedCount > 0 ? `Worker stopped and ${abortedCount} job(s) aborted` : "GitHub worker stop requested")
+        await loadRepairJobs()
+        await loadAgents()
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Unable to stop GitHub worker")
+      } finally {
+        setStoppingWorkerId(null)
+      }
+    },
+    [loadAgents, loadRepairJobs]
   )
 
   const totalOnline = agents.filter((agent) => getEffectiveStatus(agent) === "online").length
@@ -732,6 +739,27 @@ export default function WorkersPage() {
   const pendingRegistration = agents.filter((agent) => getEffectiveStatus(agent) === "pending_registration").length
   const visibleWorkers = agents.slice(0, 3)
   const visibleRepairJobs = repairJobs.slice(0, 3)
+  const getWorkerLinkedJobs = React.useCallback(
+    (worker: AgentRow) =>
+      repairJobs.filter((job) => job.claimedByAgentId === worker.id || job.requestedByAgentId === worker.id),
+    [repairJobs]
+  )
+
+  const getWorkerActiveLinkedJobs = React.useCallback(
+    (worker: AgentRow) => getWorkerLinkedJobs(worker).filter((job) => !["completed", "failed", "canceled"].includes(job.status)),
+    [getWorkerLinkedJobs]
+  )
+
+  const canStopWorker = React.useCallback(
+    (worker: AgentRow) =>
+      worker.provider === "github_actions" &&
+      (
+        getWorkerLinkedJobs(worker).length > 0 ||
+        worker.latestRun?.status === "pending" ||
+        worker.latestRun?.status === "running"
+      ),
+    [getWorkerLinkedJobs]
+  )
   const filteredMigrations = migrations.filter((migration) => {
     const query = dispatchSearch.trim().toLowerCase()
     if (!query) return true
@@ -757,7 +785,7 @@ export default function WorkersPage() {
         body: JSON.stringify({
           migrationId: dispatchMigrationId.trim(),
           mode: dispatchMode,
-          workflowSupportsRuntimeInputs: false,
+          workflowSupportsRuntimeInputs: true,
         }),
       })
       const json: unknown = await res.json().catch(() => ({}))
@@ -842,12 +870,6 @@ export default function WorkersPage() {
                           </SelectContent>
                         </Select>
                       </div>
-                      {provider === "self_hosted" ? (
-                        <div className="space-y-2 md:col-span-2">
-                          <Label htmlFor="worker-url">Worker URL</Label>
-                          <Input id="worker-url" value={workerUrl} onChange={(e) => setWorkerUrl(e.target.value)} placeholder="https://worker.example.com" />
-                        </div>
-                      ) : null}
                     </div>
                   </div>
 
@@ -950,7 +972,7 @@ export default function WorkersPage() {
                 <div className="rounded-lg border bg-muted/40 p-4 text-sm text-muted-foreground">
                   {provider === "local"
                     ? "Local workers register with a token and heartbeat from your own machine."
-                    : "Self-hosted workers register with a token. IP/domain are optional metadata and not used as identity."}
+                    : "Self-hosted workers register with a token."}
                 </div>
               )}
 
@@ -1012,160 +1034,6 @@ export default function WorkersPage() {
           </Dialog>
         </div>
       </div>
-
-      <Dialog
-        open={jobDetailsOpen}
-        onOpenChange={(next) => {
-          setJobDetailsOpen(next)
-          if (!next) setSelectedJob(null)
-        }}
-      >
-        <DialogContent className="max-h-[88vh] max-w-3xl overflow-hidden p-0">
-          <div className="flex min-h-0 flex-1 flex-col">
-            <DialogHeader className="border-b px-6 py-5">
-              <DialogTitle>Repair job details</DialogTitle>
-              <DialogDescription>
-                {selectedJob ? `Review worker execution state for repair job ${selectedJob.id}.` : "Review worker execution state."}
-              </DialogDescription>
-            </DialogHeader>
-            <div className="flex-1 overflow-y-auto px-6 py-5">
-              {selectedJob ? (
-                <div className="space-y-5 text-sm">
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Job id</div>
-                      <div className="mt-1 break-all font-mono text-xs">{selectedJob.id}</div>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Migration id</div>
-                      <div className="mt-1 break-all font-mono text-xs">{selectedJob.migrationId}</div>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Status</div>
-                    <div className="mt-1">{jobStatusLabel(selectedJob.status)}</div>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Mode</div>
-                      <div className="mt-1">{selectedJob.mode}</div>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Requested by worker</div>
-                      <div className="mt-1 break-all font-mono text-xs">{selectedJob.requestedByAgentId || "-"}</div>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Claimed by worker</div>
-                      <div className="mt-1 break-all font-mono text-xs">{selectedJob.claimedByAgentId || "-"}</div>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Created</div>
-                      <div className="mt-1">{formatDate(selectedJob.createdAt)}</div>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Updated</div>
-                      <div className="mt-1">{formatDate(selectedJob.updatedAt)}</div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-md border p-3">
-                    <div className="text-muted-foreground">Summary</div>
-                    <div className="mt-1 whitespace-pre-wrap">{selectedJob.summary || "-"}</div>
-                  </div>
-
-                  <div className="rounded-md border p-3">
-                    <div className="text-muted-foreground">Error</div>
-                    <div className="mt-1 whitespace-pre-wrap">{selectedJob.error || "-"}</div>
-                  </div>
-
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Run source</div>
-                      <div className="mt-1">{selectedJob.linkedRun?.runType === "github_dispatch" ? "GitHub workflow" : "Self-hosted worker"}</div>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Run status</div>
-                      <div className="mt-1">{agentRunStatusLabel(selectedJob.linkedRun?.status)}</div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-md border p-3">
-                    <div className="text-muted-foreground">Logs</div>
-                    <div className="mt-2 space-y-2">
-                      {readLogLines(selectedJob).length > 0 ? (
-                        readLogLines(selectedJob).map((line, index) => (
-                          <div key={`${index}-${line}`} className="rounded bg-muted px-3 py-2 font-mono text-xs">
-                            {line}
-                          </div>
-                        ))
-                      ) : (
-                        <div className="text-sm text-muted-foreground">No logs captured yet.</div>
-                      )}
-                    </div>
-                    {typeof selectedJob.linkedRun?.payload?.htmlUrl === "string" ? (
-                      <a
-                        href={selectedJob.linkedRun.payload.htmlUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="mt-3 inline-flex text-xs text-primary underline-offset-4 hover:underline"
-                      >
-                        Open GitHub run
-                      </a>
-                    ) : null}
-                  </div>
-
-                  <div className="grid gap-4 md:grid-cols-4">
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Claimed at</div>
-                      <div className="mt-1">{formatDate(selectedJob.claimedAt)}</div>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Started at</div>
-                      <div className="mt-1">{formatDate(selectedJob.startedAt)}</div>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Completed at</div>
-                      <div className="mt-1">{formatDate(selectedJob.completedAt)}</div>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="text-muted-foreground">Heartbeat</div>
-                      <div className="mt-1">{formatDate(selectedJob.lastHeartbeatAt)}</div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-4">
-                    <div className="rounded-md border p-3">
-                      <div className="mb-2 text-muted-foreground">Payload</div>
-                      <pre className="overflow-x-auto rounded bg-muted p-3 text-xs">{JSON.stringify(selectedJob.payload ?? {}, null, 2)}</pre>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="mb-2 text-muted-foreground">Progress</div>
-                      <pre className="overflow-x-auto rounded bg-muted p-3 text-xs">{JSON.stringify(selectedJob.progress ?? {}, null, 2)}</pre>
-                    </div>
-                    <div className="rounded-md border p-3">
-                      <div className="mb-2 text-muted-foreground">Result</div>
-                      <pre className="overflow-x-auto rounded bg-muted p-3 text-xs">{JSON.stringify(selectedJob.result ?? {}, null, 2)}</pre>
-                    </div>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-            <DialogFooter className="border-t px-6 py-4">
-              {selectedJob && !["completed", "failed", "canceled"].includes(selectedJob.status) ? (
-                <Button
-                  variant="outline"
-                  disabled={abortingJobId === selectedJob.id}
-                  onClick={() => void abortRepairJobRecord(selectedJob)}
-                >
-                  <Square className="mr-1 h-4 w-4" />
-                  {abortingJobId === selectedJob.id ? "Aborting..." : "Abort"}
-                </Button>
-              ) : null}
-              <Button variant="outline" onClick={() => setJobDetailsOpen(false)}>
-                Close
-              </Button>
-            </DialogFooter>
-          </div>
-        </DialogContent>
-      </Dialog>
 
       <Dialog
         open={workerDetailsOpen}
@@ -1257,7 +1125,7 @@ export default function WorkersPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{loading ? "-" : totalGithub}</div>
-            <p className="text-xs text-muted-foreground">{totalSelfHosted} token-based workers</p>
+            <p className="text-xs text-muted-foreground">{totalSelfHosted} Self Hosted workers</p>
           </CardContent>
         </Card>
         <Card>
@@ -1382,7 +1250,6 @@ export default function WorkersPage() {
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="repair_and_verify">Repair and verify</SelectItem>
-                        <SelectItem value="repair_only">Repair only</SelectItem>
                         <SelectItem value="verify_only">Verify only</SelectItem>
                       </SelectContent>
                     </Select>
@@ -1409,7 +1276,7 @@ export default function WorkersPage() {
           <div className="flex flex-wrap gap-2">
             <Badge variant="outline" className="gap-1">
               <Server className="h-3.5 w-3.5" />
-              {totalSelfHosted} token-based
+              {totalSelfHosted} Self Hosted
             </Badge>
             <Badge variant="outline" className="gap-1">
               <Github className="h-3.5 w-3.5" />
@@ -1432,6 +1299,8 @@ export default function WorkersPage() {
           {visibleWorkers.map((worker) => {
             const effectiveStatus = getEffectiveStatus(worker)
             const summary = worker.latestRun?.summary || worker.lastError || worker.notes || "No notes yet"
+            const linkedWorkerJobs = getWorkerLinkedJobs(worker)
+            const activeLinkedWorkerJobs = getWorkerActiveLinkedJobs(worker)
 
             return (
               <div key={worker.id} className="rounded-xl border bg-card p-4 shadow-sm">
@@ -1474,20 +1343,31 @@ export default function WorkersPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      disabled={workerTokenLoading === worker.id}
-                      onClick={() => void loadWorkerToken(worker)}
-                    >
-                      <Eye className="mr-1 h-4 w-4" />
-                      {workerTokenLoading === worker.id ? "Loading..." : "Details"}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
                       disabled={deletingWorkerId === worker.id}
                       onClick={() => setConfirmDeleteWorker(worker)}
                     >
                       <Trash2 className="mr-1 h-4 w-4" />
                       {deletingWorkerId === worker.id ? "Deleting..." : "Delete"}
+                    </Button>
+                    {worker.provider === "github_actions" ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={!canStopWorker(worker) || stoppingWorkerId === worker.id}
+                        onClick={() => setConfirmStopWorker(worker)}
+                      >
+                        <Square className="mr-1 h-4 w-4" />
+                        {stoppingWorkerId === worker.id ? "Stopping..." : "Stop"}
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={workerTokenLoading === worker.id}
+                      onClick={() => void loadWorkerToken(worker)}
+                    >
+                      <Eye className="mr-1 h-4 w-4" />
+                      {workerTokenLoading === worker.id ? "Loading..." : "Details"}
                     </Button>
                   </div>
                 </div>
@@ -1519,6 +1399,11 @@ export default function WorkersPage() {
                       {worker.latestRun ? `${worker.latestRun.runType} - ${agentRunStatusLabel(worker.latestRun.status)}` : "No runs yet"}
                     </div>
                     <div className="mt-2 text-xs text-muted-foreground">{summary}</div>
+                    {worker.provider === "github_actions" ? (
+                      <div className="mt-2 text-xs text-muted-foreground">
+                        Linked jobs: {linkedWorkerJobs.length} total, {activeLinkedWorkerJobs.length} active
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -1550,6 +1435,51 @@ export default function WorkersPage() {
                 event.preventDefault()
                 if (!confirmDeleteWorker) return
                 void deleteWorker(confirmDeleteWorker).finally(() => setConfirmDeleteWorker(null))
+              }}
+            >
+              Confirm
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!confirmStopWorker} onOpenChange={(open: boolean) => !open && setConfirmStopWorker(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Stop GitHub worker?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {confirmStopWorker
+                ? getWorkerActiveLinkedJobs(confirmStopWorker).length > 0
+                  ? "This will abort the active jobs linked to this worker and then stop its GitHub Actions workflow run."
+                  : "This will stop the GitHub Actions workflow run for this worker. No active linked jobs need to be aborted."
+                : "This will stop the GitHub Actions workflow run for this worker."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {confirmStopWorker ? (
+            <div className="max-h-64 space-y-3 overflow-y-auto rounded-lg border bg-muted/30 p-3 text-sm">
+              <div className="font-medium">Jobs linked to this worker</div>
+              {getWorkerLinkedJobs(confirmStopWorker).length === 0 ? (
+                <div className="text-muted-foreground">No linked repair jobs were found for this worker.</div>
+              ) : (
+                getWorkerLinkedJobs(confirmStopWorker).map((job) => (
+                  <div key={job.id} className="rounded-md border bg-background p-3">
+                    <div className="font-mono text-xs">{job.id}</div>
+                    <div className="mt-1">Migration {job.migrationId}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      Status: {jobStatusLabel(job.status)} | Mode: {job.mode}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setConfirmStopWorker(null)}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event: React.MouseEvent<HTMLButtonElement>) => {
+                event.preventDefault()
+                if (!confirmStopWorker) return
+                void stopGithubWorkerRun(confirmStopWorker).finally(() => setConfirmStopWorker(null))
               }}
             >
               Confirm

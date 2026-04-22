@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server"
 import { getAllAccounts, getActiveAccount } from "@/lib/accounts-store"
 import { r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
-import { createMigration, listMigrationItems, listMigrations, updateMigration } from "@/lib/migrations-store"
+import { createMigration, listMigrations } from "@/lib/migrations-store"
 import { getBucketStatsMap } from "@/lib/bucket-stats-store"
-import { readBucketVerifyState } from "@/lib/bucket-verifier"
+import { syncMigrationLiveState } from "@/lib/migration-live-state"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
@@ -21,107 +21,10 @@ export async function GET() {
   try {
     const migrations = await listMigrations()
 
-    // Best-effort reconciliation: prevent stale "running" migrations from sticking in history
-    // when all items are terminal (including legacy copy_* statuses from older versions).
-    const failedLike = (s: string) =>
-      s.includes("failed") || s.includes("error") || s.endsWith("_failed") || s === "copy_failed"
-    const isLegacyCopy = (s: string) => s.startsWith("copy_")
-    const isTerminal = (s: string | undefined) => {
-      const status = String(s ?? "").toLowerCase()
-      return (
-        status === "completed" ||
-        status === "copy_completed" ||
-        status === "complete" ||
-        status === "finished" ||
-        status === "success" ||
-        status === "succeeded" ||
-        status === "aborted" ||
-        status === "canceled" ||
-        status === "cancelled" ||
-        status === "copy_aborted" ||
-        isLegacyCopy(status) ||
-        failedLike(status)
-      )
-    }
-    const isSuccess = (s: string | undefined) => {
-      const status = String(s ?? "").toLowerCase()
-      return (
-        status === "completed" ||
-        status === "copy_completed" ||
-        status === "complete" ||
-        status === "finished" ||
-        status === "success" ||
-        status === "succeeded"
-      )
-    }
-    const isVerifiedOk = (progress: Record<string, unknown>) => readBucketVerifyState(progress)?.status === "ok"
-
     const candidates = migrations
-      .filter((m) => m.status === "running" || m.status === "verifying" || m.status === "completed")
-      .slice(0, 10)
-    for (const m of candidates) {
-      const items = await listMigrationItems(m.id).catch(() => [])
-      if (items.length === 0) continue
-
-      const verifyEnabled = m.options?.verifyAfterCopy !== false
-      const allTerminal = items.every((i) => {
-        const s = String(i.slurperStatus ?? "").toLowerCase()
-        if (!verifyEnabled) return isTerminal(i.slurperStatus)
-        if (isSuccess(s)) {
-          const v = readBucketVerifyState(i.progress)
-          return v?.status === "ok" || v?.status === "error"
-        }
-        return isTerminal(i.slurperStatus)
-      })
-      if (!allTerminal) continue
-
-      const anyAborted = items.some((i) => {
-        const s = String(i.slurperStatus ?? "").toLowerCase()
-        return s === "aborted" || s === "canceled" || s === "cancelled" || s === "copy_aborted"
-      })
-      const anySlurperFailure = items.some((i) => failedLike(String(i.slurperStatus ?? "").toLowerCase()))
-      const anyVerifyFailure =
-        verifyEnabled && items.some((i) => isSuccess(i.slurperStatus) && readBucketVerifyState(i.progress)?.status === "error")
-      const allSuccess = items.every((i) => {
-        const s = String(i.slurperStatus ?? "").toLowerCase()
-        if (!isSuccess(s)) return false
-        return !verifyEnabled || isVerifiedOk(i.progress)
-      })
-
-      if (anySlurperFailure) {
-        await updateMigration(m.id, {
-          status: "failed",
-          syncStatus: "error",
-          syncMessage: "One or more buckets failed",
-          completedAt: new Date().toISOString(),
-          lastSyncedAt: new Date().toISOString(),
-        })
-      } else if (anyAborted) {
-        await updateMigration(m.id, {
-          status: "canceled",
-          syncStatus: "ok",
-          syncMessage: "Migration aborted",
-          completedAt: new Date().toISOString(),
-          lastSyncedAt: new Date().toISOString(),
-        })
-      } else if (allSuccess) {
-        await updateMigration(m.id, {
-          status: "completed",
-          syncStatus: "ok",
-          syncMessage: "",
-          completedAt: new Date().toISOString(),
-          lastSyncedAt: new Date().toISOString(),
-        })
-      } else if (anyVerifyFailure) {
-        await updateMigration(m.id, {
-          status: "failed",
-          syncStatus: "error",
-          syncMessage: "Verification failed for one or more buckets",
-          completedAt: new Date().toISOString(),
-          lastSyncedAt: new Date().toISOString(),
-        })
-      }
-    }
+      .filter((m) => m.status !== "draft" && m.status !== "canceled")
+      .slice(0, 20)
+    await Promise.all(candidates.map((migration) => syncMigrationLiveState(migration.id).catch(() => undefined)))
 
     const refreshed = await listMigrations()
     return jsonOk({ migrations: refreshed })

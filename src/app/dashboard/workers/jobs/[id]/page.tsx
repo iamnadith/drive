@@ -92,6 +92,11 @@ function readItemProgress(job: RepairJob | null) {
   return source.filter(isRecord) as Array<Record<string, unknown>>
 }
 
+function readPayloadItems(job: RepairJob | null) {
+  const source = Array.isArray(job?.payload?.items) ? job?.payload?.items : []
+  return source.filter(isRecord) as Array<Record<string, unknown>>
+}
+
 function readFileEvents(job: RepairJob | null) {
   const source = Array.isArray(job?.progress?.fileEvents)
     ? job?.progress?.fileEvents
@@ -100,6 +105,15 @@ function readFileEvents(job: RepairJob | null) {
       : []
   return (source.filter(isRecord) as Array<Record<string, unknown>>).sort((a, b) =>
     String(b.updatedAt ?? b.completedAt ?? b.startedAt ?? "").localeCompare(String(a.updatedAt ?? a.completedAt ?? a.startedAt ?? ""))
+  )
+}
+
+function findActiveFileEvent(fileEvents: Array<Record<string, unknown>>) {
+  return (
+    fileEvents.find((entry) => {
+      const status = String(entry.status ?? "").toLowerCase()
+      return status === "copying" || status === "scanning" || status === "verifying"
+    }) ?? null
   )
 }
 
@@ -166,17 +180,62 @@ export default function WorkerJobDetailsPage() {
 
   const totals = React.useMemo(() => readTotals(job), [job])
   const itemProgress = React.useMemo(() => readItemProgress(job), [job])
+  const payloadItems = React.useMemo(() => readPayloadItems(job), [job])
   const fileEvents = React.useMemo(() => readFileEvents(job), [job])
   const logs = React.useMemo(() => readLogs(job), [job])
-  const currentFile = isRecord(job?.progress?.currentFile) ? (job?.progress?.currentFile as Record<string, unknown>) : null
+  const currentFileFromProgress = isRecord(job?.progress?.currentFile) ? (job?.progress?.currentFile as Record<string, unknown>) : null
+  const activeFileEvent = React.useMemo(() => findActiveFileEvent(fileEvents), [fileEvents])
+  const currentFile = currentFileFromProgress ?? activeFileEvent
   const stats = isRecord(job?.progress?.stats) ? (job?.progress?.stats as Record<string, unknown>) : null
 
-  const totalCandidates = itemProgress.reduce((sum, item) => sum + (typeof item.totalFiles === "number" ? item.totalFiles : 0), 0)
-  const processedCandidates = itemProgress.reduce((sum, item) => sum + (typeof item.processedFiles === "number" ? item.processedFiles : 0), 0)
+  const bucketItems = React.useMemo(() => {
+    const byId = new Map<string, Record<string, unknown>>()
+
+    for (const item of payloadItems) {
+      const itemId = typeof item.id === "string" ? item.id : typeof item.itemId === "string" ? item.itemId : ""
+      if (!itemId) continue
+      byId.set(itemId, {
+        itemId,
+        sourceBucket: typeof item.sourceBucket === "string" ? item.sourceBucket : "-",
+        targetBucket: typeof item.targetBucket === "string" ? item.targetBucket : "-",
+        stage: "queued",
+        status: "pending",
+        summary: "Queued for worker scan and verification",
+        processedFiles: 0,
+        totalFiles: 0,
+      })
+    }
+
+    for (const item of itemProgress) {
+      const itemId = typeof item.itemId === "string" ? item.itemId : ""
+      if (!itemId) continue
+      byId.set(itemId, {
+        ...(byId.get(itemId) ?? {}),
+        ...item,
+      })
+    }
+
+    return Array.from(byId.values())
+  }, [itemProgress, payloadItems])
+
+  const totalCandidates = bucketItems.reduce((sum, item) => sum + (typeof item.totalFiles === "number" ? item.totalFiles : 0), 0)
+  const processedCandidates = bucketItems.reduce((sum, item) => sum + (typeof item.processedFiles === "number" ? item.processedFiles : 0), 0)
   const overallPct = totalCandidates > 0 ? Math.max(0, Math.min(100, (processedCandidates / totalCandidates) * 100)) : 0
   const currentFilePct =
     currentFile && typeof currentFile.bytesTransferred === "number" && typeof currentFile.bytesTotal === "number" && currentFile.bytesTotal > 0
       ? Math.max(0, Math.min(100, (currentFile.bytesTransferred / currentFile.bytesTotal) * 100))
+      : 0
+  const currentFileHasByteProgress =
+    currentFile && typeof currentFile.bytesTotal === "number" && currentFile.bytesTotal > 0
+  const currentFileChecked =
+    currentFile && typeof currentFile.checkedObjects === "number" ? currentFile.checkedObjects : undefined
+  const currentFileTotalObjects =
+    currentFile && typeof currentFile.totalObjects === "number" ? currentFile.totalObjects : undefined
+  const currentFileScanned =
+    currentFile && typeof currentFile.scannedObjects === "number" ? currentFile.scannedObjects : undefined
+  const currentFileObjectPct =
+    typeof currentFileChecked === "number" && typeof currentFileTotalObjects === "number" && currentFileTotalObjects > 0
+      ? Math.max(0, Math.min(100, (currentFileChecked / currentFileTotalObjects) * 100))
       : 0
 
   const stopGitHubRun = React.useCallback(async () => {
@@ -289,7 +348,9 @@ export default function WorkerJobDetailsPage() {
               </div>
               <div className="rounded-lg border p-3">
                 <div className="text-xs text-muted-foreground">Buckets</div>
-                <div className="mt-1 text-lg font-semibold">{totals.completedItems + totals.failedItems} / {itemProgress.length || 0}</div>
+                <div className="mt-1 text-lg font-semibold">
+                  {totals.completedItems + totals.failedItems} / {Number(stats?.totalBuckets || bucketItems.length || 0)}
+                </div>
               </div>
             </div>
           </CardContent>
@@ -311,11 +372,31 @@ export default function WorkerJobDetailsPage() {
                     <span>{formatBytes(typeof currentFile.size === "number" ? currentFile.size : undefined)}</span>
                   </div>
                 </div>
-                <Progress value={currentFilePct} className="h-2" />
-                <div className="text-xs text-muted-foreground">
-                  {formatBytes(typeof currentFile.bytesTransferred === "number" ? currentFile.bytesTransferred : undefined)} /{" "}
-                  {formatBytes(typeof currentFile.bytesTotal === "number" ? currentFile.bytesTotal : undefined)}
-                </div>
+                {currentFileHasByteProgress ? (
+                  <>
+                    <Progress value={currentFilePct} className="h-2" />
+                    <div className="text-xs text-muted-foreground">
+                      {formatBytes(typeof currentFile.bytesTransferred === "number" ? currentFile.bytesTransferred : undefined)} /{" "}
+                      {formatBytes(typeof currentFile.bytesTotal === "number" ? currentFile.bytesTotal : undefined)}
+                    </div>
+                  </>
+                ) : typeof currentFileChecked === "number" && typeof currentFileTotalObjects === "number" ? (
+                  <>
+                    <Progress value={currentFileObjectPct} className="h-2" />
+                    <div className="text-xs text-muted-foreground">
+                      Checked {currentFileChecked} / {currentFileTotalObjects}
+                      {typeof currentFile.missing === "number" || typeof currentFile.mismatched === "number"
+                        ? ` • Missing ${Number(currentFile.missing || 0)} • Mismatched ${Number(currentFile.mismatched || 0)}`
+                        : ""}
+                    </div>
+                  </>
+                ) : typeof currentFileScanned === "number" ? (
+                  <div className="text-xs text-muted-foreground">
+                    {String(currentFile.scanPhase ?? "scan") === "destination" ? "Destination" : "Source"} scan: {currentFileScanned} object(s)
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground">Status: {String(currentFile.status ?? "running")}</div>
+                )}
               </>
             ) : (
               <div className="text-sm text-muted-foreground">No file is active right now.</div>
@@ -342,10 +423,10 @@ export default function WorkerJobDetailsPage() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Bucket execution</CardTitle>
-          <CardDescription>Per-bucket worker stages, counts, and progress bars.</CardDescription>
+          <CardDescription>Every migration bucket assigned to this worker job, including already completed and no-file buckets.</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-3">
-          {itemProgress.length > 0 ? itemProgress.map((item) => {
+          {bucketItems.length > 0 ? bucketItems.map((item) => {
             const processed = typeof item.processedFiles === "number" ? item.processedFiles : 0
             const total = typeof item.totalFiles === "number" ? item.totalFiles : 0
             const percent = total > 0 ? Math.max(0, Math.min(100, (processed / total) * 100)) : 0

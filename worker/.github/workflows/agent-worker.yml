@@ -1,4 +1,10 @@
 name: Agent Worker
+run-name: >-
+  Agent Worker / ${{
+    inputs.repair_job_id ||
+    github.event.client_payload.repair_job_id ||
+    github.run_id
+  }}
 
 on:
   workflow_dispatch:
@@ -43,7 +49,7 @@ jobs:
           SERVER_URL: ${{ inputs.server_url || github.event.client_payload.server_url || vars.DRIVE_SERVER_URL || secrets.DRIVE_SERVER_URL }}
           AGENT_ID: ${{ inputs.agent_id || github.event.client_payload.agent_id || vars.DRIVE_AGENT_ID || secrets.DRIVE_AGENT_ID }}
           TOKEN: ${{ inputs.agent_token || github.event.client_payload.agent_token || secrets.DRIVE_AGENT_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || secrets.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           POLL_MS: "15000"
           HEARTBEAT_MS: "20000"

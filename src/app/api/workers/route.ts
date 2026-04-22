@@ -23,6 +23,7 @@ function isRecentIso(value: string | undefined, maxAgeMs: number): boolean {
 
 function getEffectiveStatus<T extends { provider: string; status: string; lastHeartbeatAt?: string }>(agent: T): string {
   if (agent.provider === "github_actions") {
+    if (isRecentIso(agent.lastHeartbeatAt, 90_000)) return "online"
     return agent.status === "online" || agent.status === "busy" ? "online" : "offline"
   }
   if (agent.status === "error") return "offline"
@@ -115,6 +116,7 @@ export async function GET() {
       const activeRepairJob =
         linkedRepairJob &&
         (linkedRepairJob.status === "pending" || linkedRepairJob.status === "claimed" || linkedRepairJob.status === "running")
+      const hasFreshWorkerHeartbeat = isRecentIso(linkedRepairJob?.lastHeartbeatAt || agent.lastHeartbeatAt, 90_000)
 
       if (latestRun.externalRunId) {
         githubRun = await getGitHubWorkflowRun({
@@ -138,6 +140,18 @@ export async function GET() {
 
       if (!githubRun) {
         if (activeRepairJob) {
+          if (hasFreshWorkerHeartbeat) {
+            await updateAgent(agent.id, {
+              status: "online",
+              lastError: null,
+              metadata: {
+                ...(agent.metadata ?? {}),
+                activeRepairJobId: latestRun.jobReference ?? null,
+              },
+            }).catch(() => undefined)
+            continue
+          }
+
           await updateAgentRun(latestRun.id, {
             status: "pending",
             externalRunId: null,
@@ -179,7 +193,9 @@ export async function GET() {
         Boolean((latestRun.payload ?? {}).githubAbortRequestedAt) || linkedRepairJob?.status === "canceled"
 
       const runStatus =
-        abortRequested && currentStatus === "completed"
+        hasFreshWorkerHeartbeat && activeRepairJob
+          ? "running"
+          : abortRequested && currentStatus === "completed"
           ? "canceled"
           :
         currentStatus === "completed"
@@ -234,7 +250,7 @@ export async function GET() {
         },
       }).catch(() => undefined)
 
-      if ((runStatus === "failed" || runStatus === "canceled") && latestRun.jobReference) {
+      if (!hasFreshWorkerHeartbeat && (runStatus === "failed" || runStatus === "canceled") && latestRun.jobReference) {
         const repairJob = linkedRepairJob ?? (await getRepairJob(latestRun.jobReference).catch(() => null))
         if (repairJob && (repairJob.status === "pending" || repairJob.status === "claimed" || repairJob.status === "running")) {
           await updateRepairJob(repairJob.id, {

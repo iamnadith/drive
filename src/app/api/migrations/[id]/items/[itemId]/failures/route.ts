@@ -10,6 +10,7 @@ import {
 import { slurperListJobLogs } from "@/lib/cloudflare-r2-super-slurper"
 import { listMigrationItemFailureRecords, replaceMigrationItemFailureRecords } from "@/lib/migration-failure-records-store"
 import { getMigration, listMigrationItems, updateMigrationItem } from "@/lib/migrations-store"
+import { listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 import { r2GetObjectStream, r2HeadObject, r2ListAllObjects } from "@/lib/r2-s3"
 
 export const runtime = "nodejs"
@@ -19,6 +20,7 @@ type FailedLogEntry = {
   message: string
   at?: string
   raw?: unknown
+  evidence?: "cloudflare_log" | "verify_sample" | "repair_worker" | "repair_job"
 }
 
 type ObjectProbe = {
@@ -82,6 +84,10 @@ function getString(rec: Record<string, unknown>, keys: string[]): string | undef
   return undefined
 }
 
+function isFailureLikeMessage(value: string): boolean {
+  return /fail|error|retry|timeout|denied|forbidden|mismatch|missing|import/i.test(value)
+}
+
 function readNested(rec: Record<string, unknown>, path: string[]): unknown {
   let current: unknown = rec
   for (const key of path) {
@@ -100,7 +106,7 @@ function parseFailedLine(line: string): FailedLogEntry | null {
     const key = tabParts[0]
     const message = tabParts[1]
     const at = tabParts.length >= 3 ? tabParts[tabParts.length - 1] : undefined
-    if (key && message && /fail|error|retry/i.test(message)) {
+    if (key && message && isFailureLikeMessage(message)) {
       return { key, message, at }
     }
   }
@@ -108,6 +114,33 @@ function parseFailedLine(line: string): FailedLogEntry | null {
   const genericMatch = trimmed.match(/^(.+?)\s+Object failed to import despite retries\.?\s*$/i)
   if (genericMatch && genericMatch[1]) {
     return { key: genericMatch[1].trim(), message: "Object failed to import despite retries.", raw: line }
+  }
+
+  const quotedKeyMatch = trimmed.match(/["'`](.+?)["'`].{0,120}?(failed|error|retry|timeout|missing|mismatch|import)/i)
+  if (quotedKeyMatch && quotedKeyMatch[1]) {
+    return {
+      key: quotedKeyMatch[1].trim(),
+      message: trimmed,
+      raw: line,
+    }
+  }
+
+  const keyValueMatch = trimmed.match(/\b(?:key|object|path)\s*[=:]\s*([^\s,]+).{0,120}?(failed|error|retry|timeout|missing|mismatch|import)/i)
+  if (keyValueMatch && keyValueMatch[1]) {
+    return {
+      key: keyValueMatch[1].trim(),
+      message: trimmed,
+      raw: line,
+    }
+  }
+
+  const prefixMessageMatch = trimmed.match(/^(.+?):\s+(.+)$/)
+  if (prefixMessageMatch && prefixMessageMatch[1] && prefixMessageMatch[2] && isFailureLikeMessage(prefixMessageMatch[2])) {
+    return {
+      key: prefixMessageMatch[1].trim(),
+      message: prefixMessageMatch[2].trim(),
+      raw: line,
+    }
   }
 
   return null
@@ -123,7 +156,7 @@ function extractFailedEntries(logs: unknown): FailedLogEntry[] {
     const key = entry.key.trim()
     const message = entry.message.trim()
     if (!key || !message) return
-    if (!/fail|error|retry/i.test(message)) return
+    if (!isFailureLikeMessage(message)) return
     const id = `${key}::${message}::${entry.at ?? ""}`
     if (seen.has(id)) return
     seen.add(id)
@@ -160,7 +193,7 @@ function extractFailedEntries(logs: unknown): FailedLogEntry[] {
         ? (readNested(node, ["meta", "timestamp"]) as string)
         : undefined)
 
-    if (key && message && /fail|error|retry/i.test(message)) {
+    if (key && message && isFailureLikeMessage(message)) {
       maybePush({ key, message, at, raw: node })
     } else if (typeof message === "string") {
       maybePush(parseFailedLine(message))
@@ -171,6 +204,128 @@ function extractFailedEntries(logs: unknown): FailedLogEntry[] {
 
   visit(logs)
   return entries
+}
+
+function dedupeFailedEntries(entries: FailedLogEntry[], limit: number): FailedLogEntry[] {
+  const out: FailedLogEntry[] = []
+  const seen = new Set<string>()
+  for (const entry of entries) {
+    const key = entry.key.trim()
+    const message = entry.message.trim()
+    if (!key || !message) continue
+    const id = `${key}::${message}::${entry.at ?? ""}`
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push({ ...entry, key, message })
+    if (out.length >= limit) break
+  }
+  return out
+}
+
+function readProgressFallbackEntries(progress: Record<string, unknown>, limit: number): FailedLogEntry[] {
+  const entries: FailedLogEntry[] = []
+  const verify = isRecord(progress.verify) ? (progress.verify as Record<string, unknown>) : null
+  const verifySamples = isRecord(progress.verifySamples) ? (progress.verifySamples as Record<string, unknown>) : null
+  const repairWorker = isRecord(progress.repairWorker) ? (progress.repairWorker as Record<string, unknown>) : null
+  const repairDetails = repairWorker && isRecord(repairWorker.details) ? (repairWorker.details as Record<string, unknown>) : null
+
+  const pushKeys = (keys: unknown, message: string, evidence: FailedLogEntry["evidence"]) => {
+    if (!Array.isArray(keys)) return
+    for (const rawKey of keys) {
+      const key = typeof rawKey === "string" ? rawKey.trim() : ""
+      if (!key) continue
+      entries.push({ key, message, raw: { source: evidence, key }, evidence })
+      if (entries.length >= limit) return
+    }
+  }
+
+  pushKeys(verify?.sampleMissingKeys, "Verification found this source object missing in destination.", "verify_sample")
+  pushKeys(verify?.sampleMismatchedKeys, "Verification found this object with a size mismatch in destination.", "verify_sample")
+  pushKeys(verify?.sampleExtraKeys, "Verification found this unexpected object in destination.", "verify_sample")
+  pushKeys(verifySamples?.missing, "Verification found this source object missing in destination.", "verify_sample")
+  pushKeys(verifySamples?.mismatched, "Verification found this object with a size mismatch in destination.", "verify_sample")
+  pushKeys(verifySamples?.extra, "Verification found this unexpected object in destination.", "verify_sample")
+
+  if (Array.isArray(repairDetails?.failureSamples)) {
+    for (const sample of repairDetails.failureSamples) {
+      if (!isRecord(sample)) continue
+      const key = typeof sample.key === "string" ? sample.key.trim() : ""
+      if (!key) continue
+      const message =
+        typeof sample.error === "string" && sample.error.trim()
+          ? sample.error.trim()
+          : "Worker reported a file-level failure."
+      entries.push({ key, message, raw: sample, evidence: "repair_worker" })
+      if (entries.length >= limit) break
+    }
+  }
+
+  return dedupeFailedEntries(entries, limit)
+}
+
+function readRepairJobFallbackEntries(
+  repairJobs: Array<{ progress?: Record<string, unknown>; result?: Record<string, unknown> }>,
+  itemId: string,
+  limit: number
+): FailedLogEntry[] {
+  const entries: FailedLogEntry[] = []
+
+  for (const job of repairJobs) {
+    const fileEventsSource = Array.isArray(job.progress?.fileEvents)
+      ? job.progress?.fileEvents
+      : Array.isArray(job.result?.fileEvents)
+        ? job.result?.fileEvents
+        : []
+
+    for (const rawEvent of fileEventsSource) {
+      if (!isRecord(rawEvent)) continue
+      if (typeof rawEvent.itemId === "string" && rawEvent.itemId !== itemId) continue
+      const key = typeof rawEvent.key === "string" ? rawEvent.key.trim() : ""
+      if (!key) continue
+      const status = typeof rawEvent.status === "string" ? rawEvent.status.toLowerCase() : ""
+      const kind = typeof rawEvent.kind === "string" ? rawEvent.kind.toLowerCase() : ""
+      const stage = typeof rawEvent.stage === "string" ? rawEvent.stage.toLowerCase() : ""
+      if (status !== "failed" && kind !== "missing" && kind !== "mismatched" && !stage.includes("verify")) continue
+      const message =
+        typeof rawEvent.error === "string" && rawEvent.error.trim()
+          ? rawEvent.error.trim()
+          : kind === "missing"
+            ? "Worker detected this object missing in destination."
+            : kind === "mismatched"
+              ? "Worker detected this object with a size mismatch."
+              : "Worker reported a file-level failure."
+      const at =
+        typeof rawEvent.updatedAt === "string"
+          ? rawEvent.updatedAt
+          : typeof rawEvent.completedAt === "string"
+            ? rawEvent.completedAt
+            : typeof rawEvent.startedAt === "string"
+              ? rawEvent.startedAt
+              : undefined
+      entries.push({ key, message, at, raw: rawEvent, evidence: "repair_job" })
+      if (entries.length >= limit) return dedupeFailedEntries(entries, limit)
+    }
+
+    const resultItems = Array.isArray(job.result?.items) ? job.result?.items : []
+    for (const rawItem of resultItems) {
+      if (!isRecord(rawItem)) continue
+      if (typeof rawItem.itemId === "string" && rawItem.itemId !== itemId) continue
+      const failureSamples = Array.isArray(rawItem.failureSamples) ? rawItem.failureSamples : []
+      for (const sample of failureSamples) {
+        if (!isRecord(sample)) continue
+        const key = typeof sample.key === "string" ? sample.key.trim() : ""
+        if (!key) continue
+        const message =
+          typeof sample.error === "string" && sample.error.trim()
+            ? sample.error.trim()
+            : "Worker reported a file-level failure."
+        entries.push({ key, message, raw: sample, evidence: "repair_job" })
+        if (entries.length >= limit) return dedupeFailedEntries(entries, limit)
+      }
+    }
+  }
+
+  return dedupeFailedEntries(entries, limit)
 }
 
 async function collectJobLogs(input: {
@@ -584,7 +739,36 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
 
     const items = await listMigrationItems(id)
     const item = items.find((i) => i.id === itemId)
-    if (!item) return NextResponse.json({ error: "Migration item not found" }, { status: 404 })
+    if (!item) {
+      return NextResponse.json(
+        {
+          ok: true,
+          missing: true,
+          item: {
+            id: itemId,
+            sourceBucket: "Unavailable",
+            targetBucket: "",
+            jobId: null,
+            status: null,
+          },
+          summary: {
+            totalFailedEntries: 0,
+            detailedFailedEntries: 0,
+            cloudflareDetailedEntries: 0,
+            fallbackDetailedEntries: 0,
+            inferredDetailedEntries: 0,
+            missingDetailedEntries: 0,
+            sourceMissing: 0,
+            sourceAccessIssues: 0,
+            destinationExists: 0,
+            transientOrProviderIssues: 0,
+            unknown: 0,
+          },
+          failures: [],
+        },
+        { status: 200 }
+      )
+    }
 
     const itemProgress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
     const storedSnapshot = isRecord(itemProgress.failedDiagnosticsSnapshot)
@@ -613,8 +797,13 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
         storedSummary && typeof storedSummary.totalFailedEntries === "number"
           ? storedSummary.totalFailedEntries
           : Math.max(reportedFailedObjects, storedFailures.length)
+      const missingDetailedEntries =
+        storedSummary && typeof storedSummary.missingDetailedEntries === "number"
+          ? storedSummary.missingDetailedEntries
+          : Math.max(0, totalFailedEntries - storedFailures.length)
+      const hasRecoverableGap = totalFailedEntries > 0 && (storedFailures.length === 0 || missingDetailedEntries > 0)
 
-      if (storedFailures.length > 0 || totalFailedEntries > 0) {
+      if (!hasRecoverableGap && (storedFailures.length > 0 || totalFailedEntries > 0)) {
         return NextResponse.json(
           {
             ok: true,
@@ -636,14 +825,16 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
                 storedSummary && typeof storedSummary.cloudflareDetailedEntries === "number"
                   ? storedSummary.cloudflareDetailedEntries
                   : storedFailures.length,
+              fallbackDetailedEntries:
+                storedSummary && typeof storedSummary.fallbackDetailedEntries === "number"
+                  ? storedSummary.fallbackDetailedEntries
+                  : 0,
               inferredDetailedEntries:
                 storedSummary && typeof storedSummary.inferredDetailedEntries === "number"
                   ? storedSummary.inferredDetailedEntries
                   : 0,
               missingDetailedEntries:
-                storedSummary && typeof storedSummary.missingDetailedEntries === "number"
-                  ? storedSummary.missingDetailedEntries
-                  : Math.max(0, totalFailedEntries - storedFailures.length),
+                missingDetailedEntries,
               sourceMissing:
                 storedSummary && typeof storedSummary.sourceMissing === "number"
                   ? storedSummary.sourceMissing
@@ -692,7 +883,19 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       logsPayloads.push(...remotePages)
     }
 
-    const failedEntries = extractFailedEntries(logsPayloads).slice(0, limit)
+    const cloudflareFailedEntries = extractFailedEntries(logsPayloads)
+      .map((entry) => ({ ...entry, evidence: "cloudflare_log" as const }))
+      .slice(0, limit)
+    const progressFallbackEntries = readProgressFallbackEntries(itemProgress, limit)
+    const needRepairJobFallback =
+      cloudflareFailedEntries.length + progressFallbackEntries.length < Math.min(limit, Math.max(reportedFailedObjects, 1))
+    const repairJobFallbackEntries = needRepairJobFallback
+      ? readRepairJobFallbackEntries(await listRepairJobsByMigration(id, 10).catch(() => []), item.id, limit)
+      : []
+    const failedEntries = dedupeFailedEntries(
+      [...cloudflareFailedEntries, ...progressFallbackEntries, ...repairJobFallbackEntries],
+      limit
+    )
     const downloadBase = `/api/migrations/${encodeURIComponent(id)}/items/${encodeURIComponent(itemId)}/failed-object`
 
     const diagnostics = await mapWithConcurrency(
@@ -752,6 +955,8 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     )
 
     const diagnosticsByKey = new Set(diagnostics.map((entry) => entry.key))
+    const cloudflareDetailedEntries = failedEntries.filter((entry) => entry.evidence === "cloudflare_log").length
+    const fallbackDetailedEntries = failedEntries.filter((entry) => entry.evidence !== "cloudflare_log").length
     const progress = itemProgress
     let inferredDiagnostics: Array<{
       key: string
@@ -910,7 +1115,8 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     const summary = {
       totalFailedEntries: Math.max(reportedFailedObjects, combinedDiagnostics.length),
       detailedFailedEntries: combinedDiagnostics.length,
-      cloudflareDetailedEntries: diagnostics.length,
+      cloudflareDetailedEntries,
+      fallbackDetailedEntries,
       inferredDetailedEntries: inferredDiagnostics.length,
       missingDetailedEntries: Math.max(0, reportedFailedObjects - combinedDiagnostics.length),
       sourceMissing: combinedDiagnostics.filter((d) => d.diagnosis.category === "source_missing").length,

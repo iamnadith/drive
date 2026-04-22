@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { deleteMigration, getMigration, listMigrationItems } from "@/lib/migrations-store"
+import { syncMigrationLiveState } from "@/lib/migration-live-state"
 import { listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 
 export async function GET(
@@ -8,6 +9,7 @@ export async function GET(
 ) {
   try {
     const { id } = await context.params
+    await syncMigrationLiveState(id).catch(() => undefined)
     const migration = await getMigration(id)
     if (!migration) {
       return NextResponse.json({ error: "Migration not found" }, { status: 404 })

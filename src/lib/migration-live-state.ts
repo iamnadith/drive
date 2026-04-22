@@ -5,6 +5,7 @@ import {
   getEffectiveRepairStatus,
   getItemDisplayStatus,
   isAbortedStatus,
+  isActiveRepairWorkerStatus,
   isTerminalBucketDisplayStatus,
   isCompletedStatus,
   isFailedLikeStatus,
@@ -60,8 +61,16 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
       const repairState = readRepairWorkerState(progress)
       const repairResultItem = latestRepairItemsById.get(item.id)
       const verify = readVerifyState(progress)
+      const latestRepairJobStatus = normalizeStatus(latestRepairJob?.status)
+      const canceledRepairWithoutResult =
+        latestRepairJobStatus === "canceled" &&
+        !repairResultItem &&
+        isActiveRepairWorkerStatus(repairState?.status)
+      const canceledRepairScanOnly =
+        canceledRepairWithoutResult &&
+        normalizeStatus(repairState?.stage).includes("scan")
       const effectiveRepairStatus = getEffectiveRepairStatus({
-        repairWorkerStatus: repairState?.status,
+        repairWorkerStatus: canceledRepairWithoutResult ? (canceledRepairScanOnly ? undefined : "failed") : repairState?.status,
         latestRepairJobStatus: latestRepairJob?.status,
         repairAppliesToItem: latestRepairItemIds.has(item.id),
         latestRepairJobExists: Boolean(latestRepairJob),
@@ -71,15 +80,21 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
       const sourceScanStatus = typeof progress.sourceScanStatus === "string" ? progress.sourceScanStatus : ""
       const scanComplete = sourceScanStatus === "completed"
       const currentLive = isRecord(progress.live) ? (progress.live as Record<string, unknown>) : null
-      const previousTotal = currentLive && typeof currentLive.totalObjects === "number" ? currentLive.totalObjects : 0
-      const total = Math.max(
-        previousTotal,
-        scanComplete && typeof item.sourceObjects === "number"
-          ? item.sourceObjects
-          : typeof slurper?.objects === "number"
-            ? slurper.objects
+      const scannedSourceTotal = typeof item.sourceObjects === "number" ? item.sourceObjects : 0
+      const workerSourceTotal =
+        repairResultItem && typeof repairResultItem.sourceObjectCount === "number"
+          ? repairResultItem.sourceObjectCount
+          : repairState?.details && typeof repairState.details.sourceObjectCount === "number"
+            ? Number(repairState.details.sourceObjectCount)
             : 0
-      )
+      const total =
+        workerSourceTotal > 0
+          ? workerSourceTotal
+          : scanComplete || scannedSourceTotal > 0
+            ? scannedSourceTotal
+            : typeof slurper?.objects === "number"
+              ? slurper.objects
+              : 0
       const workerTransferred = Math.max(
         typeof repairState?.transferred === "number" ? repairState.transferred : 0,
         repairResultItem && typeof repairResultItem.transferred === "number" ? repairResultItem.transferred : 0
@@ -104,10 +119,23 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
       const slurperTransferred = typeof slurper?.transferredObjects === "number" ? slurper.transferredObjects : 0
       const slurperSkipped = typeof slurper?.skippedObjects === "number" ? slurper.skippedObjects : 0
       const slurperFailed = typeof slurper?.failedObjects === "number" ? slurper.failedObjects : 0
+      const workerInitialMissing =
+        repairResultItem && typeof repairResultItem.initialMissing === "number"
+          ? repairResultItem.initialMissing
+          : repairState?.details && typeof repairState.details.initialMissing === "number"
+            ? Number(repairState.details.initialMissing)
+            : 0
+      const workerInitialMismatched =
+        repairResultItem && typeof repairResultItem.initialMismatched === "number"
+          ? repairResultItem.initialMismatched
+          : repairState?.details && typeof repairState.details.initialMismatched === "number"
+            ? Number(repairState.details.initialMismatched)
+            : 0
       let remainingFixed = Math.max(0, workerTransferred)
-      const resolvedFailed = Math.min(slurperFailed, remainingFixed)
+      const baselineFailedCount = Math.max(slurperFailed, workerInitialMissing + workerInitialMismatched)
+      const resolvedFailed = Math.min(baselineFailedCount, remainingFixed)
       remainingFixed -= resolvedFailed
-      const baseUnaccounted = Math.max(0, total - (slurperTransferred + slurperSkipped + slurperFailed))
+      const baseUnaccounted = Math.max(0, total - (slurperTransferred + slurperSkipped + baselineFailedCount))
       const resolvedUnaccounted = Math.min(baseUnaccounted, remainingFixed)
       const verifyIssues = readLiveRepairVerificationIssues({
         repairStatus: effectiveRepairStatus,
@@ -125,7 +153,7 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
             ? Math.min(total, slurperTransferred + workerTransferred)
             : slurperTransferred + workerTransferred,
         skippedObjects: Math.max(slurperSkipped, workerSkipped),
-        failedObjects: resolvedAllObjects ? 0 : Math.max(0, slurperFailed - resolvedFailed + workerFailed + finalMissing + finalMismatched),
+        failedObjects: resolvedAllObjects ? 0 : Math.max(finalMissing + finalMismatched, Math.max(0, baselineFailedCount - workerTransferred)),
         unaccountedObjects: resolvedAllObjects ? 0 : Math.max(0, baseUnaccounted - resolvedUnaccounted - verifyIssues),
         verifyIssues,
         totalObjects: total,
@@ -138,13 +166,11 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
 
       const sameSlurperJob = (currentLive?.slurperJobId ?? null) === live.slurperJobId
       const sameRepairJob = (currentLive?.repairJobId ?? null) === live.repairJobId
-      const sameCycle = sameSlurperJob && sameRepairJob
+      const sameCycle = Boolean(live.slurperJobId || live.repairJobId || currentLive?.slurperJobId || currentLive?.repairJobId) && sameSlurperJob && sameRepairJob
       const currentStatus = currentLive && typeof currentLive.status === "string" ? currentLive.status : null
       const nextStatus = live.status
 
       if (currentLive && sameCycle) {
-        live.totalObjects = Math.max(currentLive.totalObjects === undefined ? 0 : Number(currentLive.totalObjects), live.totalObjects)
-
         if (!isTerminalBucketDisplayStatus(nextStatus)) {
           live.transferredObjects = Math.max(currentLive.transferredObjects === undefined ? 0 : Number(currentLive.transferredObjects), live.transferredObjects)
           live.skippedObjects = Math.max(currentLive.skippedObjects === undefined ? 0 : Number(currentLive.skippedObjects), live.skippedObjects)
@@ -157,6 +183,7 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
         } else if (
           !isTerminalBucketDisplayStatus(currentStatus) &&
           !isTerminalBucketDisplayStatus(nextStatus) &&
+          normalizeStatus(nextStatus) !== "queued" &&
           getBucketDisplayStatusRank(currentStatus) > getBucketDisplayStatusRank(nextStatus)
         ) {
           live.status = currentStatus
@@ -218,21 +245,21 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
       completedAt: null,
       lastSyncedAt: now,
     }).catch(() => undefined)
-  } else if (allCompleted) {
-    await updateMigration(migrationId, {
-      status: "completed",
-      syncStatus: "ok",
-      syncMessage: "",
-      completedAt: now,
-      lastSyncedAt: now,
-    }).catch(() => undefined)
-  } else if (allTerminal && anyFailed) {
+  } else if (anyFailed) {
     await updateMigration(migrationId, {
       status: "failed",
       syncStatus: "error",
       syncMessage: liveStatuses.some((status) => status === "verification_failed")
         ? "Verification failed for one or more buckets"
         : "One or more buckets failed",
+      completedAt: now,
+      lastSyncedAt: now,
+    }).catch(() => undefined)
+  } else if (allCompleted) {
+    await updateMigration(migrationId, {
+      status: "completed",
+      syncStatus: "ok",
+      syncMessage: "",
       completedAt: now,
       lastSyncedAt: now,
     }).catch(() => undefined)

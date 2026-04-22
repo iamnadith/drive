@@ -429,34 +429,28 @@ export default function MigrationsPage() {
   const totals = React.useMemo(() => {
     let totalObjects = 0
     let transferred = 0
-    let skipped = 0
-    let failed = 0
 
     for (const item of activeItems) {
+      const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
       const result = readSlurperResult(item.progress)
+      const live = isRecord(progress.live) ? (progress.live as Record<string, unknown>) : null
       const objects = result?.objects
       const transferredObjects = result?.transferredObjects
-      const skippedObjects = result?.skippedObjects
-      const failedObjects = result?.failedObjects
 
-      if (typeof objects === "number") totalObjects += objects
+      if (live && typeof live.totalObjects === "number") totalObjects += live.totalObjects
       else if (typeof item.sourceObjects === "number") totalObjects += item.sourceObjects
+      else if (typeof objects === "number") totalObjects += objects
 
-      if (typeof transferredObjects === "number") transferred += transferredObjects
-      if (typeof skippedObjects === "number") skipped += skippedObjects
-      if (typeof failedObjects === "number") failed += failedObjects
+      if (live && typeof live.transferredObjects === "number") transferred += live.transferredObjects
+      else if (typeof transferredObjects === "number") transferred += transferredObjects
     }
 
-    const processed = transferred + skipped + failed
-    const allBucketsCompleted = activeItems.length > 0 && activeItems.every((item) => isCompletedStatus(item.slurperStatus))
     const percent =
-      activeMigration?.status === "completed" || allBucketsCompleted
-        ? 100
-        : totalObjects > 0
-          ? Math.max(0, Math.min(100, (processed / totalObjects) * 100))
-          : 0
-    return { totalObjects, transferred, processed, percent }
-  }, [activeItems, activeMigration?.status])
+      totalObjects > 0
+        ? Math.max(0, Math.min(100, (transferred / totalObjects) * 100))
+        : 0
+    return { totalObjects, transferred, percent }
+  }, [activeItems])
 
   const filteredBuckets = React.useMemo(() => {
     const query = bucketQuery.trim().toLowerCase()
@@ -935,7 +929,7 @@ export default function MigrationsPage() {
                 </div>
                 <Progress value={totals.percent} className="h-2" />
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span>{formatNumber(totals.processed)} processed</span>
+                  <span>{formatNumber(totals.transferred)} transferred objects</span>
                   <span>{formatNumber(totals.totalObjects)} total objects</span>
                 </div>
               </div>

@@ -190,7 +190,6 @@ export async function POST(
       }).catch(() => undefined)
     } else if (effectiveStatus === "failed") {
       await updateMigration(job.migrationId, {
-        status: "failed",
         syncStatus: "error",
         syncMessage: errorMessage ?? summary ?? "Worker reconciliation failed",
         lastSyncedAt: now,
