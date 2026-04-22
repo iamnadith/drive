@@ -71,6 +71,7 @@ type Migration = {
     overwrite?: boolean
     concurrency?: number
     pathPrefix?: string | null
+    manualCompleted?: boolean
   }
   createdAt: string
   startedAt?: string
