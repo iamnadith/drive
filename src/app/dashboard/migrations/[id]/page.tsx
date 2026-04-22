@@ -72,6 +72,7 @@ type Migration = {
     concurrency?: number
     pathPrefix?: string | null
     manualCompleted?: boolean
+    targetActivatedAt?: string
   }
   createdAt: string
   startedAt?: string
@@ -711,6 +712,7 @@ export default function MigrationDetailsPage() {
   const [busyAction, setBusyAction] = React.useState<string | null>(null)
   const [busyItemAction, setBusyItemAction] = React.useState<Record<string, string>>({})
   const [deleteOpen, setDeleteOpen] = React.useState(false)
+  const [manualCompleteOpen, setManualCompleteOpen] = React.useState(false)
   const [logsOpen, setLogsOpen] = React.useState(false)
   const [logsItemId, setLogsItemId] = React.useState<string | null>(null)
   const [failedOpen, setFailedOpen] = React.useState(false)
@@ -1839,7 +1841,7 @@ export default function MigrationDetailsPage() {
 
                   {showMarkCompleted ? (
                     <Button
-                      onClick={() => void runMigrationAction("mark_completed")}
+                      onClick={() => setManualCompleteOpen(true)}
                       disabled={Boolean(busyAction)}
                       variant="secondary"
                     >
@@ -2745,6 +2747,31 @@ export default function MigrationDetailsPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={manualCompleteOpen} onOpenChange={setManualCompleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Mark migration completed?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will mark the migration as completed and switch the active Cloudflare account to the migrated target account.
+              The previous active account will be disabled. There is no automatic rollback after this switch.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={Boolean(busyAction)}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setManualCompleteOpen(false)
+                void runMigrationAction("mark_completed")
+              }}
+              disabled={Boolean(busyAction)}
+            >
+              {busyAction === "mark_completed" ? <Spinner className="mr-0" /> : null}
+              Confirm
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <AlertDialogContent>

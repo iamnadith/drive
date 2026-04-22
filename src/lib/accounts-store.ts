@@ -333,6 +333,28 @@ export async function updateAccount(
   return mapRow(data as DriveAccountRow)
 }
 
+export async function activateAccountForCompletedMigration(input: {
+  targetAccountId: string
+  completedAt?: string | null
+}): Promise<CloudflareAccount> {
+  const targetAccountId = String(input.targetAccountId ?? "").trim()
+  if (!targetAccountId) throw new Error("Migration target account is missing")
+
+  const accounts = await getAllAccounts()
+  const target = accounts.find((account) => account.id === targetAccountId)
+  if (!target) throw new Error("Migration target account not found")
+
+  const completedAt =
+    typeof input.completedAt === "string" && input.completedAt.trim().length > 0
+      ? input.completedAt
+      : new Date().toISOString()
+
+  return updateAccount(target.id, {
+    status: "active",
+    lastMigrated: completedAt,
+  })
+}
+
 export async function deleteAccount(id: string): Promise<void> {
   const supabase = getSupabaseServerClient()
 

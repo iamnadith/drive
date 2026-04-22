@@ -506,7 +506,7 @@ async function safeUpdateJob(jobId, body) {
     }
     return response
   } catch (error) {
-    if (error instanceof JobAbortedError) throw error
+    if (error instanceof JobAbortedError) return { canceled: true }
     console.error(`Job sync failed for ${jobId}:`, error instanceof Error ? error.message : String(error))
     return { offline: true, error: error instanceof Error ? error.message : String(error) }
   }
@@ -520,7 +520,7 @@ async function finalizeJobUpdate(jobId, body) {
     }
     return response
   } catch (error) {
-    if (error instanceof JobAbortedError) throw error
+    if (error instanceof JobAbortedError) return { canceled: true }
     console.error(`Final job update failed for ${jobId}:`, error instanceof Error ? error.message : String(error))
     return { offline: true, error: error instanceof Error ? error.message : String(error) }
   }
@@ -871,7 +871,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
       totalFiles: 0,
       summary: `Scanning ${item.sourceBucket} -> ${item.targetBucket}`,
     })
-    await safeUpdateJob(jobId, {
+    const startSync = await safeUpdateJob(jobId, {
       status: "running",
       items: [
         {
@@ -890,6 +890,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
         }),
       },
     })
+    if (startSync?.canceled) throw new JobAbortedError()
 
     const sourceObjects = await listAllObjects(sourceClient, item.sourceBucket, prefix, ({ count, key, size }) => {
       const delta = Math.max(0, count - sourceScanLastCount)
@@ -1149,7 +1150,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
           summary: `Repairing ${item.sourceBucket}: ${transferred} copied, ${failed} failed, ${skipped} skipped`,
         })
 
-        await safeUpdateJob(jobId, {
+        const repairSync = await safeUpdateJob(jobId, {
           status: "running",
           items: [
             {
@@ -1184,6 +1185,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
             }),
           },
         })
+        if (repairSync?.canceled) throw new JobAbortedError()
       }
     } else {
       skipped = toRepair.length
@@ -1407,7 +1409,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
     if (completed) state.stats.completedBuckets += 1
     else state.stats.failedBuckets += 1
 
-    await safeUpdateJob(jobId, {
+    const itemCompleteSync = await safeUpdateJob(jobId, {
         status: "running",
         items: [
           {
@@ -1451,9 +1453,10 @@ async function processItem(jobId, payload, item, completedResults, state) {
               missing: finalMissing,
               mismatched: finalMismatched,
             }),
-          }),
-        },
-      })
+        }),
+      },
+    })
+    if (itemCompleteSync?.canceled) throw new JobAbortedError()
 
     return {
       itemId: item.id,
@@ -1507,7 +1510,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
       })
       state.currentFile = null
     }
-    await safeUpdateJob(jobId, {
+    const itemFailedSync = await safeUpdateJob(jobId, {
       status: "running",
       items: [
         {
@@ -1542,6 +1545,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
         }),
       },
     }).catch(() => {})
+    if (itemFailedSync?.canceled) throw new JobAbortedError()
     throw error
   }
 }
@@ -1580,7 +1584,7 @@ async function runJob(job, payload) {
     }
   )
 
-  await finalizeJobUpdate(job.id, {
+  const finalSync = await finalizeJobUpdate(job.id, {
     status: completed ? "completed" : "failed",
     summary: completed
       ? `Worker reconciliation completed: destination matches source across ${results.length} bucket(s); ${totalVerifiedObjects} objects verified, ${totalTransferred} repaired`
@@ -1618,10 +1622,12 @@ async function runJob(job, payload) {
       }),
     },
   })
+  if (finalSync?.canceled) return
 }
 
 let currentJobId = null
 let currentMigrationId = null
+let heartbeatLoopStarted = false
 
 async function startHeartbeatLoop() {
   while (true) {
@@ -1647,7 +1653,10 @@ async function startHeartbeatLoop() {
 
 async function main() {
   console.log(`Worker starting for agent ${AGENT_ID} at ${SERVER_URL}`)
-  void startHeartbeatLoop()
+  if (!heartbeatLoopStarted) {
+    heartbeatLoopStarted = true
+    void startHeartbeatLoop()
+  }
 
   while (true) {
     try {
@@ -1701,7 +1710,29 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error)
-  process.exit(1)
+async function runWorkerForever() {
+  while (true) {
+    try {
+      await main()
+      return
+    } catch (error) {
+      console.error("Worker fatal error:", error instanceof Error ? error.stack || error.message : String(error))
+      currentJobId = null
+      currentMigrationId = null
+      migrationItemProgressCache.clear()
+      repairJobProgressCache.clear()
+      if (EXIT_AFTER_JOB) return
+      await sleep(POLL_MS)
+    }
+  }
+}
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason instanceof Error ? reason.stack || reason.message : String(reason))
 })
+
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception:", error instanceof Error ? error.stack || error.message : String(error))
+})
+
+void runWorkerForever()

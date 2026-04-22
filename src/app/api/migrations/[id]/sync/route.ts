@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { getAllAccounts } from "@/lib/accounts-store"
+import { activateAccountForCompletedMigration, getAllAccounts } from "@/lib/accounts-store"
 import {
   slurperConnectivityPrecheckSource,
   slurperConnectivityPrecheckTarget,
@@ -353,8 +353,30 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     // But we still reconcile stale terminal states from item-level truth.
     if (migration.status === "completed" || migration.status === "failed" || migration.status === "canceled") {
       const items = await listMigrationItems(id)
+      if (migration.status === "completed" && !migration.options?.targetActivatedAt) {
+        try {
+          const activatedAt = new Date().toISOString()
+          await activateAccountForCompletedMigration({
+            targetAccountId: migration.targetAccountId,
+            completedAt: activatedAt,
+          })
+          await updateMigration(id, {
+            syncStatus: "ok",
+            syncMessage: migration.syncMessage ?? "",
+            lastSyncedAt: activatedAt,
+            options: { ...migration.options, targetActivatedAt: activatedAt },
+          })
+        } catch (error: unknown) {
+          const message = formatCloudflareError(error, "Failed to activate migrated account")
+          await updateMigration(id, {
+            syncStatus: "error",
+            syncMessage: message,
+            lastSyncedAt: new Date().toISOString(),
+          }).catch(() => undefined)
+        }
+      }
       if (migration.status === "completed" && migration.options?.manualCompleted === true) {
-        return NextResponse.json({ migration, items, skipped: "manual_completed" }, { status: 200 })
+        return NextResponse.json({ migration: await getMigration(id) ?? migration, items, skipped: "manual_completed" }, { status: 200 })
       }
       if (migration.status === "completed") {
         const verifyEnabled = migration.options?.verifyAfterCopy !== false

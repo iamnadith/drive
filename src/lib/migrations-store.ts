@@ -12,6 +12,7 @@ export type MigrationOptions = {
   pathPrefix?: string | null
   sourceMode?: "r2" | "s3"
   manualCompleted?: boolean
+  targetActivatedAt?: string
 
   // When true (default), after Super Slurper completes a bucket we verify source→destination
   // object listings (key + size) before marking the migration completed.

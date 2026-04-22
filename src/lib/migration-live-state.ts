@@ -1,4 +1,5 @@
 import { getMigration, listMigrationItems, mergeMigrationItemProgressState, updateMigration } from "./migrations-store"
+import { activateAccountForCompletedMigration } from "./accounts-store"
 import { listRepairJobsByMigration, type DriveRepairJob } from "./repair-jobs-store"
 import {
   getBucketDisplayStatusRank,
@@ -257,13 +258,32 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
       lastSyncedAt: now,
     }).catch(() => undefined)
   } else if (allCompleted) {
-    await updateMigration(migrationId, {
-      status: "completed",
-      syncStatus: "ok",
-      syncMessage: "",
-      completedAt: now,
-      lastSyncedAt: now,
-    }).catch(() => undefined)
+    try {
+      await activateAccountForCompletedMigration({
+        targetAccountId: migration.targetAccountId,
+        completedAt: now,
+      })
+      await updateMigration(migrationId, {
+        status: "completed",
+        syncStatus: "ok",
+        syncMessage: "",
+        completedAt: now,
+        lastSyncedAt: now,
+        options: { ...migration.options, targetActivatedAt: now },
+      })
+    } catch (error: unknown) {
+      const message =
+        typeof error === "object" && error !== null && "message" in error
+          ? String((error as { message?: unknown }).message ?? "Failed to activate migrated account")
+          : "Failed to activate migrated account"
+      await updateMigration(migrationId, {
+        status: "failed",
+        syncStatus: "error",
+        syncMessage: message,
+        completedAt: null,
+        lastSyncedAt: now,
+      }).catch(() => undefined)
+    }
   } else if (allTerminal && anyAborted && !anyFailed) {
     await updateMigration(migrationId, {
       status: "canceled",

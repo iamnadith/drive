@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { getAgentById, getAgentGithubToken, getLatestAgentRunByJobReference, updateAgent, updateAgentRun } from "@/lib/agents-store"
-import { getAllAccounts } from "@/lib/accounts-store"
+import { activateAccountForCompletedMigration, getAllAccounts } from "@/lib/accounts-store"
 import { slurperAbortJob, slurperPauseJob, slurperResumeJob } from "@/lib/cloudflare-r2-super-slurper"
 import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflowRun, listGitHubWorkflowRuns } from "@/lib/github-oauth"
 import { getMigration, listMigrationItems, updateMigration, updateMigrationItem } from "@/lib/migrations-store"
@@ -344,7 +344,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         syncStatus: "ok",
         syncMessage: `Migration canceled${cancelRepairResult.abortedJobs > 0 ? `; aborted ${cancelRepairResult.abortedJobs} worker job(s)` : ""}`,
         lastSyncedAt: now,
-        options: { ...migration.options, manualCompleted: false },
+        options: { ...migration.options, manualCompleted: false, targetActivatedAt: undefined },
       })
       return NextResponse.json({ ok: true, abortedRepairJobs: cancelRepairResult.abortedJobs, abortedSlurperJobs: candidates.length }, { status: 200 })
     }
@@ -356,6 +356,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           { status: 400 }
         )
       }
+      await activateAccountForCompletedMigration({
+        targetAccountId: migration.targetAccountId,
+        completedAt: now,
+      })
       await updateMigration(id, {
         status: "completed",
         completedAt: now,
@@ -363,7 +367,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         // Keep completed as completed everywhere; no extra message needed.
         syncMessage: "",
         lastSyncedAt: now,
-        options: { ...migration.options, manualCompleted: true },
+        options: { ...migration.options, manualCompleted: true, targetActivatedAt: now },
       })
       return NextResponse.json({ ok: true }, { status: 200 })
     }
@@ -393,7 +397,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         syncStatus: "ok",
         syncMessage: candidates.length > 0 ? `Verification started for ${candidates.length} bucket(s)` : "No completed buckets to verify",
         lastSyncedAt: now,
-        options: { ...migration.options, manualCompleted: false },
+        options: { ...migration.options, manualCompleted: false, targetActivatedAt: undefined },
       })
 
       return NextResponse.json({ ok: true, verifying: candidates.length }, { status: 200 })
@@ -455,7 +459,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
             ? `Retry queued for ${candidates.length} bucket(s) with overwrite disabled`
             : "No buckets require retry",
         lastSyncedAt: now,
-        options: { ...migration.options, manualCompleted: false },
+        options: { ...migration.options, manualCompleted: false, targetActivatedAt: undefined },
       })
 
       return NextResponse.json({ ok: true, retried: candidates.length }, { status: 200 })
