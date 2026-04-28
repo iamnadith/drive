@@ -10,27 +10,38 @@ export type AuthUser = {
   email: string
   role: "superadmin" | "admin" | "user"
   status: "active" | "disabled"
+  emailVerified?: boolean
+  emailVerifiedAt?: string
+  mobileNumber?: string
+  mobileVerified?: boolean
+  mobileVerifiedAt?: string
   quotaLimitMb: number
   quotaUsedMb: number
   profileImageUrl?: string
   googleLinked?: boolean
   passwordSource?: "local" | "google-generated"
+  twoFactorEnabled?: boolean
+  totpEnabled?: boolean
 }
 
 type AuthContextValue = {
   user: AuthUser | null
   loading: boolean
-  login: (email: string, password: string) => Promise<void>
+  login: (
+    email: string,
+    password: string,
+    verificationMethod?: "email" | "totp" | "sms"
+  ) => Promise<{ requiresOtp?: boolean; requiresTotp?: boolean; email?: string; methods?: string[]; method?: string }>
   signup: (
     name: string,
     email: string,
     password: string,
     username?: string
-  ) => Promise<void>
+  ) => Promise<{ requiresVerification?: boolean; email?: string }>
   logout: () => Promise<void>
   updateSelf: (
     updates: Partial<
-      Pick<AuthUser, "name" | "email" | "profileImageUrl" | "googleLinked">
+      Pick<AuthUser, "name" | "username" | "email" | "profileImageUrl" | "googleLinked">
     > & { password?: string }
   ) => Promise<void>
   setUserDirect: (user: AuthUser | null) => void
@@ -208,26 +219,48 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [user, refreshUserFromServer])
 
   const loginFn = React.useCallback(
-    async (email: string, password: string) => {
+    async (email: string, password: string, verificationMethod?: "email" | "totp" | "sms") => {
       setLoading(true)
       try {
         const res = await fetch("/api/auth/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password }),
+          body: JSON.stringify({ email, password, verificationMethod }),
         })
         const data = await res.json()
         if (!res.ok) {
           throw new Error(data.error ?? "Login failed")
         }
-        const nextUser = data.user as AuthUser
-        setUser(nextUser)
-        if (typeof window !== "undefined") {
-          window.localStorage.setItem("authUser", JSON.stringify(nextUser))
+        if (data.requiresOtp) {
+          toast.success("Verification code sent")
+          return {
+            requiresOtp: true,
+            email: data.email as string | undefined,
+            method: typeof data.method === "string" ? data.method : verificationMethod || "email",
+            methods: Array.isArray(data.methods) ? data.methods.map(String) : undefined,
+          }
         }
-        toast.success("Logged in")
-      } catch (error: any) {
-        toast.error(error?.message ?? "Login failed")
+        if (data.requiresTotp) {
+          return {
+            requiresTotp: true,
+            methods: Array.isArray(data.methods) ? data.methods.map(String) : ["authenticator", "email"],
+          }
+        }
+        if (data.user) {
+          const nextUser = data.user as AuthUser
+          setUser(nextUser)
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem("authUser", JSON.stringify(nextUser))
+          }
+          toast.success("Logged in")
+        }
+        return {}
+      } catch (error: unknown) {
+        const message =
+          typeof error === "object" && error !== null && "message" in error
+            ? String((error as { message?: unknown }).message ?? "Login failed")
+            : "Login failed"
+        toast.error(message)
         throw error
       } finally {
         setLoading(false)
@@ -249,14 +282,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (!res.ok) {
           throw new Error(data.error ?? "Sign up failed")
         }
-        const nextUser = data.user as AuthUser
-        setUser(nextUser)
-        if (typeof window !== "undefined") {
-          window.localStorage.setItem("authUser", JSON.stringify(nextUser))
+        if (data.requiresVerification) {
+          toast.success("Verification email sent")
+          return { requiresVerification: true, email: data.email as string | undefined }
         }
-        toast.success("Account created")
-      } catch (error: any) {
-        toast.error(error?.message ?? "Sign up failed")
+        if (data.user) {
+          const nextUser = data.user as AuthUser
+          setUser(nextUser)
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem("authUser", JSON.stringify(nextUser))
+          }
+          toast.success("Account created")
+        }
+        return {}
+      } catch (error: unknown) {
+        const message =
+          typeof error === "object" && error !== null && "message" in error
+            ? String((error as { message?: unknown }).message ?? "Sign up failed")
+            : "Sign up failed"
+        toast.error(message)
         throw error
       } finally {
         setLoading(false)
@@ -286,7 +330,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const updateSelfFn = React.useCallback(
     async (
       updates: Partial<
-        Pick<AuthUser, "name" | "email" | "profileImageUrl">
+        Pick<AuthUser, "name" | "username" | "email" | "profileImageUrl" | "googleLinked">
       > & { password?: string }
     ) => {
       if (!user) return
@@ -318,9 +362,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           window.localStorage.setItem("authUser", JSON.stringify(nextUser))
         }
         toast.success("Profile updated")
-      } catch (error: any) {
-        if (error?.message !== "User not found") {
-          toast.error(error?.message ?? "Update failed")
+      } catch (error: unknown) {
+        const message =
+          typeof error === "object" && error !== null && "message" in error
+            ? String((error as { message?: unknown }).message ?? "Update failed")
+            : "Update failed"
+        if (message !== "User not found") {
+          toast.error(message)
           throw error
         }
       } finally {

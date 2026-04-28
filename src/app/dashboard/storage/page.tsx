@@ -4,7 +4,14 @@ import * as React from "react"
 import {
   Folder,
   File,
+  Copy,
+  Download,
+  ExternalLink,
+  Filter,
+  Loader2,
   MoreHorizontal,
+  Pause,
+  Play,
   Upload,
   Search,
   Grid2X2,
@@ -13,6 +20,7 @@ import {
   ChevronRight,
   Home,
   ArrowLeft,
+  X,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -31,6 +39,7 @@ import {
 } from "@/components/ui/context-menu"
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -47,6 +56,13 @@ import {
     TableRow,
 } from "@/components/ui/table"
 import { Progress } from "@/components/ui/progress"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 
 type ActiveAccount = {
@@ -95,6 +111,31 @@ type PropertiesTarget =
   | { type: "item"; item: FileItem }
   | { type: "path"; path: string[] }
 
+type PreviewTarget = {
+  item: FileItem
+  url?: string
+  loading: boolean
+  error?: string
+}
+
+type KindFilter = "all" | "folder" | "image" | "video" | "audio" | "pdf" | "document" | "other"
+type SortMode = "name-asc" | "name-desc" | "type" | "modified-desc" | "size-desc"
+
+type AccountRecord = {
+  id?: unknown
+  label?: unknown
+  email?: unknown
+  status?: unknown
+}
+
+type BucketRecord = {
+  id?: unknown
+  name?: unknown
+  bytes?: unknown
+  objects?: unknown
+  statsStatus?: unknown
+}
+
 function formatBytes(value: number | undefined): string {
   if (!value || value <= 0) return "0 B"
   const units = ["B", "KB", "MB", "GB", "TB", "PB"]
@@ -105,6 +146,60 @@ function formatBytes(value: number | undefined): string {
     unitIndex++
   }
   return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unitIndex]}`
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback
+}
+
+function accountStatus(value: unknown): ActiveAccount["status"] {
+  return value === "active" || value === "available" || value === "disabled"
+    ? value
+    : "available"
+}
+
+function fileKind(item: FileItem) {
+  const ext = item.name.split(".").pop()?.toLowerCase() ?? ""
+  if (["jpg", "jpeg", "png", "gif", "webp", "avif", "svg", "bmp"].includes(ext)) return "image"
+  if (["mp4", "webm", "mov", "m4v", "avi", "mkv"].includes(ext)) return "video"
+  if (["mp3", "wav", "ogg", "m4a", "flac", "aac"].includes(ext)) return "audio"
+  if (ext === "pdf") return "pdf"
+  if (["doc", "docx", "odt", "rtf", "xls", "xlsx", "ppt", "pptx", "csv"].includes(ext)) return "document"
+  if (["txt", "md", "json", "js", "jsx", "ts", "tsx", "css", "html", "xml", "sql", "yml", "yaml"].includes(ext)) return "text"
+  return "file"
+}
+
+function fileTypeLabel(item: FileItem) {
+  if (item.type === "folder") return "Folder"
+  const kind = fileKind(item)
+  if (kind === "image") return "Image"
+  if (kind === "video") return "Video"
+  if (kind === "audio") return "Audio"
+  if (kind === "pdf") return "PDF"
+  if (kind === "document") return "Document"
+  if (kind === "text") return "Text / code"
+  return "File"
+}
+
+function itemSizeBytes(item: FileItem) {
+  const size = item.size ?? ""
+  const match = /^([\d.]+)\s+(B|KB|MB|GB|TB|PB)$/.exec(size)
+  if (!match) return 0
+  const value = Number(match[1])
+  const unit = ["B", "KB", "MB", "GB", "TB", "PB"].indexOf(match[2])
+  return Number.isFinite(value) && unit >= 0 ? value * 1024 ** unit : 0
+}
+
+function itemModifiedMs(item: FileItem) {
+  const time = item.modified ? Date.parse(item.modified) : 0
+  return Number.isFinite(time) ? time : 0
+}
+
+function matchesKindFilter(item: FileItem, filter: KindFilter) {
+  if (filter === "all") return true
+  if (filter === "folder") return item.type === "folder"
+  if (filter === "other") return item.type === "file" && ["file", "text"].includes(fileKind(item))
+  return item.type === "file" && fileKind(item) === filter
 }
 
 function buildItemsFromListing(input: {
@@ -160,19 +255,34 @@ export default function StoragePage() {
   )
   const [drives, setDrives] = React.useState<Drive[]>([])
   const [totalUsedBytes, setTotalUsedBytes] = React.useState(0)
-  const [bucketObjects, setBucketObjects] = React.useState<RawObject[]>([])
+  const [, setBucketObjects] = React.useState<RawObject[]>([])
   const [objects, setObjects] = React.useState<FileItem[]>([])
   const [objectsLoading, setObjectsLoading] = React.useState(false)
   const [nextContinuationToken, setNextContinuationToken] = React.useState<string | null>(null)
+  const [query, setQuery] = React.useState("")
+  const [kindFilter, setKindFilter] = React.useState<KindFilter>("all")
+  const [sortMode, setSortMode] = React.useState<SortMode>("name-asc")
+  const [pageSize, setPageSize] = React.useState("50")
+  const [currentPage, setCurrentPage] = React.useState(1)
   const [selectedDrives, setSelectedDrives] = React.useState<string[]>([])
   const [selectedItems, setSelectedItems] = React.useState<string[]>([])
   const fileInputRef = React.useRef<HTMLInputElement | null>(null)
+  const loadRequestIdRef = React.useRef(0)
+  const videoRef = React.useRef<HTMLVideoElement | null>(null)
+  const [videoPlaying, setVideoPlaying] = React.useState(false)
   const [propertiesTarget, setPropertiesTarget] =
     React.useState<PropertiesTarget | null>(null)
+  const [previewTarget, setPreviewTarget] = React.useState<PreviewTarget | null>(null)
   const [createBucketOpen, setCreateBucketOpen] = React.useState(false)
   const [newBucketName, setNewBucketName] = React.useState("")
   const [newBucketError, setNewBucketError] = React.useState<string | null>(null)
   const [creatingBucket, setCreatingBucket] = React.useState(false)
+
+  const openCreateBucket = () => {
+    setNewBucketName("")
+    setNewBucketError(null)
+    setCreateBucketOpen(true)
+  }
 
   const loadActiveAndBuckets = React.useCallback(async () => {
     try {
@@ -182,15 +292,15 @@ export default function StoragePage() {
       ])
 
       if (accountsRes.ok) {
-        const data = await accountsRes.json()
-        const accounts: any[] = data.accounts ?? []
+        const data = (await accountsRes.json()) as { accounts?: AccountRecord[] }
+        const accounts = Array.isArray(data.accounts) ? data.accounts : []
         const active = accounts.find((a) => a.status === "active")
         if (active) {
           setActiveAccount({
-            id: active.id,
-            label: active.label ?? "",
-            email: active.email ?? "",
-            status: active.status ?? "available",
+            id: String(active.id ?? ""),
+            label: String(active.label ?? ""),
+            email: String(active.email ?? ""),
+            status: accountStatus(active.status),
           })
         } else {
           setActiveAccount(null)
@@ -198,9 +308,12 @@ export default function StoragePage() {
       }
 
       if (bucketsRes.ok) {
-        const data = await bucketsRes.json()
-        const buckets: any[] = data.buckets ?? []
-        const totalBytes: number = data.totalBytes ?? 0
+        const data = (await bucketsRes.json()) as {
+          buckets?: BucketRecord[]
+          totalBytes?: unknown
+        }
+        const buckets = Array.isArray(data.buckets) ? data.buckets : []
+        const totalBytes = typeof data.totalBytes === "number" ? data.totalBytes : 0
         setTotalUsedBytes(totalBytes)
         setDrives(
           buckets.map((b) => ({
@@ -255,11 +368,39 @@ export default function StoragePage() {
       clearInterval(interval)
     }
   }, [needsStatsSync, loadActiveAndBuckets])
+
+  const pathKey = currentPath.join("/")
+
+  React.useEffect(() => {
+    setCurrentPage(1)
+  }, [query, kindFilter, sortMode, pathKey])
+
+  const resetBrowserState = () => {
+    loadRequestIdRef.current += 1
+    setObjects([])
+    setBucketObjects([])
+    setNextContinuationToken(null)
+    setSelectedItems([])
+    setSelectedDrives([])
+    setQuery("")
+    setKindFilter("all")
+    setCurrentPage(1)
+  }
+
+  const navigateHome = () => {
+    setCurrentPath([])
+    resetBrowserState()
+  }
   
   const navigateToDrive = (driveName: string) => {
     setCurrentPath([driveName])
     setSelectedDrives([])
     setSelectedItems([])
+    setObjects([])
+    setNextContinuationToken(null)
+    setQuery("")
+    setKindFilter("all")
+    setCurrentPage(1)
     loadObjectsForPath([driveName])
   }
 
@@ -268,10 +409,12 @@ export default function StoragePage() {
       const next = prev.slice(0, -1)
       setSelectedItems([])
       if (next.length === 0) {
-        setObjects([])
-        setBucketObjects([])
-        setNextContinuationToken(null)
+        resetBrowserState()
       } else {
+        setObjects([])
+        setNextContinuationToken(null)
+        setQuery("")
+        setCurrentPage(1)
         void loadObjectsForPath(next)
       }
       return next
@@ -281,13 +424,18 @@ export default function StoragePage() {
   const navigateToFolder = (folderName: string) => {
     setCurrentPath((prev) => {
       const next = [...prev, folderName]
+      setObjects([])
+      setNextContinuationToken(null)
+      setSelectedItems([])
+      setQuery("")
+      setKindFilter("all")
+      setCurrentPage(1)
       void loadObjectsForPath(next)
       return next
     })
   }
 
   const isRoot = currentPath.length === 0
-  const hasItems = objects.length > 0
 
   const handleDriveClick = (
     event: React.MouseEvent<HTMLButtonElement>,
@@ -295,18 +443,15 @@ export default function StoragePage() {
   ) => {
     const multi = event.metaKey || event.ctrlKey || event.shiftKey
     setSelectedItems([])
+    if (!multi) {
+      navigateToDrive(drive.name)
+      return
+    }
     setSelectedDrives((prev) => {
-      if (multi) {
-        return prev.includes(drive.id)
-          ? prev.filter((id) => id !== drive.id)
-          : [...prev, drive.id]
-      }
-      return [drive.id]
+      return prev.includes(drive.id)
+        ? prev.filter((id) => id !== drive.id)
+        : [...prev, drive.id]
     })
-  }
-
-  const handleDriveDoubleClick = (drive: Drive) => {
-    navigateToDrive(drive.name)
   }
 
   const handleItemClick = (
@@ -315,22 +460,101 @@ export default function StoragePage() {
   ) => {
     const multi = event.metaKey || event.ctrlKey || event.shiftKey
     setSelectedDrives([])
+    if (!multi) {
+      setSelectedItems([item.id])
+      void openItem(item)
+      return
+    }
     setSelectedItems((prev) => {
-      if (multi) {
-        return prev.includes(item.id)
-          ? prev.filter((id) => id !== item.id)
-          : [...prev, item.id]
-      }
-      return [item.id]
+      return prev.includes(item.id)
+        ? prev.filter((id) => id !== item.id)
+        : [...prev, item.id]
     })
   }
 
   const handleItemDoubleClick = (item: FileItem) => {
+    void openItem(item)
+  }
+
+  const signedUrl = async (item: FileItem, action: "preview-url" | "download-url") => {
+    const bucketName = currentPath[0]
+    if (!bucketName) throw new Error("No drive selected")
+    const qs = new URLSearchParams({ action, key: item.key })
+    const res = await fetch(
+      `/api/storage/buckets/${encodeURIComponent(bucketName)}/objects?${qs.toString()}`
+    )
+    const data = (await res.json().catch(() => ({}))) as { url?: unknown; error?: unknown }
+    if (!res.ok || typeof data.url !== "string") {
+      throw new Error(String(data.error ?? "Unable to create signed object URL"))
+    }
+    return data.url
+  }
+
+  const systemStorageLink = (item: FileItem, download?: boolean) => {
+    const bucketName = currentPath[0]
+    if (!bucketName || item.type === "folder") return ""
+    const origin = window.location.origin
+    const encodedKey = item.key
+      .split("/")
+      .filter(Boolean)
+      .map((segment) => encodeURIComponent(segment))
+      .join("/")
+    return `${origin}/storage/${encodeURIComponent(bucketName)}/${encodedKey}${download ? "?download=1" : ""}`
+  }
+
+  const copySystemStorageLink = async (item: FileItem) => {
+    const link = systemStorageLink(item)
+    if (!link) return
+    try {
+      await navigator.clipboard.writeText(link)
+    } catch {
+      window.prompt("Storage link", link)
+    }
+  }
+
+  const openItem = async (item: FileItem) => {
     if (item.type === "folder") {
       navigateToFolder(item.name)
       return
     }
-    // TODO: open file preview or download
+    setPreviewTarget({ item, loading: true })
+    try {
+      const url = await signedUrl(item, "preview-url")
+      setPreviewTarget({ item, url, loading: false })
+    } catch (error: unknown) {
+      setPreviewTarget({
+        item,
+        loading: false,
+        error: errorMessage(error, "Unable to preview file"),
+      })
+    }
+  }
+
+  const downloadItem = (item: FileItem) => {
+    const link = systemStorageLink(item, true)
+    if (!link) return
+    window.location.href = link
+  }
+
+  const deleteItem = async (item: FileItem) => {
+    const bucketName = currentPath[0]
+    if (!bucketName) return
+    if (!window.confirm(`Delete "${item.name}"${item.type === "folder" ? " and everything inside it" : ""}?`)) {
+      return
+    }
+    const res = await fetch(`/api/storage/buckets/${encodeURIComponent(bucketName)}/objects`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: item.key, type: item.type }),
+    })
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: unknown; details?: unknown }
+      window.alert(String(data.error ?? data.details ?? "Unable to delete item"))
+      return
+    }
+    setSelectedItems([])
+    await loadObjectsForPath(currentPath)
+    void loadActiveAndBuckets()
   }
 
   const loadMore = async () => {
@@ -342,6 +566,7 @@ export default function StoragePage() {
   const loadObjectsForPath = async (path: string[], mode?: "append") => {
     const bucketName = path[0] ?? ""
     if (!bucketName) return
+    const requestId = ++loadRequestIdRef.current
     setObjectsLoading(true)
     try {
       const prefix = path.length > 1 ? path.slice(1).join("/") + "/" : ""
@@ -355,6 +580,7 @@ export default function StoragePage() {
       const res = await fetch(
         `/api/storage/buckets/${encodeURIComponent(bucketName)}/objects?${qs.toString()}`
       )
+      if (requestId !== loadRequestIdRef.current) return
       if (!res.ok) {
         setBucketObjects([])
         setObjects([])
@@ -362,6 +588,7 @@ export default function StoragePage() {
         return
       }
       const data: ObjectsResponse = await res.json()
+      if (requestId !== loadRequestIdRef.current) return
 
       const folders = Array.isArray(data.folders) ? data.folders.map(String).filter(Boolean) : []
       const rawObjects = Array.isArray(data.objects) ? data.objects : []
@@ -392,11 +619,14 @@ export default function StoragePage() {
         setObjects(buildItemsFromListing({ prefix, folders, objects: normalized }))
       }
     } catch {
+      if (requestId !== loadRequestIdRef.current) return
       setBucketObjects([])
       setObjects([])
       setNextContinuationToken(null)
     } finally {
-      setObjectsLoading(false)
+      if (requestId === loadRequestIdRef.current) {
+        setObjectsLoading(false)
+      }
     }
   }
 
@@ -430,13 +660,52 @@ export default function StoragePage() {
       setCreateBucketOpen(false)
       setNewBucketName("")
       setNewBucketError(null)
-    } catch (error: any) {
-      setNewBucketError(error?.message ?? "Network error while creating bucket")
+    } catch (error: unknown) {
+      setNewBucketError(errorMessage(error, "Network error while creating bucket"))
     } finally {
       setCreatingBucket(false)
     }
   }
 
+  const filteredDrives = React.useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    if (!needle) return drives
+    return drives.filter((drive) => drive.name.toLowerCase().includes(needle))
+  }, [drives, query])
+
+  const filteredObjects = React.useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    return objects
+      .filter((item) => {
+        if (!matchesKindFilter(item, kindFilter)) return false
+        if (!needle) return true
+        return (
+          item.name.toLowerCase().includes(needle) ||
+          item.key.toLowerCase().includes(needle) ||
+          fileTypeLabel(item).toLowerCase().includes(needle)
+        )
+      })
+      .sort((a, b) => {
+        if (sortMode === "name-desc") return b.name.localeCompare(a.name)
+        if (sortMode === "type") {
+          const typeSort = fileTypeLabel(a).localeCompare(fileTypeLabel(b))
+          return typeSort || a.name.localeCompare(b.name)
+        }
+        if (sortMode === "modified-desc") return itemModifiedMs(b) - itemModifiedMs(a)
+        if (sortMode === "size-desc") return itemSizeBytes(b) - itemSizeBytes(a)
+        return a.name.localeCompare(b.name)
+      })
+  }, [kindFilter, objects, query, sortMode])
+
+  const numericPageSize = Math.max(20, Math.min(200, Number(pageSize) || 50))
+  const totalPages = Math.max(1, Math.ceil(filteredObjects.length / numericPageSize))
+  const safePage = Math.min(currentPage, totalPages)
+  const pagedObjects = filteredObjects.slice(
+    (safePage - 1) * numericPageSize,
+    safePage * numericPageSize
+  )
+  const folderCount = objects.filter((item) => item.type === "folder").length
+  const fileCount = objects.length - folderCount
   const showDrivesPanel = isRoot
 
   return (
@@ -491,6 +760,212 @@ export default function StoragePage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={Boolean(previewTarget)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPreviewTarget(null)
+            setVideoPlaying(false)
+          }
+        }}
+      >
+        <DialogContent
+          showCloseButton={false}
+          className="h-[min(72dvh,720px)] max-h-[calc(100dvh-1rem)] w-[min(96vw,1280px)] max-w-none overflow-hidden p-0"
+        >
+          {previewTarget && (
+            <div className="grid h-full min-h-0 min-w-0 grid-rows-[auto,minmax(0,1fr)] bg-background">
+              <div className="flex h-9 min-w-0 items-center gap-1 border-b bg-background/95 px-2">
+                <DialogHeader className="min-w-0 flex-1 gap-0 text-left">
+                  <DialogTitle className="truncate text-sm font-medium leading-none">
+                    {previewTarget.item.name}
+                  </DialogTitle>
+                </DialogHeader>
+                <div className="flex shrink-0 items-center gap-1">
+                  {previewTarget.url && fileKind(previewTarget.item) === "video" && (
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-7 w-7"
+                      aria-label={videoPlaying ? "Pause video" : "Play video"}
+                      title={videoPlaying ? "Pause" : "Play"}
+                      onClick={() => {
+                        const video = videoRef.current
+                        if (!video) return
+                        if (video.paused) {
+                          void video.play()
+                          setVideoPlaying(true)
+                        } else {
+                          video.pause()
+                          setVideoPlaying(false)
+                        }
+                      }}
+                    >
+                      {videoPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                    </Button>
+                  )}
+                  {previewTarget.url && (
+                    <Button variant="outline" size="icon" className="h-7 w-7" asChild>
+                      <a
+                        href={systemStorageLink(previewTarget.item)}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label="Open file"
+                        title="Open"
+                      >
+                        <ExternalLink className="h-4 w-4" />
+                      </a>
+                    </Button>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-7 w-7"
+                    aria-label="Copy file link"
+                    title="Copy link"
+                    onClick={() => void copySystemStorageLink(previewTarget.item)}
+                  >
+                    <Copy className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    className="h-7 w-7"
+                    aria-label="Download file"
+                    title="Download"
+                    onClick={() => void downloadItem(previewTarget.item)}
+                  >
+                    <Download className="h-4 w-4" />
+                  </Button>
+                  <DialogClose asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-destructive hover:bg-destructive/15 hover:text-destructive"
+                      aria-label="Close preview"
+                      title="Close"
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </DialogClose>
+                </div>
+              </div>
+
+              <div className="min-h-0 min-w-0 overflow-hidden bg-background">
+                <div className="flex h-full min-h-0 min-w-0 items-center justify-center overflow-hidden bg-background">
+                  {previewTarget.loading && (
+                    <div className="flex items-center gap-2 rounded-md border bg-background px-4 py-3 text-sm text-muted-foreground shadow-sm">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Preparing preview
+                    </div>
+                  )}
+                  {!previewTarget.loading && previewTarget.error && (
+                    <div className="max-w-md rounded-lg border bg-background p-8 text-center shadow-sm">
+                      <File className="mx-auto mb-3 h-10 w-10 text-muted-foreground" />
+                      <p className="font-medium">Preview unavailable</p>
+                      <p className="mt-1 text-sm text-muted-foreground">{previewTarget.error}</p>
+                    </div>
+                  )}
+                  {!previewTarget.loading && previewTarget.url && fileKind(previewTarget.item) === "image" && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={previewTarget.url}
+                      alt={previewTarget.item.name}
+                      className="block h-auto max-h-full w-auto max-w-full object-contain"
+                    />
+                  )}
+                  {!previewTarget.loading && previewTarget.url && fileKind(previewTarget.item) === "video" && (
+                    <video
+                      ref={videoRef}
+                      src={previewTarget.url}
+                      controls
+                      className="h-full max-h-full w-full max-w-full bg-black object-contain object-top"
+                      onPlay={() => setVideoPlaying(true)}
+                      onPause={() => setVideoPlaying(false)}
+                    />
+                  )}
+                  {!previewTarget.loading && previewTarget.url && fileKind(previewTarget.item) === "audio" && (
+                    <div className="w-full max-w-2xl min-w-0 p-4 sm:p-6">
+                      <div className="mb-6 flex items-center gap-4">
+                        <div className="flex h-14 w-14 items-center justify-center rounded-lg border bg-muted">
+                          <File className="h-6 w-6 text-muted-foreground" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="truncate text-base font-medium">{previewTarget.item.name}</p>
+                        </div>
+                      </div>
+                      <audio src={previewTarget.url} controls className="w-full" />
+                    </div>
+                  )}
+                  {!previewTarget.loading &&
+                    previewTarget.url &&
+                    ["pdf", "text", "document", "file"].includes(fileKind(previewTarget.item)) && (
+                      <iframe
+                        src={previewTarget.url}
+                        title={previewTarget.item.name}
+                        className="h-full min-h-0 w-full min-w-0 border-0 bg-background"
+                      />
+                    )}
+                </div>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(propertiesTarget)} onOpenChange={(open) => !open && setPropertiesTarget(null)}>
+        <DialogContent>
+          {propertiesTarget && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Properties</DialogTitle>
+                <DialogDescription>
+                  {propertiesTarget.type === "drive"
+                    ? propertiesTarget.drive.name
+                    : propertiesTarget.type === "item"
+                      ? propertiesTarget.item.name
+                      : propertiesTarget.path.length
+                        ? propertiesTarget.path.join(" / ")
+                        : "This PC"}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3 text-sm">
+                {propertiesTarget.type === "drive" && (
+                  <>
+                    <div className="flex justify-between gap-4">
+                      <span className="text-muted-foreground">Used</span>
+                      <span>{formatBytes(propertiesTarget.drive.usedBytes)}</span>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <span className="text-muted-foreground">Objects</span>
+                      <span>{propertiesTarget.drive.objects}</span>
+                    </div>
+                  </>
+                )}
+                {propertiesTarget.type === "item" && (
+                  <>
+                    <div className="flex justify-between gap-4">
+                      <span className="text-muted-foreground">Type</span>
+                      <span>{propertiesTarget.item.type === "folder" ? "Folder" : propertiesTarget.item.fileType}</span>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <span className="text-muted-foreground">Size</span>
+                      <span>{propertiesTarget.item.type === "folder" ? "-" : propertiesTarget.item.size}</span>
+                    </div>
+                    <div className="break-all">
+                      <span className="text-muted-foreground">Key: </span>
+                      {propertiesTarget.item.key}
+                    </div>
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center justify-between border-b pb-4 px-1">
         <div className="flex items-center gap-2 flex-1 mr-4">
              <Button variant="ghost" size="icon" disabled={isRoot} onClick={navigateUp}>
@@ -498,17 +973,31 @@ export default function StoragePage() {
              </Button>
              
              <div className="flex items-center gap-1 border rounded-md px-3 h-9 bg-background flex-1 max-w-2xl text-sm">
-                <Button variant="ghost" size="icon" className="h-6 w-6 p-0" onClick={() => setCurrentPath([])}>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 p-0"
+                  onClick={navigateHome}
+                >
                      <Home className="h-4 w-4 text-muted-foreground" />
                 </Button>
                 {currentPath.map((segment, index) => (
                     <React.Fragment key={`${segment}-${index}`}>
                          <ChevronRight className="h-4 w-4 text-muted-foreground/50" />
-                         <span 
+                         <button
                             className={cn("cursor-pointer hover:bg-accent/50 px-1 rounded", index === currentPath.length -1 ? "font-medium" : "text-muted-foreground")}
-                         >
+                            onClick={() => {
+                              const next = currentPath.slice(0, index + 1)
+                              setCurrentPath(next)
+                              setObjects([])
+                              setSelectedItems([])
+                              setQuery("")
+                              setCurrentPage(1)
+                              void loadObjectsForPath(next)
+                            }}
+                          >
                             {segment}
-                         </span>
+                         </button>
                     </React.Fragment>
                 ))}
              </div>
@@ -518,7 +1007,9 @@ export default function StoragePage() {
              <div className="relative w-64 hidden md:block">
                 <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
                 <Input 
-                    placeholder="Search this drive" 
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder={isRoot ? "Search drives" : "Search files and folders"} 
                     className="pl-8"
                 />
              </div>
@@ -579,7 +1070,8 @@ export default function StoragePage() {
                        break
                      }
                    }
-                   await loadObjectsForPath([bucketName])
+                   await loadObjectsForPath(currentPath)
+                   void loadActiveAndBuckets()
                  } finally {
                    event.target.value = ""
                  }
@@ -617,7 +1109,7 @@ export default function StoragePage() {
                       : "space-y-2"
                   }
                 >
-                  {drives.map((drive) => {
+                  {filteredDrives.map((drive) => {
               const percent =
                 totalUsedBytes > 0
                   ? Math.round((drive.usedBytes / totalUsedBytes) * 100)
@@ -635,7 +1127,6 @@ export default function StoragePage() {
                       (isCurrent || isSelected) && "border-primary bg-primary/5"
                     )}
                     onClick={(e) => handleDriveClick(e, drive)}
-                    onDoubleClick={() => handleDriveDoubleClick(drive)}
                   >
                     <div className="flex items-center gap-3">
                       <div className="flex h-9 w-9 items-center justify-center rounded-md border bg-muted">
@@ -673,7 +1164,6 @@ export default function StoragePage() {
                       (isCurrent || isSelected) && "border-primary bg-primary/5"
                     )}
                     onClick={(e) => handleDriveClick(e, drive)}
-                    onDoubleClick={() => handleDriveDoubleClick(drive)}
                   >
                     <div className="mt-1">
                       <HardDrive className="h-5 w-5 text-muted-foreground" />
@@ -713,6 +1203,9 @@ export default function StoragePage() {
                       >
                         Open
                       </ContextMenuItem>
+                      <ContextMenuItem onClick={openCreateBucket}>
+                        New drive (bucket)
+                      </ContextMenuItem>
                       <ContextMenuSeparator />
                       <ContextMenuItem
                         onClick={() =>
@@ -729,13 +1222,7 @@ export default function StoragePage() {
               </div>
             </ContextMenuTrigger>
             <ContextMenuContent>
-              <ContextMenuItem
-                onClick={() => {
-                  setNewBucketName("")
-                  setNewBucketError(null)
-                  setCreateBucketOpen(true)
-                }}
-              >
+              <ContextMenuItem onClick={openCreateBucket}>
                 New drive (bucket)
               </ContextMenuItem>
               <ContextMenuSeparator />
@@ -751,12 +1238,20 @@ export default function StoragePage() {
         )}
 
         <div className="flex flex-col gap-4 min-h-0">
-            {hasItems && (
+            {!isRoot && (
               <>
                 <div className="flex items-center justify-between">
-                  <h2 className="text-sm font-medium text-muted-foreground">
-                    {isRoot ? "This PC" : currentPath.join(" / ")}
-                  </h2>
+                  <div>
+                    <h2 className="text-sm font-medium text-muted-foreground">
+                      {currentPath.join(" / ")}
+                    </h2>
+                    <p className="text-xs text-muted-foreground">
+                      {folderCount} folders, {fileCount} files
+                      {filteredObjects.length !== objects.length
+                        ? ` - ${filteredObjects.length} matched`
+                        : ""}
+                    </p>
+                  </div>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button variant="outline" size="icon" className="h-8 w-8">
@@ -764,18 +1259,102 @@ export default function StoragePage() {
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
-                      <DropdownMenuItem>New folder</DropdownMenuItem>
-                      <DropdownMenuItem>New bucket</DropdownMenuItem>
-                      <DropdownMenuItem>Sync settings</DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={async () => {
+                          const ctxBucket = currentPath[0]
+                          if (!ctxBucket) return
+                          const prefix = currentPath.length > 1 ? `${currentPath.slice(1).join("/")}/` : ""
+                          const name = window.prompt("New folder name")
+                          if (!name) return
+                          await fetch(`/api/storage/buckets/${encodeURIComponent(ctxBucket)}/objects`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ action: "folder", key: `${prefix}${name.replace(/\/+/g, "")}/` }),
+                          })
+                          await loadObjectsForPath(currentPath)
+                        }}
+                      >
+                        New folder
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => fileInputRef.current?.click()}>
+                        Upload files
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => void loadObjectsForPath(currentPath)}>
+                        Refresh
+                      </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
 
-                {view === "grid" ? (
+                <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card/70 p-2">
+                  <div className="flex items-center gap-2 pr-1 text-xs font-medium text-muted-foreground">
+                    <Filter className="h-4 w-4" />
+                    Filters
+                  </div>
+                  <Select value={kindFilter} onValueChange={(value) => setKindFilter(value as KindFilter)}>
+                    <SelectTrigger size="sm" className="w-[140px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All types</SelectItem>
+                      <SelectItem value="folder">Folders</SelectItem>
+                      <SelectItem value="image">Images</SelectItem>
+                      <SelectItem value="video">Videos</SelectItem>
+                      <SelectItem value="audio">Audio</SelectItem>
+                      <SelectItem value="pdf">PDF</SelectItem>
+                      <SelectItem value="document">Documents</SelectItem>
+                      <SelectItem value="other">Other files</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select value={sortMode} onValueChange={(value) => setSortMode(value as SortMode)}>
+                    <SelectTrigger size="sm" className="w-[150px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="name-asc">Name A-Z</SelectItem>
+                      <SelectItem value="name-desc">Name Z-A</SelectItem>
+                      <SelectItem value="type">Type</SelectItem>
+                      <SelectItem value="modified-desc">Newest</SelectItem>
+                      <SelectItem value="size-desc">Largest</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select value={pageSize} onValueChange={setPageSize}>
+                    <SelectTrigger size="sm" className="w-[120px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="20">20 / page</SelectItem>
+                      <SelectItem value="50">50 / page</SelectItem>
+                      <SelectItem value="100">100 / page</SelectItem>
+                      <SelectItem value="200">200 / page</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setQuery("")
+                      setKindFilter("all")
+                      setSortMode("name-asc")
+                    }}
+                  >
+                    Reset
+                  </Button>
+                </div>
+
+                {filteredObjects.length === 0 && !objectsLoading ? (
+                  <div className="flex min-h-[260px] flex-col items-center justify-center rounded-lg border border-dashed bg-card/40 text-center">
+                    <Folder className="mb-3 h-10 w-10 text-muted-foreground" />
+                    <p className="font-medium">{objects.length ? "No matching items" : "This folder is empty"}</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {objects.length ? "Try another search or filter." : "Upload files or create a folder from the context menu."}
+                    </p>
+                  </div>
+                ) : view === "grid" ? (
                   <ContextMenu>
                     <ContextMenuTrigger asChild>
                       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                        {objects.map((item) => {
+                        {pagedObjects.map((item) => {
                       const isFolder = item.type === "folder"
                       const Icon = isFolder ? Folder : File
                       const isSelected = selectedItems.includes(item.id)
@@ -785,7 +1364,6 @@ export default function StoragePage() {
                           <ContextMenuTrigger asChild>
                             <button
                               onClick={(e) => handleItemClick(e, item)}
-                              onDoubleClick={() => handleItemDoubleClick(item)}
                               className={cn(
                                 "group flex flex-col items-start gap-2 rounded-lg border bg-card p-3 text-left hover:bg-accent/60",
                                 isSelected && "border-primary bg-primary/5"
@@ -822,8 +1400,25 @@ export default function StoragePage() {
                             <ContextMenuItem
                               onClick={() => handleItemDoubleClick(item)}
                             >
-                              Open
+                              {item.type === "folder" ? "Open" : "Preview"}
                             </ContextMenuItem>
+                            {item.type === "file" && (
+                              <>
+                                <ContextMenuItem onClick={() => void downloadItem(item)}>
+                                  Download
+                                </ContextMenuItem>
+                                <ContextMenuItem
+                                  onClick={() => {
+                                    window.open(systemStorageLink(item), "_blank", "noopener,noreferrer")
+                                  }}
+                                >
+                                  Open system link
+                                </ContextMenuItem>
+                                <ContextMenuItem onClick={() => void copySystemStorageLink(item)}>
+                                  Copy system link
+                                </ContextMenuItem>
+                              </>
+                            )}
                             <ContextMenuSeparator />
                             <ContextMenuItem
                               onClick={() =>
@@ -831,6 +1426,12 @@ export default function StoragePage() {
                               }
                             >
                               Properties
+                            </ContextMenuItem>
+                            <ContextMenuItem
+                              className="text-destructive focus:text-destructive"
+                              onClick={() => void deleteItem(item)}
+                            >
+                              Delete
                             </ContextMenuItem>
                           </ContextMenuContent>
                         </ContextMenu>
@@ -934,7 +1535,7 @@ export default function StoragePage() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {objects.map((item) => {
+                        {pagedObjects.map((item) => {
                           const isFolder = item.type === "folder"
                           const isSelected = selectedItems.includes(item.id)
                           return (
@@ -946,7 +1547,6 @@ export default function StoragePage() {
                                     isSelected && "bg-accent/70"
                                   )}
                                   onClick={(e) => handleItemClick(e, item)}
-                                  onDoubleClick={() => handleItemDoubleClick(item)}
                                 >
                                   <TableCell className="flex items-center gap-2">
                                     {isFolder ? (
@@ -971,17 +1571,38 @@ export default function StoragePage() {
                                 <ContextMenuItem
                                   onClick={() => handleItemDoubleClick(item)}
                                 >
-                                  Open
+                                  {item.type === "folder" ? "Open" : "Preview"}
                                 </ContextMenuItem>
+                                {item.type === "file" && (
+                                  <>
+                                    <ContextMenuItem onClick={() => void downloadItem(item)}>
+                                      Download
+                                    </ContextMenuItem>
+                                    <ContextMenuItem
+                                      onClick={() => {
+                                        window.open(systemStorageLink(item), "_blank", "noopener,noreferrer")
+                                      }}
+                                    >
+                                      Open system link
+                                    </ContextMenuItem>
+                                    <ContextMenuItem onClick={() => void copySystemStorageLink(item)}>
+                                      Copy system link
+                                    </ContextMenuItem>
+                                  </>
+                                )}
                                 <ContextMenuSeparator />
-                                <ContextMenuItem disabled>
-                                  New folder – TODO
+                                <ContextMenuItem
+                                  onClick={() =>
+                                    setPropertiesTarget({ type: "item", item })
+                                  }
+                                >
+                                  Properties
                                 </ContextMenuItem>
-                                <ContextMenuItem disabled>
-                                  New file – TODO
-                                </ContextMenuItem>
-                                <ContextMenuItem disabled>
-                                  Upload files – TODO
+                                <ContextMenuItem
+                                  className="text-destructive focus:text-destructive"
+                                  onClick={() => void deleteItem(item)}
+                                >
+                                  Delete
                                 </ContextMenuItem>
                               </ContextMenuContent>
                             </ContextMenu>
@@ -1075,17 +1696,95 @@ export default function StoragePage() {
                   </ContextMenu>
                 )}
 
-                {!isRoot && nextContinuationToken && (
-                  <div className="flex justify-center pt-2">
-                    <Button variant="outline" onClick={loadMore} disabled={objectsLoading}>
-                      Load more
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-card px-3 py-2 text-sm">
+                  <span className="text-muted-foreground">
+                    Showing {filteredObjects.length === 0 ? 0 : (safePage - 1) * numericPageSize + 1}
+                    -{Math.min(safePage * numericPageSize, filteredObjects.length)} of {filteredObjects.length}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={safePage <= 1}
+                      onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                    >
+                      Previous
                     </Button>
+                    <span className="min-w-16 text-center text-xs text-muted-foreground">
+                      Page {safePage} / {totalPages}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={safePage >= totalPages}
+                      onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                    >
+                      Next
+                    </Button>
+                    {nextContinuationToken && (
+                      <Button variant="outline" size="sm" onClick={loadMore} disabled={objectsLoading}>
+                        Load more from R2
+                      </Button>
+                    )}
                   </div>
-                )}
+                </div>
               </>
             )}
         </div>
       </div>
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem onClick={openCreateBucket}>
+            New drive (bucket)
+          </ContextMenuItem>
+          {!isRoot && (
+            <>
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                onClick={async () => {
+                  const ctxBucket = currentPath[0]
+                  if (!ctxBucket) return
+                  const prefix = currentPath.length > 1 ? `${currentPath.slice(1).join("/")}/` : ""
+                  const name = window.prompt("New folder name")
+                  if (!name) return
+                  await fetch(`/api/storage/buckets/${encodeURIComponent(ctxBucket)}/objects`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      action: "folder",
+                      key: `${prefix}${name.replace(/\/+/g, "")}/`,
+                    }),
+                  })
+                  await loadObjectsForPath(currentPath)
+                }}
+              >
+                New folder
+              </ContextMenuItem>
+              <ContextMenuItem onClick={() => fileInputRef.current?.click()}>
+                Upload files
+              </ContextMenuItem>
+            </>
+          )}
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            onClick={() => {
+              if (isRoot) {
+                void loadActiveAndBuckets()
+              } else {
+                void loadObjectsForPath(currentPath)
+              }
+            }}
+          >
+            Refresh
+          </ContextMenuItem>
+          <ContextMenuItem
+            onClick={() => setPropertiesTarget({ type: "path", path: currentPath })}
+          >
+            Properties
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
     </div>
   )
 }

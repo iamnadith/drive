@@ -81,7 +81,7 @@ function isTransientConnectionError(error: unknown): boolean {
   )
 }
 
-export async function queryDb<T extends QueryResultRow = any>(
+export async function queryDb<T extends QueryResultRow = QueryResultRow>(
   text: string,
   params?: readonly unknown[]
 ) {
@@ -236,7 +236,13 @@ export async function ensureDriveSchema(): Promise<void> {
           profile_image_url text not null default '',
           google_linked boolean not null default false,
           google_sub text,
+          email_verified boolean not null default false,
+          email_verified_at timestamptz,
           password_source text not null default 'local',
+          two_factor_enabled boolean not null default false,
+          totp_enabled boolean not null default false,
+          totp_secret text,
+          totp_last_used_counter bigint,
           password_hash text not null,
           created_at timestamptz not null default now(),
           updated_at timestamptz not null default now()
@@ -249,6 +255,32 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(
         `create unique index if not exists drive_users_username_key on drive_users (username) where username is not null;`
       )
+      await queryDb(`alter table if exists drive_users add column if not exists email_verified boolean not null default true;`)
+      await queryDb(`alter table if exists drive_users add column if not exists email_verified_at timestamptz;`)
+      await queryDb(`alter table if exists drive_users add column if not exists two_factor_enabled boolean not null default false;`)
+      await queryDb(`alter table if exists drive_users add column if not exists totp_enabled boolean not null default false;`)
+      await queryDb(`alter table if exists drive_users add column if not exists totp_secret text;`)
+      await queryDb(`alter table if exists drive_users add column if not exists totp_last_used_counter bigint;`)
+      await queryDb(`
+        create table if not exists drive_email_verification_tokens (
+          id uuid primary key default gen_random_uuid(),
+          user_id uuid not null references drive_users(id) on delete cascade,
+          token_hash text not null,
+          email text not null,
+          purpose text not null default 'signup',
+          attempts integer not null default 0,
+          expires_at timestamptz not null,
+          consumed_at timestamptz,
+          created_at timestamptz not null default now()
+        );
+      `)
+      await queryDb(`drop index if exists drive_email_verification_tokens_hash_key;`)
+      await queryDb(`create index if not exists drive_email_verification_tokens_hash_idx on drive_email_verification_tokens (token_hash);`)
+      await queryDb(`alter table if exists drive_email_verification_tokens add column if not exists purpose text not null default 'signup';`)
+      await queryDb(`alter table if exists drive_email_verification_tokens add column if not exists attempts integer not null default 0;`)
+      await queryDb(`create index if not exists drive_email_verification_tokens_user_idx on drive_email_verification_tokens (user_id, purpose, created_at desc);`)
+      await queryDb(`create index if not exists drive_email_verification_tokens_expires_idx on drive_email_verification_tokens (expires_at);`)
+      await queryDb(`create index if not exists drive_email_verification_tokens_email_purpose_idx on drive_email_verification_tokens (email, purpose, created_at desc);`)
 
       await queryDb(`
         create table if not exists drive_accounts (
@@ -313,6 +345,24 @@ export async function ensureDriveSchema(): Promise<void> {
       )
       await queryDb(
         `create index if not exists drive_bucket_stats_status_idx on drive_bucket_stats (status);`
+      )
+
+      await queryDb(`
+        create table if not exists drive_analytics_bucket_snapshots (
+          account_id uuid not null,
+          account_label text,
+          account_email text,
+          bucket_name text not null,
+          objects bigint not null default 0,
+          bytes bigint not null default 0,
+          status text,
+          source_updated_at timestamptz,
+          captured_at timestamptz not null default now(),
+          primary key (account_id, bucket_name)
+        );
+      `)
+      await queryDb(
+        `create index if not exists drive_analytics_bucket_snapshots_captured_idx on drive_analytics_bucket_snapshots (captured_at desc);`
       )
 
       await queryDb(`

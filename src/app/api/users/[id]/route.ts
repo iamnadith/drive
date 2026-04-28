@@ -9,6 +9,13 @@ import {
   updateUser,
 } from "@/lib/users-store"
 import { cookies } from "next/headers"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+
+function errorMessage(error: unknown, fallback: string) {
+  return typeof error === "object" && error !== null && "message" in error
+    ? String((error as { message?: unknown }).message ?? fallback)
+    : fallback
+}
 
 type RouteParams = {
   params: Promise<{
@@ -25,8 +32,8 @@ export async function GET(_: Request, { params }: RouteParams) {
     }
     const publicUser: PublicUser = toPublicUser(user)
     return NextResponse.json({ user: publicUser })
-  } catch (error: any) {
-    const message = error?.message ?? "Unable to fetch user"
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to fetch user")
     return NextResponse.json({ error: message }, { status: 400 })
   }
 }
@@ -71,11 +78,19 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       googleLinked?: boolean
     }
 
-    const updates: any = {}
+    const updates: Parameters<typeof updateUser>[1] = {}
 
     if (name !== undefined) updates.name = name
     if (username !== undefined) updates.username = username
-    if (email !== undefined) updates.email = email
+    if (email !== undefined) {
+      updates.email = email
+      if (email.trim().toLowerCase() !== targetBefore.email.toLowerCase()) {
+        updates.googleLinked = false
+        updates.googleSub = undefined
+        updates.emailVerified = false
+        updates.emailVerifiedAt = undefined
+      }
+    }
     if (profileImageUrl !== undefined) updates.profileImageUrl = profileImageUrl
 
     if (password) {
@@ -229,9 +244,37 @@ export async function PATCH(request: Request, { params }: RouteParams) {
     }
 
     const publicUser: PublicUser = toPublicUser(updatedUser)
+    await recordActivity({
+      actorUserId: actorId,
+      action: "user.updated",
+      entityType: "user",
+      entityId: targetId,
+      entityLabel: updatedUser.name,
+      summary: `Updated user ${updatedUser.name}`,
+      detail: "User profile, permissions, quota, authentication, or status changed.",
+      before: { user: toPublicUser(targetBefore) },
+      after: { user: publicUser },
+      undoable: false,
+      undoPayload: {
+        type: "restore_user",
+        user: {
+          id: targetBefore.id,
+          name: targetBefore.name,
+          username: targetBefore.username,
+          email: targetBefore.email,
+          role: targetBefore.role,
+          status: targetBefore.status,
+          quotaLimitMb: targetBefore.quotaLimitMb,
+          quotaUsedMb: targetBefore.quotaUsedMb,
+          profileImageUrl: targetBefore.profileImageUrl,
+        },
+      },
+      undoReason: "User undo is recorded for review but not executable yet.",
+      ...getRequestActivityContext(request),
+    })
     return NextResponse.json({ user: publicUser })
-  } catch (error: any) {
-    const message = error?.message ?? "Unable to update user"
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to update user")
     return NextResponse.json({ error: message }, { status: 400 })
   }
 }
@@ -276,9 +319,21 @@ export async function DELETE(_: Request, { params }: RouteParams) {
     }
 
     await deleteUser(id)
+    await recordActivity({
+      actorUserId: actorId,
+      action: "user.deleted",
+      entityType: "user",
+      entityId: id,
+      entityLabel: target.name,
+      summary: `Deleted user ${target.name}`,
+      detail: `${target.email} was removed.`,
+      before: { user: toPublicUser(target) },
+      undoReason: "Deleted users must be recreated manually.",
+      ...getRequestActivityContext(_),
+    })
     return NextResponse.json({ ok: true })
-  } catch (error: any) {
-    const message = error?.message ?? "Unable to delete user"
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to delete user")
     // Make delete idempotent: if the user is already gone, treat as success.
     if (message === "User not found") {
       return NextResponse.json({ ok: true })

@@ -21,6 +21,9 @@ export async function login(
   if (user.status !== "active") {
     throw new Error("User is disabled")
   }
+  if (!user.emailVerified && !user.googleLinked) {
+    throw new Error("Please verify your email address before signing in")
+  }
   const passwordHash = hashPassword(password)
   if (user.passwordHash !== passwordHash) {
     if (user.googleLinked && user.passwordSource === "google-generated") {
@@ -53,6 +56,8 @@ export async function signup(input: {
     ...input,
     role: "user",
     status: "active",
+    emailVerified: false,
+    emailVerifiedAt: undefined,
     passwordSource: "local",
   })
 

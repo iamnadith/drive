@@ -1,6 +1,7 @@
 -- Run this in Supabase SQL Editor to create the tables used by this app.
 
 create extension if not exists pgcrypto;
+create extension if not exists pg_trgm;
 
 -- Ensure we operate on the expected schema in Supabase (usually `public`).
 set search_path = public;
@@ -19,7 +20,16 @@ create table if not exists drive_users (
   profile_image_url text not null default '',
   google_linked boolean not null default false,
   google_sub text,
+  email_verified boolean not null default false,
+  email_verified_at timestamptz,
+  mobile_number text,
+  mobile_verified boolean not null default false,
+  mobile_verified_at timestamptz,
   password_source text not null default 'local',
+  two_factor_enabled boolean not null default false,
+  totp_enabled boolean not null default false,
+  totp_secret text,
+  totp_last_used_counter bigint,
   password_hash text not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -27,6 +37,49 @@ create table if not exists drive_users (
 
 create unique index if not exists drive_users_email_key on drive_users (email);
 create unique index if not exists drive_users_username_key on drive_users (username) where username is not null;
+
+create table if not exists drive_email_verification_tokens (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references drive_users(id) on delete cascade,
+  token_hash text not null,
+  email text not null,
+  purpose text not null default 'signup',
+  attempts integer not null default 0,
+  expires_at timestamptz not null,
+  consumed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists drive_sms_verification_tokens (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references drive_users(id) on delete cascade,
+  token_hash text not null,
+  mobile_number text not null,
+  purpose text not null default 'login',
+  attempts integer not null default 0,
+  expires_at timestamptz not null,
+  consumed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists drive_sms_verification_tokens_hash_idx
+  on drive_sms_verification_tokens (token_hash);
+create index if not exists drive_sms_verification_tokens_user_idx
+  on drive_sms_verification_tokens (user_id, purpose, created_at desc);
+create index if not exists drive_sms_verification_tokens_expires_idx
+  on drive_sms_verification_tokens (expires_at);
+create index if not exists drive_sms_verification_tokens_mobile_purpose_idx
+  on drive_sms_verification_tokens (mobile_number, purpose, created_at desc);
+
+drop index if exists drive_email_verification_tokens_hash_key;
+create index if not exists drive_email_verification_tokens_hash_idx
+  on drive_email_verification_tokens (token_hash);
+create index if not exists drive_email_verification_tokens_user_idx
+  on drive_email_verification_tokens (user_id, purpose, created_at desc);
+create index if not exists drive_email_verification_tokens_expires_idx
+  on drive_email_verification_tokens (expires_at);
+create index if not exists drive_email_verification_tokens_email_purpose_idx
+  on drive_email_verification_tokens (email, purpose, created_at desc);
 
 create table if not exists drive_accounts (
   id uuid primary key,
@@ -76,6 +129,41 @@ create table if not exists drive_bucket_stats (
 create unique index if not exists drive_bucket_stats_unique on drive_bucket_stats (account_id, bucket_name);
 create index if not exists drive_bucket_stats_account_idx on drive_bucket_stats (account_id);
 create index if not exists drive_bucket_stats_status_idx on drive_bucket_stats (status);
+
+-- Analytics archive for preserving bucket/account totals after an account is deleted.
+create table if not exists drive_analytics_bucket_snapshots (
+  account_id uuid not null,
+  account_label text,
+  account_email text,
+  bucket_name text not null,
+  objects bigint not null default 0,
+  bytes bigint not null default 0,
+  status text,
+  source_updated_at timestamptz,
+  captured_at timestamptz not null default now(),
+  primary key (account_id, bucket_name)
+);
+
+create index if not exists drive_analytics_bucket_snapshots_captured_idx
+  on drive_analytics_bucket_snapshots (captured_at desc);
+
+-- Daily history of whichever account was active when analytics were refreshed.
+-- This lets overview charts span current and previous active accounts without
+-- summing every stored account at the same time.
+create table if not exists drive_analytics_active_account_snapshots (
+  captured_day date not null,
+  account_id uuid not null,
+  account_label text,
+  account_email text,
+  buckets integer not null default 0,
+  objects bigint not null default 0,
+  bytes bigint not null default 0,
+  captured_at timestamptz not null default now(),
+  primary key (captured_day, account_id)
+);
+
+create index if not exists drive_analytics_active_account_snapshots_day_idx
+  on drive_analytics_active_account_snapshots (captured_day desc);
 
 create table if not exists drive_migrations (
   id uuid primary key,
@@ -267,10 +355,68 @@ create index if not exists drive_repair_jobs_status_idx on drive_repair_jobs (st
 create index if not exists drive_repair_jobs_migration_idx on drive_repair_jobs (migration_id, created_at desc);
 create index if not exists drive_repair_jobs_claimed_idx on drive_repair_jobs (claimed_by_agent_id, status);
 
+-- Append-only audit/activity log. This table is designed for large volumes:
+-- use keyset pagination on (occurred_at, id), narrow indexed filters, and
+-- trigram search over a compact generated search_text column.
+create table if not exists drive_activity_events (
+  id uuid primary key default gen_random_uuid(),
+  occurred_at timestamptz not null default now(),
+  actor_user_id uuid references drive_users(id) on delete set null,
+  actor_name text,
+  actor_email text,
+  actor_role text,
+  action text not null,
+  entity_type text not null,
+  entity_id text,
+  entity_label text,
+  summary text not null,
+  detail text,
+  outcome text not null default 'success',
+  ip_address text,
+  user_agent text,
+  request_id text,
+  before_state jsonb,
+  after_state jsonb,
+  metadata jsonb not null default '{}'::jsonb,
+  search_text text not null default '',
+  undoable boolean not null default false,
+  undo_status text not null default 'not_undoable',
+  undo_reason text,
+  undo_payload jsonb,
+  undone_at timestamptz,
+  undone_by_user_id uuid references drive_users(id) on delete set null
+);
+
+create index if not exists drive_activity_events_time_idx
+  on drive_activity_events (occurred_at desc, id desc);
+create index if not exists drive_activity_events_actor_time_idx
+  on drive_activity_events (actor_user_id, occurred_at desc, id desc);
+create index if not exists drive_activity_events_action_time_idx
+  on drive_activity_events (action, occurred_at desc, id desc);
+create index if not exists drive_activity_events_entity_time_idx
+  on drive_activity_events (entity_type, entity_id, occurred_at desc, id desc);
+create index if not exists drive_activity_events_outcome_time_idx
+  on drive_activity_events (outcome, occurred_at desc, id desc);
+create index if not exists drive_activity_events_undo_time_idx
+  on drive_activity_events (undoable, undo_status, occurred_at desc, id desc);
+create index if not exists drive_activity_events_search_trgm_idx
+  on drive_activity_events using gin (search_text gin_trgm_ops);
+
 -- Schema updates (idempotent).
 -- Note: `create table if not exists` does NOT add missing columns to an existing table.
 -- These `alter table ... add column if not exists` statements make the schema forward-compatible.
 alter table if exists public.drive_migration_items add column if not exists slurper_job_id text;
+alter table if exists public.drive_users add column if not exists email_verified boolean not null default true;
+alter table if exists public.drive_users add column if not exists email_verified_at timestamptz;
+alter table if exists public.drive_users add column if not exists mobile_number text;
+alter table if exists public.drive_users add column if not exists mobile_verified boolean not null default false;
+alter table if exists public.drive_users add column if not exists mobile_verified_at timestamptz;
+alter table if exists public.drive_users add column if not exists two_factor_enabled boolean not null default false;
+alter table if exists public.drive_users add column if not exists totp_enabled boolean not null default false;
+alter table if exists public.drive_users add column if not exists totp_secret text;
+alter table if exists public.drive_users add column if not exists totp_last_used_counter bigint;
+alter table if exists public.drive_email_verification_tokens add column if not exists purpose text not null default 'signup';
+alter table if exists public.drive_email_verification_tokens add column if not exists attempts integer not null default 0;
 alter table if exists public.drive_migration_items add column if not exists slurper_status text;
 alter table if exists public.drive_migration_items add column if not exists progress jsonb not null default '{}'::jsonb;
 alter table if exists public.drive_migration_items add column if not exists last_progress_at timestamptz;
@@ -312,6 +458,24 @@ alter table if exists public.drive_repair_jobs add column if not exists claimed_
 alter table if exists public.drive_repair_jobs add column if not exists started_at timestamptz;
 alter table if exists public.drive_repair_jobs add column if not exists completed_at timestamptz;
 alter table if exists public.drive_repair_jobs add column if not exists last_heartbeat_at timestamptz;
+alter table if exists public.drive_activity_events add column if not exists actor_user_id uuid references public.drive_users(id) on delete set null;
+alter table if exists public.drive_activity_events add column if not exists actor_name text;
+alter table if exists public.drive_activity_events add column if not exists actor_email text;
+alter table if exists public.drive_activity_events add column if not exists actor_role text;
+alter table if exists public.drive_activity_events add column if not exists entity_label text;
+alter table if exists public.drive_activity_events add column if not exists ip_address text;
+alter table if exists public.drive_activity_events add column if not exists user_agent text;
+alter table if exists public.drive_activity_events add column if not exists request_id text;
+alter table if exists public.drive_activity_events add column if not exists before_state jsonb;
+alter table if exists public.drive_activity_events add column if not exists after_state jsonb;
+alter table if exists public.drive_activity_events add column if not exists metadata jsonb not null default '{}'::jsonb;
+alter table if exists public.drive_activity_events add column if not exists search_text text not null default '';
+alter table if exists public.drive_activity_events add column if not exists undoable boolean not null default false;
+alter table if exists public.drive_activity_events add column if not exists undo_status text not null default 'not_undoable';
+alter table if exists public.drive_activity_events add column if not exists undo_reason text;
+alter table if exists public.drive_activity_events add column if not exists undo_payload jsonb;
+alter table if exists public.drive_activity_events add column if not exists undone_at timestamptz;
+alter table if exists public.drive_activity_events add column if not exists undone_by_user_id uuid references public.drive_users(id) on delete set null;
 
 -- PostgREST caches the schema. If you just added columns, force a reload so the REST API sees them immediately.
 select pg_notify('pgrst', 'reload schema');

@@ -1,0 +1,708 @@
+"use client"
+
+import * as React from "react"
+import {
+  Activity,
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  Database,
+  HardDrive,
+  RefreshCw,
+  Server,
+  ShieldAlert,
+  TrendingUp,
+  Users,
+  Wrench,
+} from "lucide-react"
+import Link from "next/link"
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+} from "recharts"
+
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import {
+  ChartConfig,
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+} from "@/components/ui/chart"
+import { Progress } from "@/components/ui/progress"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { useIsMobile } from "@/hooks/use-mobile"
+
+type RangeKey = "7d" | "30d" | "90d"
+
+type OverviewResponse = {
+  generatedAt: string
+  activeAccount: {
+    id: string
+    label: string
+    email: string
+    status: string
+    lastSyncedAt?: string
+    syncStatus?: string
+  } | null
+  metrics: {
+    storageBytes: number
+    objects: number
+    buckets: number
+    accounts: number
+    activeAccounts: number
+    users: number
+    activeUsers: number
+    migrations: number
+    activeMigrations: number
+    failedMigrations: number
+    workers: number
+    onlineWorkers: number
+    repairJobs: number
+    activeRepairJobs: number
+    failedRepairJobs: number
+    failureRecords: number
+    verificationDiffs: number
+    attentionItems: number
+  }
+  series: Array<{
+    date: string
+    storageBytes: number
+    objects: number
+    createdMigrations: number
+    completedMigrations: number
+    transferredObjects: number
+    failedObjects: number
+    verifyIssues: number
+    activeRepairs: number
+  }>
+  breakdowns: {
+    migrations: Record<string, number>
+    accounts: Record<string, number>
+    workers: Record<string, number>
+    repairs: Record<string, number>
+    bucketStats: Record<string, number>
+  }
+  topBuckets: Array<{
+    id: string
+    accountLabel: string
+    name: string
+    objects: number
+    bytes: number
+    status: string
+    error?: string
+    updatedAt?: string
+  }>
+  attentionItems: Array<{
+    id: string
+    severity: string
+    title: string
+    detail: string
+    href?: string
+    at: string
+  }>
+  syncHealth: {
+    partial: boolean
+    warnings: string[]
+    staleBucketStats: boolean
+    bucketStatsUpdatedAt: string | null
+    unsyncedAccounts: number
+    accountSyncErrors: number
+    bucketStatsErrors: number
+  }
+}
+
+const usageChartConfig = {
+  storageGb: {
+    label: "Storage (GB)",
+    color: "var(--primary)",
+  },
+  objectsK: {
+    label: "Objects (K)",
+    color: "var(--primary)",
+  },
+} satisfies ChartConfig
+
+const migrationChartConfig = {
+  createdMigrations: {
+    label: "Created",
+    color: "var(--primary)",
+  },
+  completedMigrations: {
+    label: "Completed",
+    color: "var(--primary)",
+  },
+} satisfies ChartConfig
+
+const transferChartConfig = {
+  transferredObjects: {
+    label: "Transferred",
+    color: "var(--primary)",
+  },
+  failedObjects: {
+    label: "Failed",
+    color: "hsl(var(--destructive))",
+  },
+  verifyIssues: {
+    label: "Verify issues",
+    color: "var(--primary)",
+  },
+} satisfies ChartConfig
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function formatNumber(value: number | undefined): string {
+  if (!value || value <= 0) return "0"
+  return Intl.NumberFormat().format(value)
+}
+
+function formatCompact(value: number | undefined): string {
+  if (!value || value <= 0) return "0"
+  return Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value)
+}
+
+function formatBytes(value: number | undefined): string {
+  if (!value || value <= 0) return "0 B"
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"]
+  let size = value
+  let unitIndex = 0
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex++
+  }
+  return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unitIndex]}`
+}
+
+function formatRelative(value?: string | null): string {
+  if (!value) return "Never"
+  const time = Date.parse(value)
+  if (!Number.isFinite(time)) return "Unknown"
+  const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000))
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+function formatRefreshTime(value?: string | null): string {
+  if (!value) return "Never"
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return "Unknown"
+  return date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+}
+
+function statusVariant(status: string): "default" | "secondary" | "destructive" | "outline" {
+  const normalized = status.toLowerCase()
+  if (normalized.includes("failed") || normalized.includes("error") || normalized === "critical") return "destructive"
+  if (normalized === "completed" || normalized === "ok" || normalized === "online") return "default"
+  if (normalized === "running" || normalized === "verifying" || normalized === "syncing" || normalized === "warning") return "secondary"
+  return "outline"
+}
+
+function withChartFields(series: OverviewResponse["series"]) {
+  return series.map((point) => ({
+    ...point,
+    storageGb: Number((point.storageBytes / 1024 / 1024 / 1024).toFixed(2)),
+    objectsK: Number((point.objects / 1000).toFixed(2)),
+  }))
+}
+
+function filterByRange<T extends { date: string }>(items: T[], range: RangeKey): T[] {
+  const latest = items.reduce((max, item) => {
+    const time = Date.parse(item.date)
+    return Number.isFinite(time) ? Math.max(max, time) : max
+  }, 0)
+  const reference = latest > 0 ? new Date(latest) : new Date()
+  const days = range === "7d" ? 7 : range === "30d" ? 30 : 90
+  const start = new Date(reference)
+  start.setDate(start.getDate() - days)
+  return items.filter((item) => {
+    const date = new Date(item.date)
+    return Number.isFinite(date.getTime()) && date >= start
+  })
+}
+
+function RangeAction({ value, onChange }: { value: RangeKey; onChange: (value: RangeKey) => void }) {
+  return (
+    <CardAction>
+      <ToggleGroup
+        type="single"
+        value={value}
+        onValueChange={(next) => {
+          if (next) onChange(next as RangeKey)
+        }}
+        variant="outline"
+        className="hidden *:data-[slot=toggle-group-item]:px-4! @[767px]/card:flex"
+      >
+        <ToggleGroupItem value="90d">Last 3 months</ToggleGroupItem>
+        <ToggleGroupItem value="30d">Last 30 days</ToggleGroupItem>
+        <ToggleGroupItem value="7d">Last 7 days</ToggleGroupItem>
+      </ToggleGroup>
+      <Select value={value} onValueChange={(next) => onChange(next as RangeKey)}>
+        <SelectTrigger
+          className="flex w-40 **:data-[slot=select-value]:block **:data-[slot=select-value]:truncate @[767px]/card:hidden"
+          size="sm"
+          aria-label="Select chart range"
+        >
+          <SelectValue placeholder="Last 3 months" />
+        </SelectTrigger>
+        <SelectContent className="rounded-xl">
+          <SelectItem value="90d" className="rounded-lg">Last 3 months</SelectItem>
+          <SelectItem value="30d" className="rounded-lg">Last 30 days</SelectItem>
+          <SelectItem value="7d" className="rounded-lg">Last 7 days</SelectItem>
+        </SelectContent>
+      </Select>
+    </CardAction>
+  )
+}
+
+function UsageChart({ data }: { data: ReturnType<typeof withChartFields> }) {
+  const isMobile = useIsMobile()
+  const [range, setRange] = React.useState<RangeKey>("90d")
+  React.useEffect(() => {
+    if (isMobile) setRange("7d")
+  }, [isMobile])
+  const chartData = React.useMemo(() => filterByRange(data, range), [data, range])
+  return (
+    <Card className="@container/card">
+      <CardHeader>
+        <CardTitle>Storage and Objects</CardTitle>
+        <CardDescription>Active account storage and object totals over time.</CardDescription>
+        <RangeAction value={range} onChange={setRange} />
+      </CardHeader>
+      <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
+        <ChartContainer config={usageChartConfig} className="aspect-auto h-[300px] w-full">
+          <AreaChart data={chartData}>
+            <defs>
+              <linearGradient id="fillStorageAnalytics" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-storageGb)" stopOpacity={1} />
+                <stop offset="95%" stopColor="var(--color-storageGb)" stopOpacity={0.1} />
+              </linearGradient>
+              <linearGradient id="fillObjectsAnalytics" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-objectsK)" stopOpacity={0.75} />
+                <stop offset="95%" stopColor="var(--color-objectsK)" stopOpacity={0.08} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid vertical={false} />
+            <XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
+            <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
+            <Area dataKey="objectsK" type="natural" fill="url(#fillObjectsAnalytics)" stroke="var(--color-objectsK)" stackId="a" />
+            <Area dataKey="storageGb" type="natural" fill="url(#fillStorageAnalytics)" stroke="var(--color-storageGb)" stackId="a" />
+          </AreaChart>
+        </ChartContainer>
+      </CardContent>
+    </Card>
+  )
+}
+
+function MigrationChart({ data }: { data: ReturnType<typeof withChartFields> }) {
+  const [range, setRange] = React.useState<RangeKey>("90d")
+  const chartData = React.useMemo(() => filterByRange(data, range), [data, range])
+  return (
+    <Card className="@container/card">
+      <CardHeader>
+        <CardTitle>Migration Activity</CardTitle>
+        <CardDescription>Created and completed migrations across the selected period.</CardDescription>
+        <RangeAction value={range} onChange={setRange} />
+      </CardHeader>
+      <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
+        <ChartContainer config={migrationChartConfig} className="aspect-auto h-[300px] w-full">
+          <BarChart data={chartData}>
+            <CartesianGrid vertical={false} />
+            <XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
+            <YAxis tickLine={false} axisLine={false} width={32} allowDecimals={false} />
+            <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
+            <Bar dataKey="createdMigrations" fill="var(--color-createdMigrations)" radius={[4, 4, 0, 0]} />
+            <Bar dataKey="completedMigrations" fill="var(--color-completedMigrations)" fillOpacity={0.45} radius={[4, 4, 0, 0]} />
+          </BarChart>
+        </ChartContainer>
+      </CardContent>
+    </Card>
+  )
+}
+
+function TransferChart({ data }: { data: ReturnType<typeof withChartFields> }) {
+  const [range, setRange] = React.useState<RangeKey>("90d")
+  const chartData = React.useMemo(() => filterByRange(data, range), [data, range])
+  return (
+    <Card className="@container/card">
+      <CardHeader>
+        <CardTitle>Transfer Health</CardTitle>
+        <CardDescription>Transferred objects, failures, and verification issues from migration progress.</CardDescription>
+        <RangeAction value={range} onChange={setRange} />
+      </CardHeader>
+      <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
+        <ChartContainer config={transferChartConfig} className="aspect-auto h-[300px] w-full">
+          <AreaChart data={chartData}>
+            <defs>
+              <linearGradient id="fillTransferredAnalytics" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-transferredObjects)" stopOpacity={0.9} />
+                <stop offset="95%" stopColor="var(--color-transferredObjects)" stopOpacity={0.1} />
+              </linearGradient>
+              <linearGradient id="fillFailedAnalytics" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-failedObjects)" stopOpacity={0.55} />
+                <stop offset="95%" stopColor="var(--color-failedObjects)" stopOpacity={0.08} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid vertical={false} />
+            <XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
+            <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
+            <Area dataKey="failedObjects" type="natural" fill="url(#fillFailedAnalytics)" stroke="var(--color-failedObjects)" stackId="a" />
+            <Area dataKey="verifyIssues" type="natural" fill="var(--color-verifyIssues)" fillOpacity={0.12} stroke="var(--color-verifyIssues)" stackId="a" />
+            <Area dataKey="transferredObjects" type="natural" fill="url(#fillTransferredAnalytics)" stroke="var(--color-transferredObjects)" stackId="a" />
+          </AreaChart>
+        </ChartContainer>
+      </CardContent>
+    </Card>
+  )
+}
+
+function KpiCard({
+  title,
+  value,
+  detail,
+  icon: Icon,
+  tone = "default",
+}: {
+  title: string
+  value: string
+  detail: string
+  icon: React.ComponentType<{ className?: string }>
+  tone?: "default" | "warning" | "success"
+}) {
+  const iconClass =
+    tone === "warning"
+      ? "text-amber-500"
+      : tone === "success"
+        ? "text-green-500"
+        : "text-muted-foreground"
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+        <CardTitle className="text-sm font-medium">{title}</CardTitle>
+        <Icon className={`h-4 w-4 ${iconClass}`} />
+      </CardHeader>
+      <CardContent>
+        <div className="text-2xl font-bold tabular-nums">{value}</div>
+        <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
+      </CardContent>
+    </Card>
+  )
+}
+
+export default function DashboardPage() {
+  const [data, setData] = React.useState<OverviewResponse | null>(null)
+  const [loading, setLoading] = React.useState(true)
+  const [refreshing, setRefreshing] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
+
+  const loadOverview = React.useCallback(async (signal?: AbortSignal, quiet = false) => {
+    if (quiet) setRefreshing(true)
+    else setLoading(true)
+    try {
+      const res = await fetch("/api/dashboard/analytics?range=all", {
+        cache: "no-store",
+        signal,
+      })
+      const json: unknown = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const message =
+          isRecord(json) && typeof json.error === "string"
+            ? json.error
+            : "Unable to load dashboard analytics"
+        throw new Error(message)
+      }
+      setData(json as OverviewResponse)
+      setError(null)
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "AbortError") return
+      const message =
+        typeof caught === "object" && caught !== null && "message" in caught
+          ? String((caught as { message?: unknown }).message ?? "Unable to load dashboard analytics")
+          : "Unable to load dashboard analytics"
+      setError(message)
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    const controller = new AbortController()
+    void loadOverview(controller.signal)
+    return () => controller.abort()
+  }, [loadOverview])
+
+  React.useEffect(() => {
+    const refreshIfActive = () => {
+      if (document.visibilityState !== "visible") return
+      const controller = new AbortController()
+      void loadOverview(controller.signal, true)
+    }
+    const interval = window.setInterval(refreshIfActive, 5_000)
+    window.addEventListener("focus", refreshIfActive)
+    document.addEventListener("visibilitychange", refreshIfActive)
+    return () => {
+      window.clearInterval(interval)
+      window.removeEventListener("focus", refreshIfActive)
+      document.removeEventListener("visibilitychange", refreshIfActive)
+    }
+  }, [loadOverview])
+
+  const chartData = React.useMemo(() => withChartFields(data?.series ?? []), [data?.series])
+  const migrationCompletionRate = React.useMemo(() => {
+    if (!data || data.metrics.migrations === 0) return 0
+    const completed = data.breakdowns.migrations.completed ?? 0
+    return Math.max(0, Math.min(100, (completed / data.metrics.migrations) * 100))
+  }, [data])
+
+  if (loading && !data) {
+    return (
+      <div className="space-y-6">
+        <div className="space-y-2">
+          <Skeleton className="h-8 w-44" />
+          <Skeleton className="h-4 w-80" />
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 8 }).map((_, index) => (
+            <Skeleton key={index} className="h-32" />
+          ))}
+        </div>
+        <Skeleton className="h-[360px]" />
+        <Skeleton className="h-[360px]" />
+      </div>
+    )
+  }
+
+  const metrics = data?.metrics
+  const syncHealth = data?.syncHealth
+  const activeAccountName = data?.activeAccount?.label || data?.activeAccount?.email || "No active account"
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+            <span>Active account: <span className="font-medium text-foreground">{activeAccountName}</span></span>
+            <span className="hidden md:inline">-</span>
+            <span>Last refreshed at {formatRefreshTime(data?.generatedAt)}</span>
+            {refreshing ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null}
+          </div>
+        </div>
+        <Button variant="outline" size="icon" onClick={() => void loadOverview(undefined, true)} disabled={refreshing}>
+          <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+        </Button>
+      </div>
+
+      {error ? (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Analytics refresh failed</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      {syncHealth?.partial || syncHealth?.staleBucketStats ? (
+        <Alert>
+          <ShieldAlert className="h-4 w-4" />
+          <AlertTitle>Live data is degraded</AlertTitle>
+          <AlertDescription>
+            {syncHealth.staleBucketStats
+              ? `Bucket stats are incomplete or unavailable. Last bucket update: ${formatRelative(syncHealth.bucketStatsUpdatedAt)}. `
+              : ""}
+            {syncHealth.warnings.slice(0, 2).join(" ")}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      {metrics ? (
+        <>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <KpiCard title="Active Storage" value={formatBytes(metrics.storageBytes)} detail={`${formatNumber(metrics.buckets)} active account buckets`} icon={HardDrive} />
+            <KpiCard title="Active Objects" value={formatCompact(metrics.objects)} detail={`${formatNumber(metrics.objects)} active account objects`} icon={Database} />
+            <KpiCard title="Accounts" value={`${metrics.activeAccounts}/${metrics.accounts}`} detail={`${syncHealth?.unsyncedAccounts ?? 0} unsynced, ${syncHealth?.accountSyncErrors ?? 0} errors`} icon={Server} />
+            <KpiCard title="Users" value={formatNumber(metrics.activeUsers)} detail={`${formatNumber(metrics.users)} total users`} icon={Users} />
+            <KpiCard title="Active Migrations" value={formatNumber(metrics.activeMigrations)} detail={`${formatNumber(metrics.migrations)} total migrations`} icon={Activity} tone={metrics.activeMigrations > 0 ? "success" : "default"} />
+            <KpiCard title="Workers Online" value={`${metrics.onlineWorkers}/${metrics.workers}`} detail={`${(data?.breakdowns.workers.offline ?? 0) + (data?.breakdowns.workers.error ?? 0)} unavailable`} icon={CheckCircle2} tone={metrics.onlineWorkers > 0 ? "success" : "default"} />
+            <KpiCard title="Repair Jobs" value={formatNumber(metrics.activeRepairJobs)} detail={`${formatNumber(metrics.failedRepairJobs)} failed, ${formatNumber(metrics.repairJobs)} total`} icon={Wrench} tone={metrics.failedRepairJobs > 0 ? "warning" : "default"} />
+            <KpiCard title="Attention" value={formatNumber(metrics.attentionItems)} detail={`${formatNumber(metrics.failedMigrations)} migration issues`} icon={AlertTriangle} tone={metrics.attentionItems > 0 ? "warning" : "default"} />
+          </div>
+
+          <UsageChart data={chartData} />
+          <MigrationChart data={chartData} />
+          <TransferChart data={chartData} />
+
+          <div className="space-y-4">
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle>Buckets</CardTitle>
+                <CardDescription>All active account buckets with current storage, objects, and sync status.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-1.5">
+                {data.topBuckets.length === 0 ? (
+                  <EmptyLine text="No bucket stats yet" />
+                ) : (
+                  data.topBuckets.map((bucket) => (
+                    <Link
+                      key={bucket.id}
+                      href={`/dashboard/analytics/buckets/${encodeURIComponent(bucket.name)}`}
+                      className="grid gap-2 rounded-md border px-3 py-2.5 transition-colors hover:bg-muted/50 md:grid-cols-[1fr_auto_auto_auto] md:items-center"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium">{bucket.name}</div>
+                        <div className="truncate text-xs text-muted-foreground">{bucket.accountLabel}</div>
+                      </div>
+                      <div className="text-sm md:text-right">
+                        <div className="font-medium">{formatBytes(bucket.bytes)}</div>
+                        <div className="text-xs text-muted-foreground">storage</div>
+                      </div>
+                      <div className="text-sm md:text-right">
+                        <div className="font-medium">{formatCompact(bucket.objects)}</div>
+                        <div className="text-xs text-muted-foreground">objects</div>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 md:justify-end">
+                        <Badge variant={statusVariant(bucket.status)}>{bucket.status}</Badge>
+                        <ArrowRight className="h-4 w-4 text-muted-foreground" />
+                      </div>
+                    </Link>
+                  ))
+                )}
+              </CardContent>
+            </Card>
+
+            <SystemHealthCard data={data} completionRate={migrationCompletionRate} />
+            <AttentionQueueCard items={data.attentionItems} />
+          </div>
+        </>
+      ) : (
+        <Card>
+          <CardContent className="py-10">
+            <EmptyLine icon={TrendingUp} text="No analytics data available" />
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+function SystemHealthCard({ data, completionRate }: { data: OverviewResponse; completionRate: number }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle>System Health</CardTitle>
+        <CardDescription>Operational status across migrations, workers, bucket stats, and repair jobs.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2 rounded-md border p-3">
+          <div className="flex items-center justify-between text-sm">
+            <span>Migration completion</span>
+            <span className="font-medium">{completionRate.toFixed(1)}%</span>
+          </div>
+          <Progress value={completionRate} className="h-2" />
+        </div>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <Breakdown title="Migrations" values={data.breakdowns.migrations} />
+          <Breakdown title="Workers" values={data.breakdowns.workers} />
+          <Breakdown title="Bucket stats" values={data.breakdowns.bucketStats} />
+          <Breakdown title="Repair jobs" values={data.breakdowns.repairs} />
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function AttentionQueueCard({ items }: { items: OverviewResponse["attentionItems"] }) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle>Attention Queue</CardTitle>
+        <CardDescription>Failures, stale sync, and verification records that need review.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-1.5">
+        {items.length === 0 ? (
+          <EmptyLine icon={CheckCircle2} text="No attention items" />
+        ) : (
+          items.map((item) => (
+            <Link
+              key={item.id}
+              href={item.href ?? "/dashboard/overview"}
+              className="grid gap-2 rounded-md border px-3 py-2.5 transition-colors hover:bg-muted/50 md:grid-cols-[1fr_auto_auto] md:items-center"
+            >
+              <div className="min-w-0">
+                <div className="text-sm font-medium">{item.title}</div>
+                <div className="line-clamp-1 text-xs text-muted-foreground">{item.detail}</div>
+              </div>
+              <div className="text-xs text-muted-foreground md:text-right">{formatRelative(item.at)}</div>
+              <Badge variant={statusVariant(item.severity)}>{item.severity}</Badge>
+            </Link>
+          ))
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function Breakdown({ title, values }: { title: string; values: Record<string, number> }) {
+  const entries = Object.entries(values).sort((a, b) => b[1] - a[1])
+  return (
+    <div className="space-y-2 rounded-md border px-3 py-2.5">
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-medium">{title}</div>
+        <div className="text-xs text-muted-foreground">{formatNumber(entries.reduce((sum, [, count]) => sum + count, 0))} total</div>
+      </div>
+      {entries.length === 0 ? (
+        <div className="text-xs text-muted-foreground">No records</div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {entries.map(([status, count]) => (
+            <Badge key={status} variant={statusVariant(status)}>
+              {status}: {formatNumber(count)}
+            </Badge>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function EmptyLine({
+  text,
+  icon: Icon = Database,
+}: {
+  text: string
+  icon?: React.ComponentType<{ className?: string }>
+}) {
+  return (
+    <div className="flex min-h-20 items-center justify-center gap-2 rounded-md border border-dashed text-sm text-muted-foreground">
+      <Icon className="h-4 w-4" />
+      {text}
+    </div>
+  )
+}

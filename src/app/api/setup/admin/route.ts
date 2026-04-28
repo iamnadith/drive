@@ -6,6 +6,13 @@ import {
   toPublicUser,
   PublicUser,
 } from "@/lib/users-store"
+import { sendVerificationEmail } from "@/lib/email-verification"
+
+function errorMessage(error: unknown, fallback: string) {
+  return typeof error === "object" && error !== null && "message" in error
+    ? String((error as { message?: unknown }).message ?? fallback)
+    : fallback
+}
 
 export async function POST(request: Request) {
   try {
@@ -44,19 +51,22 @@ export async function POST(request: Request) {
     })
 
     const publicUser: PublicUser = toPublicUser(updated)
-
-    const response = NextResponse.json({ user: publicUser })
-    response.cookies.set("sessionUserId", publicUser.id, {
-      httpOnly: true,
-      sameSite: "lax",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7,
+    await sendVerificationEmail({
+      userId: publicUser.id,
+      email: publicUser.email,
+      name: publicUser.name,
+      request,
+      purpose: "signup",
     })
 
-    return response
-  } catch (error: any) {
+    return NextResponse.json({
+      requiresVerification: true,
+      email: publicUser.email,
+      message: "Verification email sent",
+    })
+  } catch (error: unknown) {
     return NextResponse.json(
-      { error: error?.message ?? "Unable to create admin" },
+      { error: errorMessage(error, "Unable to create admin") },
       { status: 400 }
     )
   }

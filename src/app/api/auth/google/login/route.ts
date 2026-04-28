@@ -35,7 +35,7 @@ export async function GET(request: Request) {
       originUrl.hostname === "localhost" || originUrl.hostname === "127.0.0.1"
     if (originUrl.protocol === "http:" && !isLocalhost) {
       throw new Error(
-        `Google OAuth requires https redirect URIs (except localhost). Set APP_ORIGIN to your https site URL; current origin is ${origin}.`
+        `Google OAuth requires https redirect URIs (except localhost). Set NEXT_PUBLIC_APP_URL to your https site URL; current origin is ${origin}.`
       )
     }
     const callbackUrl = new URL("/api/auth/google/callback", origin).toString()
@@ -67,9 +67,13 @@ export async function GET(request: Request) {
     const response = NextResponse.redirect(googleAuthUrl)
 
     return response
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const message =
+      typeof error === "object" && error !== null && "message" in error
+        ? String((error as { message?: unknown }).message ?? "Unable to start Google login")
+        : "Unable to start Google login"
     return NextResponse.json(
-      { error: error?.message ?? "Unable to start Google login" },
+      { error: message },
       { status: 400 }
     )
   }

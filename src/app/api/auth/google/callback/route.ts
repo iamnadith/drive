@@ -6,6 +6,7 @@ import {
   findUserByEmail,
   findUserById,
   findUserByUsername,
+  hasSuperAdminUser,
   updateUser,
 } from "@/lib/users-store"
 
@@ -162,6 +163,10 @@ export async function GET(request: NextRequest) {
 
     const email = userInfo.email.toLowerCase()
     const usernameCandidate = email.split("@")[0]
+    const superAdminExistsBefore = mode === "setup" ? await hasSuperAdminUser() : false
+    if (mode === "setup" && superAdminExistsBefore) {
+      throw new Error("Super admin already initialized")
+    }
 
     let user
 
@@ -183,6 +188,8 @@ export async function GET(request: NextRequest) {
       user = await updateUser(actor.id, {
         googleLinked: true,
         googleSub: userInfo.sub ?? actor.googleSub,
+        emailVerified: true,
+        emailVerifiedAt: actor.emailVerifiedAt ?? new Date().toISOString(),
       })
     } else {
       const existing = await findUserByEmail(email)
@@ -200,34 +207,64 @@ export async function GET(request: NextRequest) {
           profileImageUrl: userInfo.picture,
           googleLinked: true,
           googleSub: userInfo.sub,
+          emailVerified: true,
+          emailVerifiedAt: new Date().toISOString(),
           passwordSource: "google-generated",
         })
       } else {
         user = await updateUser(existing.id, {
           googleLinked: true,
           googleSub: userInfo.sub ?? existing.googleSub,
+          emailVerified: true,
+          emailVerifiedAt: existing.emailVerifiedAt ?? new Date().toISOString(),
         })
       }
+    }
+
+    if (mode === "setup") {
+      user = await updateUser(user.id, {
+        role: "superadmin",
+        quotaLimitMb: 0,
+        emailVerified: true,
+        emailVerifiedAt: user.emailVerifiedAt ?? new Date().toISOString(),
+      })
     }
 
     const finalUrl = new URL("/auth/google/complete", origin)
     if (redirectCookie) {
       finalUrl.searchParams.set("redirect", redirectCookie)
     }
+    const requiresPostGoogleVerification = Boolean(user.twoFactorEnabled && mode !== "link")
+    if (requiresPostGoogleVerification) {
+      finalUrl.searchParams.set("verify", "1")
+    }
 
     const response = NextResponse.redirect(finalUrl)
 
-    response.cookies.set("sessionUserId", user.id, {
-      httpOnly: true,
-      sameSite: "lax",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7,
-    })
+    if (requiresPostGoogleVerification) {
+      response.cookies.set("googleVerifyUserId", user.id, {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        maxAge: 10 * 60,
+      })
+    } else {
+      response.cookies.set("sessionUserId", user.id, {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 7,
+      })
+    }
 
     return response
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const message =
+      typeof error === "object" && error !== null && "message" in error
+        ? String((error as { message?: unknown }).message ?? "Google authentication failed")
+        : "Google authentication failed"
     return NextResponse.json(
-      { error: error?.message ?? "Google authentication failed" },
+      { error: message },
       { status: 400 }
     )
   }

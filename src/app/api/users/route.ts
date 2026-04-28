@@ -7,6 +7,13 @@ import {
   searchUsers,
   toPublicUser,
 } from "@/lib/users-store"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+
+function errorMessage(error: unknown, fallback: string) {
+  return typeof error === "object" && error !== null && "message" in error
+    ? String((error as { message?: unknown }).message ?? fallback)
+    : fallback
+}
 
 export async function GET(request: Request) {
   try {
@@ -22,8 +29,8 @@ export async function GET(request: Request) {
     const users = await searchUsers(q, role)
     const publicUsers: PublicUser[] = users.map(toPublicUser)
     return NextResponse.json({ users: publicUsers })
-  } catch (error: any) {
-    const message = error?.message ?? "Unable to load users"
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to load users")
     return NextResponse.json({ error: message }, { status: 400 })
   }
 }
@@ -86,10 +93,22 @@ export async function POST(request: Request) {
       profileImageUrl,
       passwordSource: "local",
     })
+    const actorId = (await cookies()).get("sessionUserId")?.value ?? null
+    await recordActivity({
+      actorUserId: actorId,
+      action: "user.created",
+      entityType: "user",
+      entityId: user.id,
+      entityLabel: user.name,
+      summary: `Created user ${user.name}`,
+      detail: `${user.email} was created with role ${user.role}.`,
+      after: { user: toPublicUser(user) },
+      ...getRequestActivityContext(request),
+    })
 
     return NextResponse.json({ user: toPublicUser(user) })
-  } catch (error: any) {
-    const message = error?.message ?? "Unable to create user"
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to create user")
     return NextResponse.json({ error: message }, { status: 400 })
   }
 }

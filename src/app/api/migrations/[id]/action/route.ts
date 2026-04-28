@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
+import { cookies } from "next/headers"
 import { getAgentById, getAgentGithubToken, getLatestAgentRunByJobReference, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { activateAccountForCompletedMigration, getAllAccounts } from "@/lib/accounts-store"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import { slurperAbortJob, slurperPauseJob, slurperResumeJob } from "@/lib/cloudflare-r2-super-slurper"
 import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflowRun, listGitHubWorkflowRuns } from "@/lib/github-oauth"
 import { getMigration, listMigrationItems, updateMigration, updateMigrationItem } from "@/lib/migrations-store"
@@ -255,6 +257,7 @@ async function abortRepairJobsForMigration(migrationId: string): Promise<{
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params
+    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
     const body: unknown = await request.json().catch(() => ({}))
     const data = isRecord(body) ? body : {}
     const action = typeof data.action === "string" ? data.action : ""
@@ -368,6 +371,43 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         syncMessage: "",
         lastSyncedAt: now,
         options: { ...migration.options, manualCompleted: true, targetActivatedAt: now },
+      })
+      const afterAccounts = await getAllAccounts()
+      await recordActivity({
+        actorUserId,
+        action: "migration.completed_activate_target",
+        entityType: "migration",
+        entityId: id,
+        entityLabel: `Migration ${id}`,
+        summary: "Marked migration completed and activated target account",
+        detail: "Undo restores the account active/disabled statuses captured before completion. Migrated R2 objects are not deleted.",
+        before: {
+          migration,
+          accounts: accounts.map((account) => ({
+            id: account.id,
+            label: account.label,
+            status: account.status,
+            lastMigrated: account.lastMigrated,
+          })),
+        },
+        after: {
+          accounts: afterAccounts.map((account) => ({
+            id: account.id,
+            label: account.label,
+            status: account.status,
+            lastMigrated: account.lastMigrated,
+          })),
+        },
+        undoable: true,
+        undoPayload: {
+          type: "restore_account_statuses",
+          accounts: accounts.map((account) => ({
+            id: account.id,
+            status: account.status,
+            lastMigrated: account.lastMigrated,
+          })),
+        },
+        ...getRequestActivityContext(request),
       })
       return NextResponse.json({ ok: true }, { status: 200 })
     }

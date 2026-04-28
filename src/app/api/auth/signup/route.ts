@@ -1,5 +1,13 @@
 import { NextResponse } from "next/server"
 import { signup } from "@/lib/auth"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+import { sendVerificationEmail } from "@/lib/email-verification"
+
+function errorMessage(error: unknown, fallback: string) {
+  return typeof error === "object" && error !== null && "message" in error
+    ? String((error as { message?: unknown }).message ?? fallback)
+    : fallback
+}
 
 export async function POST(request: Request) {
   try {
@@ -19,19 +27,33 @@ export async function POST(request: Request) {
     }
 
     const user = await signup({ name, username, email, password })
-
-    const response = NextResponse.json({ user })
-    response.cookies.set("sessionUserId", user.id, {
-      httpOnly: true,
-      sameSite: "lax",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7,
+    await sendVerificationEmail({
+      userId: user.id,
+      email: user.email,
+      name: user.name,
+      request,
+      purpose: "signup",
+    })
+    await recordActivity({
+      actorUserId: user.id,
+      action: "auth.signup",
+      entityType: "user",
+      entityId: user.id,
+      entityLabel: user.name,
+      summary: `${user.name} signed up`,
+      detail: `${user.email} created a new account.`,
+      after: { user },
+      ...getRequestActivityContext(request),
     })
 
-    return response
-  } catch (error: any) {
+    return NextResponse.json({
+      requiresVerification: true,
+      email: user.email,
+      message: "Verification email sent",
+    })
+  } catch (error: unknown) {
     return NextResponse.json(
-      { error: error?.message ?? "Unable to sign up" },
+      { error: errorMessage(error, "Unable to sign up") },
       { status: 400 }
     )
   }

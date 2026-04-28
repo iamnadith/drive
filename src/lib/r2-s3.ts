@@ -5,6 +5,8 @@ import {
   HeadBucketCommand,
   HeadObjectCommand,
   GetObjectCommand,
+  DeleteObjectCommand,
+  DeleteObjectsCommand,
 } from "@aws-sdk/client-s3"
 import { Upload } from "@aws-sdk/lib-storage"
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
@@ -168,6 +170,29 @@ export async function r2HeadObject(config: R2ClientConfig, bucket: string, key: 
 export async function r2GetObjectStream(config: R2ClientConfig, bucket: string, key: string) {
   const client = createR2Client(config)
   return client.send(new GetObjectCommand({ Bucket: bucket, Key: key }))
+}
+
+export async function r2DeleteObject(config: R2ClientConfig, bucket: string, key: string) {
+  const client = createR2Client(config)
+  return client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }))
+}
+
+export async function r2DeleteObjects(config: R2ClientConfig, bucket: string, keys: string[]) {
+  const client = createR2Client(config)
+  const uniqueKeys = Array.from(new Set(keys)).filter(Boolean)
+  for (let i = 0; i < uniqueKeys.length; i += 1000) {
+    const chunk = uniqueKeys.slice(i, i + 1000)
+    if (!chunk.length) continue
+    await client.send(
+      new DeleteObjectsCommand({
+        Bucket: bucket,
+        Delete: {
+          Objects: chunk.map((Key) => ({ Key })),
+          Quiet: true,
+        },
+      })
+    )
+  }
 }
 
 export async function r2CreateSignedDownloadUrl(

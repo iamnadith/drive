@@ -1,4 +1,5 @@
 import crypto from "crypto"
+import { isPostgresConfigured, queryDb } from "./db"
 import { getSupabaseServerClient } from "./supabase"
 
 export type CloudflareAccountStatus = "active" | "disabled" | "available"
@@ -51,6 +52,42 @@ type DriveAccountRow = {
 
 const ACCOUNTS_TABLE = "drive_accounts"
 const MIGRATIONS_TABLE = "drive_migrations"
+
+async function archiveAccountBucketStatsBeforeDelete(account: CloudflareAccount): Promise<void> {
+  if (!isPostgresConfigured()) return
+  await queryDb(`
+    create table if not exists drive_analytics_bucket_snapshots (
+      account_id uuid not null,
+      account_label text,
+      account_email text,
+      bucket_name text not null,
+      objects bigint not null default 0,
+      bytes bigint not null default 0,
+      status text,
+      source_updated_at timestamptz,
+      captured_at timestamptz not null default now(),
+      primary key (account_id, bucket_name)
+    );
+  `)
+  await queryDb(
+    `
+      insert into drive_analytics_bucket_snapshots
+        (account_id, account_label, account_email, bucket_name, objects, bytes, status, source_updated_at)
+      select account_id, $2, $3, bucket_name, objects, bytes, status, updated_at
+      from drive_bucket_stats
+      where account_id = $1
+      on conflict (account_id, bucket_name) do update set
+        account_label = excluded.account_label,
+        account_email = excluded.account_email,
+        objects = excluded.objects,
+        bytes = excluded.bytes,
+        status = excluded.status,
+        source_updated_at = excluded.source_updated_at,
+        captured_at = now();
+    `,
+    [account.id, account.label, account.email]
+  )
+}
 
 function normalizeSupabaseError(error: { message: string }): Error {
   const message = String(error?.message ?? "Supabase error")
@@ -360,12 +397,13 @@ export async function deleteAccount(id: string): Promise<void> {
 
   const { data: targetRows, error: targetError } = await supabase
     .from(ACCOUNTS_TABLE)
-    .select("id,status")
+    .select("*")
     .eq("id", id)
     .limit(1)
 
   if (targetError) throw new Error(targetError.message)
-  const target = (targetRows as Array<{ id: string; status: CloudflareAccountStatus }>)[0]
+  const targetRow = (targetRows as DriveAccountRow[])[0]
+  const target = targetRow ? mapRow(targetRow) : null
   if (!target) return
 
   if (target.status === "active") {
@@ -405,6 +443,8 @@ export async function deleteAccount(id: string): Promise<void> {
       "Cannot delete this account because it is referenced by one or more migrations. Delete/archive those migrations first."
     )
   }
+
+  await archiveAccountBucketStatsBeforeDelete(target).catch(() => undefined)
 
   const { error } = await supabase.from(ACCOUNTS_TABLE).delete().eq("id", id)
   if (error) throw normalizeSupabaseError(error)

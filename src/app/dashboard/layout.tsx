@@ -34,6 +34,14 @@ export default function DashboardLayout({
       return [...base, { label: "Overview" }]
     }
 
+    if (pathname.startsWith("/dashboard/analytics")) {
+      return [...base, { label: "Analytics" }]
+    }
+
+    if (pathname.startsWith("/dashboard/activity")) {
+      return [...base, { label: "Activity" }]
+    }
+
     if (pathname.startsWith("/dashboard/storage")) {
       return [...base, { label: "Storage" }]
     }

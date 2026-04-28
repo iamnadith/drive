@@ -1,5 +1,13 @@
 import { NextResponse } from "next/server"
-import { deleteAccount, updateAccount } from "@/lib/accounts-store"
+import { cookies } from "next/headers"
+import { deleteAccount, getAllAccounts, updateAccount } from "@/lib/accounts-store"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+
+function errorMessage(error: unknown, fallback: string) {
+  return typeof error === "object" && error !== null && "message" in error
+    ? String((error as { message?: unknown }).message ?? fallback)
+    : fallback
+}
 
 export async function PATCH(
   request: Request,
@@ -7,6 +15,9 @@ export async function PATCH(
 ) {
   try {
     const { id } = await context.params
+    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
+    const beforeAccounts = await getAllAccounts()
+    const before = beforeAccounts.find((account) => account.id === id)
     const body = await request.json()
 
     const {
@@ -39,10 +50,61 @@ export async function PATCH(
       updates.cloudflareAccountId = cloudflareAccountId
 
     const updated = await updateAccount(id, updates)
+    const afterAccounts = await getAllAccounts()
+    const changedStatus = typeof status !== "undefined" && before?.status !== updated.status
+    const changedActiveAccount = changedStatus || beforeAccounts.some((account) => {
+      const after = afterAccounts.find((candidate) => candidate.id === account.id)
+      return after && account.status !== after.status
+    })
+
+    await recordActivity({
+      actorUserId,
+      action: changedActiveAccount ? "account.active_status_changed" : "account.updated",
+      entityType: "account",
+      entityId: id,
+      entityLabel: updated.label,
+      summary: changedActiveAccount
+        ? `Changed active account status for ${updated.label}`
+        : `Updated account ${updated.label}`,
+      detail: changedActiveAccount
+        ? "Account status changes can be undone while all affected accounts still exist."
+        : "Account credentials or profile fields were updated.",
+      before: {
+        account: before,
+        accounts: beforeAccounts.map((account) => ({
+          id: account.id,
+          label: account.label,
+          status: account.status,
+          lastMigrated: account.lastMigrated,
+        })),
+      },
+      after: {
+        account: updated,
+        accounts: afterAccounts.map((account) => ({
+          id: account.id,
+          label: account.label,
+          status: account.status,
+          lastMigrated: account.lastMigrated,
+        })),
+      },
+      undoable: changedActiveAccount,
+      undoReason: changedActiveAccount ? null : "Only account status changes are currently undoable.",
+      undoPayload: changedActiveAccount
+        ? {
+            type: "restore_account_statuses",
+            accounts: beforeAccounts.map((account) => ({
+              id: account.id,
+              status: account.status,
+              lastMigrated: account.lastMigrated,
+            })),
+          }
+        : null,
+      ...getRequestActivityContext(request),
+    })
 
     return NextResponse.json({ account: updated })
-  } catch (error: any) {
-    const message = error?.message ?? "Unable to update account"
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to update account")
     return NextResponse.json({ error: message }, { status: 400 })
   }
 }
@@ -53,10 +115,24 @@ export async function DELETE(
 ) {
   try {
     const { id } = await context.params
+    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
+    const before = (await getAllAccounts()).find((account) => account.id === id)
     await deleteAccount(id)
+    await recordActivity({
+      actorUserId,
+      action: "account.deleted",
+      entityType: "account",
+      entityId: id,
+      entityLabel: before?.label,
+      summary: `Deleted account ${before?.label ?? id}`,
+      detail: "Account deletion is not automatically undoable because credentials and external state may no longer be valid.",
+      before: before ? { account: before } : null,
+      undoReason: "Deleted accounts must be recreated manually.",
+      ...getRequestActivityContext(_request),
+    })
     return NextResponse.json({ success: true })
-  } catch (error: any) {
-    const message = error?.message ?? "Unable to delete account"
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to delete account")
     return NextResponse.json({ error: message }, { status: 400 })
   }
 }

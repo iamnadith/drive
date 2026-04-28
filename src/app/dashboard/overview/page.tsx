@@ -2,30 +2,26 @@
 
 import * as React from "react"
 import {
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  Database,
+  HardDrive,
+  RefreshCw,
+  Server,
+} from "lucide-react"
+import {
   Area,
   AreaChart,
   CartesianGrid,
   XAxis,
-  YAxis,
 } from "recharts"
-import {
-  ArrowRight,
-  HardDrive,
-  Server,
-  Database,
-  Activity,
-  TrendingUp,
-  Users,
-} from "lucide-react"
+import Link from "next/link"
+
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   ChartConfig,
   ChartContainer,
@@ -39,299 +35,496 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import Link from "next/link"
+import { Skeleton } from "@/components/ui/skeleton"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { useIsMobile } from "@/hooks/use-mobile"
 
-type ActiveAccount = {
-  id: string
-  label: string
-  email: string
-  status: "active" | "available" | "disabled"
-}
-
-const generateData = (days: number, startValue: number) => {
-  const data = []
-  for (let i = 0; i < days; i++) {
-    const date = new Date()
-    date.setDate(date.getDate() - (days - 1 - i))
-    data.push({
-      date: date.toISOString().split("T")[0],
-      bandwidth: Math.floor(startValue + Math.random() * 50 - 20 + i * 2),
-      requests: Math.floor(startValue * 10 + Math.random() * 500 - 200 + i * 10),
-    })
+type OverviewResponse = {
+  generatedAt: string
+  activeAccount: {
+    label: string
+    email: string
+    syncStatus?: string
+    lastSyncedAt?: string
+  } | null
+  metrics: {
+    storageBytes: number
+    objects: number
+    buckets: number
+    accounts: number
+    activeMigrations: number
+    workers: number
+    onlineWorkers: number
+    attentionItems: number
   }
-  return data
+  series: Array<{
+    date: string
+    storageBytes: number
+    objects: number
+    transferredObjects: number
+    failedObjects: number
+    verifyIssues: number
+  }>
+  activeAccountSeries: Array<{
+    date: string
+    accountId: string
+    accountLabel: string
+    buckets: number
+    storageBytes: number
+    objects: number
+    capturedAt: string
+  }>
+  recentActivity: Array<{
+    id: string
+    at: string
+    title: string
+    detail: string
+    status: string
+    href?: string
+  }>
+  syncHealth: {
+    partial: boolean
+    warnings: string[]
+    staleBucketStats: boolean
+    bucketStatsUpdatedAt: string | null
+    unsyncedAccounts: number
+    accountSyncErrors: number
+    bucketStatsErrors: number
+  }
 }
 
-const chartConfig = {
-  bandwidth: {
-    label: "Bandwidth (GB)",
-    color: "hsl(var(--chart-1))",
+type UsageRange = "7d" | "30d" | "90d"
+
+const platformUsageChartConfig = {
+  storageGb: {
+    label: "Storage (GB)",
+    color: "var(--primary)",
   },
-  requests: {
-    label: "Requests (10k)",
-    color: "hsl(var(--chart-2))",
+  objectsK: {
+    label: "Objects (K)",
+    color: "var(--primary)",
   },
 } satisfies ChartConfig
 
-export default function DashboardPage() {
-  const [timeRange, setTimeRange] = React.useState("7d")
-  const [mounted, setMounted] = React.useState(false)
-  const [activeAccount, setActiveAccount] = React.useState<ActiveAccount | null>(
-    null
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function formatNumber(value: number | undefined): string {
+  if (!value || value <= 0) return "0"
+  return Intl.NumberFormat().format(value)
+}
+
+function formatCompact(value: number | undefined): string {
+  if (!value || value <= 0) return "0"
+  return Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value)
+}
+
+function formatBytes(value: number | undefined): string {
+  if (!value || value <= 0) return "0 B"
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"]
+  let size = value
+  let unitIndex = 0
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex++
+  }
+  return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unitIndex]}`
+}
+
+function formatRelative(value?: string | null): string {
+  if (!value) return "Never"
+  const time = Date.parse(value)
+  if (!Number.isFinite(time)) return "Unknown"
+  const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000))
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+function formatRefreshTime(value?: string | null): string {
+  if (!value) return "Never"
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return "Unknown"
+  return date.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  })
+}
+
+function statusVariant(status: string): "default" | "secondary" | "destructive" | "outline" {
+  const normalized = status.toLowerCase()
+  if (normalized.includes("failed") || normalized.includes("error")) return "destructive"
+  if (normalized === "completed" || normalized === "ok" || normalized === "online") return "default"
+  if (normalized === "running" || normalized === "verifying" || normalized === "syncing") return "secondary"
+  return "outline"
+}
+
+function SummaryCard({
+  title,
+  value,
+  detail,
+  icon: Icon,
+  warning,
+}: {
+  title: string
+  value: string
+  detail: string
+  icon: React.ComponentType<{ className?: string }>
+  warning?: boolean
+}) {
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+        <CardTitle className="text-sm font-medium">{title}</CardTitle>
+        <Icon className={`h-4 w-4 ${warning ? "text-amber-500" : "text-muted-foreground"}`} />
+      </CardHeader>
+      <CardContent>
+        <div className="text-2xl font-semibold tracking-tight tabular-nums">{value}</div>
+        <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
+      </CardContent>
+    </Card>
   )
+}
+
+function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccountSeries"] }) {
+  const isMobile = useIsMobile()
+  const [timeRange, setTimeRange] = React.useState<UsageRange>("90d")
 
   React.useEffect(() => {
-    setMounted(true)
-  }, [])
-
-  React.useEffect(() => {
-    const loadActive = async () => {
-      try {
-        const res = await fetch("/api/accounts")
-        if (!res.ok) return
-        const data = await res.json()
-        const accounts: any[] = data.accounts ?? []
-        const active = accounts.find((a) => a.status === "active")
-        if (active) {
-          setActiveAccount({
-            id: active.id,
-            label: active.label ?? "",
-            email: active.email ?? "",
-            status: active.status ?? "available",
-          })
-        } else {
-          setActiveAccount(null)
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    loadActive()
-  }, [])
+    if (isMobile) setTimeRange("7d")
+  }, [isMobile])
 
   const chartData = React.useMemo(() => {
-    switch (timeRange) {
-      case "30d":
-        return generateData(30, 200)
-      case "90d":
-        return generateData(90, 150)
-      case "7d":
-      default:
-        return generateData(7, 100)
-    }
-  }, [timeRange])
+    const referenceTime = series.reduce((latest, item) => {
+      const time = Date.parse(item.date)
+      return Number.isFinite(time) ? Math.max(latest, time) : latest
+    }, 0)
+    const referenceDate = referenceTime > 0 ? new Date(referenceTime) : new Date()
+    const daysToSubtract = timeRange === "30d" ? 30 : timeRange === "7d" ? 7 : 90
+    const startDate = new Date(referenceDate)
+    startDate.setDate(startDate.getDate() - daysToSubtract)
 
-  if (!mounted) {
-    return null
-  }
+    return series
+      .filter((item) => {
+        const date = new Date(item.date)
+        return Number.isFinite(date.getTime()) && date >= startDate
+      })
+      .map((item) => ({
+        ...item,
+        storageGb: Number((item.storageBytes / 1024 / 1024 / 1024).toFixed(2)),
+        objectsK: Number((item.objects / 1000).toFixed(2)),
+      }))
+  }, [series, timeRange])
 
   return (
-    <div className="flex flex-1 flex-col gap-4 pt-0">
-      <div className="flex items-center justify-between space-y-2">
-        <h2 className="text-3xl font-bold tracking-tight">Overview</h2>
-        <div className="flex items-center space-x-2">
-          <Select value={timeRange} onValueChange={setTimeRange}>
-            <SelectTrigger className="w-[160px] rounded-lg sm:ml-auto" aria-label="Select a value">
-              <SelectValue placeholder="Last 7 days" />
+    <Card className="@container/card">
+      <CardHeader>
+        <CardTitle>Storage Usage</CardTitle>
+        <CardDescription>
+          <span className="hidden @[540px]/card:block">
+            Storage and objects for current and previous active accounts over time.
+          </span>
+          <span className="@[540px]/card:hidden">Active account history</span>
+        </CardDescription>
+        <CardAction>
+          <ToggleGroup
+            type="single"
+            value={timeRange}
+            onValueChange={(value) => {
+              if (value) setTimeRange(value as UsageRange)
+            }}
+            variant="outline"
+            className="hidden *:data-[slot=toggle-group-item]:px-4! @[767px]/card:flex"
+          >
+            <ToggleGroupItem value="90d">Last 3 months</ToggleGroupItem>
+            <ToggleGroupItem value="30d">Last 30 days</ToggleGroupItem>
+            <ToggleGroupItem value="7d">Last 7 days</ToggleGroupItem>
+          </ToggleGroup>
+          <Select value={timeRange} onValueChange={(value) => setTimeRange(value as UsageRange)}>
+            <SelectTrigger
+              className="flex w-40 **:data-[slot=select-value]:block **:data-[slot=select-value]:truncate @[767px]/card:hidden"
+              size="sm"
+              aria-label="Select chart range"
+            >
+              <SelectValue placeholder="Last 3 months" />
             </SelectTrigger>
             <SelectContent className="rounded-xl">
-              <SelectItem value="7d" className="rounded-lg">
-                Last 7 days
+              <SelectItem value="90d" className="rounded-lg">
+                Last 3 months
               </SelectItem>
               <SelectItem value="30d" className="rounded-lg">
                 Last 30 days
               </SelectItem>
-              <SelectItem value="90d" className="rounded-lg">
-                Last 3 months
+              <SelectItem value="7d" className="rounded-lg">
+                Last 7 days
               </SelectItem>
             </SelectContent>
           </Select>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
+        {chartData.length === 0 ? (
+          <div className="flex h-[250px] items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground">
+            No active account usage history yet
+          </div>
+        ) : (
+          <ChartContainer config={platformUsageChartConfig} className="aspect-auto h-[250px] w-full">
+            <AreaChart data={chartData}>
+              <defs>
+                <linearGradient id="fillStorage" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="var(--color-storageGb)" stopOpacity={1} />
+                  <stop offset="95%" stopColor="var(--color-storageGb)" stopOpacity={0.1} />
+                </linearGradient>
+                <linearGradient id="fillObjects" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="var(--color-objectsK)" stopOpacity={0.8} />
+                  <stop offset="95%" stopColor="var(--color-objectsK)" stopOpacity={0.1} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid vertical={false} />
+              <XAxis
+                dataKey="date"
+                tickLine={false}
+                axisLine={false}
+                tickMargin={8}
+                minTickGap={32}
+                tickFormatter={(value) =>
+                  new Date(value).toLocaleDateString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                  })
+                }
+              />
+              <ChartTooltip
+                cursor={false}
+                content={
+                  <ChartTooltipContent
+                    labelFormatter={(value) =>
+                      new Date(value).toLocaleDateString("en-US", {
+                        month: "short",
+                        day: "numeric",
+                      })
+                    }
+                    indicator="dot"
+                  />
+                }
+              />
+              <Area
+                dataKey="objectsK"
+                type="natural"
+                fill="url(#fillObjects)"
+                stroke="var(--color-objectsK)"
+                stackId="a"
+              />
+              <Area
+                dataKey="storageGb"
+                type="natural"
+                fill="url(#fillStorage)"
+                stroke="var(--color-storageGb)"
+                stackId="a"
+              />
+            </AreaChart>
+          </ChartContainer>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+export default function OverviewPage() {
+  const [data, setData] = React.useState<OverviewResponse | null>(null)
+  const [loading, setLoading] = React.useState(true)
+  const [refreshing, setRefreshing] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
+
+  const loadOverview = React.useCallback(async (quiet = false, signal?: AbortSignal) => {
+    if (quiet) setRefreshing(true)
+    else setLoading(true)
+    try {
+      const res = await fetch("/api/dashboard/analytics?range=all", {
+        cache: "no-store",
+        signal,
+      })
+      const json: unknown = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const message =
+          isRecord(json) && typeof json.error === "string" ? json.error : "Unable to load overview"
+        throw new Error(message)
+      }
+      setData(json as OverviewResponse)
+      setError(null)
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "AbortError") return
+      const message =
+        typeof caught === "object" && caught !== null && "message" in caught
+          ? String((caught as { message?: unknown }).message ?? "Unable to load overview")
+          : "Unable to load overview"
+      setError(message)
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    const controller = new AbortController()
+    void loadOverview(false, controller.signal)
+    return () => controller.abort()
+  }, [loadOverview])
+
+  React.useEffect(() => {
+    const refreshIfActive = () => {
+      if (document.visibilityState === "visible") void loadOverview(true)
+    }
+    const interval = window.setInterval(refreshIfActive, 5_000)
+    window.addEventListener("focus", refreshIfActive)
+    document.addEventListener("visibilitychange", refreshIfActive)
+    return () => {
+      window.clearInterval(interval)
+      window.removeEventListener("focus", refreshIfActive)
+      document.removeEventListener("visibilitychange", refreshIfActive)
+    }
+  }, [loadOverview])
+
+  if (loading && !data) {
+    return (
+      <div className="space-y-6">
+        <div className="space-y-2">
+          <Skeleton className="h-8 w-36" />
+          <Skeleton className="h-4 w-80" />
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <Skeleton key={index} className="h-32" />
+          ))}
+        </div>
+        <Skeleton className="h-52" />
+      </div>
+    )
+  }
+
+  const metrics = data?.metrics
+  const accountName = data?.activeAccount?.label || data?.activeAccount?.email || "No active account"
+  const healthy = metrics ? metrics.attentionItems === 0 && !data?.syncHealth.partial : false
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
+          <p className="text-sm text-muted-foreground">
+            Retained analytics summary with active account <span className="font-medium text-foreground">{accountName}</span>. Last refreshed at {formatRefreshTime(data?.generatedAt)}.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => void loadOverview(true)} disabled={refreshing}>
+            <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
+          <Button asChild size="sm">
+            <Link href="/dashboard/analytics">
+              Analytics <ArrowRight className="h-4 w-4" />
+            </Link>
+          </Button>
         </div>
       </div>
 
-      {activeAccount && (
-        <div className="text-xs text-muted-foreground">
-          Active account:{" "}
-          <span className="font-medium text-foreground">
-            {activeAccount.label || activeAccount.email || "Unnamed"}
-          </span>{" "}
-          <span className="font-mono break-all ml-1">{activeAccount.email}</span>
-        </div>
-      )}
+      {error ? (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Overview refresh failed</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : null}
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Storage</CardTitle>
-            <HardDrive className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">24.5 TB</div>
-            <p className="text-xs text-muted-foreground">+2.1% from last month</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Objects</CardTitle>
-            <Database className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">145.2M</div>
-            <p className="text-xs text-muted-foreground">+12% from last month</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Active Accounts</CardTitle>
-            <Server className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">4</div>
-            <p className="text-xs text-muted-foreground">1 account in migration</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Active Users</CardTitle>
-            <Users className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">32</div>
-            <p className="text-xs text-muted-foreground">+3 since last week</p>
-          </CardContent>
-        </Card>
-      </div>
+      {data?.syncHealth.partial || data?.syncHealth.staleBucketStats ? (
+        <Alert>
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Some live data needs attention</AlertTitle>
+          <AlertDescription>
+            {data.syncHealth.staleBucketStats
+              ? `Bucket stats are incomplete or unavailable. Last bucket update: ${formatRelative(data.syncHealth.bucketStatsUpdatedAt)}. `
+              : ""}
+            {data.syncHealth.warnings.slice(0, 1).join(" ")}
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-7">
-        <Card className="col-span-4">
-          <CardHeader>
-            <CardTitle>Bandwidth Usage</CardTitle>
-            <CardDescription>
-              Data transfer across all buckets over time.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ChartContainer config={chartConfig} className="aspect-auto h-[310px] w-full">
-              <AreaChart
-                data={chartData}
-                margin={{
-                  left: 12,
-                  right: 12,
-                }}
-              >
-                <CartesianGrid vertical={false} />
-                <XAxis
-                  dataKey="date"
-                  tickLine={false}
-                  axisLine={false}
-                  tickMargin={8}
-                  minTickGap={32}
-                  tickFormatter={(value) => {
-                    const date = new Date(value)
-                    return date.toLocaleDateString("en-US", {
-                      month: "short",
-                      day: "numeric",
-                    })
-                  }}
-                />
-                <ChartTooltip
-                  cursor={false}
-                  content={
-                    <ChartTooltipContent
-                      labelFormatter={(value) => {
-                        return new Date(value).toLocaleDateString("en-US", {
-                          month: "short",
-                          day: "numeric",
-                        })
-                      }}
-                      indicator="dot"
-                    />
-                  }
-                />
-                <Area
-                  dataKey="requests"
-                  type="natural"
-                  fill="var(--color-requests)"
-                  fillOpacity={0.1}
-                  stroke="var(--color-requests)"
-                  stackId="a"
-                />
-                <Area
-                  dataKey="bandwidth"
-                  type="natural"
-                  fill="var(--color-bandwidth)"
-                  fillOpacity={0.4}
-                  stroke="var(--color-bandwidth)"
-                  stackId="a"
-                />
-              </AreaChart>
-            </ChartContainer>
-          </CardContent>
-          <CardFooter>
-            <div className="flex w-full items-start gap-2 text-sm">
-              <div className="grid gap-2">
-                <div className="flex items-center gap-2 font-medium leading-none">
-                  Trending up by 5.2% this month <TrendingUp className="h-4 w-4" />
-                </div>
-                <div className="flex items-center gap-2 leading-none text-muted-foreground">
-                  Showing total bandwidth usage for the last{" "}
-                  {timeRange === "7d"
-                    ? "7 days"
-                    : timeRange === "30d"
-                    ? "30 days"
-                    : "3 months"}
-                </div>
-              </div>
-            </div>
-          </CardFooter>
-        </Card>
+      {metrics ? (
+        <>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <SummaryCard
+              title="Active Storage"
+              value={formatBytes(metrics.storageBytes)}
+              detail={`${formatNumber(metrics.buckets)} active account buckets`}
+              icon={HardDrive}
+            />
+            <SummaryCard
+              title="Active Objects"
+              value={formatCompact(metrics.objects)}
+              detail={`${formatNumber(metrics.objects)} active account objects`}
+              icon={Database}
+            />
+            <SummaryCard
+              title="Migrations"
+              value={formatNumber(metrics.activeMigrations)}
+              detail="Currently running or verifying"
+              icon={Server}
+            />
+            <SummaryCard
+              title="Health"
+              value={healthy ? "Good" : formatNumber(metrics.attentionItems)}
+              detail={healthy ? "No dashboard attention items" : "Items need review"}
+              icon={healthy ? CheckCircle2 : AlertTriangle}
+              warning={!healthy}
+            />
+          </div>
 
-        <Card className="col-span-3">
-          <CardHeader>
-            <CardTitle>Recent Activity</CardTitle>
-            <CardDescription>Latest system events and migrations.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-8">
-              <div className="flex items-center">
-                <div className="space-y-1">
-                  <p className="text-sm font-medium leading-none">Migration Completed</p>
-                  <p className="text-sm text-muted-foreground">
-                    Moved 5.2TB from <strong>R2-Old-04</strong> to <strong>R2-Prod-01</strong>.
-                  </p>
-                </div>
-                <div className="ml-auto font-medium text-xs text-muted-foreground">2h ago</div>
-              </div>
-              <div className="flex items-center">
-                <div className="space-y-1">
-                  <p className="text-sm font-medium leading-none">Bucket Created</p>
-                  <p className="text-sm text-muted-foreground">
-                    New bucket <code>assets-v2</code> created in prod.
-                  </p>
-                </div>
-                <div className="ml-auto font-medium text-xs text-muted-foreground">5h ago</div>
-              </div>
-              <div className="flex items-center">
-                <div className="space-y-1">
-                  <p className="text-sm font-medium leading-none">Quota Warning</p>
-                  <p className="text-sm text-muted-foreground">
-                    Account <strong>R2-Prod-01</strong> approaching 80% capacity.
-                  </p>
-                </div>
-                <div className="ml-auto font-medium text-xs text-muted-foreground">1d ago</div>
-              </div>
-              <div className="flex items-center pt-4">
+          <PlatformUsageChart series={data.activeAccountSeries ?? []} />
+
+          <div className="grid gap-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>Recent Activity</CardTitle>
+                <CardDescription>Latest live events.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {data.recentActivity.slice(0, 4).length === 0 ? (
+                  <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
+                    No recent activity
+                  </div>
+                ) : (
+                  data.recentActivity.slice(0, 4).map((activity) => (
+                    <Link
+                      key={activity.id}
+                      href={activity.href ?? "/dashboard/analytics"}
+                      className="block rounded-md border p-3 transition-colors hover:bg-muted/50"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium">{activity.title}</div>
+                          <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{activity.detail}</div>
+                        </div>
+                        <Badge variant={statusVariant(activity.status)}>{activity.status}</Badge>
+                      </div>
+                    </Link>
+                  ))
+                )}
+              </CardContent>
+              <div className="border-t p-4">
                 <Button asChild variant="outline" className="w-full">
-                  <Link href="/migrations">
-                    View All Activity <ArrowRight className="ml-2 h-4 w-4" />
+                  <Link href="/dashboard/activity">
+                    View all activity <ArrowRight className="h-4 w-4" />
                   </Link>
                 </Button>
               </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+            </Card>
+          </div>
+        </>
+      ) : null}
     </div>
   )
 }

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { activateAccountForCompletedMigration, getAllAccounts } from "@/lib/accounts-store"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import {
   slurperConnectivityPrecheckSource,
   slurperConnectivityPrecheckTarget,
@@ -356,15 +357,53 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
       if (migration.status === "completed" && !migration.options?.targetActivatedAt) {
         try {
           const activatedAt = new Date().toISOString()
+          const beforeAccounts = await getAllAccounts()
           await activateAccountForCompletedMigration({
             targetAccountId: migration.targetAccountId,
             completedAt: activatedAt,
           })
+          const afterAccounts = await getAllAccounts()
           await updateMigration(id, {
             syncStatus: "ok",
             syncMessage: migration.syncMessage ?? "",
             lastSyncedAt: activatedAt,
             options: { ...migration.options, targetActivatedAt: activatedAt },
+          })
+          await recordActivity({
+            actorUserId: null,
+            action: "migration.auto_activate_target",
+            entityType: "migration",
+            entityId: id,
+            entityLabel: `Migration ${id}`,
+            summary: "Activated target account after completed migration",
+            detail: "Undo restores account statuses only. Migrated R2 objects are not deleted.",
+            before: {
+              migration,
+              accounts: beforeAccounts.map((account) => ({
+                id: account.id,
+                label: account.label,
+                status: account.status,
+                lastMigrated: account.lastMigrated,
+              })),
+            },
+            after: {
+              accounts: afterAccounts.map((account) => ({
+                id: account.id,
+                label: account.label,
+                status: account.status,
+                lastMigrated: account.lastMigrated,
+              })),
+            },
+            undoable: true,
+            undoPayload: {
+              type: "restore_account_statuses",
+              accounts: beforeAccounts.map((account) => ({
+                id: account.id,
+                status: account.status,
+                lastMigrated: account.lastMigrated,
+              })),
+            },
+            ...getRequestActivityContext(_request),
           })
         } catch (error: unknown) {
           const message = formatCloudflareError(error, "Failed to activate migrated account")

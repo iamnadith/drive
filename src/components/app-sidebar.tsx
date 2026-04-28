@@ -3,10 +3,12 @@
 import * as React from "react"
 import {
   ArrowRightLeft,
+  BarChart3,
   Bot,
   FolderOpen,
   HardDrive,
   LayoutDashboard,
+  ListChecks,
   LogOut,
   Settings,
   Users,
@@ -42,6 +44,16 @@ const items = [
     title: "Overview",
     url: "/dashboard/overview",
     icon: LayoutDashboard,
+  },
+  {
+    title: "Analytics",
+    url: "/dashboard/analytics",
+    icon: BarChart3,
+  },
+  {
+    title: "Activity",
+    url: "/dashboard/activity",
+    icon: ListChecks,
   },
   {
     title: "Accounts",

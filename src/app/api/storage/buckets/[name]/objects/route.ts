@@ -1,10 +1,22 @@
 import { NextResponse } from "next/server"
 import { Readable } from "stream"
+import type { ReadableStream as NodeReadableStream } from "stream/web"
 import { getAllAccounts } from "@/lib/accounts-store"
-import { r2ListObjectsPageWithDelimiter, r2PutObject } from "@/lib/r2-s3"
+import {
+  r2CreateSignedDownloadUrl,
+  r2DeleteObject,
+  r2DeleteObjects,
+  r2ListAllObjects,
+  r2ListObjectsPageWithDelimiter,
+  r2PutObject,
+} from "@/lib/r2-s3"
 
 type ActiveAccount = Awaited<ReturnType<typeof getAllAccounts>>[number] & {
   cloudflareAccountId: string
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback
 }
 
 async function getActiveAccount() {
@@ -45,9 +57,30 @@ export async function GET(
 
     const url = new URL(request.url)
     const prefix = url.searchParams.get("prefix") ?? undefined
+    const key = url.searchParams.get("key") ?? undefined
+    const action = url.searchParams.get("action") ?? undefined
     const continuationToken = url.searchParams.get("continuationToken") ?? undefined
     const maxKeysParam = url.searchParams.get("maxKeys")
     const maxKeys = maxKeysParam ? Number(maxKeysParam) : 1000
+
+    if (key && (action === "preview-url" || action === "download-url")) {
+      const preview = action === "preview-url"
+      const signedUrl = await r2CreateSignedDownloadUrl(
+        {
+          accountId: active.cloudflareAccountId,
+          accessKeyId: active.r2AccessKeyId,
+          secretAccessKey: active.r2SecretAccessKey,
+        },
+        name,
+        key,
+        {
+          expiresInSeconds: 900,
+          ...(preview ? {} : { filename: key.split("/").pop() ?? key }),
+        }
+      )
+
+      return NextResponse.json({ url: signedUrl, key, expiresAt: Date.now() + 900_000 })
+    }
 
     const page = await r2ListObjectsPageWithDelimiter(
       {
@@ -93,8 +126,8 @@ export async function GET(
       nextContinuationToken,
       isTruncated: Boolean(page.IsTruncated),
     })
-  } catch (error: any) {
-    const message = error?.message ?? "Unable to list bucket objects"
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to list bucket objects")
     return NextResponse.json({ error: message, objects: [] }, { status: 200 })
   }
 }
@@ -133,7 +166,9 @@ export async function POST(
 
       const key = `${path}${file.name}`
       // Stream the browser File directly into the Upload helper without buffering
-      const nodeStream = Readable.from(file.stream() as any)
+      const nodeStream = Readable.fromWeb(
+        file.stream() as unknown as NodeReadableStream<Uint8Array>
+      )
 
       try {
         await r2PutObject(
@@ -144,10 +179,13 @@ export async function POST(
           },
           name,
           key,
-          nodeStream
+          nodeStream,
+          {
+            contentType: file.type || "application/octet-stream",
+          }
         )
-      } catch (err: any) {
-        const message = String(err?.message ?? "R2 upload failed")
+      } catch (err: unknown) {
+        const message = errorMessage(err, "R2 upload failed")
         console.error("R2 upload object failed:", message)
         return NextResponse.json(
           { error: "Unable to upload object", details: message },
@@ -192,8 +230,8 @@ export async function POST(
         key,
         body
       )
-    } catch (err: any) {
-      const message = String(err?.message ?? "R2 create object failed")
+    } catch (err: unknown) {
+      const message = errorMessage(err, "R2 create object failed")
       console.error("R2 create object failed:", message)
       return NextResponse.json(
         { error: "Unable to create object", details: message },
@@ -202,8 +240,57 @@ export async function POST(
     }
 
     return NextResponse.json({ ok: true, key })
-  } catch (error: any) {
-    const message = error?.message ?? "Unable to modify bucket objects"
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to modify bucket objects")
+    return NextResponse.json({ error: message }, { status: 500 })
+  }
+}
+
+export async function DELETE(
+  request: Request,
+  context: { params: Promise<{ name: string }> }
+) {
+  try {
+    const { name } = await context.params
+    const { active, error } = await getActiveAccount()
+    if (!active) {
+      return NextResponse.json({ error }, { status: 400 })
+    }
+
+    if (!active.r2AccessKeyId || !active.r2SecretAccessKey) {
+      return NextResponse.json(
+        { error: "Active Cloudflare account is missing R2 access key pair" },
+        { status: 400 }
+      )
+    }
+
+    const { key, type } = await request.json().catch(() => ({}))
+    if (!key || typeof key !== "string") {
+      return NextResponse.json({ error: "Object key is required" }, { status: 400 })
+    }
+
+    const config = {
+      accountId: active.cloudflareAccountId,
+      accessKeyId: active.r2AccessKeyId,
+      secretAccessKey: active.r2SecretAccessKey,
+    }
+
+    if (type === "folder") {
+      const prefix = key.endsWith("/") ? key : `${key}/`
+      const objects = await r2ListAllObjects(config, name, {
+        prefix,
+        maxObjects: 200_000,
+      })
+      const keys = objects.map((obj) => obj.key)
+      keys.push(prefix)
+      await r2DeleteObjects(config, name, keys)
+      return NextResponse.json({ ok: true, deleted: keys.length })
+    }
+
+    await r2DeleteObject(config, name, key)
+    return NextResponse.json({ ok: true, deleted: 1 })
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to delete bucket object")
     return NextResponse.json({ error: message }, { status: 500 })
   }
 }

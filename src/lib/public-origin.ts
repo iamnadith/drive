@@ -42,10 +42,7 @@ export function getPublicOrigin(request: Request): string {
     return normalizeOrigin(requestOrigin)
   }
 
-  const fallbackOrigin =
-    process.env.APP_ORIGIN ??
-    process.env.NEXT_PUBLIC_APP_ORIGIN ??
-    process.env.NEXT_PUBLIC_APP_URL
+  const fallbackOrigin = process.env.NEXT_PUBLIC_APP_URL
   if (fallbackOrigin) {
     return normalizeOrigin(fallbackOrigin)
   }

@@ -18,11 +18,20 @@ export interface User {
   profileImageUrl?: string
   googleLinked?: boolean
   googleSub?: string
+  emailVerified?: boolean
+  emailVerifiedAt?: string
+  mobileNumber?: string
+  mobileVerified?: boolean
+  mobileVerifiedAt?: string
   passwordSource?: "local" | "google-generated"
+  twoFactorEnabled?: boolean
+  totpEnabled?: boolean
+  totpSecret?: string
+  totpLastUsedCounter?: number | null
   passwordHash: string
 }
 
-export type PublicUser = Omit<User, "passwordHash">
+export type PublicUser = Omit<User, "passwordHash" | "totpSecret" | "totpLastUsedCounter">
 
 type DriveUserRow = {
   id: string
@@ -38,7 +47,16 @@ type DriveUserRow = {
   profile_image_url: string
   google_linked: boolean
   google_sub: string | null
+  email_verified: boolean
+  email_verified_at: string | null
+  mobile_number: string | null
+  mobile_verified: boolean
+  mobile_verified_at: string | null
   password_source: "local" | "google-generated"
+  two_factor_enabled: boolean
+  totp_enabled: boolean
+  totp_secret: string | null
+  totp_last_used_counter: number | null
   password_hash: string
   created_at?: string
   updated_at?: string
@@ -101,6 +119,10 @@ function deriveNameParts(
   return lastName ? { firstName, lastName } : { firstName }
 }
 
+function usernameIsValid(value: string) {
+  return /^[a-z0-9_][a-z0-9_.-]{2,29}$/.test(value)
+}
+
 function mapRow(row: DriveUserRow): User {
   return {
     id: row.id,
@@ -116,7 +138,16 @@ function mapRow(row: DriveUserRow): User {
     profileImageUrl: row.profile_image_url ?? "",
     googleLinked: row.google_linked ?? false,
     googleSub: row.google_sub ?? undefined,
+    emailVerified: row.email_verified ?? true,
+    emailVerifiedAt: row.email_verified_at ?? undefined,
+    mobileNumber: row.mobile_number ?? undefined,
+    mobileVerified: row.mobile_verified ?? false,
+    mobileVerifiedAt: row.mobile_verified_at ?? undefined,
     passwordSource: row.password_source ?? "local",
+    twoFactorEnabled: row.two_factor_enabled ?? row.totp_enabled ?? false,
+    totpEnabled: row.totp_enabled ?? false,
+    totpSecret: row.totp_secret ?? undefined,
+    totpLastUsedCounter: row.totp_last_used_counter ?? undefined,
     passwordHash: row.password_hash,
   }
 }
@@ -137,7 +168,16 @@ function mapUpdateToDb(
       | "profileImageUrl"
       | "googleLinked"
       | "googleSub"
+      | "emailVerified"
+      | "emailVerifiedAt"
+      | "mobileNumber"
+      | "mobileVerified"
+      | "mobileVerifiedAt"
       | "passwordSource"
+      | "twoFactorEnabled"
+      | "totpEnabled"
+      | "totpSecret"
+      | "totpLastUsedCounter"
       | "passwordHash"
     >
   >
@@ -157,14 +197,31 @@ function mapUpdateToDb(
     next.profile_image_url = updates.profileImageUrl ?? ""
   if (updates.googleLinked !== undefined) next.google_linked = updates.googleLinked
   if (updates.googleSub !== undefined) next.google_sub = updates.googleSub ?? null
+  if (updates.emailVerified !== undefined) next.email_verified = updates.emailVerified
+  if (updates.emailVerifiedAt !== undefined)
+    next.email_verified_at = updates.emailVerifiedAt ?? null
+  if (updates.mobileNumber !== undefined)
+    next.mobile_number = updates.mobileNumber ?? null
+  if (updates.mobileVerified !== undefined) next.mobile_verified = updates.mobileVerified
+  if (updates.mobileVerifiedAt !== undefined)
+    next.mobile_verified_at = updates.mobileVerifiedAt ?? null
   if (updates.passwordSource !== undefined)
     next.password_source = updates.passwordSource
+  if (updates.twoFactorEnabled !== undefined)
+    next.two_factor_enabled = updates.twoFactorEnabled
+  if (updates.totpEnabled !== undefined) next.totp_enabled = updates.totpEnabled
+  if (updates.totpSecret !== undefined) next.totp_secret = updates.totpSecret ?? null
+  if (updates.totpLastUsedCounter !== undefined)
+    next.totp_last_used_counter = updates.totpLastUsedCounter ?? null
   if (updates.passwordHash !== undefined) next.password_hash = updates.passwordHash
   return next
 }
 
 export function toPublicUser(user: User): PublicUser {
-  const { passwordHash: _passwordHash, ...rest } = user
+  const rest = { ...user }
+  delete (rest as Partial<User>).passwordHash
+  delete (rest as Partial<User>).totpSecret
+  delete (rest as Partial<User>).totpLastUsedCounter
   return rest
 }
 
@@ -265,7 +322,15 @@ export async function createUser(input: {
   profileImageUrl?: string
   googleLinked?: boolean
   googleSub?: string
+  emailVerified?: boolean
+  emailVerifiedAt?: string
+  mobileNumber?: string
+  mobileVerified?: boolean
+  mobileVerifiedAt?: string
   passwordSource?: "local" | "google-generated"
+  twoFactorEnabled?: boolean
+  totpEnabled?: boolean
+  totpSecret?: string
 }): Promise<User> {
   const supabase = getSupabaseServerClient()
 
@@ -276,6 +341,9 @@ export async function createUser(input: {
   const username = input.username?.trim().toLowerCase()
   if (username) {
     if (username.includes("@")) throw new Error("Username cannot be an email address")
+    if (!usernameIsValid(username)) {
+      throw new Error("Username must be 3-30 characters and use letters, numbers, dots, dashes, or underscores")
+    }
     const existingUsername = await findUserByUsername(username)
     if (existingUsername) throw new Error("Username already in use")
   }
@@ -314,7 +382,16 @@ export async function createUser(input: {
     profile_image_url: input.profileImageUrl ?? "",
     google_linked: input.googleLinked ?? false,
     google_sub: input.googleSub ?? null,
+    email_verified: input.emailVerified ?? false,
+    email_verified_at: input.emailVerifiedAt ?? null,
+    mobile_number: input.mobileNumber ?? null,
+    mobile_verified: input.mobileVerified ?? false,
+    mobile_verified_at: input.mobileVerifiedAt ?? null,
     password_source: input.passwordSource ?? "local",
+    two_factor_enabled: input.twoFactorEnabled ?? input.totpEnabled ?? false,
+    totp_enabled: input.totpEnabled ?? false,
+    totp_secret: input.totpSecret ?? null,
+    totp_last_used_counter: null,
     password_hash: hashPassword(input.password),
   }
 
@@ -344,7 +421,16 @@ export async function updateUser(
       | "profileImageUrl"
       | "googleLinked"
       | "googleSub"
+      | "emailVerified"
+      | "emailVerifiedAt"
+      | "mobileNumber"
+      | "mobileVerified"
+      | "mobileVerifiedAt"
       | "passwordSource"
+      | "twoFactorEnabled"
+      | "totpEnabled"
+      | "totpSecret"
+      | "totpLastUsedCounter"
       | "passwordHash"
     >
   >
@@ -366,6 +452,9 @@ export async function updateUser(
   if (nextUpdates.username) {
     const normalizedUsername = nextUpdates.username.trim().toLowerCase()
     if (normalizedUsername.includes("@")) throw new Error("Username cannot be an email address")
+    if (!usernameIsValid(normalizedUsername)) {
+      throw new Error("Username must be 3-30 characters and use letters, numbers, dots, dashes, or underscores")
+    }
     const conflict = await findUserByUsername(normalizedUsername)
     if (conflict && conflict.id !== id) throw new Error("Username already in use")
     nextUpdates.username = normalizedUsername
@@ -426,6 +515,20 @@ export async function updateUser(
 
   if (error) throw normalizeSupabaseError(error)
   return mapRow(data as DriveUserRow)
+}
+
+export async function markTotpCounterUsed(userId: string, counter: number): Promise<boolean> {
+  const supabase = getSupabaseServerClient()
+  const { data, error } = await supabase
+    .from(USERS_TABLE)
+    .update({ totp_last_used_counter: counter })
+    .eq("id", userId)
+    .or(`totp_last_used_counter.is.null,totp_last_used_counter.lt.${counter}`)
+    .select("id")
+    .maybeSingle()
+
+  if (error) throw normalizeSupabaseError(error)
+  return Boolean(data)
 }
 
 export async function deleteUser(id: string): Promise<void> {

@@ -1,340 +1,428 @@
 "use client"
 
 import * as React from "react"
+import Link from "next/link"
+import { GalleryVerticalEnd } from "lucide-react"
 import { useRouter } from "next/navigation"
+import { toast } from "sonner"
+
+import { type AuthUser, useAuth } from "@/components/auth-provider"
+import { OtpInputField } from "@/components/profile-security-flow"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
 import {
   Field,
   FieldDescription,
   FieldGroup,
   FieldLabel,
+  FieldSeparator,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import { toast } from "sonner"
-import { useAuth } from "@/components/auth-provider"
+
+type SetupStep = "email" | "firstName" | "lastName" | "username" | "password" | "verify"
+type Availability = "idle" | "checking" | "available" | "taken" | "invalid"
 
 export default function SetupPage() {
   const router = useRouter()
   const { setUserDirect } = useAuth()
+  const [step, setStep] = React.useState<SetupStep>("email")
+  const [email, setEmail] = React.useState("")
   const [firstName, setFirstName] = React.useState("")
   const [lastName, setLastName] = React.useState("")
   const [username, setUsername] = React.useState("")
-  const [email, setEmail] = React.useState("")
   const [password, setPassword] = React.useState("")
   const [confirmPassword, setConfirmPassword] = React.useState("")
-  const [passwordHint, setPasswordHint] = React.useState<string>("")
-  const [passwordStrong, setPasswordStrong] = React.useState(false)
-  const [loading, setLoading] = React.useState(false)
-  const [usernameStatus, setUsernameStatus] = React.useState<
-    "idle" | "checking" | "available" | "taken" | "error"
-  >("idle")
-  const [usernameHint, setUsernameHint] = React.useState("")
+  const [verificationEmail, setVerificationEmail] = React.useState("")
+  const [otpCode, setOtpCode] = React.useState("")
+  const [usernameStatus, setUsernameStatus] = React.useState<Availability>("idle")
+  const [usernameMessage, setUsernameMessage] = React.useState("")
+  const [submitting, setSubmitting] = React.useState(false)
 
-  function evaluatePassword(value: string) {
-    if (!value) {
-      setPasswordHint("")
-      setPasswordStrong(false)
-      return
-    }
-    const lengthOk = value.length >= 8
-    const hasUpper = /[A-Z]/.test(value)
-    const hasLower = /[a-z]/.test(value)
-    const hasNumber = /[0-9]/.test(value)
-
-    // Strong = length + mixed case + number (no special char required)
-    const strong = lengthOk && hasUpper && hasLower && hasNumber
-    setPasswordStrong(strong)
-
-    if (!lengthOk) {
-      setPasswordHint("Password should be at least 8 characters long.")
-    } else if (!(hasUpper && hasLower)) {
-      setPasswordHint("Use both uppercase and lowercase letters.")
-    } else if (!hasNumber) {
-      setPasswordHint("Add at least one number.")
-    } else {
-      setPasswordHint("Strong password.")
-    }
-  }
-
-  function isValidEmail(value: string) {
+  function isEmail(value: string) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
   }
 
+  function usernameIsValid(value: string) {
+    return /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{2,29}$/.test(value)
+  }
+
+  function nameIsValid(value: string) {
+    return value.trim().length >= 2 && value.trim().length <= 80
+  }
+
+  function passwordIsStrong(value: string) {
+    return value.length >= 8 && /[A-Z]/.test(value) && /[a-z]/.test(value) && /\d/.test(value)
+  }
+
   React.useEffect(() => {
-    const value = username.trim()
-    if (!value) {
+    if (step !== "username") return
+    const nextUsername = username.trim()
+    if (!nextUsername) {
       setUsernameStatus("idle")
-      setUsernameHint("")
+      setUsernameMessage("")
+      return
+    }
+    if (!usernameIsValid(nextUsername)) {
+      setUsernameStatus("invalid")
+      setUsernameMessage("Use 3-30 letters, numbers, dots, dashes, or underscores")
       return
     }
 
     setUsernameStatus("checking")
-    setUsernameHint("Checking username availability…")
-
+    setUsernameMessage("Checking username...")
     const controller = new AbortController()
-    const timeoutId = window.setTimeout(async () => {
+    const timeout = window.setTimeout(async () => {
       try {
-        const res = await fetch(
-          `/api/users/username-available?username=${encodeURIComponent(
-            value
-          )}`,
-          { signal: controller.signal }
-        )
+        const res = await fetch(`/api/users/username-available?username=${encodeURIComponent(nextUsername)}`, {
+          signal: controller.signal,
+        })
         const data = await res.json()
-        if (!res.ok) {
-          setUsernameStatus("error")
-          setUsernameHint(data.error ?? "Unable to check username")
-          return
-        }
-        if (data.available) {
-          setUsernameStatus("available")
-          setUsernameHint("Username is available")
-        } else {
-          setUsernameStatus("taken")
-          setUsernameHint("Username is already taken")
-        }
+        if (!res.ok) throw new Error(data.error ?? "Unable to check username")
+        setUsernameStatus(data.available ? "available" : "taken")
+        setUsernameMessage(data.available ? "Username is available" : "Username is already taken")
       } catch (error) {
-        if (!(error instanceof DOMException && error.name === "AbortError")) {
-          setUsernameStatus("error")
-          setUsernameHint("Unable to check username")
-        }
+        if (error instanceof DOMException && error.name === "AbortError") return
+        setUsernameStatus("invalid")
+        setUsernameMessage(error instanceof Error ? error.message : "Unable to check username")
       }
-    }, 400)
+    }, 350)
 
     return () => {
       controller.abort()
-      window.clearTimeout(timeoutId)
+      window.clearTimeout(timeout)
     }
-  }, [username])
+  }, [step, username])
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    const fullName = `${firstName.trim()} ${lastName.trim()}`.trim()
-    if (!fullName || !username.trim() || !email.trim()) {
-      toast.error("All fields are required")
+  async function continueFromEmail(event: React.FormEvent) {
+    event.preventDefault()
+    const nextEmail = email.trim().toLowerCase()
+    if (!isEmail(nextEmail)) return toast.error("Enter a valid email address")
+
+    setSubmitting(true)
+    try {
+      const res = await fetch(`/api/users/email-available?email=${encodeURIComponent(nextEmail)}`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? "Unable to check email")
+      if (!data.available) return toast.error("Email already in use")
+      setEmail(nextEmail)
+      setStep("firstName")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to check email")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  function continueFromName(event: React.FormEvent) {
+    event.preventDefault()
+    if (step === "firstName") {
+      if (!nameIsValid(firstName)) return toast.error("Enter a valid first name")
+      setStep("lastName")
       return
     }
-    if (!isValidEmail(email.trim())) {
-      toast.error("Please enter a valid email address")
-      return
+    if (lastName.trim() && !nameIsValid(lastName)) return toast.error("Enter a valid last name")
+    setStep("username")
+  }
+
+  async function continueFromUsername(event: React.FormEvent) {
+    event.preventDefault()
+    const nextUsername = username.trim()
+    if (!usernameIsValid(nextUsername)) {
+      return toast.error("Use 3-30 letters, numbers, dots, dashes, or underscores")
     }
-    if (usernameStatus === "taken") {
-      toast.error("That username is already taken")
-      return
+    if (usernameStatus === "checking") return toast.error("Wait for username check to finish")
+    if (usernameStatus === "taken") return toast.error("Username is already taken")
+    if (usernameStatus === "invalid") return toast.error(usernameMessage || "Choose another username")
+
+    setSubmitting(true)
+    try {
+      const res = await fetch(`/api/users/username-available?username=${encodeURIComponent(nextUsername)}`)
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? "Unable to check username")
+      if (!data.available) return toast.error("Username is already taken")
+      setUsername(nextUsername)
+      setStep("password")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to check username")
+    } finally {
+      setSubmitting(false)
     }
-    if (!passwordStrong) {
-      toast.error("Please choose a stronger password")
-      return
+  }
+
+  async function createSuperAdmin(event: React.FormEvent) {
+    event.preventDefault()
+    if (!passwordIsStrong(password)) {
+      return toast.error("Use 8+ characters with uppercase, lowercase, and a number")
     }
-    if (password !== confirmPassword) {
-      toast.error("Passwords do not match")
-      return
-    }
-    setLoading(true)
+    if (password !== confirmPassword) return toast.error("Passwords do not match")
+
+    setSubmitting(true)
     try {
       const res = await fetch("/api/setup/admin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: fullName,
+          name: `${firstName.trim()} ${lastName.trim()}`.trim(),
           username: username.trim(),
-          email,
+          email: email.trim(),
           password,
         }),
       })
       const data = await res.json()
-      if (!res.ok) {
-        toast.error(data.error ?? "Unable to create Super Admin")
-        return
-      }
-      // Log in the newly created Super Admin in the client-side auth state.
-      if (data.user) {
-        setUserDirect(data.user)
-      }
-      toast.success("Super Admin created")
-      router.replace("/")
-    } catch {
-      toast.error("Unable to create Super Admin")
+      if (!res.ok) throw new Error(data.error ?? "Unable to create Super Admin")
+      setVerificationEmail(String(data.email || email.trim()))
+      setOtpCode("")
+      setStep("verify")
+      toast.success("Verification code sent")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to create Super Admin")
     } finally {
-      setLoading(false)
+      setSubmitting(false)
+    }
+  }
+
+  async function verifySetupCode(event: React.FormEvent) {
+    event.preventDefault()
+    if (otpCode.length !== 6) return toast.error("Enter the 6-digit code")
+    setSubmitting(true)
+    try {
+      const res = await fetch("/api/auth/verify-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: verificationEmail, code: otpCode }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? "Unable to verify email")
+      setUserDirect(data.user as AuthUser)
+      toast.success("Email verified")
+      router.replace("/")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to verify email")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function resendSetupCode() {
+    if (!verificationEmail) return toast.error("Create the Super Admin account first")
+    setSubmitting(true)
+    try {
+      const res = await fetch("/api/auth/resend-verification", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: verificationEmail, purpose: "signup" }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? "Unable to resend verification code")
+      setOtpCode("")
+      toast.success("Verification code sent")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to resend verification code")
+    } finally {
+      setSubmitting(false)
     }
   }
 
   function handleGoogleSetup() {
-    const url = new URL(
-      "/api/auth/google/login",
-      typeof window !== "undefined" ? window.location.origin : "http://localhost:3000"
-    )
+    const url = new URL("/api/auth/google/login", window.location.origin)
     url.searchParams.set("mode", "setup")
     url.searchParams.set("redirect", "/")
     window.location.href = url.toString()
   }
 
+  const title =
+    step === "email"
+      ? "Initialize Drive"
+      : step === "verify"
+        ? "Verify Super Admin"
+        : "Create Super Admin"
+  const description =
+    step === "email"
+      ? "Start with the email for the first Super Admin account."
+      : step === "verify"
+        ? `Enter the verification code sent to ${verificationEmail}.`
+        : "Set up the first account that controls this workspace."
+
   return (
-    <div className="flex min-h-screen items-center justify-center px-4">
-      <div className={cn("flex flex-col gap-6 w-full max-w-lg")}>
-        <Card>
-          <CardHeader className="text-center">
-            <CardTitle className="text-xl">Create Super Admin</CardTitle>
-            <CardDescription>
-              No Super Admin exists yet. Create the initial Super Admin account.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form onSubmit={handleSubmit}>
+    <main className="flex min-h-svh flex-col items-center justify-center bg-background p-6 md:p-10">
+      <div className="w-full max-w-sm">
+        <div className="flex flex-col gap-6">
+          <div className="flex flex-col items-center gap-2 text-center">
+            <Link href="/setup" className="flex flex-col items-center gap-2 font-medium">
+              <div className="flex size-8 items-center justify-center rounded-md">
+                <GalleryVerticalEnd className="size-6" />
+              </div>
+              <span className="sr-only">Drive</span>
+            </Link>
+            <h1 className="text-xl font-bold">{title}</h1>
+            <FieldDescription>{description}</FieldDescription>
+          </div>
+
+          {step === "email" ? (
+            <form onSubmit={continueFromEmail}>
               <FieldGroup>
                 <Field>
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <div>
-                      <FieldLabel htmlFor="first-name">First name</FieldLabel>
-                      <Input
-                        id="first-name"
-                        type="text"
-                        autoComplete="given-name"
-                        placeholder="John"
-                        required
-                        value={firstName}
-                        onChange={(e) => setFirstName(e.target.value)}
-                      />
-                    </div>
-                    <div>
-                      <FieldLabel htmlFor="last-name">Last name</FieldLabel>
-                      <Input
-                        id="last-name"
-                        type="text"
-                        autoComplete="family-name"
-                        placeholder="Doe"
-                        required
-                        value={lastName}
-                        onChange={(e) => setLastName(e.target.value)}
-                      />
-                    </div>
-                  </div>
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="username">Username</FieldLabel>
+                  <FieldLabel htmlFor="setup-email">Email</FieldLabel>
                   <Input
-                    id="username"
-                    type="text"
-                    autoComplete="username"
-                    placeholder="johndoe"
-                    required
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                  />
-                  {usernameStatus !== "idle" && usernameHint && (
-                    <FieldDescription
-                      className={
-                        usernameStatus === "available"
-                          ? "text-emerald-500"
-                          : usernameStatus === "taken"
-                          ? "text-destructive"
-                          : "text-muted-foreground"
-                      }
-                    >
-                      {usernameHint}
-                    </FieldDescription>
-                  )}
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="email">Email</FieldLabel>
-                  <Input
-                    id="email"
+                    id="setup-email"
                     type="email"
                     autoComplete="email"
-                    placeholder="m@example.com"
                     required
                     value={email}
-                    onChange={(e) => setEmail(e.target.value)}
+                    onChange={(event) => setEmail(event.target.value)}
                   />
                 </Field>
                 <Field>
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <Field>
-                      <FieldLabel htmlFor="password">Password</FieldLabel>
-                      <Input
-                        id="password"
-                        type="password"
-                        autoComplete="new-password"
-                        required
-                        value={password}
-                        onChange={(e) => {
-                          const value = e.target.value
-                          setPassword(value)
-                          evaluatePassword(value)
-                        }}
-                      />
-                    </Field>
-                    <Field>
-                      <FieldLabel htmlFor="confirm-password">
-                        Confirm password
-                      </FieldLabel>
-                      <Input
-                        id="confirm-password"
-                        type="password"
-                        autoComplete="new-password"
-                        required
-                        value={confirmPassword}
-                        onChange={(e) => setConfirmPassword(e.target.value)}
-                      />
-                    </Field>
-                  </div>
-                  <FieldDescription>
-                    Must be at least 8 characters long and include upper and
-                    lower case letters and a number.
-                  </FieldDescription>
-                  {passwordHint && (
-                    <FieldDescription
-                      className={
-                        passwordStrong
-                          ? "text-emerald-500"
-                          : "text-destructive"
-                      }
-                    >
-                      {passwordHint}
-                    </FieldDescription>
-                  )}
-                  {confirmPassword &&
-                    password &&
-                    confirmPassword !== password && (
-                      <FieldDescription className="text-destructive">
-                        Passwords do not match.
-                      </FieldDescription>
-                    )}
-                </Field>
-                <Field>
-                  <Button type="submit" disabled={loading}>
-                    {loading ? "Creating..." : "Create Super Admin"}
+                  <Button type="submit" disabled={submitting}>
+                    {submitting ? "Checking..." : "Continue"}
                   </Button>
-                  <FieldDescription className="text-center">
-                    This account will have full control over the panel.
-                  </FieldDescription>
                 </Field>
+                <FieldSeparator>Or</FieldSeparator>
                 <Field>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={handleGoogleSetup}
-                  >
-                    Use Google account
+                  <Button type="button" variant="outline" onClick={handleGoogleSetup}>
+                    Google
                   </Button>
-                  <FieldDescription className="text-center">
-                    Create the initial Super Admin using your Google login.
-                  </FieldDescription>
                 </Field>
               </FieldGroup>
             </form>
-          </CardContent>
-        </Card>
+          ) : null}
+
+          {(step === "firstName" || step === "lastName") ? (
+            <form onSubmit={continueFromName}>
+              <FieldGroup>
+                {step === "firstName" ? (
+                  <Field>
+                    <FieldLabel htmlFor="setup-first-name">First name</FieldLabel>
+                    <Input
+                      id="setup-first-name"
+                      autoComplete="given-name"
+                      required
+                      value={firstName}
+                      onChange={(event) => setFirstName(event.target.value)}
+                    />
+                  </Field>
+                ) : (
+                  <Field>
+                    <FieldLabel htmlFor="setup-last-name">Last name</FieldLabel>
+                    <Input
+                      id="setup-last-name"
+                      autoComplete="family-name"
+                      value={lastName}
+                      onChange={(event) => setLastName(event.target.value)}
+                    />
+                  </Field>
+                )}
+                <Field className="grid gap-3 sm:grid-cols-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setStep(step === "firstName" ? "email" : "firstName")}
+                  >
+                    Back
+                  </Button>
+                  <Button type="submit">Continue</Button>
+                </Field>
+              </FieldGroup>
+            </form>
+          ) : null}
+
+          {step === "username" ? (
+            <form onSubmit={continueFromUsername}>
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="setup-username">Username</FieldLabel>
+                  <Input
+                    id="setup-username"
+                    autoComplete="username"
+                    required
+                    value={username}
+                    onChange={(event) => setUsername(event.target.value)}
+                  />
+                  {usernameMessage ? (
+                    <FieldDescription
+                      className={cn(
+                        usernameStatus === "available" && "text-emerald-600",
+                        (usernameStatus === "taken" || usernameStatus === "invalid") && "text-destructive"
+                      )}
+                    >
+                      {usernameMessage}
+                    </FieldDescription>
+                  ) : null}
+                </Field>
+                <Field className="grid gap-3 sm:grid-cols-2">
+                  <Button type="button" variant="outline" onClick={() => setStep("lastName")}>
+                    Back
+                  </Button>
+                  <Button type="submit" disabled={submitting || usernameStatus === "checking"}>
+                    {submitting ? "Checking..." : "Continue"}
+                  </Button>
+                </Field>
+              </FieldGroup>
+            </form>
+          ) : null}
+
+          {step === "password" ? (
+            <form onSubmit={createSuperAdmin}>
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="setup-password">Password</FieldLabel>
+                  <Input
+                    id="setup-password"
+                    type="password"
+                    autoComplete="new-password"
+                    required
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                  />
+                  <FieldDescription>Use 8+ characters with uppercase, lowercase, and a number.</FieldDescription>
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="setup-confirm-password">Confirm password</FieldLabel>
+                  <Input
+                    id="setup-confirm-password"
+                    type="password"
+                    autoComplete="new-password"
+                    required
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.target.value)}
+                  />
+                  {confirmPassword && password !== confirmPassword ? (
+                    <FieldDescription className="text-destructive">Passwords do not match.</FieldDescription>
+                  ) : null}
+                </Field>
+                <Field className="grid gap-3 sm:grid-cols-2">
+                  <Button type="button" variant="outline" onClick={() => setStep("username")}>
+                    Back
+                  </Button>
+                  <Button type="submit" disabled={submitting || !password || password !== confirmPassword}>
+                    {submitting ? "Creating..." : "Create account"}
+                  </Button>
+                </Field>
+              </FieldGroup>
+            </form>
+          ) : null}
+
+          {step === "verify" ? (
+            <form onSubmit={verifySetupCode}>
+              <FieldGroup>
+                <OtpInputField displayTarget={verificationEmail} code={otpCode} setCode={setOtpCode} />
+                <Field className="grid gap-3 sm:grid-cols-2">
+                  <Button type="button" variant="outline" onClick={() => void resendSetupCode()} disabled={submitting}>
+                    Resend
+                  </Button>
+                  <Button type="submit" disabled={submitting || otpCode.length !== 6}>
+                    {submitting ? "Verifying..." : "Verify"}
+                  </Button>
+                </Field>
+              </FieldGroup>
+            </form>
+          ) : null}
+
+          <FieldDescription className="px-6 text-center">
+            This creates the first Super Admin for this Drive workspace.
+          </FieldDescription>
+        </div>
       </div>
-    </div>
+    </main>
   )
 }

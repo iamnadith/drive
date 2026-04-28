@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server"
+import { cookies } from "next/headers"
 import {
   CloudflareAccount,
   createAccount,
@@ -6,6 +7,13 @@ import {
   getActiveAccount,
   updateAccount,
 } from "@/lib/accounts-store"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+
+function errorMessage(error: unknown, fallback: string) {
+  return typeof error === "object" && error !== null && "message" in error
+    ? String((error as { message?: unknown }).message ?? fallback)
+    : fallback
+}
 
 export async function GET() {
   try {
@@ -21,8 +29,8 @@ export async function GET() {
     }
 
     return NextResponse.json({ accounts })
-  } catch (error: any) {
-    const message = error?.message ?? "Unable to load accounts"
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to load accounts")
     return NextResponse.json({ error: message }, { status: 400 })
   }
 }
@@ -30,6 +38,8 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json()
+    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
+    const beforeAccounts = await getAllAccounts()
     const {
       label,
       email,
@@ -78,10 +88,56 @@ export async function POST(request: Request) {
       r2SecretAccessKey: r2SecretAccessKey!,
       makeActive,
     })
+    const afterAccounts = await getAllAccounts()
+    const changedActiveAccount = beforeAccounts.some((before) => {
+      const after = afterAccounts.find((candidate) => candidate.id === before.id)
+      return after && before.status !== after.status
+    }) || account.status === "active"
+
+    await recordActivity({
+      actorUserId,
+      action: "account.created",
+      entityType: "account",
+      entityId: account.id,
+      entityLabel: account.label,
+      summary: `Created account ${account.label}`,
+      detail: account.status === "active" ? "The new account became active." : "The new account was added as available.",
+      before: {
+        accounts: beforeAccounts.map((item) => ({
+          id: item.id,
+          label: item.label,
+          status: item.status,
+          lastMigrated: item.lastMigrated,
+        })),
+      },
+      after: {
+        account,
+        accounts: afterAccounts.map((item) => ({
+          id: item.id,
+          label: item.label,
+          status: item.status,
+          lastMigrated: item.lastMigrated,
+        })),
+      },
+      undoable: changedActiveAccount && beforeAccounts.length > 0,
+      undoReason: beforeAccounts.length === 0 ? "Initial account creation cannot be undone automatically." : null,
+      undoPayload:
+        changedActiveAccount && beforeAccounts.length > 0
+          ? {
+              type: "restore_account_statuses",
+              accounts: beforeAccounts.map((item) => ({
+                id: item.id,
+                status: item.status,
+                lastMigrated: item.lastMigrated,
+              })),
+            }
+          : null,
+      ...getRequestActivityContext(request),
+    })
 
     return NextResponse.json({ account })
-  } catch (error: any) {
-    const message = error?.message ?? "Unable to create account"
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to create account")
     return NextResponse.json({ error: message }, { status: 400 })
   }
 }
