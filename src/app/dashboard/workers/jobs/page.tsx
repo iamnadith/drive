@@ -53,7 +53,7 @@ function formatDate(value?: string) {
 function jobStatusBadge(status: RepairJobRow["status"]) {
   if (status === "completed") return <Badge>Completed</Badge>
   if (status === "failed") return <Badge variant="destructive">Failed</Badge>
-  if (status === "running") return <Badge className="bg-blue-600">Running</Badge>
+  if (status === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
   if (status === "claimed") return <Badge className="bg-cyan-600">Claimed</Badge>
   if (status === "pending") return <Badge variant="secondary">Pending</Badge>
   return <Badge variant="outline">Aborted</Badge>

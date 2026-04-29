@@ -60,30 +60,30 @@ export default function HomePage() {
   }
 
   return (
-    <div className="flex flex-1 items-center justify-center p-4">
-      <Card className="w-full max-w-2xl">
+    <main className="flex min-h-svh min-w-0 items-center justify-center bg-[radial-gradient(circle_at_top,var(--muted),transparent_34rem)] p-4 sm:p-6">
+      <Card className="w-full max-w-2xl rounded-3xl">
         <CardHeader className="space-y-4 text-center">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10">
             <HardDrive className="h-6 w-6 text-primary" />
           </div>
           <div className="space-y-2">
-            <CardTitle className="text-3xl font-bold tracking-tight">
+            <CardTitle className="text-balance text-2xl font-bold tracking-tight sm:text-3xl">
               Cloud Storage Panel
             </CardTitle>
-            <CardDescription className="text-base">
+            <CardDescription className="text-pretty text-base">
               Secure, role-based control panel for your R2 storage and migrations.
             </CardDescription>
           </div>
         </CardHeader>
         <CardContent className="space-y-6">
           {needsSuperAdmin && !user && (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+            <div className="rounded-2xl border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
               <p className="font-medium">Super admin required</p>
               <p className="mt-1 text-xs text-destructive/80">
                 No super admin account exists yet. Create a super admin user to
                 manage this panel.
               </p>
-              <div className="mt-3 flex gap-2">
+              <div className="mt-3 flex flex-wrap gap-2">
                 <Button
                   size="sm"
                   onClick={() => router.push("/signup")}
@@ -94,7 +94,7 @@ export default function HomePage() {
             </div>
           )}
           <>
-              <div className="grid gap-4 w-full sm:grid-cols-3">
+              <div className="grid w-full gap-3 sm:grid-cols-3">
                 {!user && (
                   <>
                     <Button
@@ -127,7 +127,7 @@ export default function HomePage() {
                     className="w-full flex items-center justify-center gap-2"
                     onClick={async () => {
       // Client-only logout; session is stored in localStorage
-      setUserDirect(null as any)
+      setUserDirect(null)
                       router.push("/")
                     }}
                   >
@@ -136,32 +136,38 @@ export default function HomePage() {
                   </Button>
                 )}
               </div>
-              <div className="grid gap-4 sm:grid-cols-3 text-sm text-muted-foreground">
-                <div className="flex items-start gap-2">
+              <div className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-3">
+                <div className="min-w-0 rounded-2xl border bg-muted/20 p-3">
+                  <div className="flex items-start gap-2">
                   <Shield className="mt-0.5 h-4 w-4 text-primary" />
-                  <div>
+                  <div className="min-w-0">
                     <p className="font-medium text-foreground">Role-based access</p>
                     <p>Only admin and super admin users can see and open the dashboard.</p>
                   </div>
+                  </div>
                 </div>
-                <div className="flex items-start gap-2">
+                <div className="min-w-0 rounded-2xl border bg-muted/20 p-3">
+                  <div className="flex items-start gap-2">
                   <Users className="mt-0.5 h-4 w-4 text-primary" />
-                  <div>
+                  <div className="min-w-0">
                     <p className="font-medium text-foreground">User accounts</p>
                     <p>Sign up with email and password, then manage your profile.</p>
                   </div>
+                  </div>
                 </div>
-                <div className="flex items-start gap-2">
+                <div className="min-w-0 rounded-2xl border bg-muted/20 p-3">
+                  <div className="flex items-start gap-2">
                   <HardDrive className="mt-0.5 h-4 w-4 text-primary" />
-                  <div>
+                  <div className="min-w-0">
                     <p className="font-medium text-foreground">Admin tools</p>
                     <p>Admins and super admins can manage users, quotas and storage in the dashboard.</p>
+                  </div>
                   </div>
                 </div>
               </div>
             </>
         </CardContent>
       </Card>
-    </div>
+    </main>
   )
 }

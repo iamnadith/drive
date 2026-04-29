@@ -1,4 +1,5 @@
 import crypto from "crypto"
+import { isPostgresConfigured, queryDb } from "./db"
 import { getSupabaseServerClient } from "./supabase"
 
 export type UserRole = "superadmin" | "admin" | "user"
@@ -518,6 +519,20 @@ export async function updateUser(
 }
 
 export async function markTotpCounterUsed(userId: string, counter: number): Promise<boolean> {
+  if (isPostgresConfigured()) {
+    const result = await queryDb<{ id: string }>(
+      `
+        update public.drive_users
+        set totp_last_used_counter = $2
+        where id = $1
+          and (totp_last_used_counter is null or totp_last_used_counter < $2)
+        returning id;
+      `,
+      [userId, counter]
+    )
+    return (result.rowCount ?? 0) > 0
+  }
+
   const supabase = getSupabaseServerClient()
   const { data, error } = await supabase
     .from(USERS_TABLE)

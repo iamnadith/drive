@@ -244,18 +244,18 @@ export default function SetupPage() {
         : "Set up the first account that controls this workspace."
 
   return (
-    <main className="flex min-h-svh flex-col items-center justify-center bg-background p-6 md:p-10">
-      <div className="w-full max-w-sm">
+    <main className="flex min-h-svh flex-col items-center justify-center bg-[radial-gradient(circle_at_top,var(--muted),transparent_34rem)] p-4 sm:p-6 md:p-10">
+      <div className="w-full max-w-sm rounded-3xl border bg-card/95 p-5 shadow-sm backdrop-blur sm:p-6">
         <div className="flex flex-col gap-6">
           <div className="flex flex-col items-center gap-2 text-center">
             <Link href="/setup" className="flex flex-col items-center gap-2 font-medium">
-              <div className="flex size-8 items-center justify-center rounded-md">
+              <div className="flex size-8 items-center justify-center rounded-2xl bg-primary/10">
                 <GalleryVerticalEnd className="size-6" />
               </div>
               <span className="sr-only">Drive</span>
             </Link>
-            <h1 className="text-xl font-bold">{title}</h1>
-            <FieldDescription>{description}</FieldDescription>
+            <h1 className="text-balance text-xl font-bold">{title}</h1>
+            <FieldDescription className="text-pretty">{description}</FieldDescription>
           </div>
 
           {step === "email" ? (
@@ -273,8 +273,8 @@ export default function SetupPage() {
                   />
                 </Field>
                 <Field>
-                  <Button type="submit" disabled={submitting}>
-                    {submitting ? "Checking..." : "Continue"}
+                  <Button type="submit" loading={submitting}>
+                    Continue
                   </Button>
                 </Field>
                 <FieldSeparator>Or</FieldSeparator>
@@ -353,8 +353,8 @@ export default function SetupPage() {
                   <Button type="button" variant="outline" onClick={() => setStep("lastName")}>
                     Back
                   </Button>
-                  <Button type="submit" disabled={submitting || usernameStatus === "checking"}>
-                    {submitting ? "Checking..." : "Continue"}
+                  <Button type="submit" loading={submitting} disabled={usernameStatus === "checking"}>
+                    Continue
                   </Button>
                 </Field>
               </FieldGroup>
@@ -394,8 +394,12 @@ export default function SetupPage() {
                   <Button type="button" variant="outline" onClick={() => setStep("username")}>
                     Back
                   </Button>
-                  <Button type="submit" disabled={submitting || !password || password !== confirmPassword}>
-                    {submitting ? "Creating..." : "Create account"}
+                  <Button
+                    type="submit"
+                    loading={submitting}
+                    disabled={!password || password !== confirmPassword}
+                  >
+                    Create account
                   </Button>
                 </Field>
               </FieldGroup>
@@ -407,11 +411,15 @@ export default function SetupPage() {
               <FieldGroup>
                 <OtpInputField displayTarget={verificationEmail} code={otpCode} setCode={setOtpCode} />
                 <Field className="grid gap-3 sm:grid-cols-2">
-                  <Button type="button" variant="outline" onClick={() => void resendSetupCode()} disabled={submitting}>
+                  <Button type="button" variant="outline" onClick={() => void resendSetupCode()} loading={submitting}>
                     Resend
                   </Button>
-                  <Button type="submit" disabled={submitting || otpCode.length !== 6}>
-                    {submitting ? "Verifying..." : "Verify"}
+                  <Button
+                    type="submit"
+                    loading={submitting}
+                    disabled={otpCode.length !== 6}
+                  >
+                    Verify
                   </Button>
                 </Field>
               </FieldGroup>

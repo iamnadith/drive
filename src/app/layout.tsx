@@ -4,6 +4,7 @@ import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider } from "@/components/auth-provider";
 import { SuperAdminGate } from "@/components/superadmin-gate";
+import { ThemeProvider } from "@/components/theme-provider";
 
 const geistSans = Inter({
   variable: "--font-geist-sans",
@@ -26,14 +27,16 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <AuthProvider>
-          <SuperAdminGate>{children}</SuperAdminGate>
-        </AuthProvider>
-        <Toaster />
+        <ThemeProvider>
+          <AuthProvider>
+            <SuperAdminGate>{children}</SuperAdminGate>
+          </AuthProvider>
+          <Toaster />
+        </ThemeProvider>
       </body>
     </html>
   );

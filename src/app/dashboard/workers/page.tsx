@@ -33,6 +33,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
+import { WorkerPageSkeleton } from "@/components/dashboard/loading-skeletons"
 import { cn } from "@/lib/utils"
 
 type AgentProvider = "self_hosted" | "github_actions" | "local"
@@ -185,7 +186,7 @@ function getEffectiveStatus(agent: AgentRow): AgentStatus {
 
 function statusBadge(status: AgentStatus) {
   if (status === "online") return <Badge className="bg-green-600">Online</Badge>
-  if (status === "busy") return <Badge className="bg-blue-600">Busy</Badge>
+  if (status === "busy") return <Badge className="bg-primary text-primary-foreground">Busy</Badge>
   if (status === "dispatch_ready") return <Badge className="bg-cyan-600">Dispatch ready</Badge>
   if (status === "pending_registration") return <Badge variant="secondary">Pending registration</Badge>
   if (status === "offline") return <Badge variant="outline">Offline</Badge>
@@ -209,7 +210,7 @@ function getWorkerConnectionLabel(worker: Pick<AgentRow, "provider" | "githubRep
 function jobStatusBadge(status: RepairJobRow["status"]) {
   if (status === "completed") return <Badge>Completed</Badge>
   if (status === "failed") return <Badge variant="destructive">Failed</Badge>
-  if (status === "running") return <Badge className="bg-blue-600">Running</Badge>
+  if (status === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
   if (status === "claimed") return <Badge className="bg-cyan-600">Claimed</Badge>
   if (status === "pending") return <Badge variant="secondary">Pending</Badge>
   return <Badge variant="outline">Aborted</Badge>
@@ -815,6 +816,10 @@ export default function WorkersPage() {
       setDispatchingAgentId(null)
     }
   }, [dispatchAgent, dispatchMigrationId, dispatchMode, loadAgents, loadRepairJobs])
+
+  if (loading && agents.length === 0 && repairJobs.length === 0) {
+    return <WorkerPageSkeleton />
+  }
 
   return (
     <div className="space-y-6">

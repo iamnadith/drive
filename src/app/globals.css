@@ -44,79 +44,221 @@
 }
 
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --radius: 1rem;
+  --background: oklch(0.985 0 0);
+  --foreground: oklch(0.16 0 0);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: oklch(0.16 0 0);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.16 0 0);
+  --primary: oklch(0.24 0 0);
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.955 0 0);
+  --secondary-foreground: oklch(0.24 0 0);
+  --muted: oklch(0.955 0 0);
+  --muted-foreground: oklch(0.48 0 0);
+  --accent: oklch(0.94 0 0);
+  --accent-foreground: oklch(0.24 0 0);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --border: oklch(0.89 0 0);
+  --input: oklch(0.89 0 0);
+  --ring: oklch(0.58 0 0);
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar: oklch(0.975 0 0);
+  --sidebar-foreground: oklch(0.2 0 0);
+  --sidebar-primary: oklch(0.24 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar-accent: oklch(0.94 0 0);
+  --sidebar-accent-foreground: oklch(0.24 0 0);
+  --sidebar-border: oklch(0.89 0 0);
+  --sidebar-ring: oklch(0.58 0 0);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
+  --background: oklch(0.12 0 0);
   --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
+  --card: oklch(0.18 0 0);
   --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
+  --popover: oklch(0.18 0 0);
   --popover-foreground: oklch(0.985 0 0);
   --primary: oklch(0.922 0 0);
   --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
+  --secondary: oklch(0.24 0 0);
   --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
+  --muted: oklch(0.24 0 0);
+  --muted-foreground: oklch(0.72 0 0);
+  --accent: oklch(0.28 0 0);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: oklch(0.68 0 0);
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
+  --sidebar: oklch(0.15 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-primary: oklch(0.92 0 0);
+  --sidebar-primary-foreground: oklch(0.16 0 0);
+  --sidebar-accent: oklch(0.24 0 0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --sidebar-ring: oklch(0.68 0 0);
 }
 
 @layer base {
   * {
     @apply border-border outline-ring/50;
   }
+  html {
+    @apply scroll-smooth;
+  }
   body {
-    @apply bg-background text-foreground;
+    @apply min-w-0 overflow-x-hidden bg-background text-foreground antialiased;
+    text-rendering: geometricPrecision;
+  }
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+  img,
+  video,
+  canvas,
+  svg {
+    @apply max-w-full;
+  }
+  [data-slot="card"],
+  [data-slot="dialog-content"],
+  [data-slot="sheet-content"],
+  [data-slot="popover-content"],
+  [data-slot="dropdown-menu-content"],
+  [data-slot="select-content"] {
+    @apply rounded-3xl;
+  }
+  [data-slot="card-title"],
+  [data-slot="dialog-title"] {
+    @apply break-words;
+  }
+  [data-slot="card-description"],
+  [data-slot="dialog-description"] {
+    overflow-wrap: anywhere;
+  }
+  [data-slot="button"] {
+    @apply transition-[background-color,border-color,color,box-shadow,transform] duration-200 ease-out active:scale-[0.98];
+  }
+  [data-slot="input"],
+  [data-slot="textarea"],
+  [data-slot="select-trigger"],
+  [data-slot="tabs-list"],
+  [data-slot="input-group"] {
+    @apply rounded-2xl;
+  }
+  [data-slot="dropdown-menu-item"],
+  [data-slot="dropdown-menu-checkbox-item"],
+  [data-slot="dropdown-menu-radio-item"],
+  [data-slot="dropdown-menu-sub-trigger"],
+  [data-slot="select-item"],
+  [data-slot="tabs-trigger"] {
+    @apply rounded-xl;
+  }
+  [data-slot="card"],
+  [data-slot="dashboard-panel"],
+  [data-slot="dialog-content"],
+  [data-slot="sheet-content"],
+  [data-slot="popover-content"],
+  [data-slot="dropdown-menu-content"],
+  [data-slot="select-content"] {
+    @apply shadow-sm;
+  }
+  [data-slot="table-cell"],
+  [data-slot="table-head"] {
+    overflow-wrap: anywhere;
+  }
+  [data-slot="dashboard-actions"] > [data-slot="button"],
+  [data-slot="dialog-footer"] [data-slot="button"],
+  [data-slot="sheet-footer"] [data-slot="button"] {
+    @apply max-sm:w-full;
+  }
+  [data-slot="card"],
+  [data-slot="dashboard-panel"] {
+    @apply transition-[border-color,box-shadow,background-color] duration-200 ease-out;
+  }
+  [data-slot="dashboard-page"] {
+    animation: page-enter 180ms ease-out;
+  }
+  @media (max-width: 640px) {
+    [data-slot="dashboard-page"] {
+      @apply space-y-3;
+    }
+    [data-slot="card"] {
+      @apply gap-3 py-3;
+    }
+    [data-slot="card-header"],
+    [data-slot="card-content"],
+    [data-slot="card-footer"] {
+      @apply px-3;
+    }
+    [data-slot="dialog-content"] {
+      @apply p-4;
+    }
+    [data-slot="button"] {
+      min-height: 2.25rem;
+    }
+    [data-slot="table-container"] {
+      margin-inline: -0.25rem;
+      width: calc(100% + 0.5rem);
+    }
+    [data-slot="table-cell"],
+    [data-slot="table-head"] {
+      @apply px-2 py-2;
+    }
+    [data-slot="popover-content"],
+    [data-slot="dropdown-menu-content"],
+    [data-slot="select-content"] {
+      max-width: calc(100vw - 1rem);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@theme inline {
+  --animate-shimmer: shimmer 1.6s linear infinite;
+
+  @keyframes shimmer {
+    0% {
+      background-position: 200% 0;
+    }
+    100% {
+      background-position: -200% 0;
+    }
+  }
+}
+
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }

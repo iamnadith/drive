@@ -7,7 +7,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Eye,
-  Loader2,
   RefreshCw,
   RotateCcw,
   Search,
@@ -37,7 +36,12 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
-import { cn } from "@/lib/utils"
+import {
+  DashboardFilterGrid,
+  DashboardPage,
+  DashboardPageHeader,
+  DashboardPageSkeleton,
+} from "@/components/dashboard/page-shell"
 
 type ActivityEvent = {
   id: string
@@ -261,20 +265,32 @@ export default function ActivityPage() {
     filters.to,
   ].filter(Boolean).length
 
+  if (loading && !data) {
+    return <DashboardPageSkeleton rows={8} />
+  }
+
   return (
-    <div className="space-y-5">
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Activity</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Recent user and system activity. Last refreshed {formatRelative(data?.generatedAt)}.
-          </p>
-        </div>
-        <Button variant="outline" onClick={() => void loadActivity(true)} disabled={refreshing}>
-          <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />
+    <DashboardPage>
+      <DashboardPageHeader
+        title="Activity"
+        description={
+          <>
+            Recent user and system activity. Last refreshed{" "}
+            {formatRelative(data?.generatedAt)}.
+          </>
+        }
+        actions={
+        <Button
+          variant="outline"
+          loading={refreshing}
+          onClick={() => void loadActivity(true)}
+          disabled={refreshing}
+        >
+          {!refreshing ? <RefreshCw className="h-4 w-4" /> : null}
           Refresh
         </Button>
-      </div>
+        }
+      />
 
       {error ? (
         <Alert variant="destructive">
@@ -284,11 +300,11 @@ export default function ActivityPage() {
         </Alert>
       ) : null}
 
-      <Card className="rounded-lg py-0">
+      <Card className="py-0">
         <CardHeader className="border-b px-4 py-3">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <CardTitle className="text-base">Filters</CardTitle>
-            <div className="flex items-center gap-2">
+             <div className="flex flex-wrap items-center gap-2">
               <Badge variant={activeFilterCount ? "secondary" : "outline"}>{activeFilterCount} active</Badge>
               <Button variant="outline" size="sm" onClick={resetFilters}>
                 <X className="h-4 w-4" />
@@ -298,7 +314,7 @@ export default function ActivityPage() {
           </div>
         </CardHeader>
         <CardContent className="p-4">
-          <div className="grid gap-3 lg:grid-cols-[minmax(280px,1.5fr)_repeat(4,minmax(140px,1fr))_112px]">
+          <DashboardFilterGrid className="xl:grid-cols-[minmax(280px,1.5fr)_repeat(4,minmax(140px,1fr))_112px]">
             <div className="relative">
               <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
@@ -367,7 +383,7 @@ export default function ActivityPage() {
                 ))}
               </SelectContent>
             </Select>
-          </div>
+          </DashboardFilterGrid>
 
           <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:max-w-md">
             <div className="relative">
@@ -391,7 +407,7 @@ export default function ActivityPage() {
         </CardContent>
       </Card>
 
-      <Card className="rounded-lg py-0">
+      <Card className="py-0">
         <CardHeader className="border-b px-4 py-3">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <CardTitle className="text-base">Activity List</CardTitle>
@@ -416,7 +432,7 @@ export default function ActivityPage() {
             <ul className="divide-y">
               {events.map((event) => (
                 <li key={event.id} className="px-4 py-3">
-                  <div className="grid gap-3 lg:grid-cols-[160px_minmax(0,1fr)_180px_120px_88px] lg:items-center">
+                  <div className="grid gap-3 xl:grid-cols-[160px_minmax(0,1fr)_180px_120px_88px] xl:items-center">
                     <div className="text-sm">
                       <div className="font-medium">{formatRelative(event.occurredAt)}</div>
                       <div className="mt-0.5 text-xs text-muted-foreground">{formatDateTime(event.occurredAt)}</div>
@@ -456,7 +472,7 @@ export default function ActivityPage() {
 
         <div className="flex flex-col gap-3 border-t p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-sm text-muted-foreground">
-            {loading ? "Loading..." : `${events.length} activities on this page`}
+            {loading ? "Loading" : `${events.length} activities on this page`}
           </div>
           <div className="flex gap-2">
             <Button
@@ -525,10 +541,11 @@ export default function ActivityPage() {
               <DialogFooter>
                 <Button variant="outline" onClick={() => setSelected(null)}>Close</Button>
                 <Button
-                  disabled={selected.undoStatus !== "available" || undoingId === selected.id}
+                  loading={undoingId === selected.id}
+                  disabled={selected.undoStatus !== "available"}
                   onClick={() => void undoActivity(selected)}
                 >
-                  {undoingId === selected.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                  {undoingId !== selected.id ? <RotateCcw className="h-4 w-4" /> : null}
                   Undo
                 </Button>
               </DialogFooter>
@@ -536,6 +553,6 @@ export default function ActivityPage() {
           ) : null}
         </DialogContent>
       </Dialog>
-    </div>
+    </DashboardPage>
   )
 }

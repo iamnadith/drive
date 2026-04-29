@@ -58,7 +58,7 @@ function formatBytes(value?: number) {
 function statusBadge(status: string | undefined) {
   const value = String(status ?? "").toLowerCase()
   if (value === "completed" || value === "copied") return <Badge className="bg-green-600">Completed</Badge>
-  if (value === "running" || value === "copying") return <Badge className="bg-blue-600">Running</Badge>
+  if (value === "running" || value === "copying") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
   if (value === "claimed") return <Badge className="bg-cyan-600">Claimed</Badge>
   if (value === "pending") return <Badge variant="secondary">Pending</Badge>
   if (value === "failed") return <Badge variant="destructive">Failed</Badge>

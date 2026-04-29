@@ -3,7 +3,6 @@
 import * as React from "react"
 import Link from "next/link"
 import { ClipboardPaste, GalleryVerticalEnd } from "lucide-react"
-import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -29,18 +28,18 @@ export function SecurityFlowShell({
   children: React.ReactNode
 }) {
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center gap-6 bg-background p-6 md:p-10">
-      <div className="w-full max-w-sm">
+    <div className="flex min-h-svh flex-col items-center justify-center gap-6 bg-[radial-gradient(circle_at_top,var(--muted),transparent_34rem)] p-4 sm:p-6 md:p-10">
+      <div className="w-full max-w-sm rounded-3xl border bg-card/95 p-5 shadow-sm backdrop-blur sm:p-6">
         <div className="flex flex-col gap-6">
           <div className="flex flex-col items-center gap-2 text-center">
             <Link href="/" className="flex flex-col items-center gap-2 font-medium">
-              <div className="flex size-8 items-center justify-center rounded-md">
+              <div className="flex size-8 items-center justify-center rounded-2xl bg-primary/10">
                 <GalleryVerticalEnd className="size-6" />
               </div>
               <span className="sr-only">Drive</span>
             </Link>
-            <h1 className="text-xl font-bold">{title}</h1>
-            <FieldDescription>{description}</FieldDescription>
+            <h1 className="text-balance text-xl font-bold">{title}</h1>
+            <FieldDescription className="text-pretty">{description}</FieldDescription>
           </div>
           {children}
           <FieldDescription className="px-6 text-center">
@@ -62,6 +61,13 @@ export function OtpInputField({
   setCode: (value: string) => void
 }) {
   const inputRef = React.useRef<HTMLInputElement | null>(null)
+  const pasteCaptureRef = React.useRef<HTMLInputElement | null>(null)
+
+  function submitAfterPaste(input: HTMLInputElement | null, nextCode: string) {
+    if (nextCode.length !== 6) return
+    window.setTimeout(() => input?.form?.requestSubmit(), 50)
+  }
+
   function applyPastedCode(nextCode: string) {
     setCode(nextCode)
     const input = inputRef.current
@@ -70,9 +76,23 @@ export function OtpInputField({
     setter?.call(input, nextCode)
     input.dispatchEvent(new Event("input", { bubbles: true }))
     input.focus()
+    submitAfterPaste(input, nextCode)
   }
+
+  function handlePaste(event: React.ClipboardEvent<HTMLElement>) {
+    const nextCode = event.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6)
+    if (!nextCode) return
+    event.preventDefault()
+    applyPastedCode(nextCode)
+  }
+
+  function handlePasteCaptureChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const nextCode = event.target.value.replace(/\D/g, "").slice(0, 6)
+    event.target.value = ""
+    if (nextCode) applyPastedCode(nextCode)
+  }
+
   async function pasteCode() {
-    inputRef.current?.focus()
     if (navigator.clipboard?.readText) {
       try {
         const text = await navigator.clipboard.readText()
@@ -80,10 +100,11 @@ export function OtpInputField({
         if (nextCode) applyPastedCode(nextCode)
         return
       } catch {
-        // Browser blocked clipboard access. Focus the OTP field so manual paste works.
+        // iOS can block Clipboard API reads; keep a real input focused for native paste/autofill.
       }
     }
-    toast.message("Paste into the focused code field with Ctrl+V.")
+    pasteCaptureRef.current?.focus()
+    pasteCaptureRef.current?.select()
   }
 
   return (
@@ -99,8 +120,12 @@ export function OtpInputField({
         maxLength={6}
         id="security-otp-code"
         required
+        inputMode="numeric"
+        pattern="[0-9]*"
+        autoComplete="one-time-code"
         value={code}
         onChange={(value) => setCode(value.replace(/\D/g, ""))}
+        onPaste={handlePaste}
         containerClassName="mx-auto flex w-fit items-center justify-center gap-2"
       >
         <InputOTPGroup className="*:data-[slot=input-otp-slot]:h-12 *:data-[slot=input-otp-slot]:w-11 *:data-[slot=input-otp-slot]:text-xl">
@@ -115,10 +140,31 @@ export function OtpInputField({
           <InputOTPSlot index={5} />
         </InputOTPGroup>
       </InputOTP>
-      <Button type="button" variant="ghost" size="sm" className="mx-auto h-8 rounded-full px-3 text-xs" onClick={() => void pasteCode()}>
-        <ClipboardPaste className="h-3.5 w-3.5" />
-        Paste code
-      </Button>
+      <div className="relative mx-auto h-8 w-fit">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-8 rounded-full px-3 text-xs"
+          tabIndex={-1}
+          aria-hidden="true"
+        >
+          <ClipboardPaste className="h-3.5 w-3.5" />
+          Paste code
+        </Button>
+        <input
+          ref={pasteCaptureRef}
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          autoComplete="one-time-code"
+          aria-label="Paste verification code"
+          className="absolute inset-0 h-full w-full cursor-pointer rounded-full opacity-0"
+          onClick={() => void pasteCode()}
+          onPaste={handlePaste}
+          onChange={handlePasteCaptureChange}
+        />
+      </div>
     </Field>
   )
 }

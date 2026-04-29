@@ -50,6 +50,7 @@ import {
   HoverCardTrigger,
 } from "@/components/ui/hover-card"
 import { Switch } from "@/components/ui/switch"
+import { DashboardTableSkeleton } from "@/components/dashboard/loading-skeletons"
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
@@ -151,6 +152,7 @@ type AccountMigrationRecord = {
 
 export default function AccountsPage() {
   const [accounts, setAccounts] = React.useState<Account[]>([])
+  const [accountsLoading, setAccountsLoading] = React.useState(true)
   const [isAddOpen, setIsAddOpen] = React.useState(false)
 
   const [label, setLabel] = React.useState("")
@@ -221,6 +223,7 @@ export default function AccountsPage() {
 
   React.useEffect(() => {
     const load = async () => {
+      setAccountsLoading(true)
       try {
         const res = await fetch("/api/accounts")
         if (!res.ok) throw new Error("Failed to load accounts")
@@ -248,6 +251,8 @@ export default function AccountsPage() {
       } catch (err) {
         console.error(err)
         toast.error("Unable to load Cloudflare accounts")
+      } finally {
+        setAccountsLoading(false)
       }
     }
 
@@ -949,8 +954,8 @@ export default function AccountsPage() {
               className={
                 status === "active"
                   ? "bg-green-500 hover:bg-green-600"
-                  : status === "available"
-                  ? "text-blue-500 border-blue-500/30 bg-blue-500/10 hover:bg-blue-500/20"
+                : status === "available"
+                  ? "border-primary/25 bg-primary/10 text-primary hover:bg-primary/15"
                   : ""
               }
             >
@@ -1068,6 +1073,10 @@ export default function AccountsPage() {
       currentPageIndex * pageSize + pageSize
     )
 
+  if (accountsLoading && accounts.length === 0) {
+    return <DashboardTableSkeleton actions={2} columns={6} filters={1} rows={10} titleWidth="w-36" />
+  }
+
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 pt-0">
       <div className="flex items-center justify-between">
@@ -1101,10 +1110,11 @@ export default function AccountsPage() {
             variant="outline"
             className="h-9"
             onClick={handleSyncAll}
-            disabled={syncingAll || accounts.length === 0}
+            loading={syncingAll}
+            disabled={accounts.length === 0}
           >
-            <RefreshCw className="mr-2 h-4 w-4" />
-            {syncingAll ? "Syncing..." : "Sync all"}
+            {!syncingAll ? <RefreshCw className="mr-2 h-4 w-4" /> : null}
+            Sync all
           </Button>
           <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
             <DialogTrigger asChild>
@@ -1379,7 +1389,7 @@ export default function AccountsPage() {
                               href="https://dash.cloudflare.com/profile/api-tokens"
                               target="_blank"
                               rel="noreferrer"
-                              className="text-[11px] text-blue-600 hover:underline"
+                              className="text-[11px] text-primary hover:underline"
                             >
                               Open API Tokens page
                             </a>
@@ -1552,8 +1562,8 @@ export default function AccountsPage() {
                 </div>
               </div>
               <DialogFooter className="mt-1 pt-0">
-                <Button onClick={handleAddAccount} disabled={isSubmitting}>
-                  {isSubmitting ? "Saving..." : "Save Account"}
+                <Button onClick={handleAddAccount} loading={isSubmitting}>
+                  Save Account
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -1581,8 +1591,8 @@ export default function AccountsPage() {
                       viewAccount.status === "active"
                         ? "bg-green-500 hover:bg-green-600"
                         : viewAccount.status === "available"
-                        ? "text-blue-500 border-blue-500/30 bg-blue-500/10 hover:bg-blue-500/20"
-                        : "bg-zinc-700 text-zinc-100"
+                        ? "border-primary/25 bg-primary/10 text-primary hover:bg-primary/15"
+                        : "bg-secondary text-secondary-foreground"
                     }
                   >
                     {viewAccount.status.charAt(0).toUpperCase() +

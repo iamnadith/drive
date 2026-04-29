@@ -91,8 +91,13 @@ export default function VerifyEmailPage() {
                 </InputOTPGroup>
               </InputOTP>
             </div>
-            <Button type="submit" className="w-full" disabled={loading || code.length !== 6}>
-              {loading ? "Verifying..." : "Verify"}
+            <Button
+              type="submit"
+              className="w-full"
+              loading={loading}
+              disabled={code.length !== 6}
+            >
+              Verify
             </Button>
           </div>
         </form>
@@ -100,4 +105,3 @@ export default function VerifyEmailPage() {
     </main>
   )
 }
-

@@ -115,7 +115,7 @@ export default function MobileVerificationPage() {
               <FieldDescription>SMS messages are sent through Text.lk.</FieldDescription>
             </Field>
             <Field>
-              <Button type="submit" disabled={submitting || !mobileIsValid(mobileNumber)}>
+              <Button type="submit" loading={submitting} disabled={!mobileIsValid(mobileNumber)}>
                 Send SMS code
               </Button>
             </Field>
@@ -129,7 +129,7 @@ export default function MobileVerificationPage() {
               <Button type="button" variant="outline" onClick={() => setStep("number")}>
                 Back
               </Button>
-              <Button type="submit" disabled={submitting || code.length !== 6}>
+              <Button type="submit" loading={submitting} disabled={code.length !== 6}>
                 Verify mobile
               </Button>
             </Field>

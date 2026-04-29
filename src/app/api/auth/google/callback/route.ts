@@ -179,6 +179,9 @@ export async function GET(request: NextRequest) {
       if (!actor) {
         throw new Error("Your session is no longer valid")
       }
+      if (actor.status !== "active") {
+        throw new Error("User is disabled")
+      }
       if (actor.email.toLowerCase() !== email) {
         throw new Error(
           "Google email does not match your account email. Please use the same email to link."
@@ -212,6 +215,9 @@ export async function GET(request: NextRequest) {
           passwordSource: "google-generated",
         })
       } else {
+        if (existing.status !== "active") {
+          throw new Error("User is disabled")
+        }
         user = await updateUser(existing.id, {
           googleLinked: true,
           googleSub: userInfo.sub ?? existing.googleSub,
@@ -248,12 +254,24 @@ export async function GET(request: NextRequest) {
         path: "/",
         maxAge: 10 * 60,
       })
+      response.cookies.set("sessionUserId", "", {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        maxAge: 0,
+      })
     } else {
       response.cookies.set("sessionUserId", user.id, {
         httpOnly: true,
         sameSite: "lax",
         path: "/",
         maxAge: 60 * 60 * 24 * 7,
+      })
+      response.cookies.set("googleVerifyUserId", "", {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        maxAge: 0,
       })
     }
 

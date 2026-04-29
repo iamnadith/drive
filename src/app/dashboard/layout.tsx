@@ -14,6 +14,7 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
 import { useAuth } from "@/components/auth-provider"
+import { ThemeToggle } from "@/components/theme-toggle"
 
 type Crumb = { label: string; href?: string }
 
@@ -42,8 +43,16 @@ export default function DashboardLayout({
       return [...base, { label: "Activity" }]
     }
 
+    if (pathname.startsWith("/dashboard/api-usage")) {
+      return [...base, { label: "API Usage" }]
+    }
+
     if (pathname.startsWith("/dashboard/storage")) {
       return [...base, { label: "Storage" }]
+    }
+
+    if (pathname.startsWith("/dashboard/projects")) {
+      return [...base, { label: "Projects" }]
     }
 
     if (pathname.startsWith("/dashboard/accounts")) {
@@ -91,23 +100,25 @@ export default function DashboardLayout({
   return (
     <SidebarProvider>
       <AppSidebar />
-      <SidebarInset>
-        <header className="sticky top-0 z-10 flex h-16 shrink-0 items-center gap-2 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 transition-[width,height] ease-linear group-has-[[data-collapsible=icon]]/sidebar-wrapper:h-12">
-          <div className="flex items-center gap-2 px-4">
+      <SidebarInset className="min-w-0 overflow-hidden">
+        <header className="sticky top-0 z-10 flex min-h-14 shrink-0 items-center justify-between gap-2 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/70 sm:h-16">
+          <div className="flex min-w-0 flex-1 items-center gap-2 px-3 sm:px-4">
             <SidebarTrigger className="-ml-1" />
-            <Separator orientation="vertical" className="mr-2 h-4" />
-            <Breadcrumb>
-              <BreadcrumbList>
+            <Separator orientation="vertical" className="mr-1 h-4 sm:mr-2" />
+            <Breadcrumb className="min-w-0">
+              <BreadcrumbList className="min-w-0 flex-nowrap overflow-hidden">
                 {crumbs.map((c, index) => {
                   const isLast = index === crumbs.length - 1
                   return (
                     <React.Fragment key={`${c.label}-${index}`}>
                       {index > 0 ? <BreadcrumbSeparator className="hidden md:block" /> : null}
-                      <BreadcrumbItem className={index === 0 ? "hidden md:block" : undefined}>
+                      <BreadcrumbItem className={index === 0 ? "hidden md:block" : "min-w-0"}>
                         {isLast || !c.href ? (
-                          <BreadcrumbPage>{c.label}</BreadcrumbPage>
+                          <BreadcrumbPage className="truncate">{c.label}</BreadcrumbPage>
                         ) : (
-                          <BreadcrumbLink href={c.href}>{c.label}</BreadcrumbLink>
+                          <BreadcrumbLink href={c.href} className="truncate">
+                            {c.label}
+                          </BreadcrumbLink>
                         )}
                       </BreadcrumbItem>
                     </React.Fragment>
@@ -116,8 +127,13 @@ export default function DashboardLayout({
               </BreadcrumbList>
             </Breadcrumb>
           </div>
+          <div className="flex shrink-0 items-center gap-1 px-2 sm:px-4">
+            <ThemeToggle />
+          </div>
         </header>
-        <div className="flex flex-1 flex-col gap-4 p-4 pt-4">{children}</div>
+        <div className="flex min-w-0 flex-1 flex-col gap-4 overflow-x-hidden px-3 py-4 sm:px-4 lg:px-6">
+          {children}
+        </div>
       </SidebarInset>
     </SidebarProvider>
   )

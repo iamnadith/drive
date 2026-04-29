@@ -82,8 +82,8 @@ export default function AuthenticatorSetupPage() {
             </FieldDescription>
           </Field>
           <Field>
-            <Button type="button" onClick={() => void startSetup()} disabled={submitting}>
-              {submitting ? "Generating..." : "Generate QR code"}
+            <Button type="button" onClick={() => void startSetup()} loading={submitting}>
+              Generate QR code
             </Button>
           </Field>
         </FieldGroup>
@@ -117,7 +117,7 @@ export default function AuthenticatorSetupPage() {
               type="button"
               variant="outline"
               onClick={() => void startSetup()}
-              disabled={submitting}
+              loading={submitting}
             >
               Regenerate
             </Button>
@@ -134,7 +134,7 @@ export default function AuthenticatorSetupPage() {
               <Button type="button" variant="outline" onClick={() => setStep("scan")}>
                 Back
               </Button>
-              <Button type="submit" disabled={submitting || code.length !== 6}>
+              <Button type="submit" loading={submitting} disabled={code.length !== 6}>
                 Enable authenticator
               </Button>
             </Field>

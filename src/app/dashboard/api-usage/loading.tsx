@@ -1,0 +1,5 @@
+import { DashboardTableSkeleton } from "@/components/dashboard/loading-skeletons"
+
+export default function Loading() {
+  return <DashboardTableSkeleton cards={4} columns={5} rows={7} titleWidth="w-40" />
+}

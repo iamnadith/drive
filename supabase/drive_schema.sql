@@ -130,6 +130,295 @@ create unique index if not exists drive_bucket_stats_unique on drive_bucket_stat
 create index if not exists drive_bucket_stats_account_idx on drive_bucket_stats (account_id);
 create index if not exists drive_bucket_stats_status_idx on drive_bucket_stats (status);
 
+create table if not exists drive_projects (
+  id uuid primary key default gen_random_uuid(),
+  project_id text not null,
+  name text not null,
+  bucket_name text not null,
+  status text not null default 'active',
+  created_account_id uuid references drive_accounts(id) on delete set null,
+  created_account_label text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- Older installs may have created drive_projects.id as text. The current
+-- schema uses uuid IDs because child tables reference drive_projects(id).
+do $$
+declare
+  id_data_type text;
+  pk_name text;
+begin
+  select c.data_type
+  into id_data_type
+  from information_schema.columns c
+  where c.table_schema = 'public'
+    and c.table_name = 'drive_projects'
+    and c.column_name = 'id';
+
+  if id_data_type is not null and id_data_type <> 'uuid' then
+    alter table public.drive_projects add column if not exists legacy_id text;
+
+    update public.drive_projects
+    set legacy_id = id::text
+    where legacy_id is null;
+
+    select conname
+    into pk_name
+    from pg_constraint
+    where conrelid = 'public.drive_projects'::regclass
+      and contype = 'p'
+    limit 1;
+
+    if pk_name is not null then
+      execute format('alter table public.drive_projects drop constraint %I', pk_name);
+    end if;
+
+    alter table public.drive_projects rename column id to old_text_id;
+    alter table public.drive_projects add column id uuid default gen_random_uuid();
+
+    update public.drive_projects
+    set id = case
+      when old_text_id::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        then old_text_id::text::uuid
+      else gen_random_uuid()
+    end;
+
+    alter table public.drive_projects alter column id set not null;
+    alter table public.drive_projects add primary key (id);
+  end if;
+end $$;
+
+-- `create table if not exists` does not add columns to an existing table.
+-- Repair older installs that had `drive_projects` before project API support.
+alter table if exists public.drive_projects add column if not exists project_id text;
+alter table if exists public.drive_projects add column if not exists name text;
+alter table if exists public.drive_projects add column if not exists bucket_name text;
+alter table if exists public.drive_projects add column if not exists status text not null default 'active';
+alter table if exists public.drive_projects add column if not exists created_account_id uuid references public.drive_accounts(id) on delete set null;
+alter table if exists public.drive_projects add column if not exists created_account_label text;
+alter table if exists public.drive_projects add column if not exists created_at timestamptz not null default now();
+alter table if exists public.drive_projects add column if not exists updated_at timestamptz not null default now();
+
+update public.drive_projects
+set project_id = 'prj_' || replace(id::text, '-', '')
+where project_id is null;
+
+update public.drive_projects
+set name = coalesce(nullif(bucket_name, ''), 'Imported project')
+where name is null;
+
+update public.drive_projects
+set bucket_name = project_id
+where bucket_name is null;
+
+alter table if exists public.drive_projects alter column project_id set not null;
+alter table if exists public.drive_projects alter column name set not null;
+alter table if exists public.drive_projects alter column bucket_name set not null;
+
+create unique index if not exists drive_projects_project_id_key on drive_projects (project_id);
+create unique index if not exists drive_projects_bucket_name_key on drive_projects (bucket_name);
+create index if not exists drive_projects_status_idx on drive_projects (status);
+
+create table if not exists drive_project_api_keys (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  key_prefix text not null,
+  key_hash text not null,
+  status text not null default 'active',
+  expires_at timestamptz,
+  last_used_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists drive_project_api_keys_hash_key
+  on drive_project_api_keys (key_hash);
+create index if not exists drive_project_api_keys_status_idx
+  on drive_project_api_keys (status);
+
+create table if not exists drive_project_api_key_assignments (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references drive_projects(id) on delete cascade,
+  api_key_id uuid not null references drive_project_api_keys(id) on delete cascade,
+  permissions jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table if exists public.drive_project_api_key_assignments add column if not exists project_id uuid references public.drive_projects(id) on delete cascade;
+alter table if exists public.drive_project_api_key_assignments add column if not exists api_key_id uuid references public.drive_project_api_keys(id) on delete cascade;
+alter table if exists public.drive_project_api_key_assignments add column if not exists permissions jsonb not null default '{}'::jsonb;
+alter table if exists public.drive_project_api_key_assignments add column if not exists created_at timestamptz not null default now();
+alter table if exists public.drive_project_api_key_assignments add column if not exists updated_at timestamptz not null default now();
+
+create unique index if not exists drive_project_api_key_assignments_unique
+  on drive_project_api_key_assignments (project_id, api_key_id);
+create index if not exists drive_project_api_key_assignments_key_idx
+  on drive_project_api_key_assignments (api_key_id);
+
+create table if not exists drive_project_file_links (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references drive_projects(id) on delete cascade,
+  object_key text not null,
+  token_hash text not null,
+  mode text not null,
+  expires_at timestamptz,
+  revoked_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+alter table if exists public.drive_project_file_links add column if not exists project_id uuid references public.drive_projects(id) on delete cascade;
+alter table if exists public.drive_project_file_links add column if not exists object_key text;
+alter table if exists public.drive_project_file_links add column if not exists token_hash text;
+alter table if exists public.drive_project_file_links add column if not exists mode text;
+alter table if exists public.drive_project_file_links add column if not exists expires_at timestamptz;
+alter table if exists public.drive_project_file_links add column if not exists revoked_at timestamptz;
+alter table if exists public.drive_project_file_links add column if not exists created_at timestamptz not null default now();
+
+create unique index if not exists drive_project_file_links_token_hash_key
+  on drive_project_file_links (token_hash);
+create index if not exists drive_project_file_links_project_idx
+  on drive_project_file_links (project_id, object_key);
+create index if not exists drive_project_file_links_active_idx
+  on drive_project_file_links (mode, revoked_at, expires_at);
+
+create table if not exists drive_project_operation_jobs (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references drive_projects(id) on delete cascade,
+  type text not null,
+  status text not null default 'queued',
+  payload jsonb not null default '{}'::jsonb,
+  progress jsonb not null default '{}'::jsonb,
+  result jsonb not null default '{}'::jsonb,
+  error text,
+  idempotency_key text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  started_at timestamptz,
+  completed_at timestamptz
+);
+
+alter table if exists public.drive_project_operation_jobs add column if not exists project_id uuid references public.drive_projects(id) on delete cascade;
+alter table if exists public.drive_project_operation_jobs add column if not exists type text;
+alter table if exists public.drive_project_operation_jobs add column if not exists status text not null default 'queued';
+alter table if exists public.drive_project_operation_jobs add column if not exists payload jsonb not null default '{}'::jsonb;
+alter table if exists public.drive_project_operation_jobs add column if not exists progress jsonb not null default '{}'::jsonb;
+alter table if exists public.drive_project_operation_jobs add column if not exists result jsonb not null default '{}'::jsonb;
+alter table if exists public.drive_project_operation_jobs add column if not exists error text;
+alter table if exists public.drive_project_operation_jobs add column if not exists idempotency_key text;
+alter table if exists public.drive_project_operation_jobs add column if not exists created_at timestamptz not null default now();
+alter table if exists public.drive_project_operation_jobs add column if not exists updated_at timestamptz not null default now();
+alter table if exists public.drive_project_operation_jobs add column if not exists started_at timestamptz;
+alter table if exists public.drive_project_operation_jobs add column if not exists completed_at timestamptz;
+
+create index if not exists drive_project_operation_jobs_project_idx
+  on drive_project_operation_jobs (project_id, created_at desc);
+create index if not exists drive_project_operation_jobs_status_idx
+  on drive_project_operation_jobs (status, created_at);
+create unique index if not exists drive_project_operation_jobs_idempotency_key
+  on drive_project_operation_jobs (project_id, idempotency_key)
+  where idempotency_key is not null;
+
+create table if not exists drive_project_api_events (
+  id uuid primary key default gen_random_uuid(),
+  occurred_at timestamptz not null default now(),
+  project_id uuid references drive_projects(id) on delete cascade,
+  api_key_id uuid references drive_project_api_keys(id) on delete set null,
+  action text not null,
+  object_key text,
+  status integer,
+  outcome text not null default 'success',
+  ip_address text,
+  user_agent text,
+  request_id text,
+  metadata jsonb not null default '{}'::jsonb
+);
+
+alter table if exists public.drive_project_api_events add column if not exists occurred_at timestamptz not null default now();
+alter table if exists public.drive_project_api_events add column if not exists project_id uuid references public.drive_projects(id) on delete cascade;
+alter table if exists public.drive_project_api_events add column if not exists api_key_id uuid references public.drive_project_api_keys(id) on delete set null;
+alter table if exists public.drive_project_api_events add column if not exists action text not null default 'unknown';
+alter table if exists public.drive_project_api_events add column if not exists object_key text;
+alter table if exists public.drive_project_api_events add column if not exists status integer;
+alter table if exists public.drive_project_api_events add column if not exists outcome text not null default 'success';
+alter table if exists public.drive_project_api_events add column if not exists ip_address text;
+alter table if exists public.drive_project_api_events add column if not exists user_agent text;
+alter table if exists public.drive_project_api_events add column if not exists request_id text;
+alter table if exists public.drive_project_api_events add column if not exists metadata jsonb not null default '{}'::jsonb;
+
+create index if not exists drive_project_api_events_project_time_idx
+  on drive_project_api_events (project_id, occurred_at desc);
+create index if not exists drive_project_api_events_key_time_idx
+  on drive_project_api_events (api_key_id, occurred_at desc);
+create index if not exists drive_project_api_events_action_time_idx
+  on drive_project_api_events (action, occurred_at desc);
+
+create table if not exists drive_project_object_inventory (
+  project_id uuid not null references drive_projects(id) on delete cascade,
+  object_key text not null,
+  size bigint not null default 0,
+  etag text,
+  content_type text,
+  metadata jsonb not null default '{}'::jsonb,
+  last_modified timestamptz,
+  deleted_at timestamptz,
+  updated_at timestamptz not null default now(),
+  primary key (project_id, object_key)
+);
+
+alter table if exists public.drive_project_object_inventory add column if not exists project_id uuid references public.drive_projects(id) on delete cascade;
+alter table if exists public.drive_project_object_inventory add column if not exists object_key text;
+alter table if exists public.drive_project_object_inventory add column if not exists size bigint not null default 0;
+alter table if exists public.drive_project_object_inventory add column if not exists etag text;
+alter table if exists public.drive_project_object_inventory add column if not exists content_type text;
+alter table if exists public.drive_project_object_inventory add column if not exists metadata jsonb not null default '{}'::jsonb;
+alter table if exists public.drive_project_object_inventory add column if not exists last_modified timestamptz;
+alter table if exists public.drive_project_object_inventory add column if not exists deleted_at timestamptz;
+alter table if exists public.drive_project_object_inventory add column if not exists updated_at timestamptz not null default now();
+
+create index if not exists drive_project_object_inventory_search_idx
+  on drive_project_object_inventory (project_id, object_key text_pattern_ops)
+  where deleted_at is null;
+create index if not exists drive_project_object_inventory_updated_idx
+  on drive_project_object_inventory (project_id, updated_at desc);
+
+create table if not exists drive_project_object_locks (
+  project_id uuid not null references drive_projects(id) on delete cascade,
+  object_key text not null,
+  lock_token_hash text not null,
+  reason text,
+  expires_at timestamptz,
+  created_at timestamptz not null default now(),
+  primary key (project_id, object_key)
+);
+
+alter table if exists public.drive_project_object_locks add column if not exists project_id uuid references public.drive_projects(id) on delete cascade;
+alter table if exists public.drive_project_object_locks add column if not exists object_key text;
+alter table if exists public.drive_project_object_locks add column if not exists lock_token_hash text;
+alter table if exists public.drive_project_object_locks add column if not exists reason text;
+alter table if exists public.drive_project_object_locks add column if not exists expires_at timestamptz;
+alter table if exists public.drive_project_object_locks add column if not exists created_at timestamptz not null default now();
+
+create table if not exists drive_project_webhooks (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references drive_projects(id) on delete cascade,
+  target_url text not null,
+  events jsonb not null default '[]'::jsonb,
+  secret text,
+  status text not null default 'active',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table if exists public.drive_project_webhooks add column if not exists project_id uuid references public.drive_projects(id) on delete cascade;
+alter table if exists public.drive_project_webhooks add column if not exists target_url text;
+alter table if exists public.drive_project_webhooks add column if not exists events jsonb not null default '[]'::jsonb;
+alter table if exists public.drive_project_webhooks add column if not exists secret text;
+alter table if exists public.drive_project_webhooks add column if not exists status text not null default 'active';
+alter table if exists public.drive_project_webhooks add column if not exists created_at timestamptz not null default now();
+alter table if exists public.drive_project_webhooks add column if not exists updated_at timestamptz not null default now();
+
 -- Analytics archive for preserving bucket/account totals after an account is deleted.
 create table if not exists drive_analytics_bucket_snapshots (
   account_id uuid not null,
@@ -476,6 +765,3 @@ alter table if exists public.drive_activity_events add column if not exists undo
 alter table if exists public.drive_activity_events add column if not exists undo_payload jsonb;
 alter table if exists public.drive_activity_events add column if not exists undone_at timestamptz;
 alter table if exists public.drive_activity_events add column if not exists undone_by_user_id uuid references public.drive_users(id) on delete set null;
-
--- PostgREST caches the schema. If you just added columns, force a reload so the REST API sees them immediately.
-select pg_notify('pgrst', 'reload schema');

@@ -272,8 +272,8 @@ function statusBadge(
   if (s === "verifying") return <Badge className="bg-purple-600">Verifying</Badge>
   if (s === "scanning") return <Badge className="bg-sky-600">Scanning</Badge>
   if (s === "queued") return <Badge variant="secondary">Queued</Badge>
-  if (s === "running") return <Badge className="bg-blue-600">Running</Badge>
-  if (s === "progress_fetch_failed") return <Badge className="bg-blue-600">Running</Badge>
+  if (s === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
+  if (s === "progress_fetch_failed") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
   if (s === "paused") return <Badge className="bg-yellow-600">Paused</Badge>
   if (s === "failed") return <Badge className="bg-red-600">Failed</Badge>
   if (s === "verification_failed") return <Badge className="bg-red-600">Verification failed</Badge>
@@ -283,7 +283,7 @@ function statusBadge(
     return <Badge variant="secondary">{hadProgress ? "Aborted" : "Canceled"}</Badge>
   }
   if (s === "draft") return <Badge variant="outline">Draft</Badge>
-  if (s === "creating_job") return <Badge className="bg-blue-600">Creating job</Badge>
+  if (s === "creating_job") return <Badge className="bg-primary text-primary-foreground">Creating job</Badge>
   if (s === "job_id_pending") return <Badge className="bg-yellow-600">Job pending</Badge>
   if (s === "precheck_failed") return <Badge className="bg-red-600">Precheck failed</Badge>
   if (s.endsWith("_failed") || s.includes("error")) return <Badge className="bg-red-600">Error</Badge>
@@ -292,7 +292,7 @@ function statusBadge(
 
 function repairJobBadge(status: RepairJob["status"] | undefined) {
   if (status === "completed") return <Badge className="bg-green-600">Worker completed</Badge>
-  if (status === "running") return <Badge className="bg-blue-600">Worker running</Badge>
+  if (status === "running") return <Badge className="bg-primary text-primary-foreground">Worker running</Badge>
   if (status === "claimed") return <Badge className="bg-sky-600">Worker claimed</Badge>
   if (status === "pending") return <Badge variant="secondary">Worker queued</Badge>
   if (status === "failed") return <Badge className="bg-red-600">Worker failed</Badge>
@@ -570,7 +570,7 @@ function ProgressStacked({
         <div className="h-full bg-primary" style={{ width: `${safeTransferred}%` }} />
         <div className="h-full bg-yellow-500" style={{ width: `${safeSkipped}%` }} />
         <div className="h-full bg-red-500" style={{ width: `${safeFailed}%` }} />
-        <div className="h-full bg-zinc-400" style={{ width: `${safeUnaccounted}%` }} />
+        <div className="h-full bg-muted-foreground/45" style={{ width: `${safeUnaccounted}%` }} />
       </div>
     </div>
   )
@@ -1645,7 +1645,7 @@ export default function MigrationDetailsPage() {
     overviewBadgeStatus === "completed" ? (
       <CheckCircle2 className="h-4 w-4 text-green-600" />
     ) : overviewBadgeStatus === "running" || overviewBadgeStatus === "scanning" || overviewBadgeStatus === "verifying" ? (
-      <Clock className="h-4 w-4 text-blue-600" />
+      <Clock className="h-4 w-4 text-primary" />
     ) : overviewBadgeStatus === "failed" ? (
       <AlertCircle className="h-4 w-4 text-red-600" />
     ) : (
@@ -1876,7 +1876,7 @@ export default function MigrationDetailsPage() {
                 <div
                   className={cn(
                     "overflow-hidden rounded-2xl border text-sm",
-                    isActive ? "border-blue-500/30 bg-blue-500/[0.04]" : "bg-muted/15"
+                    isActive ? "border-primary/30 bg-primary/[0.04]" : "bg-muted/15"
                   )}
                 >
                   <div className="flex flex-col gap-4 border-b px-4 py-4 lg:flex-row lg:items-start lg:justify-between">
@@ -2559,7 +2559,7 @@ export default function MigrationDetailsPage() {
                                       <div className="flex flex-col gap-1">
                                         {failure.download?.source ? (
                                           <a
-                                            className="text-blue-600 hover:underline"
+                                            className="text-primary hover:underline"
                                             href={failure.download.source}
                                             target="_blank"
                                             rel="noreferrer"
@@ -2571,7 +2571,7 @@ export default function MigrationDetailsPage() {
                                         )}
                                         {failure.download?.destination ? (
                                           <a
-                                            className="text-blue-600 hover:underline"
+                                            className="text-primary hover:underline"
                                             href={failure.download.destination}
                                             target="_blank"
                                             rel="noreferrer"

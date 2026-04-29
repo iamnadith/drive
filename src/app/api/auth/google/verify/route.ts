@@ -5,18 +5,24 @@ import { sendSmsVerificationCode, verifySmsCode } from "@/lib/sms-verification"
 import { findUserById, toPublicUser } from "@/lib/users-store"
 import { consumeUserTotpCode } from "@/lib/totp-verification"
 
+type VerificationMethod = "authenticator" | "email" | "sms"
+
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
     ? String((error as { message?: unknown }).message ?? fallback)
     : fallback
 }
 
-function methodsFor(user: { totpEnabled?: boolean; mobileVerified?: boolean; mobileNumber?: string }) {
-  return [
-    ...(user.totpEnabled ? ["authenticator"] : []),
-    "email",
-    ...(user.mobileVerified && user.mobileNumber ? ["sms"] : []),
-  ]
+function normalizeMethod(value: unknown): VerificationMethod {
+  return value === "sms" ? "sms" : value === "authenticator" ? "authenticator" : "email"
+}
+
+function methodsFor(user: { totpEnabled?: boolean; mobileVerified?: boolean; mobileNumber?: string }): VerificationMethod[] {
+  const methods: VerificationMethod[] = []
+  if (user.totpEnabled) methods.push("authenticator")
+  methods.push("email")
+  if (user.mobileVerified && user.mobileNumber) methods.push("sms")
+  return methods
 }
 
 export async function GET(request: NextRequest) {
@@ -25,6 +31,7 @@ export async function GET(request: NextRequest) {
     if (!userId) return NextResponse.json({ error: "No Google verification is pending" }, { status: 401 })
     const user = await findUserById(userId)
     if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 })
+    if (user.status !== "active") return NextResponse.json({ error: "User is disabled" }, { status: 403 })
     return NextResponse.json({
       email: user.email,
       methods: methodsFor(user),
@@ -41,16 +48,23 @@ export async function POST(request: NextRequest) {
     if (!userId) return NextResponse.json({ error: "No Google verification is pending" }, { status: 401 })
     const user = await findUserById(userId)
     if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 })
+    if (user.status !== "active") return NextResponse.json({ error: "User is disabled" }, { status: 403 })
 
     const body = (await request.json().catch(() => ({}))) as {
       action?: unknown
       method?: unknown
       code?: unknown
     }
-    const method = body.method === "sms" ? "sms" : body.method === "authenticator" ? "authenticator" : "email"
+    const method = normalizeMethod(body.method)
     const action = body.action === "send" ? "send" : "verify"
 
     if (action === "send") {
+      if (method === "authenticator") {
+        return NextResponse.json(
+          { error: "Authenticator codes are generated in your authenticator app" },
+          { status: 400 }
+        )
+      }
       if (method === "sms") {
         if (!user.mobileVerified || !user.mobileNumber) {
           return NextResponse.json({ error: "SMS verification is not available" }, { status: 400 })
@@ -65,11 +79,19 @@ export async function POST(request: NextRequest) {
           purpose: "login",
         })
       }
-      return NextResponse.json({ ok: true, method })
+      return NextResponse.json({
+        requiresOtp: true,
+        email: user.email,
+        method,
+        methods: methodsFor(user),
+      })
     }
 
     const code = typeof body.code === "string" ? body.code : ""
     if (method === "authenticator") {
+      if (!user.totpEnabled || !user.totpSecret) {
+        return NextResponse.json({ error: "Authenticator verification is not enabled" }, { status: 400 })
+      }
       if (!(await consumeUserTotpCode(user, code))) {
         return NextResponse.json({ error: "Authenticator code is invalid" }, { status: 400 })
       }

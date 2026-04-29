@@ -56,6 +56,7 @@ import {
     TableRow,
 } from "@/components/ui/table"
 import { Progress } from "@/components/ui/progress"
+import { StoragePageSkeleton } from "@/components/dashboard/loading-skeletons"
 import {
   Select,
   SelectContent,
@@ -254,6 +255,7 @@ export default function StoragePage() {
     null
   )
   const [drives, setDrives] = React.useState<Drive[]>([])
+  const [drivesLoading, setDrivesLoading] = React.useState(true)
   const [totalUsedBytes, setTotalUsedBytes] = React.useState(0)
   const [, setBucketObjects] = React.useState<RawObject[]>([])
   const [objects, setObjects] = React.useState<FileItem[]>([])
@@ -285,6 +287,7 @@ export default function StoragePage() {
   }
 
   const loadActiveAndBuckets = React.useCallback(async () => {
+    setDrivesLoading(true)
     try {
       const [accountsRes, bucketsRes] = await Promise.all([
         fetch("/api/accounts"),
@@ -331,6 +334,8 @@ export default function StoragePage() {
     } catch {
       setDrives([])
       setTotalUsedBytes(0)
+    } finally {
+      setDrivesLoading(false)
     }
   }, [])
 
@@ -708,6 +713,10 @@ export default function StoragePage() {
   const fileCount = objects.length - folderCount
   const showDrivesPanel = isRoot
 
+  if (drivesLoading && drives.length === 0) {
+    return <StoragePageSkeleton />
+  }
+
   return (
     <div className="flex flex-1 flex-col h-full">
       <Dialog open={createBucketOpen} onOpenChange={setCreateBucketOpen}>
@@ -752,9 +761,10 @@ export default function StoragePage() {
             </Button>
             <Button
               onClick={() => void handleCreateBucket()}
-              disabled={creatingBucket || !newBucketName.trim()}
+              loading={creatingBucket}
+              disabled={!newBucketName.trim()}
             >
-              {creatingBucket ? "Creating…" : "Create drive"}
+              Create drive
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -771,11 +781,11 @@ export default function StoragePage() {
       >
         <DialogContent
           showCloseButton={false}
-          className="h-[min(72dvh,720px)] max-h-[calc(100dvh-1rem)] w-[min(96vw,1280px)] max-w-none overflow-hidden p-0"
+          className="h-[min(76dvh,720px)] max-h-[calc(100dvh-1rem)] w-[min(96vw,1280px)] max-w-none overflow-hidden p-0"
         >
           {previewTarget && (
             <div className="grid h-full min-h-0 min-w-0 grid-rows-[auto,minmax(0,1fr)] bg-background">
-              <div className="flex h-9 min-w-0 items-center gap-1 border-b bg-background/95 px-2">
+              <div className="flex min-h-10 min-w-0 flex-wrap items-center gap-1 border-b bg-background/95 px-2 py-1">
                 <DialogHeader className="min-w-0 flex-1 gap-0 text-left">
                   <DialogTitle className="truncate text-sm font-medium leading-none">
                     {previewTarget.item.name}
@@ -965,14 +975,14 @@ export default function StoragePage() {
 
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-between border-b pb-4 px-1">
-        <div className="flex items-center gap-2 flex-1 mr-4">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="flex flex-col gap-3 border-b px-1 pb-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="mr-0 flex min-w-0 flex-1 items-center gap-2 lg:mr-4">
              <Button variant="ghost" size="icon" disabled={isRoot} onClick={navigateUp}>
                 <ArrowLeft className="h-4 w-4" />
              </Button>
              
-             <div className="flex items-center gap-1 border rounded-md px-3 h-9 bg-background flex-1 max-w-2xl text-sm">
+             <div className="flex h-9 min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded-xl border bg-background px-3 text-sm [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:max-w-2xl">
                 <Button
                   variant="ghost"
                   size="icon"
@@ -1003,8 +1013,8 @@ export default function StoragePage() {
              </div>
        </div>
 
-       <div className="flex items-center gap-2">
-             <div className="relative w-64 hidden md:block">
+       <div className="flex flex-wrap items-center gap-2">
+             <div className="relative hidden w-full sm:w-64 md:block">
                 <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
                 <Input 
                     value={query}
@@ -1013,11 +1023,11 @@ export default function StoragePage() {
                     className="pl-8"
                 />
              </div>
-             <div className="flex rounded-md border bg-muted/40">
+             <div className="flex rounded-xl border bg-muted/40 p-0.5">
                 <Button 
                     variant={view === "list" ? "secondary" : "ghost"}
                     size="icon"
-                    className="rounded-none"
+                    className="rounded-lg"
                     onClick={() => setView("list")}
                 >
                     <ListIcon className="h-4 w-4" />
@@ -1025,7 +1035,7 @@ export default function StoragePage() {
                 <Button 
                     variant={view === "grid" ? "secondary" : "ghost"}
                     size="icon"
-                    className="rounded-none"
+                    className="rounded-lg"
                     onClick={() => setView("grid")}
                 >
                     <Grid2X2 className="h-4 w-4" />
@@ -1094,8 +1104,8 @@ export default function StoragePage() {
       <div
         className={
           showDrivesPanel && view === "grid"
-            ? "grid grid-cols-[260px,1fr] gap-4 py-4 flex-1 min-h-0"
-            : "grid grid-cols-1 gap-4 py-4 flex-1 min-h-0"
+            ? "grid flex-1 grid-cols-1 gap-4 py-4 xl:grid-cols-[minmax(220px,260px)_minmax(0,1fr)]"
+            : "grid min-h-0 flex-1 grid-cols-1 gap-4 py-4"
         }
       >
         {showDrivesPanel && (
@@ -1123,7 +1133,7 @@ export default function StoragePage() {
                   <button
                     key={drive.id}
                     className={cn(
-                      "group flex w-64 flex-col gap-2 rounded-lg border bg-card p-3 text-left hover:bg-accent/60",
+                      "group flex w-full min-w-0 flex-col gap-2 rounded-2xl border bg-card p-3 text-left transition-colors hover:bg-accent/60 sm:w-64",
                       (isCurrent || isSelected) && "border-primary bg-primary/5"
                     )}
                     onClick={(e) => handleDriveClick(e, drive)}
@@ -1144,7 +1154,7 @@ export default function StoragePage() {
                       </div>
                     </div>
                     <Progress value={percent} className="h-1.5" />
-                    <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
                       <span>
                         {drive.statsStatus && drive.statsStatus !== "completed"
                           ? drive.statsStatus === "error"
@@ -1160,7 +1170,7 @@ export default function StoragePage() {
                   <button
                     key={drive.id}
                     className={cn(
-                      "group flex w-full gap-4 px-4 py-2 rounded-lg border bg-card hover:bg-accent/40 transition-colors text-left",
+                      "group flex w-full min-w-0 gap-4 rounded-2xl border bg-card px-4 py-2 text-left transition-colors hover:bg-accent/40",
                       (isCurrent || isSelected) && "border-primary bg-primary/5"
                     )}
                     onClick={(e) => handleDriveClick(e, drive)}
@@ -1168,17 +1178,17 @@ export default function StoragePage() {
                     <div className="mt-1">
                       <HardDrive className="h-5 w-5 text-muted-foreground" />
                     </div>
-                    <div className="flex-1 space-y-1">
-                      <div className="flex items-center justify-between text-xs">
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex min-w-0 items-center justify-between gap-2 text-xs">
                         <span className="font-medium text-foreground truncate">
                           {drive.name}
                         </span>
-                        <span className="text-muted-foreground">
+                        <span className="shrink-0 text-muted-foreground">
                           {formatBytes(drive.usedBytes)} used
                         </span>
                       </div>
                       <Progress value={percent} className="h-1.5" />
-                      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
                         <span>
                           {drive.statsStatus && drive.statsStatus !== "completed"
                             ? drive.statsStatus === "error"
@@ -1237,12 +1247,12 @@ export default function StoragePage() {
           </ContextMenu>
         )}
 
-        <div className="flex flex-col gap-4 min-h-0">
+        <div className="flex min-h-0 min-w-0 flex-col gap-4">
             {!isRoot && (
               <>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-sm font-medium text-muted-foreground">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <h2 className="truncate text-sm font-medium text-muted-foreground">
                       {currentPath.join(" / ")}
                     </h2>
                     <p className="text-xs text-muted-foreground">
@@ -1286,13 +1296,13 @@ export default function StoragePage() {
                   </DropdownMenu>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card/70 p-2">
+                <div className="flex flex-wrap items-center gap-2 rounded-2xl border bg-card/70 p-2">
                   <div className="flex items-center gap-2 pr-1 text-xs font-medium text-muted-foreground">
                     <Filter className="h-4 w-4" />
                     Filters
                   </div>
                   <Select value={kindFilter} onValueChange={(value) => setKindFilter(value as KindFilter)}>
-                    <SelectTrigger size="sm" className="w-[140px]">
+                    <SelectTrigger size="sm" className="w-[140px] max-w-[calc(100vw-3rem)]">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -1307,7 +1317,7 @@ export default function StoragePage() {
                     </SelectContent>
                   </Select>
                   <Select value={sortMode} onValueChange={(value) => setSortMode(value as SortMode)}>
-                    <SelectTrigger size="sm" className="w-[150px]">
+                    <SelectTrigger size="sm" className="w-[150px] max-w-[calc(100vw-3rem)]">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -1319,7 +1329,7 @@ export default function StoragePage() {
                     </SelectContent>
                   </Select>
                   <Select value={pageSize} onValueChange={setPageSize}>
-                    <SelectTrigger size="sm" className="w-[120px]">
+                    <SelectTrigger size="sm" className="w-[120px] max-w-[calc(100vw-3rem)]">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -1343,7 +1353,7 @@ export default function StoragePage() {
                 </div>
 
                 {filteredObjects.length === 0 && !objectsLoading ? (
-                  <div className="flex min-h-[260px] flex-col items-center justify-center rounded-lg border border-dashed bg-card/40 text-center">
+                  <div className="flex min-h-[260px] flex-col items-center justify-center rounded-2xl border border-dashed bg-card/40 p-4 text-center">
                     <Folder className="mb-3 h-10 w-10 text-muted-foreground" />
                     <p className="font-medium">{objects.length ? "No matching items" : "This folder is empty"}</p>
                     <p className="mt-1 text-sm text-muted-foreground">
@@ -1369,17 +1379,17 @@ export default function StoragePage() {
                                 isSelected && "border-primary bg-primary/5"
                               )}
                             >
-                              <div className="flex items-center justify-between w-full gap-2">
-                                <div className="flex items-center gap-2">
+                              <div className="flex w-full min-w-0 items-center justify-between gap-2">
+                                <div className="flex min-w-0 items-center gap-2">
                                   <div
                                     className={cn(
-                                      "flex h-8 w-8 items-center justify-center rounded-md border bg-muted",
-                                      isFolder && "bg-blue-500/10 text-blue-500"
+                                      "flex h-8 w-8 items-center justify-center rounded-md border bg-muted text-muted-foreground",
+                                      isFolder && "bg-primary/10 text-primary"
                                     )}
                                   >
                                     <Icon className="h-4 w-4" />
                                   </div>
-                                  <div className="flex flex-col">
+                                  <div className="flex min-w-0 flex-col">
                                     <span className="truncate text-sm font-medium">
                                       {item.name}
                                     </span>
@@ -1390,8 +1400,8 @@ export default function StoragePage() {
                                 </div>
                                 <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
                               </div>
-                              <div className="flex w-full items-center justify-between text-xs text-muted-foreground">
-                                <span>{item.modified}</span>
+                              <div className="flex w-full flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                                <span className="truncate">{item.modified}</span>
                                 {!isFolder && <span>{item.size}</span>}
                               </div>
                             </button>
@@ -1524,7 +1534,7 @@ export default function StoragePage() {
                 ) : (
                   <ContextMenu>
                     <ContextMenuTrigger asChild>
-                      <div className="rounded-md border bg-card">
+                      <div className="rounded-2xl border bg-card">
                         <Table>
                       <TableHeader>
                         <TableRow>
@@ -1548,13 +1558,13 @@ export default function StoragePage() {
                                   )}
                                   onClick={(e) => handleItemClick(e, item)}
                                 >
-                                  <TableCell className="flex items-center gap-2">
+                                  <TableCell className="flex min-w-0 items-center gap-2">
                                     {isFolder ? (
-                                      <Folder className="h-4 w-4 text-blue-500" />
+                                      <Folder className="h-4 w-4 text-primary" />
                                     ) : (
                                       <File className="h-4 w-4 text-muted-foreground" />
                                     )}
-                                    <span>{item.name}</span>
+                                    <span className="truncate">{item.name}</span>
                                   </TableCell>
                                   <TableCell className="text-muted-foreground">
                                     {isFolder ? "Folder" : item.fileType}
@@ -1722,7 +1732,12 @@ export default function StoragePage() {
                       Next
                     </Button>
                     {nextContinuationToken && (
-                      <Button variant="outline" size="sm" onClick={loadMore} disabled={objectsLoading}>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        loading={objectsLoading}
+                        onClick={loadMore}
+                      >
                         Load more from R2
                       </Button>
                     )}

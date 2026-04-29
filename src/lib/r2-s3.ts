@@ -1,12 +1,19 @@
 import {
   S3Client,
   CreateBucketCommand,
+  DeleteBucketCommand,
   ListObjectsV2Command,
   HeadBucketCommand,
   HeadObjectCommand,
   GetObjectCommand,
+  PutObjectCommand,
+  CopyObjectCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
 } from "@aws-sdk/client-s3"
 import { Upload } from "@aws-sdk/lib-storage"
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
@@ -87,12 +94,23 @@ export async function r2CreateBucket(config: R2ClientConfig, bucket: string) {
   return client.send(command)
 }
 
+export async function r2DeleteBucket(config: R2ClientConfig, bucket: string) {
+  const client = createR2Client(config)
+  return client.send(new DeleteBucketCommand({ Bucket: bucket }))
+}
+
 export async function r2PutObject(
   config: R2ClientConfig,
   bucket: string,
   key: string,
   body: Buffer | Uint8Array | string | Readable,
-  options?: { contentType?: string; cacheControl?: string; metadata?: Record<string, string> }
+  options?: {
+    contentType?: string
+    cacheControl?: string
+    metadata?: Record<string, string>
+    ifMatch?: string
+    ifNoneMatch?: string
+  }
 ) {
   const client = createR2Client(config)
 
@@ -105,6 +123,8 @@ export async function r2PutObject(
       ...(options?.contentType ? { ContentType: options.contentType } : {}),
       ...(options?.cacheControl ? { CacheControl: options.cacheControl } : {}),
       ...(options?.metadata ? { Metadata: options.metadata } : {}),
+      ...(options?.ifMatch ? { IfMatch: options.ifMatch } : {}),
+      ...(options?.ifNoneMatch ? { IfNoneMatch: options.ifNoneMatch } : {}),
     },
     queueSize: 4,
     partSize: 8 * 1024 * 1024,
@@ -112,6 +132,34 @@ export async function r2PutObject(
   })
 
   return upload.done()
+}
+
+export async function r2CreateSignedUploadUrl(
+  config: R2ClientConfig,
+  bucket: string,
+  key: string,
+  input?: {
+    expiresInSeconds?: number
+    contentType?: string
+    metadata?: Record<string, string>
+    ifMatch?: string
+    ifNoneMatch?: string
+  }
+) {
+  const client = createR2Client(config)
+  const expiresInSeconds =
+    typeof input?.expiresInSeconds === "number" && Number.isFinite(input.expiresInSeconds)
+      ? Math.max(30, Math.min(3600, Math.floor(input.expiresInSeconds)))
+      : 900
+  const command = new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    ...(input?.contentType ? { ContentType: input.contentType } : {}),
+    ...(input?.metadata ? { Metadata: input.metadata } : {}),
+    ...(input?.ifMatch ? { IfMatch: input.ifMatch } : {}),
+    ...(input?.ifNoneMatch ? { IfNoneMatch: input.ifNoneMatch } : {}),
+  })
+  return getSignedUrl(client, command, { expiresIn: expiresInSeconds })
 }
 
 export async function r2HeadBucket(config: R2ClientConfig, bucket: string) {
@@ -167,6 +215,50 @@ export async function r2HeadObject(config: R2ClientConfig, bucket: string, key: 
   return client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
 }
 
+export async function r2CopyObject(
+  config: R2ClientConfig,
+  bucket: string,
+  sourceKey: string,
+  destinationKey: string,
+  options?: {
+    ifMatch?: string
+    metadata?: Record<string, string>
+    contentType?: string
+    metadataDirective?: "COPY" | "REPLACE"
+  }
+) {
+  const client = createR2Client(config)
+  const encodedSource = `${bucket}/${sourceKey}`
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/")
+  return client.send(
+    new CopyObjectCommand({
+      Bucket: bucket,
+      CopySource: encodedSource,
+      Key: destinationKey,
+      ...(options?.ifMatch ? { CopySourceIfMatch: options.ifMatch } : {}),
+      ...(options?.metadata ? { Metadata: options.metadata } : {}),
+      ...(options?.contentType ? { ContentType: options.contentType } : {}),
+      ...(options?.metadataDirective ? { MetadataDirective: options.metadataDirective } : {}),
+    })
+  )
+}
+
+export async function r2UpdateObjectMetadata(
+  config: R2ClientConfig,
+  bucket: string,
+  key: string,
+  input: { metadata?: Record<string, string>; contentType?: string; ifMatch?: string }
+) {
+  return r2CopyObject(config, bucket, key, key, {
+    metadata: input.metadata ?? {},
+    contentType: input.contentType,
+    ifMatch: input.ifMatch,
+    metadataDirective: "REPLACE",
+  })
+}
+
 export async function r2GetObjectStream(config: R2ClientConfig, bucket: string, key: string) {
   const client = createR2Client(config)
   return client.send(new GetObjectCommand({ Bucket: bucket, Key: key }))
@@ -195,6 +287,18 @@ export async function r2DeleteObjects(config: R2ClientConfig, bucket: string, ke
   }
 }
 
+export async function r2DeleteBucketAndContents(config: R2ClientConfig, bucket: string) {
+  const objects = await r2ListAllObjects(config, bucket, { maxObjects: 200_000 })
+  if (objects.length > 0) {
+    await r2DeleteObjects(
+      config,
+      bucket,
+      objects.map((object) => object.key)
+    )
+  }
+  await r2DeleteBucket(config, bucket)
+}
+
 export async function r2CreateSignedDownloadUrl(
   config: R2ClientConfig,
   bucket: string,
@@ -221,6 +325,81 @@ export async function r2CreateSignedDownloadUrl(
   })
 
   return getSignedUrl(client, command, { expiresIn: expiresInSeconds })
+}
+
+export async function r2CreateMultipartUpload(
+  config: R2ClientConfig,
+  bucket: string,
+  key: string,
+  input?: { contentType?: string; metadata?: Record<string, string> }
+) {
+  const client = createR2Client(config)
+  return client.send(
+    new CreateMultipartUploadCommand({
+      Bucket: bucket,
+      Key: key,
+      ...(input?.contentType ? { ContentType: input.contentType } : {}),
+      ...(input?.metadata ? { Metadata: input.metadata } : {}),
+    })
+  )
+}
+
+export async function r2CreateSignedMultipartPartUrl(
+  config: R2ClientConfig,
+  bucket: string,
+  key: string,
+  uploadId: string,
+  partNumber: number,
+  expiresInSeconds = 900
+) {
+  const client = createR2Client(config)
+  const command = new UploadPartCommand({
+    Bucket: bucket,
+    Key: key,
+    UploadId: uploadId,
+    PartNumber: partNumber,
+  })
+  return getSignedUrl(client, command, {
+    expiresIn: Math.max(30, Math.min(3600, Math.floor(expiresInSeconds))),
+  })
+}
+
+export async function r2CompleteMultipartUpload(
+  config: R2ClientConfig,
+  bucket: string,
+  key: string,
+  uploadId: string,
+  parts: Array<{ partNumber: number; etag: string }>
+) {
+  const client = createR2Client(config)
+  return client.send(
+    new CompleteMultipartUploadCommand({
+      Bucket: bucket,
+      Key: key,
+      UploadId: uploadId,
+      MultipartUpload: {
+        Parts: parts
+          .map((part) => ({ PartNumber: part.partNumber, ETag: part.etag }))
+          .sort((a, b) => (a.PartNumber ?? 0) - (b.PartNumber ?? 0)),
+      },
+    })
+  )
+}
+
+export async function r2AbortMultipartUpload(
+  config: R2ClientConfig,
+  bucket: string,
+  key: string,
+  uploadId: string
+) {
+  const client = createR2Client(config)
+  return client.send(
+    new AbortMultipartUploadCommand({
+      Bucket: bucket,
+      Key: key,
+      UploadId: uploadId,
+    })
+  )
 }
 
 export async function r2ListAllObjects(

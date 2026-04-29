@@ -57,6 +57,7 @@ import {
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { useAuth } from "@/components/auth-provider"
+import { DashboardTableSkeleton } from "@/components/dashboard/loading-skeletons"
 
 type UserRow = {
   id: string
@@ -75,6 +76,7 @@ const PAGE_SIZE = 10
 
 export default function UsersPage() {
   const [mounted, setMounted] = React.useState(false)
+  const [usersLoading, setUsersLoading] = React.useState(true)
   const [users, setUsers] = React.useState<UserRow[]>([])
   const [search, setSearch] = React.useState("")
   const [roleFilter, setRoleFilter] = React.useState<
@@ -97,6 +99,7 @@ export default function UsersPage() {
   )
 
   const reloadUsers = React.useCallback(async () => {
+    setUsersLoading(true)
     try {
       const res = await fetch("/api/users")
       if (!res.ok) return
@@ -104,6 +107,8 @@ export default function UsersPage() {
       setUsers(data.users as UserRow[])
     } catch {
       // ignore for now
+    } finally {
+      setUsersLoading(false)
     }
   }, [])
 
@@ -929,8 +934,8 @@ export default function UsersPage() {
     }
   }
 
-  if (!mounted) {
-    return null
+  if (!mounted || (usersLoading && users.length === 0)) {
+    return <DashboardTableSkeleton actions={1} columns={5} filters={3} rows={10} titleWidth="w-28" />
   }
 
   return (

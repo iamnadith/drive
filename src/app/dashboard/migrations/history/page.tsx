@@ -47,7 +47,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function statusBadge(status: string) {
   if (status === "completed") return <Badge className="bg-green-600">Completed</Badge>
   if (status === "verifying") return <Badge className="bg-purple-600">Verifying</Badge>
-  if (status === "running") return <Badge className="bg-blue-600">Running</Badge>
+  if (status === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
   if (status === "failed") return <Badge className="bg-red-600">Failed</Badge>
   if (status === "canceled") return <Badge variant="secondary">Canceled</Badge>
   if (status === "draft") return <Badge variant="outline">Draft</Badge>
@@ -181,7 +181,7 @@ export default function MigrationsHistoryPage() {
                       ) : m.status === "verifying" ? (
                         <Clock className="h-4 w-4 text-purple-600" />
                       ) : m.status === "running" ? (
-                        <Clock className="h-4 w-4 text-blue-600" />
+                        <Clock className="h-4 w-4 text-primary" />
                       ) : m.status === "failed" ? (
                         <AlertCircle className="h-4 w-4 text-red-600" />
                       ) : (

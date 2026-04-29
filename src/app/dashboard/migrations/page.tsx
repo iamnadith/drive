@@ -190,12 +190,12 @@ function statusBadge(status: string | undefined, syncStatus?: string) {
   if (s === "verifying" && syncStatus === "error") return <Badge className="bg-red-600">Verification failed</Badge>
   if (s === "completed") return <Badge className="bg-green-600">Completed</Badge>
   if (s === "verifying") return <Badge className="bg-purple-600">Verifying</Badge>
-  if (s === "running") return <Badge className="bg-blue-600">Running</Badge>
+  if (s === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
   if (s === "paused") return <Badge className="bg-yellow-600">Paused</Badge>
   if (s === "failed") return <Badge className="bg-red-600">Failed</Badge>
   if (s === "canceled" || s === "aborted") return <Badge variant="secondary">Canceled</Badge>
   if (s === "draft") return <Badge variant="outline">Draft</Badge>
-  if (s === "creating_job") return <Badge className="bg-blue-600">Creating job</Badge>
+  if (s === "creating_job") return <Badge className="bg-primary text-primary-foreground">Creating job</Badge>
   if (s === "job_id_pending") return <Badge className="bg-yellow-600">Job pending</Badge>
   if (s === "precheck_failed") return <Badge className="bg-red-600">Precheck failed</Badge>
   if (s.endsWith("_failed") || s.includes("error")) return <Badge className="bg-red-600">Error</Badge>
@@ -1002,7 +1002,7 @@ export default function MigrationsPage() {
                   ) : m.status === "verifying" ? (
                     <Clock className="h-5 w-5 text-purple-600" />
                   ) : m.status === "running" ? (
-                    <Clock className="h-5 w-5 text-blue-600" />
+                    <Clock className="h-5 w-5 text-primary" />
                   ) : m.status === "failed" ? (
                     <AlertCircle className="h-5 w-5 text-red-600" />
                   ) : (

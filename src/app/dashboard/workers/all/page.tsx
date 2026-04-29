@@ -67,7 +67,7 @@ function getWorkerConnectionLabel(worker: AgentRow) {
 
 function statusBadge(status: AgentStatus) {
   if (status === "online") return <Badge className="bg-green-600">Online</Badge>
-  if (status === "busy") return <Badge className="bg-blue-600">Busy</Badge>
+  if (status === "busy") return <Badge className="bg-primary text-primary-foreground">Busy</Badge>
   if (status === "dispatch_ready") return <Badge className="bg-cyan-600">Dispatch ready</Badge>
   if (status === "pending_registration") return <Badge variant="secondary">Pending registration</Badge>
   if (status === "offline") return <Badge variant="outline">Offline</Badge>

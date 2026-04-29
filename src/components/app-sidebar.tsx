@@ -5,6 +5,7 @@ import {
   ArrowRightLeft,
   BarChart3,
   Bot,
+  Boxes,
   FolderOpen,
   HardDrive,
   LayoutDashboard,
@@ -12,6 +13,7 @@ import {
   LogOut,
   Settings,
   Users,
+  type LucideIcon,
 } from "lucide-react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
@@ -27,7 +29,6 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarRail,
 } from "@/components/ui/sidebar"
 import {
   DropdownMenu,
@@ -38,8 +39,14 @@ import {
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { useAuth } from "@/components/auth-provider"
 
-// Menu items.
-const items = [
+type NavItem = {
+  title: string
+  url: string
+  icon: LucideIcon
+  adminOnly?: boolean
+}
+
+const navOverview: NavItem[] = [
   {
     title: "Overview",
     url: "/dashboard/overview",
@@ -55,21 +62,32 @@ const items = [
     url: "/dashboard/activity",
     icon: ListChecks,
   },
-  {
-    title: "Accounts",
-    url: "/dashboard/accounts",
-    icon: HardDrive,
-  },
+]
+
+const navManage: NavItem[] = [
   {
     title: "Storage",
     url: "/dashboard/storage",
     icon: FolderOpen,
   },
   {
-    title: "Users",
-    url: "/dashboard/users",
-    icon: Users,
+    title: "Accounts",
+    url: "/dashboard/accounts",
+    icon: HardDrive,
   },
+  {
+    title: "Projects",
+    url: "/dashboard/projects",
+    icon: Boxes,
+  },
+  {
+    title: "API Usage",
+    url: "/dashboard/api-usage",
+    icon: BarChart3,
+  },
+]
+
+const navSystem: NavItem[] = [
   {
     title: "Migrations",
     url: "/dashboard/migrations",
@@ -81,6 +99,15 @@ const items = [
     icon: Bot,
   },
   {
+    title: "Users",
+    url: "/dashboard/users",
+    icon: Users,
+    adminOnly: true,
+  },
+]
+
+const navSecondary: NavItem[] = [
+  {
     title: "Settings",
     url: "/settings",
     icon: Settings,
@@ -90,13 +117,27 @@ const items = [
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { user, logout } = useAuth()
   const pathname = usePathname()
+  const canManageUsers = user?.role === "admin" || user?.role === "superadmin"
 
-  const filteredItems = React.useMemo(() => {
-    if (!user || (user.role !== "admin" && user.role !== "superadmin")) {
-      return items.filter((item) => item.title !== "Users")
-    }
-    return items
-  }, [user])
+  const systemItems = React.useMemo(
+    () => navSystem.filter((item) => !item.adminOnly || canManageUsers),
+    [canManageUsers]
+  )
+
+  const isActive = React.useCallback(
+    (url: string) => {
+      if (!pathname) {
+        return false
+      }
+
+      if (url === "/dashboard/overview") {
+        return pathname === "/dashboard" || pathname.startsWith(url)
+      }
+
+      return pathname === url || pathname.startsWith(`${url}/`)
+    },
+    [pathname]
+  )
 
   const [mounted, setMounted] = React.useState(false)
 
@@ -109,46 +150,37 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   }
 
   return (
-    <Sidebar collapsible="icon" {...props}>
+    <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton size="lg" asChild>
+            <SidebarMenuButton
+              asChild
+              className="data-[slot=sidebar-menu-button]:p-1.5!"
+            >
               <Link href="/">
-                <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-                  <HardDrive className="size-4" />
+                <div className="flex aspect-square size-7 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground">
+                  <HardDrive className="size-4!" />
                 </div>
-                <div className="grid flex-1 text-left text-sm leading-tight">
-                  <span className="truncate font-semibold">CloudPanel</span>
-                  <span className="truncate text-xs">Enterprise Storage</span>
-                </div>
+                <span className="text-base font-semibold">CloudPanel</span>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
-      <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel>Platform</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {filteredItems.map((item) => (
-                <SidebarMenuItem key={item.title}>
-                  <SidebarMenuButton
-                    asChild
-                    tooltip={item.title}
-                    isActive={pathname?.startsWith(item.url)}
-                  >
-                    <Link href={item.url}>
-                      <item.icon />
-                      <span>{item.title}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+      <SidebarContent className="overflow-y-auto overflow-x-hidden [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <SidebarNav label="Overview" items={navOverview} isActive={isActive} />
+        <SidebarNav label="Manage" items={navManage} isActive={isActive} />
+        <SidebarNav
+          label="System"
+          items={systemItems}
+          isActive={isActive}
+        />
+        <SidebarNav
+          items={navSecondary}
+          isActive={isActive}
+          className="mt-auto"
+        />
       </SidebarContent>
       <SidebarFooter>
         <SidebarMenu>
@@ -202,7 +234,46 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarFooter>
-      <SidebarRail />
     </Sidebar>
+  )
+}
+
+function SidebarNav({
+  className,
+  isActive,
+  items,
+  label,
+}: {
+  className?: string
+  isActive: (url: string) => boolean
+  items: NavItem[]
+  label?: string
+}) {
+  if (items.length === 0) {
+    return null
+  }
+
+  return (
+    <SidebarGroup className={className}>
+      {label ? <SidebarGroupLabel>{label}</SidebarGroupLabel> : null}
+      <SidebarGroupContent>
+        <SidebarMenu>
+          {items.map((item) => (
+            <SidebarMenuItem key={item.title}>
+              <SidebarMenuButton
+                asChild
+                tooltip={item.title}
+                isActive={isActive(item.url)}
+              >
+                <Link href={item.url}>
+                  <item.icon />
+                  <span>{item.title}</span>
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          ))}
+        </SidebarMenu>
+      </SidebarGroupContent>
+    </SidebarGroup>
   )
 }

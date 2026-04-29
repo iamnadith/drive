@@ -10,7 +10,6 @@ import {
   ImagePlus,
   KeyRound,
   Link2,
-  Loader2,
   LockKeyhole,
   Phone,
   Save,
@@ -416,10 +415,11 @@ export default function ProfilePage() {
               ) : null}
               <Button
                 type="submit"
-                disabled={!dirty || loading || saving}
+                loading={saving}
+                disabled={!dirty || loading}
                 className={cn("w-full rounded-xl", !dirty && "sm:col-span-2")}
               >
-                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                {!saving ? <Save className="h-4 w-4" /> : null}
                 Save changes
               </Button>
             </div>
@@ -435,7 +435,7 @@ export default function ProfilePage() {
                 <p className="text-sm opacity-80">Enable 2FA to require verification for password and Google sign-in.</p>
               </div>
             </div>
-            <Button type="button" variant="outline" className="w-full rounded-xl sm:w-auto" onClick={() => void setTwoFactorEnabled(true)} disabled={saving}>
+            <Button type="button" variant="outline" className="w-full rounded-xl sm:w-auto" onClick={() => void setTwoFactorEnabled(true)} loading={saving}>
               <Shield className="h-4 w-4" />
               Enable 2FA
             </Button>
@@ -612,7 +612,7 @@ export default function ProfilePage() {
                       </div>
                     </div>
                     {user.totpEnabled ? (
-                      <Button type="button" variant="outline" className="w-full rounded-xl sm:w-auto" onClick={() => void disableTotp()} disabled={saving}>
+                      <Button type="button" variant="outline" className="w-full rounded-xl sm:w-auto" onClick={() => void disableTotp()} loading={saving}>
                         Remove
                       </Button>
                     ) : (
@@ -639,7 +639,7 @@ export default function ProfilePage() {
                   </div>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {user.mobileVerified ? (
-                      <Button type="button" variant="outline" className="rounded-xl" onClick={() => void removeMobileNumber()} disabled={saving}>
+                      <Button type="button" variant="outline" className="rounded-xl" onClick={() => void removeMobileNumber()} loading={saving}>
                         Remove
                       </Button>
                     ) : null}
@@ -671,11 +671,11 @@ export default function ProfilePage() {
                     </div>
                   </div>
                   {!isGoogleLinked ? (
-                    <Button type="button" variant="outline" className="w-full rounded-xl sm:w-auto" onClick={handleLinkGoogle} disabled={loading || saving}>
+                    <Button type="button" variant="outline" className="w-full rounded-xl sm:w-auto" onClick={handleLinkGoogle} loading={saving} disabled={loading}>
                       Link Google
                     </Button>
                   ) : (
-                    <Button type="button" variant="outline" className="w-full rounded-xl sm:w-auto" onClick={() => void handleUnlinkGoogle()} disabled={loading || saving}>
+                    <Button type="button" variant="outline" className="w-full rounded-xl sm:w-auto" onClick={() => void handleUnlinkGoogle()} loading={saving} disabled={loading}>
                       Unlink
                     </Button>
                   )}

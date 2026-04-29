@@ -523,7 +523,7 @@ export function LoginForm({
               <Input id="login-email" autoComplete="username" required value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} />
             </Field>
             <Field>
-              <Button type="submit" disabled={busy}>{busy ? "Checking..." : "Login"}</Button>
+              <Button type="submit" loading={busy}>Login</Button>
             </Field>
             <FieldSeparator>Or</FieldSeparator>
             <GoogleButton onClick={() => handleGoogleLogin("login")} />
@@ -549,7 +549,7 @@ export function LoginForm({
             </Field>
             <Field className="grid gap-3 sm:grid-cols-2">
               <Button type="button" variant="outline" onClick={() => setLoginStep("email")}>Back</Button>
-              <Button type="submit" disabled={busy}>{busy ? "Checking..." : "Continue"}</Button>
+              <Button type="submit" loading={busy}>Continue</Button>
             </Field>
           </FieldGroup>
         </form>
@@ -591,7 +591,7 @@ export function LoginForm({
                 />
                 <Field className="grid gap-3 sm:grid-cols-2">
                   <Button type="button" variant="outline" onClick={() => setLoginStep("password")}>Back</Button>
-                  <Button type="submit" disabled={busy || totpCode.length !== 6}>Verify 2FA</Button>
+                  <Button type="submit" loading={busy} disabled={totpCode.length !== 6}>Verify 2FA</Button>
                 </Field>
                 <Field>
                   <button
@@ -616,7 +616,7 @@ export function LoginForm({
               <Input id="signup-email" type="email" autoComplete="email" required value={signupEmail} onChange={(event) => setSignupEmail(event.target.value)} />
             </Field>
             <Field>
-              <Button type="submit" disabled={busy}>{busy ? "Sending..." : "Create account"}</Button>
+              <Button type="submit" loading={busy}>Create account</Button>
             </Field>
             <FieldSeparator>Or</FieldSeparator>
             <GoogleButton onClick={() => handleGoogleLogin("signup")} />
@@ -678,7 +678,7 @@ export function LoginForm({
               >
                 Back
               </Button>
-              <Button type="submit" disabled={busy}>Continue</Button>
+              <Button type="submit" loading={busy}>Continue</Button>
             </Field>
           </FieldGroup>
         </form>
@@ -698,7 +698,7 @@ export function LoginForm({
             </Field>
             <Field className="grid gap-3 sm:grid-cols-2">
               <Button type="button" variant="outline" onClick={() => setSignupStep("username")}>Back</Button>
-              <Button type="submit" disabled={busy}>{busy ? "Creating..." : "Create account"}</Button>
+              <Button type="submit" loading={busy}>Create account</Button>
             </Field>
           </FieldGroup>
         </form>
@@ -772,7 +772,8 @@ export function LoginForm({
                 ) : null}
                 <Button
                   type="submit"
-                  disabled={busy || (resetStep === "code" && resetCode.length !== 6)}
+                  loading={busy}
+                  disabled={resetStep === "code" && resetCode.length !== 6}
                   className={resetStep === "email" ? "sm:col-span-2" : ""}
                 >
                   {resetStep === "email" ? "Send reset code" : resetStep === "code" ? "Verify code" : "Reset password"}
@@ -848,7 +849,7 @@ function OtpFields({
       <OtpInputField displayTarget={displayTarget} code={code} setCode={setCode} />
       <Field className="grid gap-3 sm:grid-cols-2">
         <Button type="button" variant="outline" onClick={onBack}>Back</Button>
-        <Button type="submit" disabled={submitting || code.length !== 6}>{submitText}</Button>
+        <Button type="submit" loading={submitting} disabled={code.length !== 6}>{submitText}</Button>
       </Field>
     </FieldGroup>
   )
@@ -865,6 +866,13 @@ function OtpInputField({
 }) {
   const target = displayTarget
   const inputRef = React.useRef<HTMLInputElement | null>(null)
+  const pasteCaptureRef = React.useRef<HTMLInputElement | null>(null)
+
+  function submitAfterPaste(input: HTMLInputElement | null, nextCode: string) {
+    if (nextCode.length !== 6) return
+    window.setTimeout(() => input?.form?.requestSubmit(), 50)
+  }
+
   function applyPastedCode(nextCode: string) {
     setCode(nextCode)
     const input = inputRef.current
@@ -873,9 +881,23 @@ function OtpInputField({
     setter?.call(input, nextCode)
     input.dispatchEvent(new Event("input", { bubbles: true }))
     input.focus()
+    submitAfterPaste(input, nextCode)
   }
+
+  function handlePaste(event: React.ClipboardEvent<HTMLElement>) {
+    const nextCode = event.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6)
+    if (!nextCode) return
+    event.preventDefault()
+    applyPastedCode(nextCode)
+  }
+
+  function handlePasteCaptureChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const nextCode = event.target.value.replace(/\D/g, "").slice(0, 6)
+    event.target.value = ""
+    if (nextCode) applyPastedCode(nextCode)
+  }
+
   async function pasteCode() {
-    inputRef.current?.focus()
     if (navigator.clipboard?.readText) {
       try {
         const text = await navigator.clipboard.readText()
@@ -883,10 +905,11 @@ function OtpInputField({
         if (nextCode) applyPastedCode(nextCode)
         return
       } catch {
-        // Browser blocked clipboard access. Focus the OTP field so manual paste works.
+        // iOS can block Clipboard API reads; keep a real input focused for native paste/autofill.
       }
     }
-    toast.message("Paste into the focused code field with Ctrl+V.")
+    pasteCaptureRef.current?.focus()
+    pasteCaptureRef.current?.select()
   }
   return (
     <Field className="items-center text-center">
@@ -901,8 +924,12 @@ function OtpInputField({
         maxLength={6}
         id="otp-code"
         required
+        inputMode="numeric"
+        pattern="[0-9]*"
+        autoComplete="one-time-code"
         value={code}
         onChange={setCode}
+        onPaste={handlePaste}
         containerClassName="mx-auto flex w-fit items-center justify-center gap-2"
       >
         <InputOTPGroup className="*:data-[slot=input-otp-slot]:h-12 *:data-[slot=input-otp-slot]:w-11 *:data-[slot=input-otp-slot]:text-xl">
@@ -917,10 +944,31 @@ function OtpInputField({
           <InputOTPSlot index={5} />
         </InputOTPGroup>
       </InputOTP>
-      <Button type="button" variant="ghost" size="sm" className="mx-auto h-8 rounded-full px-3 text-xs" onClick={() => void pasteCode()}>
-        <ClipboardPaste className="h-3.5 w-3.5" />
-        Paste code
-      </Button>
+      <div className="relative mx-auto h-8 w-fit">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-8 rounded-full px-3 text-xs"
+          tabIndex={-1}
+          aria-hidden="true"
+        >
+          <ClipboardPaste className="h-3.5 w-3.5" />
+          Paste code
+        </Button>
+        <input
+          ref={pasteCaptureRef}
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          autoComplete="one-time-code"
+          aria-label="Paste verification code"
+          className="absolute inset-0 h-full w-full cursor-pointer rounded-full opacity-0"
+          onClick={() => void pasteCode()}
+          onPaste={handlePaste}
+          onChange={handlePasteCaptureChange}
+        />
+      </div>
     </Field>
   )
 }

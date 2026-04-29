@@ -161,7 +161,7 @@ export default function ChangePasswordPage() {
             ) : method !== "authenticator" && !codeSent ? (
               <>
                 <Field>
-                  <Button type="button" onClick={() => void sendCode()} disabled={submitting}>
+                  <Button type="button" onClick={() => void sendCode()} loading={submitting}>
                     Send {method === "sms" ? "SMS" : "email"} code
                   </Button>
                 </Field>
@@ -189,7 +189,7 @@ export default function ChangePasswordPage() {
                   setCode={setCode}
                 />
                 <Field>
-                  <Button type="submit" disabled={submitting || code.length !== 6}>
+                  <Button type="submit" loading={submitting} disabled={code.length !== 6}>
                     Continue
                   </Button>
                 </Field>
@@ -236,7 +236,7 @@ export default function ChangePasswordPage() {
               <Button type="button" variant="outline" onClick={() => setStep("verify")}>
                 Back
               </Button>
-              <Button type="submit" disabled={submitting || !password || password !== confirmPassword}>
+              <Button type="submit" loading={submitting} disabled={!password || password !== confirmPassword}>
                 Change password
               </Button>
             </Field>
