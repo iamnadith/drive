@@ -17,7 +17,7 @@ const InputOTP = React.forwardRef<
       ref={ref}
       data-slot="input-otp"
       containerClassName={cn(
-        "flex max-w-full items-center justify-center gap-1.5 overflow-x-auto has-disabled:opacity-50 sm:gap-2",
+        "flex max-w-full items-center justify-center gap-1.5 overflow-hidden has-disabled:opacity-50 sm:gap-2",
         containerClassName
       )}
       className={cn("disabled:cursor-not-allowed", className)}
@@ -59,7 +59,7 @@ function InputOTPSlot({
       data-slot="input-otp-slot"
       data-active={isActive}
       className={cn(
-        "aria-invalid:border-destructive dark:bg-input/30 border-input relative flex h-10 w-9 shrink-0 items-center justify-center border-y border-r text-sm shadow-xs transition-colors outline-none first:rounded-l-xl first:border-l last:rounded-r-xl sm:h-11 sm:w-10",
+        "aria-invalid:border-destructive dark:bg-input/30 border-input relative flex h-10 w-[clamp(2rem,11vw,2.25rem)] shrink-0 items-center justify-center border-y border-r text-sm shadow-xs transition-colors outline-none first:rounded-l-xl first:border-l last:rounded-r-xl sm:h-11 sm:w-10",
         className
       )}
       {...props}

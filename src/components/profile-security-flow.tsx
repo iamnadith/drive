@@ -126,15 +126,15 @@ export function OtpInputField({
         value={code}
         onChange={(value) => setCode(value.replace(/\D/g, ""))}
         onPaste={handlePaste}
-        containerClassName="mx-auto flex w-fit items-center justify-center gap-2"
+        containerClassName="mx-auto flex w-fit max-w-full items-center justify-center gap-[clamp(0.25rem,1.5vw,0.5rem)]"
       >
-        <InputOTPGroup className="*:data-[slot=input-otp-slot]:h-12 *:data-[slot=input-otp-slot]:w-11 *:data-[slot=input-otp-slot]:text-xl">
+        <InputOTPGroup className="*:data-[slot=input-otp-slot]:h-12 *:data-[slot=input-otp-slot]:w-[clamp(2rem,11vw,2.75rem)] *:data-[slot=input-otp-slot]:text-xl">
           <InputOTPSlot index={0} />
           <InputOTPSlot index={1} />
           <InputOTPSlot index={2} />
         </InputOTPGroup>
-        <InputOTPSeparator className="mx-2" />
-        <InputOTPGroup className="*:data-[slot=input-otp-slot]:h-12 *:data-[slot=input-otp-slot]:w-11 *:data-[slot=input-otp-slot]:text-xl">
+        <InputOTPSeparator className="mx-[clamp(0.25rem,1.5vw,0.5rem)]" />
+        <InputOTPGroup className="*:data-[slot=input-otp-slot]:h-12 *:data-[slot=input-otp-slot]:w-[clamp(2rem,11vw,2.75rem)] *:data-[slot=input-otp-slot]:text-xl">
           <InputOTPSlot index={3} />
           <InputOTPSlot index={4} />
           <InputOTPSlot index={5} />

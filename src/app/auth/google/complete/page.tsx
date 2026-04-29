@@ -198,6 +198,20 @@ export default function GoogleCompletePage() {
         ? "Google sign-in failed"
         : "Verify your login"
 
+  if (step === "loading") {
+    return (
+      <div className="auth-flow-bg flex min-h-svh flex-col items-center justify-center gap-6 p-4 sm:p-6 md:p-10">
+        <div className="flex w-full max-w-sm flex-col items-center gap-2 text-center">
+          <div className="flex size-8 items-center justify-center rounded-2xl bg-primary/10">
+            <GalleryVerticalEnd className="size-6" />
+          </div>
+          <h1 className="text-xl font-bold">{title}</h1>
+          <FieldDescription>Please wait while we prepare your account.</FieldDescription>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="auth-flow-bg flex min-h-svh flex-col items-center justify-center gap-6 p-4 sm:p-6 md:p-10">
       <div className="auth-flow-panel w-full max-w-sm rounded-3xl p-5 backdrop-blur sm:p-6">
@@ -208,11 +222,7 @@ export default function GoogleCompletePage() {
             </div>
             <h1 className="text-xl font-bold">{title}</h1>
             <FieldDescription>
-              {step === "loading"
-                ? "Please wait while we prepare your account."
-                : step === "error"
-                  ? error
-                  : "Enter your verification code to continue."}
+              {step === "error" ? error : "Enter your verification code to continue."}
             </FieldDescription>
           </div>
 
@@ -435,15 +445,15 @@ function OtpInputField({
         value={code}
         onChange={(value) => setCode(value.replace(/\D/g, ""))}
         onPaste={handlePaste}
-        containerClassName="mx-auto flex w-fit items-center justify-center gap-2"
+        containerClassName="mx-auto flex w-fit max-w-full items-center justify-center gap-[clamp(0.25rem,1.5vw,0.5rem)]"
       >
-        <InputOTPGroup className="*:data-[slot=input-otp-slot]:h-12 *:data-[slot=input-otp-slot]:w-11 *:data-[slot=input-otp-slot]:text-xl">
+        <InputOTPGroup className="*:data-[slot=input-otp-slot]:h-12 *:data-[slot=input-otp-slot]:w-[clamp(2rem,11vw,2.75rem)] *:data-[slot=input-otp-slot]:text-xl">
           <InputOTPSlot index={0} />
           <InputOTPSlot index={1} />
           <InputOTPSlot index={2} />
         </InputOTPGroup>
-        <InputOTPSeparator className="mx-2" />
-        <InputOTPGroup className="*:data-[slot=input-otp-slot]:h-12 *:data-[slot=input-otp-slot]:w-11 *:data-[slot=input-otp-slot]:text-xl">
+        <InputOTPSeparator className="mx-[clamp(0.25rem,1.5vw,0.5rem)]" />
+        <InputOTPGroup className="*:data-[slot=input-otp-slot]:h-12 *:data-[slot=input-otp-slot]:w-[clamp(2rem,11vw,2.75rem)] *:data-[slot=input-otp-slot]:text-xl">
           <InputOTPSlot index={3} />
           <InputOTPSlot index={4} />
           <InputOTPSlot index={5} />
