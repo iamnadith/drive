@@ -244,8 +244,8 @@ export default function SetupPage() {
         : "Set up the first account that controls this workspace."
 
   return (
-    <main className="flex min-h-svh flex-col items-center justify-center bg-[radial-gradient(circle_at_top,var(--muted),transparent_34rem)] p-4 sm:p-6 md:p-10">
-      <div className="w-full max-w-sm rounded-3xl border bg-card/95 p-5 shadow-sm backdrop-blur sm:p-6">
+    <main className="auth-flow-bg flex min-h-svh flex-col items-center justify-center p-4 sm:p-6 md:p-10">
+      <div className="auth-flow-panel w-full max-w-sm rounded-3xl p-5 backdrop-blur sm:p-6">
         <div className="flex flex-col gap-6">
           <div className="flex flex-col items-center gap-2 text-center">
             <Link href="/setup" className="flex flex-col items-center gap-2 font-medium">

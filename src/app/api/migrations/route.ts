@@ -4,6 +4,7 @@ import { r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
 import { createMigration, listMigrations } from "@/lib/migrations-store"
 import { getBucketStatsMap } from "@/lib/bucket-stats-store"
 import { syncMigrationLiveState } from "@/lib/migration-live-state"
+import { requireAdmin } from "@/lib/server-auth"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
@@ -19,6 +20,9 @@ function jsonBad(error: string, status = 400, extra?: Record<string, unknown>) {
 
 export async function GET() {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const migrations = await listMigrations()
 
     const candidates = migrations
@@ -39,6 +43,9 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const body: unknown = await request.json().catch(() => ({}))
     const data = isRecord(body) ? body : {}
 

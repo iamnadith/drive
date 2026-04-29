@@ -2,6 +2,11 @@ import { NextResponse } from "next/server"
 import { createRepairJob, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
 import { getAgentById } from "@/lib/agents-store"
 import { listMigrationItems } from "@/lib/migrations-store"
+import { requireAdmin } from "@/lib/server-auth"
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback
+}
 
 function isRecentIso(value: string | undefined, maxAgeMs: number): boolean {
   if (!value) return false
@@ -24,15 +29,21 @@ function hasActiveSuperSlurper(items: Array<{ slurperJobId?: string; slurperStat
 
 export async function GET() {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const jobs = await listRepairJobs(100)
     return NextResponse.json({ jobs })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "Unable to load repair jobs" }, { status: 400 })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to load repair jobs") }, { status: 400 })
   }
 }
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
     const migrationId = typeof body.migrationId === "string" ? body.migrationId.trim() : ""
     const mode = (
@@ -62,7 +73,7 @@ export async function POST(request: Request) {
     }
     const job = await createRepairJob({ migrationId, mode, requestedByAgentId })
     return NextResponse.json({ job }, { status: 201 })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "Unable to create repair job" }, { status: 400 })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to create repair job") }, { status: 400 })
   }
 }

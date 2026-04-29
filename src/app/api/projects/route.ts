@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
 import { getActiveAccount } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import {
@@ -9,6 +8,7 @@ import {
   sanitizeBucketName,
 } from "@/lib/projects-store"
 import { r2CreateBucket } from "@/lib/r2-s3"
+import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -18,6 +18,9 @@ function errorMessage(error: unknown, fallback: string) {
 
 export async function GET() {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const projects = await listProjects()
     return NextResponse.json({ projects })
   } catch (error: unknown) {
@@ -30,6 +33,9 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const body = (await request.json().catch(() => ({}))) as { name?: unknown }
     const name = typeof body.name === "string" ? body.name.trim() : ""
     if (!name) {
@@ -67,9 +73,8 @@ export async function POST(request: Request) {
       createdAccountLabel: active.label,
     })
 
-    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
     await recordActivity({
-      actorUserId,
+      actorUserId: auth.user.id,
       action: "project.created",
       entityType: "project",
       entityId: project.projectId,

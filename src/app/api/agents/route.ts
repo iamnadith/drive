@@ -2,9 +2,14 @@ import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
 import { createAgent, listAgents, type AgentCapability, type AgentCategory, type AgentProvider } from "@/lib/agents-store"
 import { GITHUB_TOKEN_COOKIE } from "@/lib/github-oauth"
+import { requireAdmin } from "@/lib/server-auth"
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value : ""
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback
 }
 
 function parseCapabilities(value: unknown): AgentCapability[] {
@@ -18,15 +23,21 @@ function parseCapabilities(value: unknown): AgentCapability[] {
 
 export async function GET() {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const agents = await listAgents()
     return NextResponse.json({ agents })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "Unable to load workers" }, { status: 400 })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to load workers") }, { status: 400 })
   }
 }
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
     const name = asString(body.name).trim()
     const category = (["worker", "agent"].includes(asString(body.category)) ? asString(body.category) : "worker") as AgentCategory
@@ -69,7 +80,7 @@ export async function POST(request: Request) {
     })
 
     return NextResponse.json(result, { status: 201 })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "Unable to create agent/worker" }, { status: 400 })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to create agent/worker") }, { status: 400 })
   }
 }

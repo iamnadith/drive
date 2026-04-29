@@ -1,9 +1,17 @@
 import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
 import { GITHUB_TOKEN_COOKIE, listGitHubWorkflows } from "@/lib/github-oauth"
+import { requireAdmin } from "@/lib/server-auth"
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback
+}
 
 export async function GET(request: Request) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const token = (await cookies()).get(GITHUB_TOKEN_COOKIE)?.value ?? ""
     if (!token) return NextResponse.json({ error: "GitHub is not connected" }, { status: 401 })
 
@@ -14,7 +22,7 @@ export async function GET(request: Request) {
 
     const workflows = await listGitHubWorkflows(token, owner, repo)
     return NextResponse.json({ workflows })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "Unable to load GitHub workflows" }, { status: 400 })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to load GitHub workflows") }, { status: 400 })
   }
 }

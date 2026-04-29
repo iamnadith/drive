@@ -2,12 +2,16 @@ import { NextResponse } from "next/server"
 import { deleteMigration, getMigration, listMigrationItems } from "@/lib/migrations-store"
 import { syncMigrationLiveState } from "@/lib/migration-live-state"
 import { listRepairJobsByMigration } from "@/lib/repair-jobs-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 export async function GET(
   _request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     await syncMigrationLiveState(id).catch(() => undefined)
     const migration = await getMigration(id)
@@ -33,6 +37,9 @@ export async function DELETE(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const migration = await getMigration(id)
     if (!migration) {

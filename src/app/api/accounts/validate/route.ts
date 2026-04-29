@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server"
+import { requireAdmin } from "@/lib/server-auth"
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const body = await request.json()
     const { apiToken } = body as {
       apiToken?: string

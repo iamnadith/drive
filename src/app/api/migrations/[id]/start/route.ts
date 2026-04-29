@@ -20,6 +20,7 @@ import {
   updateMigrationItem,
   claimMigrationItemJobCreation,
 } from "@/lib/migrations-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
 
@@ -174,6 +175,9 @@ export async function POST(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const migration = await getMigration(id)
     if (!migration) {

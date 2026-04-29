@@ -8,6 +8,7 @@ import {
   updateBucketStats,
   type BucketStatsStatus,
 } from "@/lib/bucket-stats-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
 
@@ -17,6 +18,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const body: unknown = await request.json().catch(() => ({}))
     const data = isRecord(body) ? body : {}
     const bucketFilter = typeof data.bucket === "string" ? data.bucket : ""
@@ -28,10 +32,10 @@ export async function POST(request: Request) {
     const accounts = await getAllAccounts()
     const active = accounts.find((a) => a.status === "active")
     if (!active?.cloudflareAccountId) {
-      return NextResponse.json({ error: "No active Cloudflare account" }, { status: 200 })
+      return NextResponse.json({ error: "No active Cloudflare account" }, { status: 404 })
     }
     if (!active.r2AccessKeyId || !active.r2SecretAccessKey) {
-      return NextResponse.json({ error: "Active account missing R2 access key pair" }, { status: 200 })
+      return NextResponse.json({ error: "Active account missing R2 access key pair" }, { status: 409 })
     }
 
     const buckets = await r2ListBuckets({ accountId: active.cloudflareAccountId, apiToken: active.apiToken })
@@ -39,7 +43,7 @@ export async function POST(request: Request) {
 
     if (bucketFilter) {
       if (!bucketNames.includes(bucketFilter)) {
-        return NextResponse.json({ error: "Bucket not found in active account" }, { status: 200 })
+        return NextResponse.json({ error: "Bucket not found in active account" }, { status: 404 })
       }
     }
 
@@ -135,6 +139,6 @@ export async function POST(request: Request) {
       typeof error === "object" && error !== null && "message" in error
         ? String((error as { message?: unknown }).message ?? "Unable to sync bucket stats")
         : "Unable to sync bucket stats"
-    return NextResponse.json({ error: message }, { status: 200 })
+    return NextResponse.json({ error: message }, { status: 500 })
   }
 }

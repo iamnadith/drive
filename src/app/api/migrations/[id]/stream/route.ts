@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { getMigration, listMigrationItems } from "@/lib/migrations-store"
 import { listRepairJobsByMigration } from "@/lib/repair-jobs-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
 
@@ -9,6 +10,9 @@ function sleep(ms: number) {
 }
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
+  const auth = await requireAdmin()
+  if (!auth.ok) return auth.response
+
   const { id } = await context.params
 
   const encoder = new TextEncoder()
@@ -75,7 +79,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     },
   })
 
-  return new NextResponse(stream as any, {
+  return new NextResponse(stream, {
     headers: {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",

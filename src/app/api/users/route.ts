@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
 import {
   PublicUser,
   createUser,
-  getAllUsers,
   searchUsers,
   toPublicUser,
 } from "@/lib/users-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -17,6 +16,9 @@ function errorMessage(error: unknown, fallback: string) {
 
 export async function GET(request: Request) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { searchParams } = new URL(request.url)
     const q = searchParams.get("q") ?? undefined
     const roleParam = searchParams.get("role") ?? undefined
@@ -37,6 +39,9 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const body = await request.json()
     const {
       name,
@@ -65,18 +70,11 @@ export async function POST(request: Request) {
       )
     }
 
-    // Only a super admin can explicitly create a super admin user.
-    if (role === "superadmin") {
-      const cookieStore = await cookies()
-      const actorId = cookieStore.get("sessionUserId")?.value
-      const allUsers = await getAllUsers()
-      const actor = actorId
-        ? allUsers.find((u) => u.id === actorId)
-        : undefined
-
-      if (!actor || actor.role !== "superadmin") {
+    // Only a super admin can create elevated users.
+    if (role === "superadmin" || role === "admin") {
+      if (auth.user.role !== "superadmin") {
         return NextResponse.json(
-          { error: "Only Super Admin can create a Super Admin account" },
+          { error: "Only Super Admin can create admin accounts" },
           { status: 403 }
         )
       }
@@ -93,9 +91,8 @@ export async function POST(request: Request) {
       profileImageUrl,
       passwordSource: "local",
     })
-    const actorId = (await cookies()).get("sessionUserId")?.value ?? null
     await recordActivity({
-      actorUserId: actorId,
+      actorUserId: auth.user.id,
       action: "user.created",
       entityType: "user",
       entityId: user.id,

@@ -199,11 +199,11 @@ export default function GoogleCompletePage() {
         : "Verify your login"
 
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center gap-6 bg-background p-6 md:p-10">
-      <div className="w-full max-w-sm">
+    <div className="auth-flow-bg flex min-h-svh flex-col items-center justify-center gap-6 p-4 sm:p-6 md:p-10">
+      <div className="auth-flow-panel w-full max-w-sm rounded-3xl p-5 backdrop-blur sm:p-6">
         <div className="flex flex-col gap-6">
           <div className="flex flex-col items-center gap-2 text-center">
-            <div className="flex size-8 items-center justify-center rounded-md">
+            <div className="flex size-8 items-center justify-center rounded-2xl bg-primary/10">
               <GalleryVerticalEnd className="size-6" />
             </div>
             <h1 className="text-xl font-bold">{title}</h1>

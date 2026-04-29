@@ -9,7 +9,12 @@ import {
   GITHUB_TOKEN_COOKIE,
 } from "@/lib/github-oauth"
 import { syncMigrationLiveState } from "@/lib/migration-live-state"
-import { abortRepairJob, deleteRepairJob, getRepairJob, updateRepairJob } from "@/lib/repair-jobs-store"
+import { abortRepairJob, deleteRepairJob, getRepairJob } from "@/lib/repair-jobs-store"
+import { requireAdmin } from "@/lib/server-auth"
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback
+}
 
 function getGitHubTokenFallback(): string {
   return (
@@ -165,18 +170,24 @@ async function resolveGitHubRunIdsForAbort(input: {
 
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const job = await getRepairJob(id)
     if (!job) return NextResponse.json({ error: "Repair job not found" }, { status: 404 })
     const linkedRun = await getLatestAgentRunByJobReference(id).catch(() => null)
     return NextResponse.json({ job: { ...job, linkedRun } })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "Unable to load repair job" }, { status: 400 })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to load repair job") }, { status: 400 })
   }
 }
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
     const action = typeof body.action === "string" ? body.action : ""
@@ -344,20 +355,23 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     await syncMigrationLiveState(updatedJob.migrationId).catch(() => undefined)
     const refreshedRun = await getLatestAgentRunByJobReference(id).catch(() => null)
     return NextResponse.json({ ok: true, job: { ...updatedJob, linkedRun: refreshedRun } })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "Unable to update repair job" }, { status: 400 })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to update repair job") }, { status: 400 })
   }
 }
 
 export async function DELETE(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const job = await getRepairJob(id)
     if (!job) return NextResponse.json({ error: "Repair job not found" }, { status: 404 })
 
     await deleteRepairJob(id)
     return NextResponse.json({ ok: true })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "Unable to delete repair job" }, { status: 400 })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to delete repair job") }, { status: 400 })
   }
 }

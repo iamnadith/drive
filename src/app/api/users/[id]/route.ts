@@ -8,8 +8,8 @@ import {
   toPublicUser,
   updateUser,
 } from "@/lib/users-store"
-import { cookies } from "next/headers"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+import { requireAdmin, requireSessionUser } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -25,7 +25,15 @@ type RouteParams = {
 
 export async function GET(_: Request, { params }: RouteParams) {
   try {
+    const auth = await requireSessionUser()
+    if (!auth.ok) return auth.response
+
     const { id } = await params
+    const canRead = auth.user.id === id || auth.user.role === "admin" || auth.user.role === "superadmin"
+    if (!canRead) {
+      return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 })
+    }
+
     const user = await findUserById(id)
     if (!user) {
       return NextResponse.json({ error: "User not found" }, { status: 404 })
@@ -40,6 +48,9 @@ export async function GET(_: Request, { params }: RouteParams) {
 
 export async function PATCH(request: Request, { params }: RouteParams) {
   try {
+    const auth = await requireSessionUser()
+    if (!auth.ok) return auth.response
+
     const { id: targetId } = await params
 
     const allBefore = await getAllUsers()
@@ -48,9 +59,8 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       return NextResponse.json({ error: "User not found" }, { status: 404 })
     }
 
-    const cookieStore = await cookies()
-    const actorId = cookieStore.get("sessionUserId")?.value
-    const actor = actorId ? allBefore.find((u) => u.id === actorId) : undefined
+    const actorId = auth.user.id
+    const actor = auth.user
 
     const body = await request.json()
 
@@ -110,13 +120,6 @@ export async function PATCH(request: Request, { params }: RouteParams) {
     if (quotaLimitMb !== undefined) updates.quotaLimitMb = quotaLimitMb
     if (quotaUsedMb !== undefined) updates.quotaUsedMb = quotaUsedMb
 
-    if (!actor) {
-      return NextResponse.json(
-        { error: "Authentication required" },
-        { status: 401 }
-      )
-    }
-
     const isSelf = actorId === targetId
     const isActorSuperAdmin = actor.role === "superadmin"
     const isActorAdmin = actor.role === "admin"
@@ -124,6 +127,13 @@ export async function PATCH(request: Request, { params }: RouteParams) {
 
     const isTargetSuperAdmin = targetBefore.role === "superadmin"
     const isTargetAdmin = targetBefore.role === "admin"
+
+    if (isActorUser && !isSelf) {
+      return NextResponse.json(
+        { error: "Users can only modify their own account" },
+        { status: 403 }
+      )
+    }
 
     const activeSuperAdminsBefore = allBefore.filter(
       (u) => u.role === "superadmin" && u.status === "active"
@@ -281,6 +291,9 @@ export async function PATCH(request: Request, { params }: RouteParams) {
 
 export async function DELETE(_: Request, { params }: RouteParams) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await params
     const target = await findUserById(id)
     if (!target) {
@@ -288,9 +301,8 @@ export async function DELETE(_: Request, { params }: RouteParams) {
       return NextResponse.json({ ok: true })
     }
 
-    const cookieStore = await cookies()
-    const actorId = cookieStore.get("sessionUserId")?.value
-    const actor = actorId ? await findUserById(actorId) : undefined
+    const actorId = auth.user.id
+    const actor = auth.user
 
     // Only a super admin may delete another super admin.
     if (target.role === "superadmin" && actor?.role !== "superadmin") {

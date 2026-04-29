@@ -4,6 +4,11 @@ import { createAgentRun, ensureAgentRegistrationToken, getAgentById, getAgentGit
 import { createRepairJob, findActiveRepairJobForDispatch, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
 import { GITHUB_TOKEN_COOKIE, listGitHubWorkflowRuns, setGitHubActionsSecret } from "@/lib/github-oauth"
 import { listMigrationItems } from "@/lib/migrations-store"
+import { requireAdmin } from "@/lib/server-auth"
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback
+}
 
 function normalizeStatus(value: unknown): string {
   return String(value ?? "").trim().toLowerCase()
@@ -65,6 +70,9 @@ function isUnexpectedWorkflowInputsError(status: number, text: string): boolean 
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const agent = await getAgentById(id)
     if (!agent) return NextResponse.json({ error: "Agent not found" }, { status: 404 })
@@ -177,8 +185,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         agentId: id,
         registrationToken,
       })
-    } catch (error: any) {
-      secretSyncError = error?.message ? String(error.message) : "Unable to sync GitHub worker secrets"
+    } catch (error: unknown) {
+      secretSyncError = errorMessage(error, "Unable to sync GitHub worker secrets")
     }
     const job = await createRepairJob({
       migrationId,
@@ -254,8 +262,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           response = new Response(firstBody, { status: response.status, statusText: response.statusText, headers: response.headers })
         }
       }
-    } catch (error: any) {
-      return NextResponse.json({ error: error?.message ?? "Unable to send GitHub workflow dispatch request" }, { status: 400 })
+    } catch (error: unknown) {
+      return NextResponse.json({ error: errorMessage(error, "Unable to send GitHub workflow dispatch request") }, { status: 400 })
     }
 
     if (!response.ok) {
@@ -339,7 +347,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }).catch(() => undefined)
 
     return NextResponse.json({ ok: true, job, run: updatedRun }, { status: 200 })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "Unable to dispatch GitHub workflow" }, { status: 400 })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to dispatch GitHub workflow") }, { status: 400 })
   }
 }

@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
 import { getActiveAccount } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import {
@@ -8,6 +7,7 @@ import {
   updateProjectRecord,
 } from "@/lib/projects-store"
 import { r2DeleteBucketAndContents } from "@/lib/r2-s3"
+import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -20,6 +20,9 @@ export async function GET(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const project = await getProjectByIdentifier(id)
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 })
@@ -37,6 +40,9 @@ export async function PATCH(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const body = (await request.json().catch(() => ({}))) as {
       name?: unknown
@@ -48,9 +54,8 @@ export async function PATCH(
     const before = await getProjectByIdentifier(id)
     const project = await updateProjectRecord(id, { name, status })
 
-    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
     await recordActivity({
-      actorUserId,
+      actorUserId: auth.user.id,
       action: "project.updated",
       entityType: "project",
       entityId: project.projectId,
@@ -75,6 +80,9 @@ export async function DELETE(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const body = (await request.json().catch(() => ({}))) as { deleteBucket?: unknown }
     const deleteBucket = body.deleteBucket === true
@@ -105,9 +113,8 @@ export async function DELETE(
 
     await deleteProjectRecord(project.id)
 
-    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
     await recordActivity({
-      actorUserId,
+      actorUserId: auth.user.id,
       action: deleteBucket ? "project.deleted_with_bucket" : "project.deleted",
       entityType: "project",
       entityId: project.projectId,

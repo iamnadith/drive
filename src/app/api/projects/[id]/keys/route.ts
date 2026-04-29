@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import {
   PROJECT_PERMISSION_PRESETS,
@@ -8,6 +7,7 @@ import {
   listProjectApiKeys,
   normalizePermissions,
 } from "@/lib/projects-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -20,6 +20,9 @@ export async function GET(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const keys = await listProjectApiKeys(id)
     return NextResponse.json({ keys })
@@ -36,6 +39,9 @@ export async function POST(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const body = (await request.json().catch(() => ({}))) as {
       name?: unknown
@@ -65,9 +71,8 @@ export async function POST(
       expiresAt: typeof body.expiresAt === "string" && body.expiresAt ? body.expiresAt : null,
     })
 
-    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
     await recordActivity({
-      actorUserId,
+      actorUserId: auth.user.id,
       action: "project.api_key.created",
       entityType: "project",
       entityId: project.projectId,

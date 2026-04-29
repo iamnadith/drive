@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { deleteMigration, listMigrationsByAccount } from "@/lib/migrations-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 function toMessage(error: unknown, fallback: string): string {
   return typeof error === "object" && error !== null && "message" in error
@@ -12,6 +13,9 @@ export async function GET(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const migrations = await listMigrationsByAccount(id)
     return NextResponse.json({ migrations }, { status: 200 })
@@ -28,6 +32,9 @@ export async function DELETE(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const migrations = await listMigrationsByAccount(id)
     await Promise.all(migrations.map((migration) => deleteMigration(migration.id)))

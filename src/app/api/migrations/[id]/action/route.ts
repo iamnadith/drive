@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
 import { getAgentById, getAgentGithubToken, getLatestAgentRunByJobReference, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { activateAccountForCompletedMigration, getAllAccounts } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
@@ -8,6 +7,7 @@ import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflo
 import { getMigration, listMigrationItems, updateMigration, updateMigrationItem } from "@/lib/migrations-store"
 import { abortRepairJob, listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 import { createInitialBucketVerifyState } from "@/lib/bucket-verifier"
+import { requireAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
 
@@ -256,8 +256,11 @@ async function abortRepairJobsForMigration(migrationId: string): Promise<{
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
-    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
+    const actorUserId = auth.user.id
     const body: unknown = await request.json().catch(() => ({}))
     const data = isRecord(body) ? body : {}
     const action = typeof data.action === "string" ? data.action : ""

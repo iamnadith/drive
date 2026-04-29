@@ -10,6 +10,7 @@ import {
   r2ListObjectsPageWithDelimiter,
   r2PutObject,
 } from "@/lib/r2-s3"
+import { requireAdmin } from "@/lib/server-auth"
 
 type ActiveAccount = Awaited<ReturnType<typeof getAllAccounts>>[number] & {
   cloudflareAccountId: string
@@ -39,19 +40,22 @@ export async function GET(
   context: { params: Promise<{ name: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { name } = await context.params
     const { active, error } = await getActiveAccount()
     if (!active) {
       return NextResponse.json(
         { error, objects: [] },
-        { status: 200 }
+        { status: 404 }
       )
     }
 
     if (!active.r2AccessKeyId || !active.r2SecretAccessKey) {
       return NextResponse.json(
         { error: "Active Cloudflare account is missing R2 access key pair", objects: [] },
-        { status: 200 }
+        { status: 409 }
       )
     }
 
@@ -128,7 +132,7 @@ export async function GET(
     })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to list bucket objects")
-    return NextResponse.json({ error: message, objects: [] }, { status: 200 })
+    return NextResponse.json({ error: message, objects: [] }, { status: 500 })
   }
 }
 
@@ -137,6 +141,9 @@ export async function POST(
   context: { params: Promise<{ name: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { name } = await context.params
     const { active, error } = await getActiveAccount()
     if (!active) {
@@ -251,6 +258,9 @@ export async function DELETE(
   context: { params: Promise<{ name: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { name } = await context.params
     const { active, error } = await getActiveAccount()
     if (!active) {

@@ -1,11 +1,15 @@
 import { NextResponse } from "next/server"
 import { getAllAccounts, updateAccount } from "@/lib/accounts-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 export async function POST(
   _request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
 
     const account = (await getAllAccounts()).find((a) => a.id === id)

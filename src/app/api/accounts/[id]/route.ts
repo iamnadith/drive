@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
 import { deleteAccount, getAllAccounts, updateAccount } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -14,8 +14,11 @@ export async function PATCH(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
-    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
+    const actorUserId = auth.user.id
     const beforeAccounts = await getAllAccounts()
     const before = beforeAccounts.find((account) => account.id === id)
     const body = await request.json()
@@ -114,8 +117,11 @@ export async function DELETE(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
-    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
+    const actorUserId = auth.user.id
     const before = (await getAllAccounts()).find((account) => account.id === id)
     await deleteAccount(id)
     await recordActivity({

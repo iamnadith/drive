@@ -13,6 +13,7 @@ import { reconcileRepairJobs, type DriveRepairJob } from "@/lib/repair-jobs-stor
 import { isPostgresConfigured, queryDb } from "@/lib/db"
 import { getSupabaseServerClient } from "@/lib/supabase"
 import { getAllUsers, type User } from "@/lib/users-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
 
@@ -417,6 +418,9 @@ function mapRepairJobRow(row: RepairJobRow): DriveRepairJob {
 }
 
 export async function GET(request: Request) {
+  const auth = await requireAdmin()
+  if (!auth.ok) return auth.response
+
   const url = new URL(request.url)
   const range = asRange(url.searchParams.get("range"))
   const activityLimitRaw = Number(url.searchParams.get("activityLimit") ?? 12)

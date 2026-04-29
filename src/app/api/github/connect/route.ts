@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server"
 import { buildGitHubOAuthUrl, createGitHubOAuthState, GITHUB_FLOW_COOKIE, GITHUB_STATE_COOKIE } from "@/lib/github-oauth"
 import { getPublicOrigin } from "@/lib/public-origin"
+import { requireAdmin } from "@/lib/server-auth"
 
 export async function GET(request: Request) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const url = new URL(request.url)
     const popup = url.searchParams.get("popup") === "1"
     const state = createGitHubOAuthState()

@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
 import {
   CloudflareAccount,
   createAccount,
@@ -8,6 +7,7 @@ import {
   updateAccount,
 } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -17,6 +17,9 @@ function errorMessage(error: unknown, fallback: string) {
 
 export async function GET() {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     let accounts = await getAllAccounts()
 
     if (accounts.length > 0) {
@@ -37,8 +40,11 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const body = await request.json()
-    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
+    const actorUserId = auth.user.id
     const beforeAccounts = await getAllAccounts()
     const {
       label,

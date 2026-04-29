@@ -1,6 +1,6 @@
-import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
 import { undoActivity } from "@/lib/activity-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
 
@@ -15,9 +15,11 @@ export async function POST(
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
-    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
-    await undoActivity(id, actorUserId, request)
+    await undoActivity(id, auth.user.id, request)
     return NextResponse.json({ success: true })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to undo activity")

@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server"
-import { cookies } from "next/headers"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import {
   deleteProjectApiKey,
@@ -7,6 +6,7 @@ import {
   normalizePermissions,
   updateProjectApiKey,
 } from "@/lib/projects-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -19,6 +19,9 @@ export async function PATCH(
   context: { params: Promise<{ id: string; keyId: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id, keyId } = await context.params
     const body = (await request.json().catch(() => ({}))) as {
       name?: unknown
@@ -39,9 +42,8 @@ export async function PATCH(
       permissions: body.permissions ? normalizePermissions(body.permissions) : undefined,
     })
 
-    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
     await recordActivity({
-      actorUserId,
+      actorUserId: auth.user.id,
       action: "project.api_key.updated",
       entityType: "project",
       entityId: project.projectId,
@@ -65,14 +67,16 @@ export async function DELETE(
   context: { params: Promise<{ id: string; keyId: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id, keyId } = await context.params
     const project = await getProjectByIdentifier(id)
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 })
     await deleteProjectApiKey(project.id, keyId)
 
-    const actorUserId = (await cookies()).get("sessionUserId")?.value ?? null
     await recordActivity({
-      actorUserId,
+      actorUserId: auth.user.id,
       action: "project.api_key.deleted",
       entityType: "project",
       entityId: project.projectId,

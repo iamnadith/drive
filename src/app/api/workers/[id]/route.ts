@@ -10,6 +10,11 @@ import {
   GITHUB_TOKEN_COOKIE,
 } from "@/lib/github-oauth"
 import { syncMigrationLiveState } from "@/lib/migration-live-state"
+import { requireAdmin } from "@/lib/server-auth"
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback
+}
 
 function getGitHubTokenFallback(): string {
   return (
@@ -246,6 +251,9 @@ async function stopGithubWorkerById(workerId: string) {
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
     const action = typeof body.action === "string" ? body.action : ""
@@ -255,8 +263,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     const result = await stopGithubWorkerById(id)
     return NextResponse.json({ ok: true, ...result })
-  } catch (error: any) {
-    const message = error?.message ?? "Unable to stop worker"
+  } catch (error: unknown) {
+    const message = errorMessage(error, "Unable to stop worker")
     const status = typeof message === "string" && message.includes("still running") ? 409 : 400
     return NextResponse.json({ error: message }, { status })
   }
@@ -264,13 +272,16 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
 export async function DELETE(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { id } = await context.params
     const worker = await getAgentById(id)
     if (!worker) return NextResponse.json({ error: "Worker not found" }, { status: 404 })
 
     await deleteAgent(id)
     return NextResponse.json({ ok: true })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "Unable to delete worker" }, { status: 400 })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to delete worker") }, { status: 400 })
   }
 }

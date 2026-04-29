@@ -50,11 +50,11 @@ export default function VerifyEmailPage() {
   }
 
   return (
-    <main className="min-h-screen bg-muted/30">
-      <div className="mx-auto flex min-h-screen w-full max-w-md items-center px-4">
-        <form className="w-full rounded-md border bg-background p-6 shadow-sm" onSubmit={handleSubmit}>
+    <main className="auth-flow-bg min-h-svh">
+      <div className="mx-auto flex min-h-svh w-full max-w-md items-center p-4 sm:p-6">
+        <form className="auth-flow-panel w-full rounded-3xl p-5 backdrop-blur sm:p-6" onSubmit={handleSubmit}>
           <div className="mb-5 flex items-start gap-3">
-            <div className="flex size-10 items-center justify-center rounded-md border bg-muted/40">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-2xl border bg-primary/10">
               <MailCheck className="h-5 w-5 text-primary" />
             </div>
             <div>

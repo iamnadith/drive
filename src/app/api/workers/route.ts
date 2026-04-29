@@ -4,6 +4,11 @@ import { POST as createWorker } from "@/app/api/agents/route"
 import { getAgentGithubToken, listAgents, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { GITHUB_TOKEN_COOKIE, getGitHubWorkflowRun, listGitHubWorkflowRunJobs, listGitHubWorkflowRuns } from "@/lib/github-oauth"
 import { listRepairJobs, getRepairJob, updateRepairJob } from "@/lib/repair-jobs-store"
+import { requireAdmin } from "@/lib/server-auth"
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback
+}
 
 function getGitHubTokenFallback(): string {
   return (
@@ -99,6 +104,9 @@ function matchGithubRunToDispatch(
 
 export async function GET() {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const agents = await listAgents()
     const cookieToken = (await cookies()).get(GITHUB_TOKEN_COOKIE)?.value ?? ""
 
@@ -322,8 +330,8 @@ export async function GET() {
         status: getEffectiveStatus(agent),
       })),
     })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "Unable to load workers" }, { status: 400 })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to load workers") }, { status: 400 })
   }
 }
 

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { listActivity } from "@/lib/activity-store"
+import { requireAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
 
@@ -11,6 +12,9 @@ function errorMessage(error: unknown, fallback: string) {
 
 export async function GET(request: Request) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+
     const { searchParams } = new URL(request.url)
     const limitRaw = Number(searchParams.get("limit") ?? 25)
     const undoableParam = searchParams.get("undoable")
