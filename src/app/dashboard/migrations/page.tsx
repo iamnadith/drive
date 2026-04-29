@@ -450,13 +450,18 @@ export default function MigrationsPage() {
       else if (typeof skippedObjects === "number") skipped += skippedObjects
     }
 
-    const completed = totalObjects > 0 ? Math.min(totalObjects, transferred + skipped) : transferred + skipped
+    const completed =
+      activeMigration?.status === "completed" && totalObjects > 0
+        ? totalObjects
+        : totalObjects > 0
+          ? Math.min(totalObjects, transferred + skipped)
+          : transferred + skipped
     const percent =
       totalObjects > 0
         ? Math.max(0, Math.min(100, (completed / totalObjects) * 100))
         : 0
     return { totalObjects, transferred, skipped, completed, percent }
-  }, [activeItems])
+  }, [activeItems, activeMigration?.status])
 
   const filteredBuckets = React.useMemo(() => {
     const query = bucketQuery.trim().toLowerCase()
