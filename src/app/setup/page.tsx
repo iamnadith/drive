@@ -249,7 +249,7 @@ export default function SetupPage() {
         <div className="flex flex-col gap-6">
           <div className="flex flex-col items-center gap-2 text-center">
             <Link href="/setup" className="flex flex-col items-center gap-2 font-medium">
-              <div className="flex size-8 items-center justify-center rounded-2xl bg-primary/10">
+              <div className="flex size-8 items-center justify-center rounded-2xl">
                 <GalleryVerticalEnd className="size-6" />
               </div>
               <span className="sr-only">Drive</span>
