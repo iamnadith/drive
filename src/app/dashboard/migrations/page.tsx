@@ -380,8 +380,8 @@ export default function MigrationsPage() {
         setTimeout(connect, delay)
       }
 
-      es.addEventListener("snapshot", onSnapshot as any)
-      es.addEventListener("error", onError as any)
+      es.addEventListener("snapshot", onSnapshot)
+      es.addEventListener("error", onError)
     }
 
     connect()
@@ -429,6 +429,7 @@ export default function MigrationsPage() {
   const totals = React.useMemo(() => {
     let totalObjects = 0
     let transferred = 0
+    let skipped = 0
 
     for (const item of activeItems) {
       const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
@@ -436,6 +437,7 @@ export default function MigrationsPage() {
       const live = isRecord(progress.live) ? (progress.live as Record<string, unknown>) : null
       const objects = result?.objects
       const transferredObjects = result?.transferredObjects
+      const skippedObjects = result?.skippedObjects
 
       if (live && typeof live.totalObjects === "number") totalObjects += live.totalObjects
       else if (typeof item.sourceObjects === "number") totalObjects += item.sourceObjects
@@ -443,13 +445,17 @@ export default function MigrationsPage() {
 
       if (live && typeof live.transferredObjects === "number") transferred += live.transferredObjects
       else if (typeof transferredObjects === "number") transferred += transferredObjects
+
+      if (live && typeof live.skippedObjects === "number") skipped += live.skippedObjects
+      else if (typeof skippedObjects === "number") skipped += skippedObjects
     }
 
+    const completed = totalObjects > 0 ? Math.min(totalObjects, transferred + skipped) : transferred + skipped
     const percent =
       totalObjects > 0
-        ? Math.max(0, Math.min(100, (transferred / totalObjects) * 100))
+        ? Math.max(0, Math.min(100, (completed / totalObjects) * 100))
         : 0
-    return { totalObjects, transferred, percent }
+    return { totalObjects, transferred, skipped, completed, percent }
   }, [activeItems])
 
   const filteredBuckets = React.useMemo(() => {
@@ -929,7 +935,10 @@ export default function MigrationsPage() {
                 </div>
                 <Progress value={totals.percent} className="h-2" />
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span>{formatNumber(totals.transferred)} transferred objects</span>
+                  <span>
+                    {formatNumber(totals.transferred)} transferred
+                    {totals.skipped > 0 ? `, ${formatNumber(totals.skipped)} skipped` : ""}
+                  </span>
                   <span>{formatNumber(totals.totalObjects)} total objects</span>
                 </div>
               </div>

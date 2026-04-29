@@ -386,10 +386,33 @@ export async function activateAccountForCompletedMigration(input: {
       ? input.completedAt
       : new Date().toISOString()
 
-  return updateAccount(target.id, {
-    status: "active",
-    lastMigrated: completedAt,
-  })
+  if (target.status === "active") {
+    return updateAccount(target.id, {
+      lastMigrated: completedAt,
+    })
+  }
+
+  try {
+    return await updateAccount(target.id, {
+      status: "active",
+      lastMigrated: completedAt,
+    })
+  } catch (error: unknown) {
+    const message =
+      typeof error === "object" && error !== null && "message" in error
+        ? String((error as { message?: unknown }).message ?? "")
+        : String(error ?? "")
+
+    if (!message.includes("drive_accounts_one_active_key")) throw error
+
+    const refreshed = await getAllAccounts()
+    const activeTarget = refreshed.find((account) => account.id === targetAccountId && account.status === "active")
+    if (!activeTarget) throw error
+
+    return updateAccount(activeTarget.id, {
+      lastMigrated: completedAt,
+    })
+  }
 }
 
 export async function deleteAccount(id: string): Promise<void> {
