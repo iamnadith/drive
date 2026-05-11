@@ -53,12 +53,14 @@ export async function POST(request: Request) {
       typeof data.targetAccountId === "string" ? data.targetAccountId : ""
     const overwrite = typeof data.overwrite === "boolean" ? data.overwrite : true
     const concurrency = typeof data.concurrency === "number" ? data.concurrency : 3
-    const hasIncludeBuckets = Array.isArray(data.includeBuckets)
+    const rawIncludeBuckets = data.includeBuckets
+    const hasIncludeBuckets = Array.isArray(rawIncludeBuckets)
     const includeBuckets = hasIncludeBuckets
-      ? data.includeBuckets.map((v) => String(v)).filter(Boolean)
+      ? rawIncludeBuckets.map((v) => String(v)).filter(Boolean)
       : undefined
-    const excludeBuckets = Array.isArray(data.excludeBuckets)
-      ? data.excludeBuckets.map((v) => String(v)).filter(Boolean)
+    const rawExcludeBuckets = data.excludeBuckets
+    const excludeBuckets = Array.isArray(rawExcludeBuckets)
+      ? rawExcludeBuckets.map((v) => String(v)).filter(Boolean)
       : undefined
     const pathPrefix =
       typeof data.pathPrefix === "string"
