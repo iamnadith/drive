@@ -492,14 +492,24 @@ export default function MigrationsPage() {
   }, [selectedBuckets, buckets])
 
   const createNewMigration = async () => {
-    setBusyAction("create")
-    setError(null)
     try {
       const parsedConcurrency = Number(concurrency)
       const chosen = Object.entries(selectedBuckets)
         .filter(([, on]) => on)
         .map(([name]) => name)
-      if (chosen.length === 0) throw new Error("Select at least one bucket to migrate")
+
+      if (
+        chosen.length > 0 &&
+        typeof window !== "undefined" &&
+        !window.confirm(
+          `Start a migration for ${chosen.length} selected bucket${chosen.length === 1 ? "" : "s"}?`
+        )
+      ) {
+        return
+      }
+
+      setBusyAction("create")
+      setError(null)
 
       const res = await fetch("/api/migrations", {
         method: "POST",
@@ -693,10 +703,10 @@ export default function MigrationsPage() {
         >
           <div className="border-b px-6 py-5">
             <div className="flex items-start justify-between gap-4">
-              <DialogHeader className="flex-1">
-                <DialogTitle>Create migration</DialogTitle>
-                <DialogDescription>Pick a destination account and the buckets to migrate.</DialogDescription>
-              </DialogHeader>
+                <DialogHeader className="flex-1">
+                  <DialogTitle>Create migration</DialogTitle>
+                  <DialogDescription>Pick a destination account and optionally choose buckets to migrate.</DialogDescription>
+                </DialogHeader>
               <div className="flex items-center gap-3">
                 <Button
                   size="sm"
@@ -706,8 +716,7 @@ export default function MigrationsPage() {
                     busyAction === "create" ||
                     !activeAccount ||
                     availableTargets.length === 0 ||
-                    !targetAccountId ||
-                    Object.values(selectedBuckets).every((v) => !v)
+                    !targetAccountId
                   }
                 >
                   {busyAction === "create" ? <Spinner className="mr-0" /> : null}
@@ -903,7 +912,7 @@ export default function MigrationsPage() {
 
               <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p className="text-xs text-muted-foreground">
-                  Review selection, then create the migration record (jobs start after clicking Start).
+                  Review selection, then create the migration record. If no buckets are selected, starting it will only switch the active account.
                 </p>
               </div>
             </div>

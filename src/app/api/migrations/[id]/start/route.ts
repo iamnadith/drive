@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { getAllAccounts } from "@/lib/accounts-store"
+import { activateAccountForCompletedMigration, getAllAccounts } from "@/lib/accounts-store"
 import { r2CreateBucketViaApi, r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
 import {
   slurperConnectivityPrecheckSource,
@@ -186,10 +186,21 @@ export async function POST(
 
     const items = await listMigrationItems(id)
     if (items.length === 0) {
-      return NextResponse.json(
-        { error: "Migration has no buckets to migrate" },
-        { status: 400 }
-      )
+      const completedAt = new Date().toISOString()
+      await activateAccountForCompletedMigration({
+        targetAccountId: migration.targetAccountId,
+        completedAt,
+      })
+      const completedMigration = await updateMigration(id, {
+        status: "completed",
+        startedAt: migration.startedAt ?? completedAt,
+        completedAt,
+        syncStatus: "ok",
+        syncMessage: "",
+        lastSyncedAt: completedAt,
+        options: { ...migration.options, targetActivatedAt: completedAt },
+      })
+      return NextResponse.json({ migration: completedMigration, items: [] }, { status: 200 })
     }
 
     const accounts = await getAllAccounts()

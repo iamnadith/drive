@@ -53,7 +53,8 @@ export async function POST(request: Request) {
       typeof data.targetAccountId === "string" ? data.targetAccountId : ""
     const overwrite = typeof data.overwrite === "boolean" ? data.overwrite : true
     const concurrency = typeof data.concurrency === "number" ? data.concurrency : 3
-    const includeBuckets = Array.isArray(data.includeBuckets)
+    const hasIncludeBuckets = Array.isArray(data.includeBuckets)
+    const includeBuckets = hasIncludeBuckets
       ? data.includeBuckets.map((v) => String(v)).filter(Boolean)
       : undefined
     const excludeBuckets = Array.isArray(data.excludeBuckets)
@@ -84,6 +85,28 @@ export async function POST(request: Request) {
     const target = accounts.find((a) => a.id === targetAccountId)
     if (!target) return jsonBad("Target Cloudflare account not found", 404)
 
+    if (hasIncludeBuckets && includeBuckets?.length === 0) {
+      const { migration, items } = await createMigration({
+        sourceAccountId: source.id,
+        targetAccountId: target.id,
+        options: {
+          overwrite,
+          concurrency,
+          includeBuckets,
+          excludeBuckets,
+          pathPrefix,
+          sourceMode: "s3",
+          verifyAfterCopy,
+          verifyStrictDestination,
+          verifyMode,
+          ...(typeof verifyHashMaxBytes !== "undefined" ? { verifyHashMaxBytes } : {}),
+        },
+        items: [],
+      })
+
+      return jsonOk({ migration, items })
+    }
+
     if (!source.cloudflareAccountId) return jsonBad("Active Cloudflare account is not synced")
     if (!target.cloudflareAccountId) return jsonBad("Target Cloudflare account is not synced")
 
@@ -100,14 +123,10 @@ export async function POST(request: Request) {
     })
 
     const filtered = buckets.filter((bucket) => {
-      if (includeBuckets?.length) return includeBuckets.includes(bucket.name)
+      if (hasIncludeBuckets) return includeBuckets?.includes(bucket.name) ?? false
       if (excludeBuckets?.length) return !excludeBuckets.includes(bucket.name)
       return true
     })
-
-    if (filtered.length === 0) {
-      return jsonBad("No buckets to migrate (check include/exclude filters)")
-    }
 
     const cachedStats = await getBucketStatsMap(source.id)
 

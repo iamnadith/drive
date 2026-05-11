@@ -323,6 +323,13 @@ export async function createMigration(input: {
     updated_at: now,
   }))
 
+  if (itemRows.length === 0) {
+    return {
+      migration: mapMigrationRow(migrationRow as DriveMigrationRow),
+      items: [],
+    }
+  }
+
   const { data: createdItems, error: itemsError } = await supabase
     .from(MIGRATION_ITEMS_TABLE)
     .insert(itemRows)
