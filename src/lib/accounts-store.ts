@@ -265,11 +265,14 @@ export async function createAccount(input: {
     .single()
   if (error) {
     if (status === "active" && previousActiveIds.length > 0) {
-      await supabase
-        .from(ACCOUNTS_TABLE)
-        .update({ status: "active" })
-        .in("id", previousActiveIds)
-        .catch(() => undefined)
+      try {
+        await supabase
+          .from(ACCOUNTS_TABLE)
+          .update({ status: "active" })
+          .in("id", previousActiveIds)
+      } catch {
+        // Best-effort rollback only.
+      }
     }
     throw normalizeSupabaseError(error)
   }
@@ -394,11 +397,14 @@ export async function updateAccount(
 
   if (error) {
     if (updates.status === "active" && previousActiveIds.length > 0) {
-      await supabase
-        .from(ACCOUNTS_TABLE)
-        .update({ status: "active" })
-        .in("id", previousActiveIds)
-        .catch(() => undefined)
+      try {
+        await supabase
+          .from(ACCOUNTS_TABLE)
+          .update({ status: "active" })
+          .in("id", previousActiveIds)
+      } catch {
+        // Best-effort rollback only.
+      }
     }
     throw normalizeSupabaseError(error)
   }
