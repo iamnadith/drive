@@ -25,9 +25,12 @@ export async function GET() {
     if (accounts.length > 0) {
       const active = await getActiveAccount()
       if (!active) {
-        // Promote the first account to active if none exists.
-        await updateAccount(accounts[0].id, { status: "active" })
-        accounts = await getAllAccounts()
+        const fallback = accounts.find((account) => account.status === "available")
+        if (fallback) {
+          // Promote the first available account to active if none exists.
+          await updateAccount(fallback.id, { status: "active" })
+          accounts = await getAllAccounts()
+        }
       }
     }
 

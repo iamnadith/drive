@@ -221,10 +221,18 @@ export async function createAccount(input: {
   let status: CloudflareAccountStatus = "available"
   if (input.makeActive || accountCount === 0) status = "active"
 
+  let previousActiveIds: string[] = []
   if (status === "active") {
+    const { data: activeRows, error: activeRowsError } = await supabase
+      .from(ACCOUNTS_TABLE)
+      .select("id")
+      .eq("status", "active")
+    if (activeRowsError) throw normalizeSupabaseError(activeRowsError)
+    previousActiveIds = ((activeRows as Array<{ id: string }> | null) ?? []).map((row) => row.id)
+
     const { error } = await supabase
       .from(ACCOUNTS_TABLE)
-      .update({ status: "disabled" })
+      .update({ status: "available" })
       .eq("status", "active")
     if (error) throw normalizeSupabaseError(error)
   }
@@ -255,7 +263,16 @@ export async function createAccount(input: {
     .insert(row)
     .select("*")
     .single()
-  if (error) throw normalizeSupabaseError(error)
+  if (error) {
+    if (status === "active" && previousActiveIds.length > 0) {
+      await supabase
+        .from(ACCOUNTS_TABLE)
+        .update({ status: "active" })
+        .in("id", previousActiveIds)
+        .catch(() => undefined)
+    }
+    throw normalizeSupabaseError(error)
+  }
   return mapRow(data as DriveAccountRow)
 }
 
@@ -297,10 +314,19 @@ export async function updateAccount(
   const current = (currentRows as DriveAccountRow[])[0]
   if (!current) throw new Error("Account not found")
 
+  let previousActiveIds: string[] = []
   if (updates.status === "active") {
+    const { data: activeRows, error: activeRowsError } = await supabase
+      .from(ACCOUNTS_TABLE)
+      .select("id")
+      .eq("status", "active")
+      .neq("id", id)
+    if (activeRowsError) throw normalizeSupabaseError(activeRowsError)
+    previousActiveIds = ((activeRows as Array<{ id: string }> | null) ?? []).map((row) => row.id)
+
     const { error } = await supabase
       .from(ACCOUNTS_TABLE)
-      .update({ status: "disabled" })
+      .update({ status: "available" })
       .eq("status", "active")
       .neq("id", id)
     if (error) throw normalizeSupabaseError(error)
@@ -366,7 +392,16 @@ export async function updateAccount(
     .select("*")
     .single()
 
-  if (error) throw normalizeSupabaseError(error)
+  if (error) {
+    if (updates.status === "active" && previousActiveIds.length > 0) {
+      await supabase
+        .from(ACCOUNTS_TABLE)
+        .update({ status: "active" })
+        .in("id", previousActiveIds)
+        .catch(() => undefined)
+    }
+    throw normalizeSupabaseError(error)
+  }
   return mapRow(data as DriveAccountRow)
 }
 
