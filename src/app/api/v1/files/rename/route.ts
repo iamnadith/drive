@@ -8,16 +8,17 @@ import {
 import {
   assertProjectObjectWritable,
   createProjectOperationJob,
-  markTrackedBucketObjectDeleted,
+  getProjectObjectInventoryByFileId,
   processProjectOperationJob,
   recordProjectApiEvent,
-  syncTrackedBucketObject,
+  syncRenamedTrackedBucketObject,
 } from "@/lib/project-operations-store"
 import { r2CopyObject, r2DeleteObject } from "@/lib/r2-s3"
 
 export async function PATCH(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {
     projectId?: unknown
+    fileId?: unknown
     fromKey?: unknown
     toKey?: unknown
     fromPrefix?: unknown
@@ -33,7 +34,8 @@ export async function PATCH(request: Request) {
     (typeof (body as { bucket?: unknown }).bucket === "string"
       ? String((body as { bucket?: unknown }).bucket).trim()
       : "") || projectBucketFromRequest(request)
-  const fromKey = typeof body.fromKey === "string" ? body.fromKey.trim() : ""
+  const fileId = typeof body.fileId === "string" ? body.fileId.trim() : ""
+  let fromKey = typeof body.fromKey === "string" ? body.fromKey.trim() : ""
   const toKey = typeof body.toKey === "string" ? body.toKey.trim() : ""
   const fromPrefix = typeof body.fromPrefix === "string" ? body.fromPrefix.trim() : ""
   const toPrefix = typeof body.toPrefix === "string" ? body.toPrefix.trim() : ""
@@ -47,8 +49,14 @@ export async function PATCH(request: Request) {
 
   const authorized = await authorizeProjectRequest(request, projectId, "rename")
   if ("response" in authorized) return authorized.response
+  const fileObject = fileId
+    ? await getProjectObjectInventoryByFileId(authorized.auth.project.id, fileId)
+    : null
+  if (fileId && !fileObject) return NextResponse.json({ error: "File not found" }, { status: 404 })
+  fromKey = fileObject?.key ?? fromKey
   const resolvedBucket = await resolveProjectBucketName(authorized.auth.project, bucketName)
   if ("response" in resolvedBucket) return resolvedBucket.response
+  const effectiveBucketName = fileObject?.bucketName ?? resolvedBucket.bucketName
   const idempotencyKey = request.headers.get("idempotency-key")?.trim()
 
   if (prefixRename || body.async === true) {
@@ -56,12 +64,12 @@ export async function PATCH(request: Request) {
       projectIdentifier: authorized.auth.project.id,
       type: prefixRename ? "prefix_rename" : "batch_move",
       payload: prefixRename
-        ? { fromPrefix, toPrefix, bucketName: resolvedBucket.bucketName }
+        ? { fromPrefix, toPrefix, bucketName: effectiveBucketName }
         : {
             items: [{ fromKey, toKey, ifMatch: body.ifMatch ?? request.headers.get("if-match") }],
-            bucketName: resolvedBucket.bucketName,
+            bucketName: effectiveBucketName,
           },
-      idempotencyKey: idempotencyKey ? `${resolvedBucket.bucketName}:${idempotencyKey}` : undefined,
+      idempotencyKey: idempotencyKey ? `${effectiveBucketName}:${idempotencyKey}` : undefined,
     })
     void processProjectOperationJob(job.id).catch((error) => {
       console.error("Rename job failed:", error)
@@ -73,12 +81,15 @@ export async function PATCH(request: Request) {
       objectKey: prefixRename ? fromPrefix : fromKey,
       status: 202,
       request,
-      metadata: { jobId: job.id, bucketName: resolvedBucket.bucketName },
+      metadata: { jobId: job.id, bucketName: effectiveBucketName, ...(fileId ? { fileId } : {}) },
     })
     return NextResponse.json({ job }, { status: 202 })
   }
 
-  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
+  const r2 = await getActiveProjectBucketR2Config(
+    authorized.auth.project,
+    fileObject?.bucketName ?? bucketName
+  )
   if ("response" in r2) return r2.response
   try {
     await assertProjectObjectWritable(
@@ -98,16 +109,12 @@ export async function PATCH(request: Request) {
         : request.headers.get("if-match") ?? undefined,
   })
   await r2DeleteObject(r2.config, r2.bucketName, fromKey)
-  await syncTrackedBucketObject({
+  const trackedObject = await syncRenamedTrackedBucketObject({
     config: r2.config,
     projectId: authorized.auth.project.id,
     bucketName: r2.bucketName,
-    key: toKey,
-  }).catch(() => undefined)
-  await markTrackedBucketObjectDeleted({
-    projectId: authorized.auth.project.id,
-    bucketName: r2.bucketName,
-    key: fromKey,
+    fromKey,
+    toKey,
   }).catch(() => undefined)
   await recordProjectApiEvent({
     project: authorized.auth.project,
@@ -115,7 +122,7 @@ export async function PATCH(request: Request) {
     action: "file.rename",
     objectKey: fromKey,
     request,
-    metadata: { toKey },
+    metadata: { toKey, ...(trackedObject?.fileId ? { fileId: trackedObject.fileId } : {}) },
   })
-  return NextResponse.json({ ok: true, projectId, fromKey, toKey })
+  return NextResponse.json({ ok: true, projectId, fromKey, toKey, fileId: trackedObject?.fileId ?? fileId ?? null })
 }

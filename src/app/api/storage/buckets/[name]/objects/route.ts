@@ -196,15 +196,15 @@ export async function POST(
             contentType: file.type || "application/octet-stream",
           }
         )
-        await syncTrackedBucketObject(
-          {
+        await syncTrackedBucketObject({
+          config: {
             accountId: active.cloudflareAccountId,
             accessKeyId: active.r2AccessKeyId,
             secretAccessKey: active.r2SecretAccessKey,
           },
-          name,
-          key
-        )
+          bucketName: name,
+          key,
+        })
       } catch (err: unknown) {
         const message = errorMessage(err, "R2 upload failed")
         console.error("R2 upload object failed:", message)
@@ -251,15 +251,15 @@ export async function POST(
         key,
         body
       )
-      await syncTrackedBucketObject(
-        {
+      await syncTrackedBucketObject({
+        config: {
           accountId: active.cloudflareAccountId,
           accessKeyId: active.r2AccessKeyId,
           secretAccessKey: active.r2SecretAccessKey,
         },
-        name,
-        key
-      )
+        bucketName: name,
+        key,
+      })
     } catch (err: unknown) {
       const message = errorMessage(err, "R2 create object failed")
       console.error("R2 create object failed:", message)

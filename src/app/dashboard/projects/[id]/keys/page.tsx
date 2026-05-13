@@ -562,6 +562,19 @@ export default function ProjectKeysPage() {
           <div className="min-h-0 overflow-x-hidden overflow-y-auto pr-1">
             <div className="grid gap-6 text-sm">
             <section className="space-y-3">
+              <h3 className="font-semibold">Core model</h3>
+              <p className="text-muted-foreground">
+                Every tracked object now gets a permanent `fileId`. Use `fileId` for stable references across renames,
+                bucket remaps, and long-lived application records. Keep using `key` when you want path-level control.
+              </p>
+              <CodeExample>{`{
+  "fileId": "8a3f2f01e7e29c0b0b0f5d7a",
+  "key": "uploads/large-video.mp4",
+  "bucketName": "uploads-archive"
+}`}</CodeExample>
+            </section>
+
+            <section className="space-y-3">
               <h3 className="font-semibold">Authentication</h3>
               <p className="text-muted-foreground">
                 Send the API key in the authorization header and target the project with its project ID. If the project has multiple assigned buckets, send `bucket` in the query string or `X-Drive-Bucket` to target a non-primary bucket.
@@ -576,10 +589,17 @@ X-Drive-Bucket: uploads-archive`}</CodeExample>
               <h3 className="font-semibold">List files</h3>
               <CodeExample>{`curl -X GET "/api/v1/files?projectId=${docsProjectId}&bucket=uploads-archive&prefix=uploads/&limit=100" \
   -H "Authorization: Bearer ${docsApiKey}"`}</CodeExample>
+              <p className="text-muted-foreground">
+                `GET /api/v1/files` and `GET /api/v1/files/search` return `fileId` when the object is already tracked.
+              </p>
             </section>
 
             <section className="space-y-3">
-              <h3 className="font-semibold">Upload a file</h3>
+              <h3 className="font-semibold">Single upload flow</h3>
+              <p className="text-muted-foreground">
+                Uploads are direct-to-R2. First request a signed upload URL, then upload bytes directly to R2, then call
+                `PATCH /api/v1/files/upload` to finalize tracking and receive the permanent `fileId`.
+              </p>
               <CodeExample>{`curl -X POST "/api/v1/files/upload" \
   -H "Authorization: Bearer ${docsApiKey}" \
   -H "Content-Type: application/json" \
@@ -589,6 +609,19 @@ X-Drive-Bucket: uploads-archive`}</CodeExample>
     "key": "uploads/large-video.mp4",
     "contentType": "video/mp4"
   }'`}</CodeExample>
+              <CodeExample>{`{
+  "uploadType": "single",
+  "method": "PUT",
+  "url": "https://...signed-r2-url...",
+  "key": "uploads/large-video.mp4",
+  "bucketName": "uploads-archive",
+  "headers": {
+    "Content-Type": "video/mp4"
+  }
+}`}</CodeExample>
+              <CodeExample>{`curl -X PUT "https://...signed-r2-url..." \
+  -H "Content-Type: video/mp4" \
+  --data-binary "@large-video.mp4"`}</CodeExample>
               <CodeExample>{`curl -X PATCH "/api/v1/files/upload" \
   -H "Authorization: Bearer ${docsApiKey}" \
   -H "Content-Type: application/json" \
@@ -597,20 +630,122 @@ X-Drive-Bucket: uploads-archive`}</CodeExample>
     "bucket": "uploads-archive",
     "key": "uploads/large-video.mp4"
   }'`}</CodeExample>
+              <CodeExample>{`{
+  "ok": true,
+  "bucketName": "uploads-archive",
+  "key": "uploads/large-video.mp4",
+  "fileId": "8a3f2f01e7e29c0b0b0f5d7a"
+}`}</CodeExample>
             </section>
 
             <section className="space-y-3">
-              <h3 className="font-semibold">Generate links</h3>
-              <CodeExample>{`curl -X POST "/api/v1/files/links" \
+              <h3 className="font-semibold">Multipart upload flow</h3>
+              <p className="text-muted-foreground">
+                Use multipart for large files. Start the multipart upload, upload parts directly to R2, then complete the
+                multipart session to finalize tracking and get the permanent `fileId`.
+              </p>
+              <CodeExample>{`curl -X POST "/api/v1/files/uploads/multipart" \
   -H "Authorization: Bearer ${docsApiKey}" \
   -H "Content-Type: application/json" \
   -d '{
     "projectId": "${docsProjectId}",
     "bucket": "uploads-archive",
-    "key": "uploads/image.png",
+    "key": "uploads/feature-film.mp4",
+    "contentType": "video/mp4"
+  }'`}</CodeExample>
+              <CodeExample>{`{
+  "uploadType": "multipart",
+  "key": "uploads/feature-film.mp4",
+  "bucketName": "uploads-archive",
+  "uploadId": "..."
+}`}</CodeExample>
+              <CodeExample>{`curl -X POST "/api/v1/files/uploads/multipart/complete" \
+  -H "Authorization: Bearer ${docsApiKey}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "projectId": "${docsProjectId}",
+    "bucket": "uploads-archive",
+    "key": "uploads/feature-film.mp4",
+    "uploadId": "...",
+    "parts": [
+      { "partNumber": 1, "etag": "..." },
+      { "partNumber": 2, "etag": "..." }
+    ]
+  }'`}</CodeExample>
+            </section>
+
+            <section className="space-y-3">
+              <h3 className="font-semibold">Read or download by fileId</h3>
+              <p className="text-muted-foreground">
+                Prefer `fileId` for app records. Drive resolves the current bucket and key internally, then issues a short-lived direct R2 download URL.
+              </p>
+              <CodeExample>{`curl -X GET "/api/v1/files/download?projectId=${docsProjectId}&fileId=8a3f2f01e7e29c0b0b0f5d7a" \
+  -H "Authorization: Bearer ${docsApiKey}"`}</CodeExample>
+              <CodeExample>{`curl -X GET "/api/v1/files/read?projectId=${docsProjectId}&fileId=8a3f2f01e7e29c0b0b0f5d7a" \
+  -H "Authorization: Bearer ${docsApiKey}"`}</CodeExample>
+            </section>
+
+            <section className="space-y-3">
+              <h3 className="font-semibold">Metadata and writes by fileId</h3>
+              <CodeExample>{`curl -X GET "/api/v1/files/metadata?projectId=${docsProjectId}&fileId=8a3f2f01e7e29c0b0b0f5d7a" \
+  -H "Authorization: Bearer ${docsApiKey}"`}</CodeExample>
+              <CodeExample>{`curl -X PUT "/api/v1/files/content" \
+  -H "Authorization: Bearer ${docsApiKey}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "projectId": "${docsProjectId}",
+    "fileId": "8a3f2f01e7e29c0b0b0f5d7a",
+    "content": "updated text payload",
+    "contentType": "text/plain; charset=utf-8"
+  }'`}</CodeExample>
+            </section>
+
+            <section className="space-y-3">
+              <h3 className="font-semibold">Rename and delete by fileId</h3>
+              <p className="text-muted-foreground">
+                Renames preserve the same `fileId`. Deletes mark that tracked file as deleted, so later access by the same `fileId` returns not found.
+              </p>
+              <CodeExample>{`curl -X PATCH "/api/v1/files/rename" \
+  -H "Authorization: Bearer ${docsApiKey}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "projectId": "${docsProjectId}",
+    "fileId": "8a3f2f01e7e29c0b0b0f5d7a",
+    "toKey": "uploads/final-video.mp4"
+  }'`}</CodeExample>
+              <CodeExample>{`curl -X DELETE "/api/v1/files" \
+  -H "Authorization: Bearer ${docsApiKey}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "projectId": "${docsProjectId}",
+    "fileId": "8a3f2f01e7e29c0b0b0f5d7a"
+  }'`}</CodeExample>
+            </section>
+
+            <section className="space-y-3">
+              <h3 className="font-semibold">Generate links</h3>
+              <p className="text-muted-foreground">
+                Permanent links now store the tracked `fileId` when available, so they keep resolving after renames.
+              </p>
+              <CodeExample>{`curl -X POST "/api/v1/files/links" \
+  -H "Authorization: Bearer ${docsApiKey}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "projectId": "${docsProjectId}",
+    "fileId": "8a3f2f01e7e29c0b0b0f5d7a",
     "mode": "expiring",
     "expiresInSeconds": 900
   }'`}</CodeExample>
+            </section>
+
+            <section className="space-y-3">
+              <h3 className="font-semibold">Behavior guarantees</h3>
+              <CodeExample>{`- fileId is permanent for the tracked object
+- rename keeps the same fileId
+- direct uploads only become fully tracked after finalize/complete
+- permanent links follow fileId-backed renames
+- deleted files stop resolving by fileId
+- direct file bytes still flow between client and R2, not through this host`}</CodeExample>
             </section>
             </div>
           </div>

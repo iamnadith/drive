@@ -33,7 +33,7 @@ export async function POST(request: Request) {
   if ("response" in r2) return r2.response
 
   await r2PutObject(r2.config, r2.bucketName, key, "")
-  await syncTrackedBucketObject({
+  const trackedObject = await syncTrackedBucketObject({
     config: r2.config,
     projectId: authorized.auth.project.id,
     bucketName: r2.bucketName,
@@ -45,6 +45,7 @@ export async function POST(request: Request) {
     action: "folder.create",
     objectKey: key,
     request,
+    metadata: trackedObject?.fileId ? { fileId: trackedObject.fileId } : undefined,
   })
-  return NextResponse.json({ ok: true, projectId, key })
+  return NextResponse.json({ ok: true, projectId, key, fileId: trackedObject?.fileId ?? null })
 }

@@ -65,6 +65,7 @@ export type ProjectApiKey = {
 export type ProjectFileLink = {
   id: string
   projectId: string
+  fileId?: string
   objectKey: string
   bucketName?: string
   mode: ProjectLinkMode
@@ -120,6 +121,7 @@ type ApiKeyRow = {
 type FileLinkRow = {
   id: string
   project_id: string
+  file_id: string | null
   object_key: string
   bucket_name: string | null
   mode: ProjectLinkMode
@@ -211,6 +213,7 @@ function mapFileLink(row: FileLinkRow): ProjectFileLink {
   return {
     id: row.id,
     projectId: row.project_id,
+    fileId: row.file_id ?? undefined,
     objectKey: row.object_key,
     bucketName: row.bucket_name ?? undefined,
     mode: row.mode,
@@ -534,6 +537,7 @@ export async function ensureProjectSchema() {
     create table if not exists drive_project_file_links (
       id uuid primary key default gen_random_uuid(),
       project_id uuid not null references drive_projects(id) on delete cascade,
+      file_id text,
       object_key text not null,
       bucket_name text,
       token_hash text not null,
@@ -543,6 +547,7 @@ export async function ensureProjectSchema() {
       created_at timestamptz not null default now()
     );
   `)
+  await queryDb(`alter table public.drive_project_file_links add column if not exists file_id text;`)
   await queryDb(`alter table public.drive_project_file_links add column if not exists bucket_name text;`)
   await queryDb(`
     update drive_project_file_links l
@@ -552,6 +557,7 @@ export async function ensureProjectSchema() {
       and l.bucket_name is null;
   `)
   await queryDb(`create unique index if not exists drive_project_file_links_token_hash_key on drive_project_file_links (token_hash);`)
+  await queryDb(`create index if not exists drive_project_file_links_file_idx on drive_project_file_links (file_id);`)
   await queryDb(`create index if not exists drive_project_file_links_project_idx on drive_project_file_links (project_id, object_key);`)
   await queryDb(`create index if not exists drive_project_file_links_active_idx on drive_project_file_links (mode, revoked_at, expires_at);`)
 }
@@ -1039,6 +1045,7 @@ export async function authorizeProjectApiKey(
 
 export async function createProjectFileLink(input: {
   projectIdentifier: string
+  fileId?: string | null
   objectKey: string
   bucketName: string
   mode: ProjectLinkMode
@@ -1051,12 +1058,13 @@ export async function createProjectFileLink(input: {
   const { rows } = await queryDb<FileLinkRow>(
     `
       insert into drive_project_file_links
-        (project_id, object_key, bucket_name, token_hash, mode, expires_at)
-      values ($1, $2, $3, $4, $5, $6)
+        (project_id, file_id, object_key, bucket_name, token_hash, mode, expires_at)
+      values ($1, $2, $3, $4, $5, $6, $7)
       returning *;
     `,
     [
       project.id,
+      input.fileId ?? null,
       input.objectKey,
       input.bucketName,
       hashProjectSecret(token),

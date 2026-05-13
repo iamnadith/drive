@@ -45,9 +45,9 @@ function parseUploadMetadata(metadata: unknown) {
 
 async function authorizeUploadTarget(request: Request, projectId: string, bucketName: string) {
   const authorized = await authorizeProjectRequest(request, projectId, "upload")
-  if ("response" in authorized) return authorized
+  if ("response" in authorized) return { response: authorized.response }
   const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
-  if ("response" in r2) return r2
+  if ("response" in r2) return { response: r2.response }
   return { authorized, r2 }
 }
 
@@ -165,7 +165,7 @@ export async function completeProjectUpload(request: Request, body: UploadComple
     return NextResponse.json({ error: "Uploaded object was not found in R2" }, { status: 404 })
   }
 
-  await syncTrackedBucketObject({
+  const trackedObject = await syncTrackedBucketObject({
     config: resolved.r2.config,
     projectId: resolved.authorized.auth.project.id,
     bucketName: resolved.r2.bucketName,
@@ -186,6 +186,7 @@ export async function completeProjectUpload(request: Request, body: UploadComple
     projectId,
     bucketName: resolved.r2.bucketName,
     key,
+    fileId: trackedObject?.fileId ?? null,
     size: head.ContentLength ?? 0,
     etag: head.ETag,
     contentType: head.ContentType,

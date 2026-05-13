@@ -51,7 +51,7 @@ export async function POST(request: Request) {
     uploadId,
     parts
   )
-  await syncTrackedBucketObject({
+  const trackedObject = await syncTrackedBucketObject({
     config: r2.config,
     projectId: authorized.auth.project.id,
     bucketName: r2.bucketName,
@@ -64,5 +64,5 @@ export async function POST(request: Request) {
     objectKey: key,
     request,
   })
-  return NextResponse.json({ ok: true, projectId, key })
+  return NextResponse.json({ ok: true, projectId, key, fileId: trackedObject?.fileId ?? null })
 }

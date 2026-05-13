@@ -5,34 +5,47 @@ import {
   projectBucketFromRequest,
   projectIdFromUrl,
 } from "@/lib/project-api-auth"
-import { recordProjectApiEvent } from "@/lib/project-operations-store"
+import {
+  getProjectObjectInventoryByFileId,
+  recordProjectApiEvent,
+} from "@/lib/project-operations-store"
 import { r2CreateSignedDownloadUrl } from "@/lib/r2-s3"
 
 export async function GET(request: Request) {
   const url = new URL(request.url)
   const projectId = projectIdFromUrl(request)
-  const bucketName = projectBucketFromRequest(request)
+  const requestedBucketName = projectBucketFromRequest(request)
   const key = url.searchParams.get("key")?.trim() ?? ""
-  if (!key) return NextResponse.json({ error: "Object key is required" }, { status: 400 })
+  const fileId = url.searchParams.get("fileId")?.trim() ?? ""
+  if (!key && !fileId) {
+    return NextResponse.json({ error: "Object key or fileId is required" }, { status: 400 })
+  }
 
   const authorized = await authorizeProjectRequest(request, projectId, "read")
   if ("response" in authorized) return authorized.response
-  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
+  const object = fileId
+    ? await getProjectObjectInventoryByFileId(authorized.auth.project.id, fileId)
+    : null
+  if (fileId && !object) return NextResponse.json({ error: "File not found" }, { status: 404 })
+  const resolvedKey = object?.key ?? key
+  const resolvedBucketName = object?.bucketName ?? requestedBucketName
+  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, resolvedBucketName)
   if ("response" in r2) return r2.response
 
   const signedUrl = await r2CreateSignedDownloadUrl(
     r2.config,
     r2.bucketName,
-    key,
+    resolvedKey,
     { expiresInSeconds: 300 }
   )
   await recordProjectApiEvent({
     project: authorized.auth.project,
     apiKeyId: authorized.auth.apiKey.id,
     action: "file.read.redirect",
-    objectKey: key,
+    objectKey: resolvedKey,
     status: 302,
     request,
+    metadata: fileId ? { fileId } : undefined,
   })
   return NextResponse.redirect(signedUrl, 302)
 }

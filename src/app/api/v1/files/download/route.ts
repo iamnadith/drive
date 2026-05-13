@@ -5,19 +5,31 @@ import {
   projectBucketFromRequest,
   projectIdFromUrl,
 } from "@/lib/project-api-auth"
-import { recordProjectApiEvent } from "@/lib/project-operations-store"
+import {
+  getProjectObjectInventoryByFileId,
+  recordProjectApiEvent,
+} from "@/lib/project-operations-store"
 import { r2CreateSignedDownloadUrl } from "@/lib/r2-s3"
 
 export async function GET(request: Request) {
   const url = new URL(request.url)
   const projectId = projectIdFromUrl(request)
-  const bucketName = projectBucketFromRequest(request)
+  const requestedBucketName = projectBucketFromRequest(request)
   const key = url.searchParams.get("key")?.trim() ?? ""
-  if (!key) return NextResponse.json({ error: "Object key is required" }, { status: 400 })
+  const fileId = url.searchParams.get("fileId")?.trim() ?? ""
+  if (!key && !fileId) {
+    return NextResponse.json({ error: "Object key or fileId is required" }, { status: 400 })
+  }
 
   const authorized = await authorizeProjectRequest(request, projectId, "download")
   if ("response" in authorized) return authorized.response
-  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
+  const object = fileId
+    ? await getProjectObjectInventoryByFileId(authorized.auth.project.id, fileId)
+    : null
+  if (fileId && !object) return NextResponse.json({ error: "File not found" }, { status: 404 })
+  const resolvedKey = object?.key ?? key
+  const resolvedBucketName = object?.bucketName ?? requestedBucketName
+  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, resolvedBucketName)
   if ("response" in r2) return r2.response
 
   const expiresInSeconds = Math.max(
@@ -27,18 +39,22 @@ export async function GET(request: Request) {
   const signedUrl = await r2CreateSignedDownloadUrl(
     r2.config,
     r2.bucketName,
-    key,
+    resolvedKey,
     {
       expiresInSeconds,
-      filename: url.searchParams.get("download") === "1" ? key.split("/").pop() ?? key : undefined,
+      filename:
+        url.searchParams.get("download") === "1"
+          ? resolvedKey.split("/").pop() ?? resolvedKey
+          : undefined,
     }
   )
   await recordProjectApiEvent({
     project: authorized.auth.project,
     apiKeyId: authorized.auth.apiKey.id,
     action: "file.download.presign",
-    objectKey: key,
+    objectKey: resolvedKey,
     request,
+    metadata: fileId ? { fileId } : undefined,
   })
 
   if (url.searchParams.get("redirect") === "1") {
@@ -47,7 +63,8 @@ export async function GET(request: Request) {
 
   return NextResponse.json({
     url: signedUrl,
-    key,
+    key: resolvedKey,
+    fileId: object?.fileId ?? fileId ?? undefined,
     expiresAt: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
   })
 }

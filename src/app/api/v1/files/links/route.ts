@@ -5,13 +5,18 @@ import {
   projectBucketFromRequest,
 } from "@/lib/project-api-auth"
 import { getPublicOrigin } from "@/lib/public-origin"
-import { recordProjectApiEvent } from "@/lib/project-operations-store"
+import {
+  getProjectObjectInventoryByFileId,
+  getProjectObjectInventoryByKey,
+  recordProjectApiEvent,
+} from "@/lib/project-operations-store"
 import { createProjectFileLink } from "@/lib/projects-store"
 import { r2CreateSignedDownloadUrl } from "@/lib/r2-s3"
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {
     projectId?: unknown
+    fileId?: unknown
     key?: unknown
     bucket?: unknown
     mode?: unknown
@@ -22,18 +27,32 @@ export async function POST(request: Request) {
     (typeof body.projectId === "string" ? body.projectId.trim() : "") ||
     request.headers.get("x-drive-project")?.trim() ||
     ""
+  const fileId = typeof body.fileId === "string" ? body.fileId.trim() : ""
   const key = typeof body.key === "string" ? body.key.trim() : ""
   const bucketName =
     (typeof body.bucket === "string" ? body.bucket.trim() : "") ||
     projectBucketFromRequest(request)
   const mode = body.mode === "permanent" ? "permanent" : "expiring"
-  if (!key) return NextResponse.json({ error: "Object key is required" }, { status: 400 })
+  if (!key && !fileId) {
+    return NextResponse.json({ error: "Object key or fileId is required" }, { status: 400 })
+  }
 
   const permission = mode === "permanent" ? "createPermanentLink" : "createExpiringLink"
   const authorized = await authorizeProjectRequest(request, projectId, permission)
   if ("response" in authorized) return authorized.response
-  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
+  const directObject = fileId
+    ? await getProjectObjectInventoryByFileId(authorized.auth.project.id, fileId)
+    : null
+  if (fileId && !directObject) return NextResponse.json({ error: "File not found" }, { status: 404 })
+  const resolvedKey = directObject?.key ?? key
+  const resolvedBucketName = directObject?.bucketName ?? bucketName
+  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, resolvedBucketName)
   if ("response" in r2) return r2.response
+  const trackedObject =
+    directObject ??
+    (resolvedKey
+      ? await getProjectObjectInventoryByKey(authorized.auth.project.id, r2.bucketName, resolvedKey)
+      : null)
 
   const expiresInSeconds = Math.max(
     30,
@@ -51,12 +70,13 @@ export async function POST(request: Request) {
     const signedUrl = await r2CreateSignedDownloadUrl(
       r2.config,
       r2.bucketName,
-      key,
+      resolvedKey,
       { expiresInSeconds }
     )
     const { link } = await createProjectFileLink({
       projectIdentifier: authorized.auth.project.id,
-      objectKey: key,
+      fileId: trackedObject?.fileId,
+      objectKey: resolvedKey,
       bucketName: r2.bucketName,
       mode,
       expiresAt,
@@ -65,16 +85,17 @@ export async function POST(request: Request) {
       project: authorized.auth.project,
       apiKeyId: authorized.auth.apiKey.id,
       action: "file.link.expiring.create",
-      objectKey: key,
+      objectKey: resolvedKey,
       request,
-      metadata: { linkId: link.id },
+      metadata: { linkId: link.id, ...(trackedObject?.fileId ? { fileId: trackedObject.fileId } : {}) },
     })
-    return NextResponse.json({ link, url: signedUrl, expiresAt })
+    return NextResponse.json({ link, url: signedUrl, expiresAt, fileId: trackedObject?.fileId ?? null })
   }
 
   const { link, token } = await createProjectFileLink({
     projectIdentifier: authorized.auth.project.id,
-    objectKey: key,
+    fileId: trackedObject?.fileId,
+    objectKey: resolvedKey,
     bucketName: r2.bucketName,
     mode,
     expiresAt: typeof body.expiresAt === "string" ? body.expiresAt : null,
@@ -84,9 +105,9 @@ export async function POST(request: Request) {
     project: authorized.auth.project,
     apiKeyId: authorized.auth.apiKey.id,
     action: "file.link.permanent.create",
-    objectKey: key,
+    objectKey: resolvedKey,
     request,
-    metadata: { linkId: link.id },
+    metadata: { linkId: link.id, ...(trackedObject?.fileId ? { fileId: trackedObject.fileId } : {}) },
   })
-  return NextResponse.json({ link, url: publicUrl, expiresAt: link.expiresAt ?? null })
+  return NextResponse.json({ link, url: publicUrl, expiresAt: link.expiresAt ?? null, fileId: trackedObject?.fileId ?? null })
 }

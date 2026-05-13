@@ -8,6 +8,8 @@ import {
 import {
   assertProjectObjectWritable,
   createProjectOperationJob,
+  getProjectObjectInventoriesByKeys,
+  getProjectObjectInventoryByFileId,
   markTrackedBucketObjectDeleted,
   processProjectOperationJob,
   recordProjectApiEvent,
@@ -46,20 +48,30 @@ export async function GET(request: Request) {
     metadata: { prefix: url.searchParams.get("prefix") ?? "" },
   })
 
+  const objects = (page.Contents ?? [])
+    .map((item) => ({
+      key: item.Key ?? "",
+      size: item.Size ?? 0,
+      etag: item.ETag,
+      lastModified: item.LastModified?.toISOString(),
+    }))
+    .filter((item) => item.key)
+  const inventory = await getProjectObjectInventoriesByKeys({
+    projectId: authorized.auth.project.id,
+    bucketName: r2.bucketName,
+    keys: objects.map((item) => item.key),
+  })
+
   return NextResponse.json({
     projectId: authorized.auth.project.projectId,
     prefix: url.searchParams.get("prefix") ?? "",
     folders: (page.CommonPrefixes ?? [])
       .map((item) => item.Prefix)
       .filter((item): item is string => Boolean(item)),
-    objects: (page.Contents ?? [])
-      .map((item) => ({
-        key: item.Key ?? "",
-        size: item.Size ?? 0,
-        etag: item.ETag,
-        lastModified: item.LastModified?.toISOString(),
-      }))
-      .filter((item) => item.key),
+    objects: objects.map((item) => ({
+      ...item,
+      fileId: inventory.get(item.key)?.fileId,
+    })),
     nextCursor: page.NextContinuationToken ?? null,
     isTruncated: Boolean(page.IsTruncated),
   })
@@ -69,12 +81,14 @@ export async function DELETE(request: Request) {
   const url = new URL(request.url)
   const body = (await request.json().catch(() => ({}))) as {
     projectId?: unknown
+    fileId?: unknown
     key?: unknown
     recursive?: unknown
   }
   const projectId =
     (typeof body.projectId === "string" ? body.projectId.trim() : "") ||
     projectIdFromUrl(request)
+  const fileId = typeof body.fileId === "string" ? body.fileId.trim() : ""
   const key =
     (typeof body.key === "string" ? body.key.trim() : "") ||
     url.searchParams.get("key")?.trim() ||
@@ -83,11 +97,22 @@ export async function DELETE(request: Request) {
   const bucketName =
     (typeof (body as { bucket?: unknown }).bucket === "string" ? String((body as { bucket?: unknown }).bucket).trim() : "") ||
     projectBucketFromRequest(request)
-  if (!key) return NextResponse.json({ error: "Object key is required" }, { status: 400 })
+  if (!key && !fileId) {
+    return NextResponse.json({ error: "Object key or fileId is required" }, { status: 400 })
+  }
 
   const authorized = await authorizeProjectRequest(request, projectId, "delete")
   if ("response" in authorized) return authorized.response
-  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
+  const object = fileId
+    ? await getProjectObjectInventoryByFileId(authorized.auth.project.id, fileId)
+    : null
+  if (fileId && !object) return NextResponse.json({ error: "File not found" }, { status: 404 })
+  if (recursive && fileId) {
+    return NextResponse.json({ error: "Recursive delete requires an object key or prefix" }, { status: 400 })
+  }
+  const resolvedKey = object?.key ?? key
+  const resolvedBucketName = object?.bucketName ?? bucketName
+  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, resolvedBucketName)
   if ("response" in r2) return r2.response
   const idempotencyKey = request.headers.get("idempotency-key")?.trim()
   if (!recursive) {
@@ -95,7 +120,7 @@ export async function DELETE(request: Request) {
       await assertProjectObjectWritable(
         authorized.auth.project.id,
         r2.bucketName,
-        key,
+        resolvedKey,
         request.headers.get("x-drive-lock-token")
       )
     } catch {
@@ -126,18 +151,19 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ job }, { status: 202 })
   }
 
-  await r2DeleteObject(r2.config, r2.bucketName, key)
+  await r2DeleteObject(r2.config, r2.bucketName, resolvedKey)
   await markTrackedBucketObjectDeleted({
     projectId: authorized.auth.project.id,
     bucketName: r2.bucketName,
-    key,
+    key: resolvedKey,
   }).catch(() => undefined)
   await recordProjectApiEvent({
     project: authorized.auth.project,
     apiKeyId: authorized.auth.apiKey.id,
     action: "file.delete",
-    objectKey: key,
+    objectKey: resolvedKey,
     request,
+    metadata: object?.fileId ? { fileId: object.fileId } : undefined,
   })
-  return NextResponse.json({ ok: true, projectId, deleted: 1 })
+  return NextResponse.json({ ok: true, projectId, deleted: 1, key: resolvedKey, fileId: object?.fileId ?? null })
 }

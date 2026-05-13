@@ -6,6 +6,7 @@ import {
 } from "@/lib/project-api-auth"
 import {
   assertProjectObjectWritable,
+  getProjectObjectInventoryByFileId,
   recordProjectApiEvent,
   syncTrackedBucketObject,
 } from "@/lib/project-operations-store"
@@ -14,6 +15,7 @@ import { r2PutObject } from "@/lib/r2-s3"
 export async function PUT(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {
     projectId?: unknown
+    fileId?: unknown
     key?: unknown
     content?: unknown
     contentType?: unknown
@@ -26,14 +28,20 @@ export async function PUT(request: Request) {
     (typeof (body as { bucket?: unknown }).bucket === "string"
       ? String((body as { bucket?: unknown }).bucket).trim()
       : "") || projectBucketFromRequest(request)
-  const key = typeof body.key === "string" ? body.key.trim() : ""
+  const fileId = typeof body.fileId === "string" ? body.fileId.trim() : ""
+  let key = typeof body.key === "string" ? body.key.trim() : ""
   if (!key || key.endsWith("/")) {
-    return NextResponse.json({ error: "Valid object key is required" }, { status: 400 })
+    if (!fileId) return NextResponse.json({ error: "Valid object key or fileId is required" }, { status: 400 })
   }
 
   const authorized = await authorizeProjectRequest(request, projectId, "write")
   if ("response" in authorized) return authorized.response
-  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
+  const object = fileId
+    ? await getProjectObjectInventoryByFileId(authorized.auth.project.id, fileId)
+    : null
+  if (fileId && !object) return NextResponse.json({ error: "File not found" }, { status: 404 })
+  key = object?.key ?? key
+  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, object?.bucketName ?? bucketName)
   if ("response" in r2) return r2.response
   try {
     await assertProjectObjectWritable(
@@ -61,7 +69,7 @@ export async function PUT(request: Request) {
     ifMatch: request.headers.get("if-match") ?? undefined,
     ifNoneMatch: request.headers.get("if-none-match") ?? undefined,
   })
-  await syncTrackedBucketObject({
+  const trackedObject = await syncTrackedBucketObject({
     config: r2.config,
     projectId: authorized.auth.project.id,
     bucketName: r2.bucketName,
@@ -73,7 +81,8 @@ export async function PUT(request: Request) {
     action: "file.write",
     objectKey: key,
     request,
+    metadata: trackedObject?.fileId ? { fileId: trackedObject.fileId } : undefined,
   })
 
-  return NextResponse.json({ ok: true, projectId, key })
+  return NextResponse.json({ ok: true, projectId, key, fileId: trackedObject?.fileId ?? fileId ?? null })
 }

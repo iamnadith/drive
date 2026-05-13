@@ -58,6 +58,34 @@ type JobRow = {
   completed_at: string | null
 }
 
+type InventoryRow = {
+  file_id: string
+  project_id: string
+  bucket_name: string
+  object_key: string
+  size: string | number
+  etag: string | null
+  content_type: string | null
+  metadata: Record<string, unknown> | null
+  last_modified: string | null
+  deleted_at: string | null
+  updated_at: string
+}
+
+export type ProjectInventoryObject = {
+  fileId: string
+  projectId: string
+  bucketName: string
+  key: string
+  size: number
+  etag?: string
+  contentType?: string
+  metadata: Record<string, unknown>
+  lastModified?: string
+  deletedAt?: string
+  updatedAt: string
+}
+
 function mapJob(row: JobRow): ProjectOperationJob {
   return {
     id: row.id,
@@ -82,6 +110,22 @@ function asString(value: unknown) {
 
 function asArray(value: unknown) {
   return Array.isArray(value) ? value : []
+}
+
+function mapInventoryRow(row: InventoryRow): ProjectInventoryObject {
+  return {
+    fileId: row.file_id,
+    projectId: row.project_id,
+    bucketName: row.bucket_name,
+    key: row.object_key,
+    size: Number(row.size ?? 0),
+    etag: row.etag ?? undefined,
+    contentType: row.content_type ?? undefined,
+    metadata: row.metadata ?? {},
+    lastModified: row.last_modified ?? undefined,
+    deletedAt: row.deleted_at ?? undefined,
+    updatedAt: row.updated_at,
+  }
 }
 
 async function findProjectIdsForTrackedBucket(bucketName: string) {
@@ -160,6 +204,7 @@ export async function ensureProjectOperationsSchema() {
     );
   `)
   await queryDb(`alter table public.drive_project_object_inventory add column if not exists bucket_name text;`)
+  await queryDb(`alter table public.drive_project_object_inventory add column if not exists file_id text;`)
   await queryDb(`
     update drive_project_object_inventory i
     set bucket_name = coalesce(nullif(p.bucket_name, ''), '')
@@ -168,14 +213,19 @@ export async function ensureProjectOperationsSchema() {
       and i.bucket_name is null;
   `)
   await queryDb(`update public.drive_project_object_inventory set bucket_name = '' where bucket_name is null;`)
+  await queryDb(`update public.drive_project_object_inventory set file_id = encode(gen_random_bytes(12), 'hex') where file_id is null or file_id = '';`)
   await queryDb(`alter table public.drive_project_object_inventory alter column bucket_name set default '';`)
   await queryDb(`alter table public.drive_project_object_inventory alter column bucket_name set not null;`)
+  await queryDb(`alter table public.drive_project_object_inventory alter column file_id set default encode(gen_random_bytes(12), 'hex');`)
+  await queryDb(`alter table public.drive_project_object_inventory alter column file_id set not null;`)
   await queryDb(`alter table public.drive_project_object_inventory drop constraint if exists drive_project_object_inventory_pkey;`)
   await queryDb(`alter table public.drive_project_object_inventory add constraint drive_project_object_inventory_pkey primary key (project_id, bucket_name, object_key);`)
+  await queryDb(`create unique index if not exists drive_project_object_inventory_file_id_key on drive_project_object_inventory (file_id);`)
   await queryDb(`drop index if exists drive_project_object_inventory_search_idx;`)
   await queryDb(`drop index if exists drive_project_object_inventory_updated_idx;`)
   await queryDb(`create index if not exists drive_project_object_inventory_search_idx on drive_project_object_inventory (project_id, bucket_name, object_key text_pattern_ops) where deleted_at is null;`)
   await queryDb(`create index if not exists drive_project_object_inventory_updated_idx on drive_project_object_inventory (project_id, bucket_name, updated_at desc);`)
+  await queryDb(`create index if not exists drive_project_object_inventory_project_file_id_idx on drive_project_object_inventory (project_id, file_id) where deleted_at is null;`)
 
   await queryDb(`
     create table if not exists drive_project_object_locks (
@@ -269,6 +319,7 @@ export async function upsertProjectObjectInventory(input: {
   projectId: string
   bucketName: string
   key: string
+  fileId?: string
   size?: number
   etag?: string
   contentType?: string
@@ -276,11 +327,11 @@ export async function upsertProjectObjectInventory(input: {
   lastModified?: string
 }) {
   await ensureProjectOperationsSchema()
-  await queryDb(
+  const { rows } = await queryDb<InventoryRow>(
     `
       insert into drive_project_object_inventory
-        (project_id, bucket_name, object_key, size, etag, content_type, metadata, last_modified, deleted_at)
-      values ($1, $2, $3, $4, $5, $6, coalesce($7::jsonb, '{}'::jsonb), $8, null)
+        (project_id, bucket_name, object_key, file_id, size, etag, content_type, metadata, last_modified, deleted_at)
+      values ($1, $2, $3, coalesce($4, encode(gen_random_bytes(12), 'hex')), $5, $6, $7, coalesce($8::jsonb, '{}'::jsonb), $9, null)
       on conflict (project_id, bucket_name, object_key) do update set
         size = excluded.size,
         etag = excluded.etag,
@@ -288,12 +339,14 @@ export async function upsertProjectObjectInventory(input: {
         metadata = excluded.metadata,
         last_modified = excluded.last_modified,
         deleted_at = null,
-        updated_at = now();
+        updated_at = now()
+      returning *;
     `,
     [
       input.projectId,
       input.bucketName,
       input.key,
+      input.fileId ?? null,
       input.size ?? 0,
       input.etag ?? null,
       input.contentType ?? null,
@@ -301,6 +354,56 @@ export async function upsertProjectObjectInventory(input: {
       input.lastModified ?? null,
     ]
   )
+  return mapInventoryRow(rows[0])
+}
+
+export async function getProjectObjectInventoryByKey(projectId: string, bucketName: string, key: string) {
+  await ensureProjectOperationsSchema()
+  const { rows } = await queryDb<InventoryRow>(
+    `
+      select *
+      from drive_project_object_inventory
+      where project_id = $1 and bucket_name = $2 and object_key = $3
+      limit 1;
+    `,
+    [projectId, bucketName, key]
+  )
+  return rows[0] ? mapInventoryRow(rows[0]) : null
+}
+
+export async function getProjectObjectInventoryByFileId(projectId: string, fileId: string) {
+  await ensureProjectOperationsSchema()
+  const { rows } = await queryDb<InventoryRow>(
+    `
+      select *
+      from drive_project_object_inventory
+      where project_id = $1 and file_id = $2 and deleted_at is null
+      limit 1;
+    `,
+    [projectId, fileId]
+  )
+  return rows[0] ? mapInventoryRow(rows[0]) : null
+}
+
+export async function getProjectObjectInventoriesByKeys(input: {
+  projectId: string
+  bucketName: string
+  keys: string[]
+}) {
+  await ensureProjectOperationsSchema()
+  if (!input.keys.length) return new Map<string, ProjectInventoryObject>()
+  const { rows } = await queryDb<InventoryRow>(
+    `
+      select *
+      from drive_project_object_inventory
+      where project_id = $1
+        and bucket_name = $2
+        and object_key = any($3::text[])
+        and deleted_at is null;
+    `,
+    [input.projectId, input.bucketName, input.keys]
+  )
+  return new Map(rows.map((row) => [row.object_key, mapInventoryRow(row)]))
 }
 
 export async function markProjectObjectDeleted(projectId: string, bucketName: string, key: string) {
@@ -315,6 +418,66 @@ export async function markProjectObjectDeleted(projectId: string, bucketName: st
   )
 }
 
+export async function renameProjectObjectInventory(input: {
+  projectId: string
+  bucketName: string
+  fromKey: string
+  toKey: string
+  size?: number
+  etag?: string
+  contentType?: string
+  metadata?: Record<string, unknown>
+  lastModified?: string
+}) {
+  await ensureProjectOperationsSchema()
+  const source = await getProjectObjectInventoryByKey(input.projectId, input.bucketName, input.fromKey)
+  await queryDb(
+    `
+      delete from drive_project_object_inventory
+      where project_id = $1 and bucket_name = $2 and object_key = $3 and object_key <> $4;
+    `,
+    [input.projectId, input.bucketName, input.toKey, input.fromKey]
+  )
+  const { rows } = await queryDb<InventoryRow>(
+    `
+      update drive_project_object_inventory
+      set object_key = $4,
+          size = $5,
+          etag = $6,
+          content_type = $7,
+          metadata = coalesce($8::jsonb, '{}'::jsonb),
+          last_modified = $9,
+          deleted_at = null,
+          updated_at = now()
+      where project_id = $1 and bucket_name = $2 and object_key = $3
+      returning *;
+    `,
+    [
+      input.projectId,
+      input.bucketName,
+      input.fromKey,
+      input.toKey,
+      input.size ?? 0,
+      input.etag ?? null,
+      input.contentType ?? null,
+      JSON.stringify(input.metadata ?? {}),
+      input.lastModified ?? null,
+    ]
+  )
+  if (rows[0]) return mapInventoryRow(rows[0])
+  return upsertProjectObjectInventory({
+    projectId: input.projectId,
+    bucketName: input.bucketName,
+    key: input.toKey,
+    fileId: source?.fileId,
+    size: input.size,
+    etag: input.etag,
+    contentType: input.contentType,
+    metadata: input.metadata,
+    lastModified: input.lastModified,
+  })
+}
+
 export async function syncTrackedBucketObject(input: {
   config: R2ClientConfig
   bucketName: string
@@ -322,10 +485,10 @@ export async function syncTrackedBucketObject(input: {
   projectId?: string
 }) {
   const head = await r2HeadObject(input.config, input.bucketName, input.key).catch(() => null)
-  if (!head) return false
+  if (!head) return null
 
   const projectIds = input.projectId ? [input.projectId] : await findProjectIdsForTrackedBucket(input.bucketName)
-  await Promise.all(
+  const results = await Promise.all(
     projectIds.map((projectId) =>
       upsertProjectObjectInventory({
         projectId,
@@ -339,7 +502,29 @@ export async function syncTrackedBucketObject(input: {
       }).catch(() => undefined)
     )
   )
-  return true
+  return input.projectId ? (results.find(Boolean) ?? null) : null
+}
+
+export async function syncRenamedTrackedBucketObject(input: {
+  config: R2ClientConfig
+  projectId: string
+  bucketName: string
+  fromKey: string
+  toKey: string
+}) {
+  const head = await r2HeadObject(input.config, input.bucketName, input.toKey).catch(() => null)
+  if (!head) return null
+  return renameProjectObjectInventory({
+    projectId: input.projectId,
+    bucketName: input.bucketName,
+    fromKey: input.fromKey,
+    toKey: input.toKey,
+    size: head.ContentLength ?? 0,
+    etag: head.ETag,
+    contentType: head.ContentType,
+    metadata: head.Metadata,
+    lastModified: head.LastModified?.toISOString(),
+  })
 }
 
 export async function markTrackedBucketObjectDeleted(input: {
@@ -426,6 +611,7 @@ export async function searchProjectInventory(input: {
   }
   params.push(limit + 1)
   const { rows } = await queryDb<{
+    file_id: string
     object_key: string
     size: string | number
     etag: string | null
@@ -433,7 +619,7 @@ export async function searchProjectInventory(input: {
     last_modified: string | null
   }>(
     `
-      select object_key, size, etag, content_type, last_modified
+      select file_id, object_key, size, etag, content_type, last_modified
       from drive_project_object_inventory
       where ${clauses.join(" and ")}
       order by object_key asc
@@ -444,6 +630,7 @@ export async function searchProjectInventory(input: {
   const page = rows.slice(0, limit)
   return {
     objects: page.map((row) => ({
+      fileId: row.file_id,
       key: row.object_key,
       size: Number(row.size),
       etag: row.etag ?? undefined,
@@ -795,10 +982,17 @@ async function processBatchCopyMove(
     await r2CopyObject(config, bucketName, fromKey, toKey, {
       ifMatch: asString(item.ifMatch) || undefined,
     })
-    await syncTrackedBucketObject({ config, bucketName, key: toKey, projectId: project.id }).catch(() => undefined)
     if (move) {
       await r2DeleteObject(config, bucketName, fromKey)
-      await markTrackedBucketObjectDeleted({ projectId: project.id, bucketName, key: fromKey }).catch(() => undefined)
+      await syncRenamedTrackedBucketObject({
+        config,
+        bucketName,
+        fromKey,
+        toKey,
+        projectId: project.id,
+      }).catch(() => undefined)
+    } else {
+      await syncTrackedBucketObject({ config, bucketName, key: toKey, projectId: project.id }).catch(() => undefined)
     }
     processed += 1
   }
@@ -835,8 +1029,13 @@ async function processPrefixRename(
       const toKey = `${toPrefix}${fromKey.slice(fromPrefix.length)}`
       await r2CopyObject(config, bucketName, fromKey, toKey)
       await r2DeleteObject(config, bucketName, fromKey)
-      await syncTrackedBucketObject({ config, bucketName, key: toKey, projectId: project.id }).catch(() => undefined)
-      await markTrackedBucketObjectDeleted({ projectId: project.id, bucketName, key: fromKey }).catch(() => undefined)
+      await syncRenamedTrackedBucketObject({
+        config,
+        bucketName,
+        fromKey,
+        toKey,
+        projectId: project.id,
+      }).catch(() => undefined)
       moved += 1
     }
     continuationToken = page.NextContinuationToken

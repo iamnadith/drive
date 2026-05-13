@@ -543,6 +543,7 @@ export async function ensureDriveSchema(): Promise<void> {
         create table if not exists drive_project_file_links (
           id uuid primary key default gen_random_uuid(),
           project_id uuid not null references drive_projects(id) on delete cascade,
+          file_id text,
           object_key text not null,
           bucket_name text,
           token_hash text not null,
@@ -552,6 +553,7 @@ export async function ensureDriveSchema(): Promise<void> {
           created_at timestamptz not null default now()
         );
       `)
+      await queryDb(`alter table public.drive_project_file_links add column if not exists file_id text;`)
       await queryDb(`alter table public.drive_project_file_links add column if not exists bucket_name text;`)
       await queryDb(`
         update drive_project_file_links l
@@ -561,6 +563,7 @@ export async function ensureDriveSchema(): Promise<void> {
           and l.bucket_name is null;
       `)
       await queryDb(`create unique index if not exists drive_project_file_links_token_hash_key on drive_project_file_links (token_hash);`)
+      await queryDb(`create index if not exists drive_project_file_links_file_idx on drive_project_file_links (file_id);`)
       await queryDb(`create index if not exists drive_project_file_links_project_idx on drive_project_file_links (project_id, object_key);`)
       await queryDb(`create index if not exists drive_project_file_links_active_idx on drive_project_file_links (mode, revoked_at, expires_at);`)
 
@@ -625,6 +628,7 @@ export async function ensureDriveSchema(): Promise<void> {
         );
       `)
       await queryDb(`alter table public.drive_project_object_inventory add column if not exists bucket_name text;`)
+      await queryDb(`alter table public.drive_project_object_inventory add column if not exists file_id text;`)
       await queryDb(`
         update drive_project_object_inventory i
         set bucket_name = coalesce(nullif(p.bucket_name, ''), '')
@@ -633,14 +637,19 @@ export async function ensureDriveSchema(): Promise<void> {
           and i.bucket_name is null;
       `)
       await queryDb(`update public.drive_project_object_inventory set bucket_name = '' where bucket_name is null;`)
+      await queryDb(`update public.drive_project_object_inventory set file_id = encode(gen_random_bytes(12), 'hex') where file_id is null or file_id = '';`)
       await queryDb(`alter table public.drive_project_object_inventory alter column bucket_name set default '';`)
       await queryDb(`alter table public.drive_project_object_inventory alter column bucket_name set not null;`)
+      await queryDb(`alter table public.drive_project_object_inventory alter column file_id set default encode(gen_random_bytes(12), 'hex');`)
+      await queryDb(`alter table public.drive_project_object_inventory alter column file_id set not null;`)
       await queryDb(`alter table public.drive_project_object_inventory drop constraint if exists drive_project_object_inventory_pkey;`)
       await queryDb(`alter table public.drive_project_object_inventory add constraint drive_project_object_inventory_pkey primary key (project_id, bucket_name, object_key);`)
+      await queryDb(`create unique index if not exists drive_project_object_inventory_file_id_key on drive_project_object_inventory (file_id);`)
       await queryDb(`drop index if exists drive_project_object_inventory_search_idx;`)
       await queryDb(`drop index if exists drive_project_object_inventory_updated_idx;`)
       await queryDb(`create index if not exists drive_project_object_inventory_search_idx on drive_project_object_inventory (project_id, bucket_name, object_key text_pattern_ops) where deleted_at is null;`)
       await queryDb(`create index if not exists drive_project_object_inventory_updated_idx on drive_project_object_inventory (project_id, bucket_name, updated_at desc);`)
+      await queryDb(`create index if not exists drive_project_object_inventory_project_file_id_idx on drive_project_object_inventory (project_id, file_id) where deleted_at is null;`)
 
       await queryDb(`
         create table if not exists drive_project_object_locks (
