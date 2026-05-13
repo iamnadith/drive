@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { useSearchParams } from "next/navigation"
 import {
   Folder,
   File,
@@ -249,6 +250,7 @@ function buildItemsFromListing(input: {
 }
 
 export default function StoragePage() {
+  const searchParams = useSearchParams()
   const [view, setView] = React.useState<"list" | "grid">("list")
   const [currentPath, setCurrentPath] = React.useState<string[]>([])
   const [activeAccount, setActiveAccount] = React.useState<ActiveAccount | null>(
@@ -270,6 +272,7 @@ export default function StoragePage() {
   const [selectedItems, setSelectedItems] = React.useState<string[]>([])
   const fileInputRef = React.useRef<HTMLInputElement | null>(null)
   const loadRequestIdRef = React.useRef(0)
+  const initialBucketAppliedRef = React.useRef(false)
   const videoRef = React.useRef<HTMLVideoElement | null>(null)
   const [videoPlaying, setVideoPlaying] = React.useState(false)
   const [propertiesTarget, setPropertiesTarget] =
@@ -342,6 +345,25 @@ export default function StoragePage() {
   React.useEffect(() => {
     loadActiveAndBuckets()
   }, [loadActiveAndBuckets])
+
+  // This runs once after bucket data loads to support direct links like /dashboard/storage?bucket=name.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  React.useEffect(() => {
+    if (initialBucketAppliedRef.current) return
+    if (drivesLoading) return
+    const requestedBucket = searchParams.get("bucket")?.trim()
+    if (!requestedBucket) {
+      initialBucketAppliedRef.current = true
+      return
+    }
+    const matchingDrive = drives.find((drive) => drive.name === requestedBucket)
+    if (!matchingDrive) {
+      initialBucketAppliedRef.current = true
+      return
+    }
+    initialBucketAppliedRef.current = true
+    navigateToDrive(matchingDrive.name)
+  }, [drives, drivesLoading, searchParams])
 
   const needsStatsSync = React.useMemo(() => {
     if (!activeAccount?.id) return false

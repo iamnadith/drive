@@ -41,6 +41,13 @@ export type Project = {
   createdAt: string
   updatedAt: string
   keyCount?: number
+  bucketCount?: number
+}
+
+export type ProjectBucketAssignment = {
+  bucketName: string
+  isPrimary: boolean
+  createdAt: string
 }
 
 export type ProjectApiKey = {
@@ -59,6 +66,7 @@ export type ProjectFileLink = {
   id: string
   projectId: string
   objectKey: string
+  bucketName?: string
   mode: ProjectLinkMode
   expiresAt?: string
   revokedAt?: string
@@ -88,6 +96,13 @@ type ProjectRow = {
   created_at: string
   updated_at: string
   key_count?: string | number | null
+  bucket_count?: string | number | null
+}
+
+type ProjectBucketAssignmentRow = {
+  bucket_name: string
+  is_primary: boolean
+  created_at: string
 }
 
 type ApiKeyRow = {
@@ -106,6 +121,7 @@ type FileLinkRow = {
   id: string
   project_id: string
   object_key: string
+  bucket_name: string | null
   mode: ProjectLinkMode
   expires_at: string | null
   revoked_at: string | null
@@ -162,6 +178,18 @@ function mapProject(row: ProjectRow): Project {
       row.key_count === null || row.key_count === undefined
         ? undefined
         : Number(row.key_count),
+    bucketCount:
+      row.bucket_count === null || row.bucket_count === undefined
+        ? undefined
+        : Number(row.bucket_count),
+  }
+}
+
+function mapProjectBucketAssignment(row: ProjectBucketAssignmentRow): ProjectBucketAssignment {
+  return {
+    bucketName: row.bucket_name,
+    isPrimary: row.is_primary === true,
+    createdAt: row.created_at,
   }
 }
 
@@ -184,6 +212,7 @@ function mapFileLink(row: FileLinkRow): ProjectFileLink {
     id: row.id,
     projectId: row.project_id,
     objectKey: row.object_key,
+    bucketName: row.bucket_name ?? undefined,
     mode: row.mode,
     expiresAt: row.expires_at ?? undefined,
     revokedAt: row.revoked_at ?? undefined,
@@ -265,28 +294,27 @@ export function clearProjectAuthCache() {
 }
 
 export function generateProjectId() {
-  return `prj_${crypto.randomBytes(9).toString("base64url").toLowerCase()}`
+  return crypto.randomBytes(9).toString("base64url").toLowerCase()
 }
 
 export function generateProjectApiKey() {
-  return `drv_${crypto.randomBytes(32).toString("base64url")}`
+  return crypto.randomBytes(32).toString("base64url")
 }
 
 export function generateFileLinkToken() {
   return `pfl_${crypto.randomBytes(32).toString("base64url")}`
 }
 
-export function sanitizeBucketName(name: string, projectId: string) {
-  const suffix = projectId.replace(/^prj_/, "").slice(0, 12)
+export function sanitizeBucketName(name: string) {
   const base = name
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
     .replace(/-{2,}/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 45)
+    .slice(0, 63)
     .replace(/^-+|-+$/g, "")
-  return `${base || "project"}-${suffix}`
+  return base || "project"
 }
 
 export async function ensureProjectSchema() {
@@ -306,6 +334,12 @@ export async function ensureProjectSchema() {
       updated_at timestamptz not null default now()
     );
   `)
+  await queryDb(`alter table public.drive_projects add column if not exists created_account_id uuid references drive_accounts(id) on delete set null;`)
+  await queryDb(`alter table public.drive_projects add column if not exists created_account_label text;`)
+  await queryDb(`alter table public.drive_projects alter column bucket_name drop not null;`)
+  await queryDb(`update public.drive_projects set bucket_name = '' where bucket_name is null;`)
+  await queryDb(`alter table public.drive_projects alter column bucket_name set default '';`)
+  await queryDb(`alter table public.drive_projects alter column bucket_name set not null;`)
   await queryDb(`
     do $$
     declare
@@ -338,6 +372,7 @@ export async function ensureProjectSchema() {
         end if;
 
         alter table public.drive_projects rename column id to old_text_id;
+        alter table public.drive_projects alter column old_text_id drop not null;
         alter table public.drive_projects add column id uuid default gen_random_uuid();
 
         update public.drive_projects
@@ -352,9 +387,116 @@ export async function ensureProjectSchema() {
       end if;
     end $$;
   `)
+  await queryDb(`
+    do $$
+    begin
+      if exists (
+        select 1
+        from information_schema.columns
+        where table_schema = 'public'
+          and table_name = 'drive_projects'
+          and column_name = 'active_account_id'
+      ) then
+        update public.drive_projects
+        set created_account_id = active_account_id
+        where created_account_id is null
+          and active_account_id is not null;
+
+        if exists (
+          select 1
+          from information_schema.columns
+          where table_schema = 'public'
+            and table_name = 'drive_projects'
+            and column_name = 'active_account_id'
+            and is_nullable = 'NO'
+        ) then
+          alter table public.drive_projects alter column active_account_id drop not null;
+        end if;
+      end if;
+    end $$;
+  `)
+  await queryDb(`
+    do $$
+    begin
+      if exists (
+        select 1
+        from information_schema.columns
+        where table_schema = 'public'
+          and table_name = 'drive_projects'
+          and column_name = 'old_text_id'
+          and is_nullable = 'NO'
+      ) then
+        alter table public.drive_projects alter column old_text_id drop not null;
+      end if;
+    end $$;
+  `)
+  await queryDb(`
+    do $$
+    declare
+      legacy_column text;
+    begin
+      foreach legacy_column in array array['api_key_hash', 'api_key_prefix', 'api_key_name', 'api_key', 'bucket_id']
+      loop
+        if exists (
+          select 1
+          from information_schema.columns
+          where table_schema = 'public'
+            and table_name = 'drive_projects'
+            and column_name = legacy_column
+            and is_nullable = 'NO'
+        ) then
+          execute format(
+            'alter table public.drive_projects alter column %I drop not null',
+            legacy_column
+          );
+        end if;
+      end loop;
+    end $$;
+  `)
+  await queryDb(`drop index if exists drive_projects_bucket_name_key;`)
   await queryDb(`create unique index if not exists drive_projects_project_id_key on drive_projects (project_id);`)
-  await queryDb(`create unique index if not exists drive_projects_bucket_name_key on drive_projects (bucket_name);`)
+  await queryDb(`create unique index if not exists drive_projects_bucket_name_key on drive_projects (bucket_name) where bucket_name <> '';`)
   await queryDb(`create index if not exists drive_projects_status_idx on drive_projects (status);`)
+  await queryDb(`
+    create table if not exists drive_project_bucket_assignments (
+      project_id uuid not null references drive_projects(id) on delete cascade,
+      bucket_name text not null,
+      is_primary boolean not null default false,
+      created_at timestamptz not null default now(),
+      primary key (project_id, bucket_name)
+    );
+  `)
+  await queryDb(`create unique index if not exists drive_project_bucket_assignments_bucket_key on drive_project_bucket_assignments (bucket_name);`)
+  await queryDb(`create unique index if not exists drive_project_bucket_assignments_primary_idx on drive_project_bucket_assignments (project_id) where is_primary = true;`)
+  await queryDb(`
+    insert into drive_project_bucket_assignments (project_id, bucket_name, is_primary)
+    select p.id, p.bucket_name, true
+    from drive_projects p
+    where p.bucket_name <> ''
+      and not exists (
+        select 1
+        from drive_project_bucket_assignments a
+        where a.project_id = p.id
+          and a.bucket_name = p.bucket_name
+      );
+  `)
+  await queryDb(`
+    do $$
+    begin
+      update drive_project_bucket_assignments a
+      set is_primary = true
+      where a.bucket_name in (
+        select p.bucket_name
+        from drive_projects p
+        where p.bucket_name <> ''
+      )
+      and a.project_id in (
+        select p.id
+        from drive_projects p
+        where p.bucket_name = a.bucket_name
+      );
+    end $$;
+  `)
 
   await queryDb(`
     create table if not exists drive_project_api_keys (
@@ -393,12 +535,21 @@ export async function ensureProjectSchema() {
       id uuid primary key default gen_random_uuid(),
       project_id uuid not null references drive_projects(id) on delete cascade,
       object_key text not null,
+      bucket_name text,
       token_hash text not null,
       mode text not null,
       expires_at timestamptz,
       revoked_at timestamptz,
       created_at timestamptz not null default now()
     );
+  `)
+  await queryDb(`alter table public.drive_project_file_links add column if not exists bucket_name text;`)
+  await queryDb(`
+    update drive_project_file_links l
+    set bucket_name = p.bucket_name
+    from drive_projects p
+    where l.project_id = p.id
+      and l.bucket_name is null;
   `)
   await queryDb(`create unique index if not exists drive_project_file_links_token_hash_key on drive_project_file_links (token_hash);`)
   await queryDb(`create index if not exists drive_project_file_links_project_idx on drive_project_file_links (project_id, object_key);`)
@@ -409,9 +560,11 @@ export async function listProjects(): Promise<Project[]> {
   await ensureProjectSchema()
   const { rows } = await queryDb<ProjectRow>(`
     select p.*,
-      count(a.id)::int as key_count
+      count(distinct a.id)::int as key_count,
+      count(distinct b.bucket_name)::int as bucket_count
     from drive_projects p
     left join drive_project_api_key_assignments a on a.project_id = p.id
+    left join drive_project_bucket_assignments b on b.project_id = p.id
     group by p.id
     order by p.created_at desc;
   `)
@@ -434,7 +587,7 @@ export async function getProjectByIdentifier(identifier: string): Promise<Projec
 export async function createProjectRecord(input: {
   name: string
   projectId: string
-  bucketName: string
+  bucketName?: string
   createdAccountId?: string
   createdAccountLabel?: string
 }) {
@@ -449,7 +602,7 @@ export async function createProjectRecord(input: {
     [
       input.projectId,
       input.name.trim(),
-      input.bucketName,
+      input.bucketName ?? "",
       input.createdAccountId ?? null,
       input.createdAccountLabel ?? null,
     ]
@@ -459,7 +612,7 @@ export async function createProjectRecord(input: {
 
 export async function updateProjectRecord(
   identifier: string,
-  updates: { name?: string; status?: ProjectStatus }
+  updates: { name?: string; status?: ProjectStatus; bucketName?: string }
 ) {
   await ensureProjectSchema()
   const current = await getProjectByIdentifier(identifier)
@@ -471,11 +624,12 @@ export async function updateProjectRecord(
       set
         name = coalesce($2, name),
         status = coalesce($3, status),
+        bucket_name = coalesce($4, bucket_name),
         updated_at = now()
       where id = $1
       returning *;
     `,
-    [current.id, nextName || null, updates.status ?? null]
+    [current.id, nextName || null, updates.status ?? null, updates.bucketName ?? null]
   )
   clearProjectAuthCache()
   return mapProject(rows[0])
@@ -489,6 +643,143 @@ export async function deleteProjectRecord(identifier: string) {
   await deleteOrphanApiKeys()
   clearProjectAuthCache()
   return project
+}
+
+export async function listProjectBuckets(projectIdentifier: string) {
+  await ensureProjectSchema()
+  const project = await getProjectByIdentifier(projectIdentifier)
+  if (!project) throw new Error("Project not found")
+  const { rows } = await queryDb<ProjectBucketAssignmentRow>(
+    `
+      select bucket_name, is_primary, created_at
+      from drive_project_bucket_assignments
+      where project_id = $1
+      order by is_primary desc, created_at asc, bucket_name asc;
+    `,
+    [project.id]
+  )
+  return rows.map(mapProjectBucketAssignment)
+}
+
+async function syncProjectPrimaryBucket(projectId: string) {
+  const { rows } = await queryDb<{ bucket_name: string | null }>(
+    `
+      select bucket_name
+      from drive_project_bucket_assignments
+      where project_id = $1
+      order by is_primary desc, created_at asc, bucket_name asc
+      limit 1;
+    `,
+    [projectId]
+  )
+  const bucketName = rows[0]?.bucket_name ?? ""
+  await queryDb(
+    `
+      update drive_projects
+      set bucket_name = $2, updated_at = now()
+      where id = $1;
+    `,
+    [projectId, bucketName]
+  )
+  clearProjectAuthCache()
+}
+
+export async function assignProjectBucket(input: {
+  projectIdentifier: string
+  bucketName: string
+  makePrimary?: boolean
+}) {
+  await ensureProjectSchema()
+  const project = await getProjectByIdentifier(input.projectIdentifier)
+  if (!project) throw new Error("Project not found")
+
+  const currentBuckets = await listProjectBuckets(project.id)
+  const makePrimary = input.makePrimary === true || currentBuckets.length === 0
+
+  await queryDb(
+    `
+      insert into drive_project_bucket_assignments (project_id, bucket_name, is_primary)
+      values ($1, $2, $3)
+      on conflict (project_id, bucket_name)
+      do update set is_primary = excluded.is_primary;
+    `,
+    [project.id, input.bucketName, makePrimary]
+  )
+
+  if (makePrimary) {
+    await queryDb(
+      `
+        update drive_project_bucket_assignments
+        set is_primary = (bucket_name = $2)
+        where project_id = $1;
+      `,
+      [project.id, input.bucketName]
+    )
+  }
+
+  await syncProjectPrimaryBucket(project.id)
+  return listProjectBuckets(project.id)
+}
+
+export async function setProjectPrimaryBucket(projectIdentifier: string, bucketName: string) {
+  await ensureProjectSchema()
+  const project = await getProjectByIdentifier(projectIdentifier)
+  if (!project) throw new Error("Project not found")
+
+  const { rowCount } = await queryDb(
+    `
+      update drive_project_bucket_assignments
+      set is_primary = (bucket_name = $2)
+      where project_id = $1;
+    `,
+    [project.id, bucketName]
+  )
+
+  if (!rowCount) throw new Error("Bucket is not assigned to this project")
+
+  await syncProjectPrimaryBucket(project.id)
+  return listProjectBuckets(project.id)
+}
+
+export async function removeProjectBucket(projectIdentifier: string, bucketName: string) {
+  await ensureProjectSchema()
+  const project = await getProjectByIdentifier(projectIdentifier)
+  if (!project) throw new Error("Project not found")
+
+  const currentBuckets = await listProjectBuckets(project.id)
+  const removingPrimary = currentBuckets.some(
+    (bucket) => bucket.bucketName === bucketName && bucket.isPrimary
+  )
+
+  const { rowCount } = await queryDb(
+    `
+      delete from drive_project_bucket_assignments
+      where project_id = $1 and bucket_name = $2;
+    `,
+    [project.id, bucketName]
+  )
+  if (!rowCount) throw new Error("Bucket is not assigned to this project")
+
+  if (removingPrimary) {
+    await queryDb(
+      `
+        update drive_project_bucket_assignments
+        set is_primary = true
+        where project_id = $1
+          and bucket_name = (
+            select bucket_name
+            from drive_project_bucket_assignments
+            where project_id = $1
+            order by created_at asc, bucket_name asc
+            limit 1
+          );
+      `,
+      [project.id]
+    )
+  }
+
+  await syncProjectPrimaryBucket(project.id)
+  return listProjectBuckets(project.id)
 }
 
 export async function listProjectApiKeys(projectIdentifier: string) {
@@ -749,6 +1040,7 @@ export async function authorizeProjectApiKey(
 export async function createProjectFileLink(input: {
   projectIdentifier: string
   objectKey: string
+  bucketName: string
   mode: ProjectLinkMode
   expiresAt?: string | null
 }) {
@@ -759,13 +1051,14 @@ export async function createProjectFileLink(input: {
   const { rows } = await queryDb<FileLinkRow>(
     `
       insert into drive_project_file_links
-        (project_id, object_key, token_hash, mode, expires_at)
-      values ($1, $2, $3, $4, $5)
+        (project_id, object_key, bucket_name, token_hash, mode, expires_at)
+      values ($1, $2, $3, $4, $5, $6)
       returning *;
     `,
     [
       project.id,
       input.objectKey,
+      input.bucketName,
       hashProjectSecret(token),
       input.mode,
       input.expiresAt ?? null,
@@ -795,7 +1088,7 @@ export async function getProjectFileLinkByToken(token: string) {
         p.id as project_uuid,
         p.project_id as external_project_id,
         p.name as project_name,
-        p.bucket_name,
+        coalesce(l.bucket_name, p.bucket_name) as bucket_name,
         p.status as project_status,
         p.created_account_id,
         p.created_account_label,

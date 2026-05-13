@@ -3,6 +3,11 @@ import { Readable } from "stream"
 import type { ReadableStream as NodeReadableStream } from "stream/web"
 import { getAllAccounts } from "@/lib/accounts-store"
 import {
+  markTrackedBucketObjectDeleted,
+  markTrackedBucketPrefixDeleted,
+  syncTrackedBucketObject,
+} from "@/lib/project-operations-store"
+import {
   r2CreateSignedDownloadUrl,
   r2DeleteObject,
   r2DeleteObjects,
@@ -191,6 +196,15 @@ export async function POST(
             contentType: file.type || "application/octet-stream",
           }
         )
+        await syncTrackedBucketObject(
+          {
+            accountId: active.cloudflareAccountId,
+            accessKeyId: active.r2AccessKeyId,
+            secretAccessKey: active.r2SecretAccessKey,
+          },
+          name,
+          key
+        )
       } catch (err: unknown) {
         const message = errorMessage(err, "R2 upload failed")
         console.error("R2 upload object failed:", message)
@@ -236,6 +250,15 @@ export async function POST(
         name,
         key,
         body
+      )
+      await syncTrackedBucketObject(
+        {
+          accountId: active.cloudflareAccountId,
+          accessKeyId: active.r2AccessKeyId,
+          secretAccessKey: active.r2SecretAccessKey,
+        },
+        name,
+        key
       )
     } catch (err: unknown) {
       const message = errorMessage(err, "R2 create object failed")
@@ -294,10 +317,13 @@ export async function DELETE(
       const keys = objects.map((obj) => obj.key)
       keys.push(prefix)
       await r2DeleteObjects(config, name, keys)
+      await markTrackedBucketPrefixDeleted({ bucketName: name, prefix }).catch(() => undefined)
+      await Promise.all(keys.map((item) => markTrackedBucketObjectDeleted({ bucketName: name, key: item }).catch(() => undefined)))
       return NextResponse.json({ ok: true, deleted: keys.length })
     }
 
     await r2DeleteObject(config, name, key)
+    await markTrackedBucketObjectDeleted({ bucketName: name, key }).catch(() => undefined)
     return NextResponse.json({ ok: true, deleted: 1 })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to delete bucket object")

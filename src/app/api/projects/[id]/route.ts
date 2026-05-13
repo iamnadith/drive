@@ -4,15 +4,18 @@ import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import {
   deleteProjectRecord,
   getProjectByIdentifier,
+  listProjectBuckets,
   updateProjectRecord,
 } from "@/lib/projects-store"
 import { r2DeleteBucketAndContents } from "@/lib/r2-s3"
 import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
-  return typeof error === "object" && error !== null && "message" in error
-    ? String((error as { message?: unknown }).message ?? fallback)
-    : fallback
+  const message =
+    typeof error === "object" && error !== null && "message" in error
+      ? String((error as { message?: unknown }).message ?? fallback)
+      : fallback
+  return message
 }
 
 export async function GET(
@@ -52,6 +55,8 @@ export async function PATCH(
       body.status === "active" || body.status === "disabled" ? body.status : undefined
     const name = typeof body.name === "string" ? body.name : undefined
     const before = await getProjectByIdentifier(id)
+    if (!before) return NextResponse.json({ error: "Project not found" }, { status: 404 })
+
     const project = await updateProjectRecord(id, { name, status })
 
     await recordActivity({
@@ -88,6 +93,7 @@ export async function DELETE(
     const deleteBucket = body.deleteBucket === true
     const project = await getProjectByIdentifier(id)
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 })
+    const assignedBuckets = await listProjectBuckets(project.id)
 
     if (deleteBucket) {
       const active = await getActiveAccount()
@@ -101,14 +107,16 @@ export async function DELETE(
           { status: 400 }
         )
       }
-      await r2DeleteBucketAndContents(
-        {
-          accountId: active.cloudflareAccountId,
-          accessKeyId: active.r2AccessKeyId,
-          secretAccessKey: active.r2SecretAccessKey,
-        },
-        project.bucketName
-      )
+      for (const bucket of assignedBuckets) {
+        await r2DeleteBucketAndContents(
+          {
+            accountId: active.cloudflareAccountId,
+            accessKeyId: active.r2AccessKeyId,
+            secretAccessKey: active.r2SecretAccessKey,
+          },
+          bucket.bucketName
+        )
+      }
     }
 
     await deleteProjectRecord(project.id)
@@ -120,11 +128,11 @@ export async function DELETE(
       entityId: project.projectId,
       entityLabel: project.name,
       summary: deleteBucket
-        ? `Deleted project ${project.name} and its bucket`
+        ? `Deleted project ${project.name} and its buckets`
         : `Deleted project ${project.name}`,
       detail: deleteBucket
-        ? `Deleted R2 bucket ${project.bucketName} from the active account.`
-        : `Kept R2 bucket ${project.bucketName}.`,
+        ? `Deleted ${assignedBuckets.length} assigned R2 bucket(s) from the active account.`
+        : `Kept ${assignedBuckets.length} assigned R2 bucket(s).`,
       before: { project },
       undoReason: "Projects and generated API key secrets cannot be restored automatically.",
       ...getRequestActivityContext(request),

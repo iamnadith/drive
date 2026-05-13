@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server"
 import {
   authorizeProjectRequest,
-  getActiveProjectR2Config,
+  getActiveProjectBucketR2Config,
+  projectBucketFromRequest,
   projectIdFromUrl,
 } from "@/lib/project-api-auth"
 import {
   assertProjectObjectWritable,
   createProjectOperationJob,
-  markProjectObjectDeleted,
+  markTrackedBucketObjectDeleted,
   processProjectOperationJob,
   recordProjectApiEvent,
 } from "@/lib/project-operations-store"
@@ -21,14 +22,15 @@ function toNumber(value: string | null, fallback: number) {
 export async function GET(request: Request) {
   const url = new URL(request.url)
   const projectId = projectIdFromUrl(request)
+  const bucketName = projectBucketFromRequest(request)
   const authorized = await authorizeProjectRequest(request, projectId, "list")
   if ("response" in authorized) return authorized.response
-  const r2 = await getActiveProjectR2Config(authorized.auth.project)
+  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
   if ("response" in r2) return r2.response
 
   const page = await r2ListObjectsPageWithDelimiter(
     r2.config,
-    authorized.auth.project.bucketName,
+    r2.bucketName,
     {
       prefix: url.searchParams.get("prefix") ?? undefined,
       continuationToken: url.searchParams.get("cursor") ?? undefined,
@@ -78,14 +80,21 @@ export async function DELETE(request: Request) {
     url.searchParams.get("key")?.trim() ||
     ""
   const recursive = body.recursive === true || url.searchParams.get("recursive") === "true"
+  const bucketName =
+    (typeof (body as { bucket?: unknown }).bucket === "string" ? String((body as { bucket?: unknown }).bucket).trim() : "") ||
+    projectBucketFromRequest(request)
   if (!key) return NextResponse.json({ error: "Object key is required" }, { status: 400 })
 
   const authorized = await authorizeProjectRequest(request, projectId, "delete")
   if ("response" in authorized) return authorized.response
+  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
+  if ("response" in r2) return r2.response
+  const idempotencyKey = request.headers.get("idempotency-key")?.trim()
   if (!recursive) {
     try {
       await assertProjectObjectWritable(
         authorized.auth.project.id,
+        r2.bucketName,
         key,
         request.headers.get("x-drive-lock-token")
       )
@@ -99,8 +108,8 @@ export async function DELETE(request: Request) {
     const job = await createProjectOperationJob({
       projectIdentifier: authorized.auth.project.id,
       type: "recursive_delete",
-      payload: { prefix },
-      idempotencyKey: request.headers.get("idempotency-key"),
+      payload: { prefix, bucketName: r2.bucketName },
+      idempotencyKey: idempotencyKey ? `${r2.bucketName}:${idempotencyKey}` : undefined,
     })
     void processProjectOperationJob(job.id).catch((error) => {
       console.error("Recursive delete job failed:", error)
@@ -112,15 +121,17 @@ export async function DELETE(request: Request) {
       objectKey: prefix,
       status: 202,
       request,
-      metadata: { jobId: job.id },
+      metadata: { jobId: job.id, bucketName: r2.bucketName },
     })
     return NextResponse.json({ job }, { status: 202 })
   }
 
-  const r2 = await getActiveProjectR2Config(authorized.auth.project)
-  if ("response" in r2) return r2.response
-  await r2DeleteObject(r2.config, authorized.auth.project.bucketName, key)
-  await markProjectObjectDeleted(authorized.auth.project.id, key).catch(() => undefined)
+  await r2DeleteObject(r2.config, r2.bucketName, key)
+  await markTrackedBucketObjectDeleted({
+    projectId: authorized.auth.project.id,
+    bucketName: r2.bucketName,
+    key,
+  }).catch(() => undefined)
   await recordProjectApiEvent({
     project: authorized.auth.project,
     apiKeyId: authorized.auth.apiKey.id,

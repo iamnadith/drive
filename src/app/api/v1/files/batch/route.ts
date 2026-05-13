@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server"
-import { authorizeProjectRequest } from "@/lib/project-api-auth"
+import {
+  authorizeProjectRequest,
+  projectBucketFromRequest,
+  resolveProjectBucketName,
+} from "@/lib/project-api-auth"
 import {
   createProjectOperationJob,
   processProjectOperationJob,
@@ -9,6 +13,7 @@ import {
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {
     projectId?: unknown
+    bucket?: unknown
     operation?: unknown
     keys?: unknown
     items?: unknown
@@ -17,6 +22,8 @@ export async function POST(request: Request) {
     (typeof body.projectId === "string" ? body.projectId.trim() : "") ||
     request.headers.get("x-drive-project")?.trim() ||
     ""
+  const bucketName =
+    (typeof body.bucket === "string" ? body.bucket.trim() : "") || projectBucketFromRequest(request)
   const operation = typeof body.operation === "string" ? body.operation : ""
   const type =
     operation === "delete"
@@ -32,15 +39,19 @@ export async function POST(request: Request) {
   const permission = operation === "delete" ? "delete" : operation === "copy" ? "read" : "rename"
   const authorized = await authorizeProjectRequest(request, projectId, permission)
   if ("response" in authorized) return authorized.response
+  const resolvedBucket = await resolveProjectBucketName(authorized.auth.project, bucketName)
+  if ("response" in resolvedBucket) return resolvedBucket.response
+  const idempotencyKey = request.headers.get("idempotency-key")?.trim()
 
   const job = await createProjectOperationJob({
     projectIdentifier: authorized.auth.project.id,
     type,
     payload: {
+      bucketName: resolvedBucket.bucketName,
       keys: Array.isArray(body.keys) ? body.keys : undefined,
       items: Array.isArray(body.items) ? body.items : undefined,
     },
-    idempotencyKey: request.headers.get("idempotency-key"),
+    idempotencyKey: idempotencyKey ? `${resolvedBucket.bucketName}:${idempotencyKey}` : undefined,
   })
   void processProjectOperationJob(job.id).catch((error) => {
     console.error("Batch operation job failed:", error)
@@ -51,7 +62,7 @@ export async function POST(request: Request) {
     action: `file.batch.${operation}.queued`,
     status: 202,
     request,
-    metadata: { jobId: job.id },
+    metadata: { jobId: job.id, bucketName: resolvedBucket.bucketName },
   })
   return NextResponse.json({ job }, { status: 202 })
 }

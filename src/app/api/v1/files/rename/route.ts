@@ -1,17 +1,19 @@
 import { NextResponse } from "next/server"
 import {
   authorizeProjectRequest,
-  getActiveProjectR2Config,
+  getActiveProjectBucketR2Config,
+  projectBucketFromRequest,
+  resolveProjectBucketName,
 } from "@/lib/project-api-auth"
 import {
   assertProjectObjectWritable,
   createProjectOperationJob,
-  markProjectObjectDeleted,
+  markTrackedBucketObjectDeleted,
   processProjectOperationJob,
   recordProjectApiEvent,
-  upsertProjectObjectInventory,
+  syncTrackedBucketObject,
 } from "@/lib/project-operations-store"
-import { r2CopyObject, r2DeleteObject, r2HeadObject } from "@/lib/r2-s3"
+import { r2CopyObject, r2DeleteObject } from "@/lib/r2-s3"
 
 export async function PATCH(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {
@@ -27,6 +29,10 @@ export async function PATCH(request: Request) {
     (typeof body.projectId === "string" ? body.projectId.trim() : "") ||
     request.headers.get("x-drive-project")?.trim() ||
     ""
+  const bucketName =
+    (typeof (body as { bucket?: unknown }).bucket === "string"
+      ? String((body as { bucket?: unknown }).bucket).trim()
+      : "") || projectBucketFromRequest(request)
   const fromKey = typeof body.fromKey === "string" ? body.fromKey.trim() : ""
   const toKey = typeof body.toKey === "string" ? body.toKey.trim() : ""
   const fromPrefix = typeof body.fromPrefix === "string" ? body.fromPrefix.trim() : ""
@@ -41,15 +47,21 @@ export async function PATCH(request: Request) {
 
   const authorized = await authorizeProjectRequest(request, projectId, "rename")
   if ("response" in authorized) return authorized.response
+  const resolvedBucket = await resolveProjectBucketName(authorized.auth.project, bucketName)
+  if ("response" in resolvedBucket) return resolvedBucket.response
+  const idempotencyKey = request.headers.get("idempotency-key")?.trim()
 
   if (prefixRename || body.async === true) {
     const job = await createProjectOperationJob({
       projectIdentifier: authorized.auth.project.id,
       type: prefixRename ? "prefix_rename" : "batch_move",
       payload: prefixRename
-        ? { fromPrefix, toPrefix }
-        : { items: [{ fromKey, toKey, ifMatch: body.ifMatch ?? request.headers.get("if-match") }] },
-      idempotencyKey: request.headers.get("idempotency-key"),
+        ? { fromPrefix, toPrefix, bucketName: resolvedBucket.bucketName }
+        : {
+            items: [{ fromKey, toKey, ifMatch: body.ifMatch ?? request.headers.get("if-match") }],
+            bucketName: resolvedBucket.bucketName,
+          },
+      idempotencyKey: idempotencyKey ? `${resolvedBucket.bucketName}:${idempotencyKey}` : undefined,
     })
     void processProjectOperationJob(job.id).catch((error) => {
       console.error("Rename job failed:", error)
@@ -61,16 +73,17 @@ export async function PATCH(request: Request) {
       objectKey: prefixRename ? fromPrefix : fromKey,
       status: 202,
       request,
-      metadata: { jobId: job.id },
+      metadata: { jobId: job.id, bucketName: resolvedBucket.bucketName },
     })
     return NextResponse.json({ job }, { status: 202 })
   }
 
-  const r2 = await getActiveProjectR2Config(authorized.auth.project)
+  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
   if ("response" in r2) return r2.response
   try {
     await assertProjectObjectWritable(
       authorized.auth.project.id,
+      r2.bucketName,
       fromKey,
       request.headers.get("x-drive-lock-token")
     )
@@ -78,24 +91,24 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ error: "Object is locked" }, { status: 409 })
   }
 
-  await r2CopyObject(r2.config, authorized.auth.project.bucketName, fromKey, toKey, {
+  await r2CopyObject(r2.config, r2.bucketName, fromKey, toKey, {
     ifMatch:
       typeof body.ifMatch === "string"
         ? body.ifMatch
         : request.headers.get("if-match") ?? undefined,
   })
-  await r2DeleteObject(r2.config, authorized.auth.project.bucketName, fromKey)
-  const head = await r2HeadObject(r2.config, authorized.auth.project.bucketName, toKey).catch(() => null)
-  await upsertProjectObjectInventory({
+  await r2DeleteObject(r2.config, r2.bucketName, fromKey)
+  await syncTrackedBucketObject({
+    config: r2.config,
     projectId: authorized.auth.project.id,
+    bucketName: r2.bucketName,
     key: toKey,
-    size: head?.ContentLength ?? 0,
-    etag: head?.ETag,
-    contentType: head?.ContentType,
-    metadata: head?.Metadata,
-    lastModified: head?.LastModified?.toISOString(),
   }).catch(() => undefined)
-  await markProjectObjectDeleted(authorized.auth.project.id, fromKey).catch(() => undefined)
+  await markTrackedBucketObjectDeleted({
+    projectId: authorized.auth.project.id,
+    bucketName: r2.bucketName,
+    key: fromKey,
+  }).catch(() => undefined)
   await recordProjectApiEvent({
     project: authorized.auth.project,
     apiKeyId: authorized.auth.apiKey.id,

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { getActiveAccount, type CloudflareAccount } from "./accounts-store"
 import {
   authorizeProjectApiKey,
+  listProjectBuckets,
   validateProjectApiKey,
   type Project,
   type ProjectPermission,
@@ -33,6 +34,11 @@ export function projectIdFromUrl(request: Request) {
     request.headers.get("x-drive-project")?.trim() ||
     ""
   )
+}
+
+export function projectBucketFromRequest(request: Request) {
+  const url = new URL(request.url)
+  return url.searchParams.get("bucket")?.trim() || request.headers.get("x-drive-bucket")?.trim() || ""
 }
 
 export async function authorizeProjectRequest(
@@ -126,9 +132,52 @@ function enforceProjectRateLimit(request: Request, apiKeyId: string, projectId: 
 }
 
 export async function getActiveProjectR2Config(project: Project): Promise<
-  | { config: R2ClientConfig }
+  | { config: R2ClientConfig; bucketName: string }
   | { response: NextResponse<{ error: string }> }
 > {
+  return getActiveProjectBucketR2Config(project, undefined)
+}
+
+export async function resolveProjectBucketName(
+  project: Project,
+  requestedBucketName?: string
+): Promise<{ bucketName: string } | { response: NextResponse<{ error: string }> }> {
+  const selectedBucketName = requestedBucketName?.trim() || project.bucketName
+
+  if (!selectedBucketName) {
+    return {
+      response: NextResponse.json(
+        { error: "Project does not have a primary bucket assigned yet" },
+        { status: 409 }
+      ),
+    }
+  }
+
+  const assignedBuckets = await listProjectBuckets(project.id)
+  const isAssigned = assignedBuckets.some((bucket) => bucket.bucketName === selectedBucketName)
+  if (!isAssigned) {
+    return {
+      response: NextResponse.json(
+        { error: "Requested bucket is not assigned to this project" },
+        { status: 403 }
+      ),
+    }
+  }
+
+  return { bucketName: selectedBucketName }
+}
+
+export async function getActiveProjectBucketR2Config(
+  project: Project,
+  requestedBucketName?: string
+): Promise<
+  | { config: R2ClientConfig; bucketName: string }
+  | { response: NextResponse<{ error: string }> }
+> {
+  const resolved = await resolveProjectBucketName(project, requestedBucketName)
+  if ("response" in resolved) return resolved
+  const selectedBucketName = resolved.bucketName
+
   const active = await getCachedActiveAccount()
   if (
     !active?.cloudflareAccountId ||
@@ -150,11 +199,11 @@ export async function getActiveProjectR2Config(project: Project): Promise<
   }
 
   const bucketCache = getBucketCache()
-  const bucketCacheKey = `${active.id}:${active.cloudflareAccountId}:${project.bucketName}`
+  const bucketCacheKey = `${active.id}:${active.cloudflareAccountId}:${selectedBucketName}`
   const cached = bucketCache.get(bucketCacheKey)
   if (!cached || cached.expiresAt <= Date.now()) {
     try {
-      await r2HeadBucket(config, project.bucketName)
+      await r2HeadBucket(config, selectedBucketName)
       bucketCache.set(bucketCacheKey, {
         ok: true,
         expiresAt: Date.now() + cacheTtlMs("PROJECT_BUCKET_CACHE_TTL_SECONDS", 120),
@@ -173,12 +222,12 @@ export async function getActiveProjectR2Config(project: Project): Promise<
       response: NextResponse.json(
         {
           error:
-            "Project bucket is not available in the current active Cloudflare account",
+            "Requested project bucket is not available in the current active Cloudflare account",
         },
         { status: 409 }
       ),
     }
   }
 
-  return { config }
+  return { config, bucketName: selectedBucketName }
 }

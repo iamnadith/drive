@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server"
 import {
   authorizeProjectRequest,
-  getActiveProjectR2Config,
+  getActiveProjectBucketR2Config,
+  projectBucketFromRequest,
 } from "@/lib/project-api-auth"
 import { getPublicOrigin } from "@/lib/public-origin"
 import { recordProjectApiEvent } from "@/lib/project-operations-store"
@@ -12,6 +13,7 @@ export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {
     projectId?: unknown
     key?: unknown
+    bucket?: unknown
     mode?: unknown
     expiresAt?: unknown
     expiresInSeconds?: unknown
@@ -21,13 +23,16 @@ export async function POST(request: Request) {
     request.headers.get("x-drive-project")?.trim() ||
     ""
   const key = typeof body.key === "string" ? body.key.trim() : ""
+  const bucketName =
+    (typeof body.bucket === "string" ? body.bucket.trim() : "") ||
+    projectBucketFromRequest(request)
   const mode = body.mode === "permanent" ? "permanent" : "expiring"
   if (!key) return NextResponse.json({ error: "Object key is required" }, { status: 400 })
 
   const permission = mode === "permanent" ? "createPermanentLink" : "createExpiringLink"
   const authorized = await authorizeProjectRequest(request, projectId, permission)
   if ("response" in authorized) return authorized.response
-  const r2 = await getActiveProjectR2Config(authorized.auth.project)
+  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
   if ("response" in r2) return r2.response
 
   const expiresInSeconds = Math.max(
@@ -45,13 +50,14 @@ export async function POST(request: Request) {
   if (mode === "expiring") {
     const signedUrl = await r2CreateSignedDownloadUrl(
       r2.config,
-      authorized.auth.project.bucketName,
+      r2.bucketName,
       key,
       { expiresInSeconds }
     )
     const { link } = await createProjectFileLink({
       projectIdentifier: authorized.auth.project.id,
       objectKey: key,
+      bucketName: r2.bucketName,
       mode,
       expiresAt,
     })
@@ -69,6 +75,7 @@ export async function POST(request: Request) {
   const { link, token } = await createProjectFileLink({
     projectIdentifier: authorized.auth.project.id,
     objectKey: key,
+    bucketName: r2.bucketName,
     mode,
     expiresAt: typeof body.expiresAt === "string" ? body.expiresAt : null,
   })

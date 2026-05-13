@@ -360,6 +360,12 @@ export async function ensureDriveSchema(): Promise<void> {
           updated_at timestamptz not null default now()
         );
       `)
+      await queryDb(`alter table public.drive_projects add column if not exists created_account_id uuid references drive_accounts(id) on delete set null;`)
+      await queryDb(`alter table public.drive_projects add column if not exists created_account_label text;`)
+      await queryDb(`alter table public.drive_projects alter column bucket_name drop not null;`)
+      await queryDb(`update public.drive_projects set bucket_name = '' where bucket_name is null;`)
+      await queryDb(`alter table public.drive_projects alter column bucket_name set default '';`)
+      await queryDb(`alter table public.drive_projects alter column bucket_name set not null;`)
       await queryDb(`
         do $$
         declare
@@ -392,6 +398,7 @@ export async function ensureDriveSchema(): Promise<void> {
             end if;
 
             alter table public.drive_projects rename column id to old_text_id;
+            alter table public.drive_projects alter column old_text_id drop not null;
             alter table public.drive_projects add column id uuid default gen_random_uuid();
 
             update public.drive_projects
@@ -406,9 +413,99 @@ export async function ensureDriveSchema(): Promise<void> {
           end if;
         end $$;
       `)
+      await queryDb(`
+        do $$
+        begin
+          if exists (
+            select 1
+            from information_schema.columns
+            where table_schema = 'public'
+              and table_name = 'drive_projects'
+              and column_name = 'active_account_id'
+          ) then
+            update public.drive_projects
+            set created_account_id = active_account_id
+            where created_account_id is null
+              and active_account_id is not null;
+
+            if exists (
+              select 1
+              from information_schema.columns
+              where table_schema = 'public'
+                and table_name = 'drive_projects'
+                and column_name = 'active_account_id'
+                and is_nullable = 'NO'
+            ) then
+              alter table public.drive_projects alter column active_account_id drop not null;
+            end if;
+          end if;
+        end $$;
+      `)
+      await queryDb(`
+        do $$
+        begin
+          if exists (
+            select 1
+            from information_schema.columns
+            where table_schema = 'public'
+              and table_name = 'drive_projects'
+              and column_name = 'old_text_id'
+              and is_nullable = 'NO'
+          ) then
+            alter table public.drive_projects alter column old_text_id drop not null;
+          end if;
+        end $$;
+      `)
+      await queryDb(`
+        do $$
+        declare
+          legacy_column text;
+        begin
+          foreach legacy_column in array array['api_key_hash', 'api_key_prefix', 'api_key_name', 'api_key', 'bucket_id']
+          loop
+            if exists (
+              select 1
+              from information_schema.columns
+              where table_schema = 'public'
+                and table_name = 'drive_projects'
+                and column_name = legacy_column
+                and is_nullable = 'NO'
+            ) then
+              execute format(
+                'alter table public.drive_projects alter column %I drop not null',
+                legacy_column
+              );
+            end if;
+          end loop;
+        end $$;
+      `)
+      await queryDb(`drop index if exists drive_projects_bucket_name_key;`)
       await queryDb(`create unique index if not exists drive_projects_project_id_key on drive_projects (project_id);`)
-      await queryDb(`create unique index if not exists drive_projects_bucket_name_key on drive_projects (bucket_name);`)
+      await queryDb(`create unique index if not exists drive_projects_bucket_name_key on drive_projects (bucket_name) where bucket_name <> '';`)
       await queryDb(`create index if not exists drive_projects_status_idx on drive_projects (status);`)
+      await queryDb(`
+        create table if not exists drive_project_bucket_assignments (
+          project_id uuid not null references drive_projects(id) on delete cascade,
+          bucket_name text not null,
+          is_primary boolean not null default false,
+          created_at timestamptz not null default now(),
+          primary key (project_id, bucket_name)
+        );
+      `)
+      await queryDb(`create unique index if not exists drive_project_bucket_assignments_bucket_key on drive_project_bucket_assignments (bucket_name);`)
+      await queryDb(`create unique index if not exists drive_project_bucket_assignments_primary_idx on drive_project_bucket_assignments (project_id) where is_primary = true;`)
+      await queryDb(`
+        insert into drive_project_bucket_assignments (project_id, bucket_name, is_primary)
+        select p.id, p.bucket_name, true
+        from drive_projects p
+        where p.bucket_name <> ''
+          and not exists (
+            select 1
+            from drive_project_bucket_assignments a
+            where a.project_id = p.id
+              and a.bucket_name = p.bucket_name
+          );
+      `)
 
       await queryDb(`
         create table if not exists drive_project_api_keys (
@@ -447,12 +544,21 @@ export async function ensureDriveSchema(): Promise<void> {
           id uuid primary key default gen_random_uuid(),
           project_id uuid not null references drive_projects(id) on delete cascade,
           object_key text not null,
+          bucket_name text,
           token_hash text not null,
           mode text not null,
           expires_at timestamptz,
           revoked_at timestamptz,
           created_at timestamptz not null default now()
         );
+      `)
+      await queryDb(`alter table public.drive_project_file_links add column if not exists bucket_name text;`)
+      await queryDb(`
+        update drive_project_file_links l
+        set bucket_name = p.bucket_name
+        from drive_projects p
+        where l.project_id = p.id
+          and l.bucket_name is null;
       `)
       await queryDb(`create unique index if not exists drive_project_file_links_token_hash_key on drive_project_file_links (token_hash);`)
       await queryDb(`create index if not exists drive_project_file_links_project_idx on drive_project_file_links (project_id, object_key);`)
@@ -506,6 +612,7 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(`
         create table if not exists drive_project_object_inventory (
           project_id uuid not null references drive_projects(id) on delete cascade,
+          bucket_name text not null,
           object_key text not null,
           size bigint not null default 0,
           etag text,
@@ -514,23 +621,52 @@ export async function ensureDriveSchema(): Promise<void> {
           last_modified timestamptz,
           deleted_at timestamptz,
           updated_at timestamptz not null default now(),
-          primary key (project_id, object_key)
+          primary key (project_id, bucket_name, object_key)
         );
       `)
-      await queryDb(`create index if not exists drive_project_object_inventory_search_idx on drive_project_object_inventory (project_id, object_key text_pattern_ops) where deleted_at is null;`)
-      await queryDb(`create index if not exists drive_project_object_inventory_updated_idx on drive_project_object_inventory (project_id, updated_at desc);`)
+      await queryDb(`alter table public.drive_project_object_inventory add column if not exists bucket_name text;`)
+      await queryDb(`
+        update drive_project_object_inventory i
+        set bucket_name = coalesce(nullif(p.bucket_name, ''), '')
+        from drive_projects p
+        where p.id = i.project_id
+          and i.bucket_name is null;
+      `)
+      await queryDb(`update public.drive_project_object_inventory set bucket_name = '' where bucket_name is null;`)
+      await queryDb(`alter table public.drive_project_object_inventory alter column bucket_name set default '';`)
+      await queryDb(`alter table public.drive_project_object_inventory alter column bucket_name set not null;`)
+      await queryDb(`alter table public.drive_project_object_inventory drop constraint if exists drive_project_object_inventory_pkey;`)
+      await queryDb(`alter table public.drive_project_object_inventory add constraint drive_project_object_inventory_pkey primary key (project_id, bucket_name, object_key);`)
+      await queryDb(`drop index if exists drive_project_object_inventory_search_idx;`)
+      await queryDb(`drop index if exists drive_project_object_inventory_updated_idx;`)
+      await queryDb(`create index if not exists drive_project_object_inventory_search_idx on drive_project_object_inventory (project_id, bucket_name, object_key text_pattern_ops) where deleted_at is null;`)
+      await queryDb(`create index if not exists drive_project_object_inventory_updated_idx on drive_project_object_inventory (project_id, bucket_name, updated_at desc);`)
 
       await queryDb(`
         create table if not exists drive_project_object_locks (
           project_id uuid not null references drive_projects(id) on delete cascade,
+          bucket_name text not null,
           object_key text not null,
           lock_token_hash text not null,
           reason text,
           expires_at timestamptz,
           created_at timestamptz not null default now(),
-          primary key (project_id, object_key)
+          primary key (project_id, bucket_name, object_key)
         );
       `)
+      await queryDb(`alter table public.drive_project_object_locks add column if not exists bucket_name text;`)
+      await queryDb(`
+        update drive_project_object_locks l
+        set bucket_name = coalesce(nullif(p.bucket_name, ''), '')
+        from drive_projects p
+        where p.id = l.project_id
+          and l.bucket_name is null;
+      `)
+      await queryDb(`update public.drive_project_object_locks set bucket_name = '' where bucket_name is null;`)
+      await queryDb(`alter table public.drive_project_object_locks alter column bucket_name set default '';`)
+      await queryDb(`alter table public.drive_project_object_locks alter column bucket_name set not null;`)
+      await queryDb(`alter table public.drive_project_object_locks drop constraint if exists drive_project_object_locks_pkey;`)
+      await queryDb(`alter table public.drive_project_object_locks add constraint drive_project_object_locks_pkey primary key (project_id, bucket_name, object_key);`)
 
       await queryDb(`
         create table if not exists drive_project_webhooks (
