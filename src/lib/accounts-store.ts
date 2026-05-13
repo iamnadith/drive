@@ -47,7 +47,7 @@ type DriveAccountRow = {
   last_synced_at: string | null
   sync_status: CloudflareAccountSyncStatus | null
   sync_message: string | null
-  updated_at?: string
+  updated_at: string | null
 }
 
 const ACCOUNTS_TABLE = "drive_accounts"
@@ -135,27 +135,100 @@ function mapRow(row: DriveAccountRow): CloudflareAccount {
   }
 }
 
-export async function getAllAccounts(): Promise<CloudflareAccount[]> {
-  const supabase = getSupabaseServerClient()
+function parseTimestamp(value: string | null | undefined): number {
+  if (!value || value === "-") return Number.NaN
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : Number.NaN
+}
+
+function compareRowsByRecency(a: DriveAccountRow, b: DriveAccountRow): number {
+  const fields: Array<keyof DriveAccountRow> = ["last_migrated", "updated_at", "created_at"]
+  for (const field of fields) {
+    const diff = parseTimestamp(b[field] as string | null | undefined) - parseTimestamp(a[field] as string | null | undefined)
+    if (Number.isFinite(diff) && diff !== 0) return diff
+  }
+  return (b.created_at || "").localeCompare(a.created_at || "")
+}
+
+async function readAllAccountRows(supabase: ReturnType<typeof getSupabaseServerClient>): Promise<DriveAccountRow[]> {
   const { data, error } = await supabase
     .from(ACCOUNTS_TABLE)
     .select("*")
     .order("created_at", { ascending: true })
 
   if (error) throw normalizeSupabaseError(error)
-  return (data as DriveAccountRow[]).map(mapRow)
+  return (data as DriveAccountRow[]) ?? []
+}
+
+async function reconcileAccountStatuses(
+  supabase: ReturnType<typeof getSupabaseServerClient>,
+  options?: {
+    preferredActiveAccountId?: string
+    promoteFirstAvailable?: boolean
+  }
+): Promise<DriveAccountRow[]> {
+  let rows = await readAllAccountRows(supabase)
+  const preferredId = typeof options?.preferredActiveAccountId === "string" ? options.preferredActiveAccountId.trim() : ""
+  const preferred = preferredId ? rows.find((row) => row.id === preferredId) ?? null : null
+
+  let desiredActiveId = ""
+  if (preferred && preferred.status !== "disabled") {
+    desiredActiveId = preferred.id
+  } else {
+    const activeRows = rows.filter((row) => row.status === "active").sort(compareRowsByRecency)
+    if (activeRows.length > 0) {
+      desiredActiveId = activeRows[0].id
+    } else if (options?.promoteFirstAvailable) {
+      desiredActiveId = rows.find((row) => row.status === "available")?.id ?? ""
+    }
+  }
+
+  const activeIdsToDemote = rows
+    .filter((row) => row.status === "active" && row.id !== desiredActiveId)
+    .map((row) => row.id)
+
+  let changed = false
+  if (activeIdsToDemote.length > 0) {
+    const { error } = await supabase
+      .from(ACCOUNTS_TABLE)
+      .update({ status: "disabled" })
+      .in("id", activeIdsToDemote)
+    if (error) throw normalizeSupabaseError(error)
+    changed = true
+  }
+
+  if (desiredActiveId) {
+    const desired = rows.find((row) => row.id === desiredActiveId) ?? null
+    if (desired && desired.status !== "active") {
+      const canPromote = desired.status === "available"
+      if (canPromote) {
+        const { error } = await supabase
+          .from(ACCOUNTS_TABLE)
+          .update({ status: "active" })
+          .eq("id", desiredActiveId)
+        if (error) throw normalizeSupabaseError(error)
+        changed = true
+      }
+    }
+  }
+
+  if (changed) {
+    rows = await readAllAccountRows(supabase)
+  }
+
+  return rows
+}
+
+export async function getAllAccounts(): Promise<CloudflareAccount[]> {
+  const supabase = getSupabaseServerClient()
+  const rows = await reconcileAccountStatuses(supabase, { promoteFirstAvailable: true })
+  return rows.map(mapRow)
 }
 
 export async function getActiveAccount(): Promise<CloudflareAccount | null> {
   const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(ACCOUNTS_TABLE)
-    .select("*")
-    .eq("status", "active")
-    .limit(1)
-
-  if (error) throw normalizeSupabaseError(error)
-  const row = (data as DriveAccountRow[])[0]
+  const rows = await reconcileAccountStatuses(supabase, { promoteFirstAvailable: true })
+  const row = rows.find((account) => account.status === "active")
   return row ? mapRow(row) : null
 }
 
@@ -232,7 +305,7 @@ export async function createAccount(input: {
 
     const { error } = await supabase
       .from(ACCOUNTS_TABLE)
-      .update({ status: "available" })
+      .update({ status: "disabled" })
       .eq("status", "active")
     if (error) throw normalizeSupabaseError(error)
   }
@@ -276,6 +349,11 @@ export async function createAccount(input: {
     }
     throw normalizeSupabaseError(error)
   }
+  if (status === "active") {
+    const rows = await reconcileAccountStatuses(supabase, { preferredActiveAccountId: row.id })
+    const created = rows.find((account) => account.id === row.id)
+    if (created) return mapRow(created)
+  }
   return mapRow(data as DriveAccountRow)
 }
 
@@ -317,6 +395,14 @@ export async function updateAccount(
   const current = (currentRows as DriveAccountRow[])[0]
   if (!current) throw new Error("Account not found")
 
+  if (
+    current.status === "disabled" &&
+    typeof updates.status !== "undefined" &&
+    updates.status !== "disabled"
+  ) {
+    throw new Error("Disabled Cloudflare accounts are permanent and cannot be re-enabled")
+  }
+
   let previousActiveIds: string[] = []
   if (updates.status === "active") {
     const { data: activeRows, error: activeRowsError } = await supabase
@@ -329,7 +415,7 @@ export async function updateAccount(
 
     const { error } = await supabase
       .from(ACCOUNTS_TABLE)
-      .update({ status: "available" })
+      .update({ status: "disabled" })
       .eq("status", "active")
       .neq("id", id)
     if (error) throw normalizeSupabaseError(error)
@@ -408,6 +494,11 @@ export async function updateAccount(
     }
     throw normalizeSupabaseError(error)
   }
+  if (updates.status === "active") {
+    const rows = await reconcileAccountStatuses(supabase, { preferredActiveAccountId: id })
+    const updatedRow = rows.find((account) => account.id === id)
+    if (updatedRow) return mapRow(updatedRow)
+  }
   return mapRow(data as DriveAccountRow)
 }
 
@@ -427,6 +518,10 @@ export async function activateAccountForCompletedMigration(input: {
       ? input.completedAt
       : new Date().toISOString()
 
+  if (target.status === "disabled") {
+    throw new Error("Migration target account is disabled and cannot be activated")
+  }
+
   if (target.status === "active") {
     return updateAccount(target.id, {
       lastMigrated: completedAt,
@@ -434,10 +529,13 @@ export async function activateAccountForCompletedMigration(input: {
   }
 
   try {
-    return await updateAccount(target.id, {
+    const updated = await updateAccount(target.id, {
       status: "active",
       lastMigrated: completedAt,
     })
+    const rows = await reconcileAccountStatuses(getSupabaseServerClient(), { preferredActiveAccountId: target.id })
+    const reconciled = rows.find((account) => account.id === target.id)
+    return reconciled ? mapRow(reconciled) : updated
   } catch (error: unknown) {
     const message =
       typeof error === "object" && error !== null && "message" in error

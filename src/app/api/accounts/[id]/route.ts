@@ -70,7 +70,7 @@ export async function PATCH(
         ? `Changed active account status for ${updated.label}`
         : `Updated account ${updated.label}`,
       detail: changedActiveAccount
-        ? "Account status changes can be undone while all affected accounts still exist."
+        ? "Account status changes are permanent. Disabled accounts cannot be restored."
         : "Account credentials or profile fields were updated.",
       before: {
         account: before,
@@ -90,18 +90,10 @@ export async function PATCH(
           lastMigrated: account.lastMigrated,
         })),
       },
-      undoable: changedActiveAccount,
-      undoReason: changedActiveAccount ? null : "Only account status changes are currently undoable.",
-      undoPayload: changedActiveAccount
-        ? {
-            type: "restore_account_statuses",
-            accounts: beforeAccounts.map((account) => ({
-              id: account.id,
-              status: account.status,
-              lastMigrated: account.lastMigrated,
-            })),
-          }
-        : null,
+      undoable: false,
+      undoReason: changedActiveAccount
+        ? "Account status changes are permanent. Disabled accounts cannot be restored."
+        : "Only account profile fields were changed.",
       ...getRequestActivityContext(request),
     })
 

@@ -259,12 +259,19 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
     }).catch(() => undefined)
   } else if (allCompleted) {
     try {
+      await updateMigration(migrationId, {
+        status: "completed",
+        syncStatus: "ok",
+        syncMessage: "",
+        completedAt: now,
+        lastSyncedAt: now,
+        options: { ...migration.options, targetActivatedAt: undefined },
+      })
       await activateAccountForCompletedMigration({
         targetAccountId: migration.targetAccountId,
         completedAt: now,
       })
       await updateMigration(migrationId, {
-        status: "completed",
         syncStatus: "ok",
         syncMessage: "",
         completedAt: now,
@@ -277,10 +284,10 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
           ? String((error as { message?: unknown }).message ?? "Failed to activate migrated account")
           : "Failed to activate migrated account"
       await updateMigration(migrationId, {
-        status: "failed",
+        status: "completed",
         syncStatus: "error",
         syncMessage: message,
-        completedAt: null,
+        completedAt: now,
         lastSyncedAt: now,
       }).catch(() => undefined)
     }

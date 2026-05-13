@@ -362,15 +362,21 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           { status: 400 }
         )
       }
-      await activateAccountForCompletedMigration({
-        targetAccountId: migration.targetAccountId,
-        completedAt: now,
-      })
       await updateMigration(id, {
         status: "completed",
         completedAt: now,
         syncStatus: "ok",
         // Keep completed as completed everywhere; no extra message needed.
+        syncMessage: "",
+        lastSyncedAt: now,
+        options: { ...migration.options, manualCompleted: true, targetActivatedAt: undefined },
+      })
+      await activateAccountForCompletedMigration({
+        targetAccountId: migration.targetAccountId,
+        completedAt: now,
+      })
+      await updateMigration(id, {
+        syncStatus: "ok",
         syncMessage: "",
         lastSyncedAt: now,
         options: { ...migration.options, manualCompleted: true, targetActivatedAt: now },
@@ -383,7 +389,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         entityId: id,
         entityLabel: `Migration ${id}`,
         summary: "Marked migration completed and activated target account",
-        detail: "Undo restores the account active/disabled statuses captured before completion. Migrated R2 objects are not deleted.",
+        detail: "Completed migrations permanently activate the target account and disable the previous active account.",
         before: {
           migration,
           accounts: accounts.map((account) => ({
@@ -401,15 +407,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
             lastMigrated: account.lastMigrated,
           })),
         },
-        undoable: true,
-        undoPayload: {
-          type: "restore_account_statuses",
-          accounts: accounts.map((account) => ({
-            id: account.id,
-            status: account.status,
-            lastMigrated: account.lastMigrated,
-          })),
-        },
+        undoable: false,
+        undoReason: "Completed migrations permanently change the active account. Disabled accounts cannot be restored.",
         ...getRequestActivityContext(request),
       })
       return NextResponse.json({ ok: true }, { status: 200 })

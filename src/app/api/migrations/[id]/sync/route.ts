@@ -376,7 +376,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
             entityId: id,
             entityLabel: `Migration ${id}`,
             summary: "Activated target account after completed migration",
-            detail: "Undo restores account statuses only. Migrated R2 objects are not deleted.",
+            detail: "Migration completion permanently activates the target account and disables the previous active account.",
             before: {
               migration,
               accounts: beforeAccounts.map((account) => ({
@@ -394,15 +394,8 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
                 lastMigrated: account.lastMigrated,
               })),
             },
-            undoable: true,
-            undoPayload: {
-              type: "restore_account_statuses",
-              accounts: beforeAccounts.map((account) => ({
-                id: account.id,
-                status: account.status,
-                lastMigrated: account.lastMigrated,
-              })),
-            },
+            undoable: false,
+            undoReason: "Completed migrations permanently change the active account. Disabled accounts cannot be restored.",
             ...getRequestActivityContext(_request),
           })
         } catch (error: unknown) {

@@ -3,8 +3,6 @@ import {
   CloudflareAccount,
   createAccount,
   getAllAccounts,
-  getActiveAccount,
-  updateAccount,
 } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import { requireAdmin } from "@/lib/server-auth"
@@ -20,19 +18,7 @@ export async function GET() {
     const auth = await requireAdmin()
     if (!auth.ok) return auth.response
 
-    let accounts = await getAllAccounts()
-
-    if (accounts.length > 0) {
-      const active = await getActiveAccount()
-      if (!active) {
-        const fallback = accounts.find((account) => account.status === "available")
-        if (fallback) {
-          // Promote the first available account to active if none exists.
-          await updateAccount(fallback.id, { status: "active" })
-          accounts = await getAllAccounts()
-        }
-      }
-    }
+    const accounts = await getAllAccounts()
 
     return NextResponse.json({ accounts })
   } catch (error: unknown) {
@@ -128,18 +114,11 @@ export async function POST(request: Request) {
           lastMigrated: item.lastMigrated,
         })),
       },
-      undoable: changedActiveAccount && beforeAccounts.length > 0,
-      undoReason: beforeAccounts.length === 0 ? "Initial account creation cannot be undone automatically." : null,
-      undoPayload:
-        changedActiveAccount && beforeAccounts.length > 0
-          ? {
-              type: "restore_account_statuses",
-              accounts: beforeAccounts.map((item) => ({
-                id: item.id,
-                status: item.status,
-                lastMigrated: item.lastMigrated,
-              })),
-            }
+      undoable: false,
+      undoReason: changedActiveAccount
+        ? "Account activation changes are permanent. Disabled accounts cannot be restored."
+        : beforeAccounts.length === 0
+          ? "Initial account creation cannot be undone automatically."
           : null,
       ...getRequestActivityContext(request),
     })

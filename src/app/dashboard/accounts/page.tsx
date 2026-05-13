@@ -206,7 +206,6 @@ export default function AccountsPage() {
     type: "delete" | "disable"
     account: Account | null
   } | null>(null)
-  const [enableAccount, setEnableAccount] = React.useState<Account | null>(null)
   const [migrationCleanupAccount, setMigrationCleanupAccount] =
     React.useState<Account | null>(null)
   const [linkedMigrations, setLinkedMigrations] = React.useState<
@@ -2067,7 +2066,7 @@ export default function AccountsPage() {
                       <div className="flex items-center gap-2">
                         <Switch
                           checked={settingsAccount.status !== "disabled"}
-                          disabled={settingsAccount.status === "active"}
+                          disabled={settingsAccount.status === "active" || settingsAccount.status === "disabled"}
                           onCheckedChange={async (checked) => {
                             const next: Account["status"] = checked
                               ? settingsAccount.status === "active"
@@ -2076,13 +2075,6 @@ export default function AccountsPage() {
                               : "disabled"
                             if (next === settingsAccount.status) return
                             if (next === "active") return
-                            if (
-                              settingsAccount.status === "disabled" &&
-                              next === "available"
-                            ) {
-                              setEnableAccount(settingsAccount)
-                              return
-                            }
                             await handleChangeStatus(settingsAccount.id, next)
                             setSettingsAccount((prev) =>
                               prev ? { ...prev, status: next } : prev
@@ -2091,7 +2083,7 @@ export default function AccountsPage() {
                         />
                         <span className="text-xs text-muted-foreground">
                           {settingsAccount.status === "disabled"
-                            ? "Disabled"
+                            ? "Disabled permanently"
                             : settingsAccount.status === "active"
                             ? "Active (managed by migrations)"
                             : "Available"}
@@ -2772,52 +2764,6 @@ export default function AccountsPage() {
         </Dialog>
       )}
 
-      {enableAccount && (
-        <Dialog
-          open={!!enableAccount}
-          onOpenChange={(open) => {
-            if (!open) setEnableAccount(null)
-          }}
-        >
-          <DialogContent className="sm:max-w-md">
-            <DialogHeader>
-              <DialogTitle>Enable Cloudflare account</DialogTitle>
-              <DialogDescription>
-                This will mark{" "}
-                <span className="font-semibold">
-                  {enableAccount.name || enableAccount.email || "this account"}
-                </span>{" "}
-                as available so it can be used for future migrations.
-              </DialogDescription>
-            </DialogHeader>
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setEnableAccount(null)}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                onClick={async () => {
-                  const account = enableAccount
-                  if (!account) return
-                  await handleChangeStatus(account.id, "available")
-                  setSettingsAccount((prev) =>
-                    prev && prev.id === account.id
-                      ? { ...prev, status: "available" }
-                      : prev
-                  )
-                  setEnableAccount(null)
-                }}
-              >
-                Enable account
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      )}
 
       <div className="rounded-lg border bg-muted/40 px-2 py-1 sm:px-3 sm:py-2">
         <Table className="table-fixed w-full">

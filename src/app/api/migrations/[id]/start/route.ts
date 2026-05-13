@@ -187,20 +187,35 @@ export async function POST(
     const items = await listMigrationItems(id)
     if (items.length === 0) {
       const completedAt = new Date().toISOString()
-      await activateAccountForCompletedMigration({
-        targetAccountId: migration.targetAccountId,
-        completedAt,
-      })
-      const completedMigration = await updateMigration(id, {
+      await updateMigration(id, {
         status: "completed",
         startedAt: migration.startedAt ?? completedAt,
         completedAt,
         syncStatus: "ok",
         syncMessage: "",
         lastSyncedAt: completedAt,
-        options: { ...migration.options, targetActivatedAt: completedAt },
       })
-      return NextResponse.json({ migration: completedMigration, items: [] }, { status: 200 })
+      try {
+        await activateAccountForCompletedMigration({
+          targetAccountId: migration.targetAccountId,
+          completedAt,
+        })
+        const completedMigration = await updateMigration(id, {
+          syncStatus: "ok",
+          syncMessage: "",
+          lastSyncedAt: completedAt,
+          options: { ...migration.options, targetActivatedAt: completedAt },
+        })
+        return NextResponse.json({ migration: completedMigration, items: [] }, { status: 200 })
+      } catch (error: unknown) {
+        const message = formatCloudflareError(error, "Failed to activate migrated account")
+        const completedMigration = await updateMigration(id, {
+          syncStatus: "error",
+          syncMessage: message,
+          lastSyncedAt: completedAt,
+        })
+        return NextResponse.json({ migration: completedMigration, items: [] }, { status: 200 })
+      }
     }
 
     const accounts = await getAllAccounts()
