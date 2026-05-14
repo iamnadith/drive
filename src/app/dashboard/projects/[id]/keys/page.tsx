@@ -644,6 +644,10 @@ X-Drive-Bucket: uploads-archive`}</CodeExample>
                 Use multipart for large files. Start the multipart upload, upload parts directly to R2, then complete the
                 multipart session to finalize tracking and get the permanent `fileId`.
               </p>
+              <p className="text-muted-foreground">
+                Bucket CORS must expose the `ETag` response header for browser multipart uploads. Without that, part uploads
+                can succeed in R2 but the browser cannot complete the multipart session.
+              </p>
               <CodeExample>{`curl -X POST "/api/v1/files/uploads/multipart" \
   -H "Authorization: Bearer ${docsApiKey}" \
   -H "Content-Type: application/json" \
