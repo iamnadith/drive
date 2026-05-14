@@ -14,7 +14,7 @@ export async function GET(request: Request) {
 
   const objects = await r2ListAllObjects(r2.config, r2.bucketName, {
     prefix: url.searchParams.get("prefix") ?? undefined,
-    maxObjects: Math.max(1, Math.min(50_000, Number(url.searchParams.get("limit") ?? 5_000))),
+    maxObjects: Math.max(1, Math.min(5_000, Number(url.searchParams.get("limit") ?? 1_000))),
   })
 
   return NextResponse.json({
