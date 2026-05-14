@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server"
-import { Readable } from "stream"
 import { authorizeProjectRequest, getActiveProjectBucketR2Config, projectBucketFromRequest, projectIdFromUrl } from "@/lib/project-api-auth"
 import { buildProjectStorageObjectUrl } from "@/lib/project-storage-gateway"
 import { assertProjectObjectWritable, markTrackedBucketObjectDeleted, recordProjectApiEvent, syncTrackedBucketObject } from "@/lib/project-operations-store"
@@ -37,36 +36,41 @@ export async function PUT(
     return NextResponse.json({ error: "Object is locked" }, { status: 409 })
   }
 
-  const bodyStream = request.body
-    ? Readable.fromWeb(request.body as any)
-    : ""
-  const trackedObject = await r2PutObject(r2.config, r2.bucketName, key, bodyStream, {
-    contentType: request.headers.get("content-type") ?? undefined,
-  }).then(() =>
-    syncTrackedBucketObject({
-      config: r2.config,
-      projectId: authorized.auth.project.id,
-      bucketName: r2.bucketName,
-      key,
+  try {
+    const bodyBytes = request.body
+      ? new Uint8Array(await request.arrayBuffer())
+      : ""
+    const trackedObject = await r2PutObject(r2.config, r2.bucketName, key, bodyBytes, {
+      contentType: request.headers.get("content-type") ?? undefined,
+    }).then(() =>
+      syncTrackedBucketObject({
+        config: r2.config,
+        projectId: authorized.auth.project.id,
+        bucketName: r2.bucketName,
+        key,
+      })
+    )
+
+    await recordProjectApiEvent({
+      project: authorized.auth.project,
+      apiKeyId: authorized.auth.apiKey.id,
+      action: "storage.object.put",
+      objectKey: key,
+      request,
+      metadata: trackedObject?.fileId ? { fileId: trackedObject.fileId } : undefined,
     })
-  )
 
-  await recordProjectApiEvent({
-    project: authorized.auth.project,
-    apiKeyId: authorized.auth.apiKey.id,
-    action: "storage.object.put",
-    objectKey: key,
-    request,
-    metadata: trackedObject?.fileId ? { fileId: trackedObject.fileId } : undefined,
-  })
-
-  return NextResponse.json({
-    ok: true,
-    key,
-    bucketName: r2.bucketName,
-    fileId: trackedObject?.fileId ?? null,
-    url: buildProjectStorageObjectUrl(request, r2.bucketName, key),
-  })
+    return NextResponse.json({
+      ok: true,
+      key,
+      bucketName: r2.bucketName,
+      fileId: trackedObject?.fileId ?? null,
+      url: buildProjectStorageObjectUrl(request, r2.bucketName, key),
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to upload object"
+    return NextResponse.json({ error: message }, { status: 500 })
+  }
 }
 
 export async function DELETE(
