@@ -4,8 +4,14 @@ import { buildProjectStorageObjectUrl } from "@/lib/project-storage-gateway"
 import { assertProjectObjectWritable, markTrackedBucketObjectDeleted, recordProjectApiEvent, syncTrackedBucketObject } from "@/lib/project-operations-store"
 import { r2DeleteObject, r2PutObject } from "@/lib/r2-s3"
 
+const SYSTEM_DERIVATIVE_KEY_REGEX = /-(poster|preview|stream|subtitles(?:\.[a-z0-9_-]+)?)\.[a-z0-9]{1,8}$/i
+
 function keyFromParams(parts: string[]) {
   return parts.map((part) => decodeURIComponent(part)).join("/").trim().replace(/^\/+/, "")
+}
+
+function shouldBypassWriteLockForKey(key: string) {
+  return SYSTEM_DERIVATIVE_KEY_REGEX.test(key)
 }
 
 export async function PUT(
@@ -25,15 +31,17 @@ export async function PUT(
   const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
   if ("response" in r2) return r2.response
 
-  try {
-    await assertProjectObjectWritable(
-      authorized.auth.project.id,
-      r2.bucketName,
-      key,
-      request.headers.get("x-drive-lock-token")
-    )
-  } catch {
-    return NextResponse.json({ error: "Object is locked" }, { status: 409 })
+  if (!shouldBypassWriteLockForKey(key)) {
+    try {
+      await assertProjectObjectWritable(
+        authorized.auth.project.id,
+        r2.bucketName,
+        key,
+        request.headers.get("x-drive-lock-token")
+      )
+    } catch {
+      return NextResponse.json({ error: "Object is locked" }, { status: 409 })
+    }
   }
 
   try {
@@ -88,15 +96,17 @@ export async function DELETE(
   const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
   if ("response" in r2) return r2.response
 
-  try {
-    await assertProjectObjectWritable(
-      authorized.auth.project.id,
-      r2.bucketName,
-      key,
-      request.headers.get("x-drive-lock-token")
-    )
-  } catch {
-    return NextResponse.json({ error: "Object is locked" }, { status: 409 })
+  if (!shouldBypassWriteLockForKey(key)) {
+    try {
+      await assertProjectObjectWritable(
+        authorized.auth.project.id,
+        r2.bucketName,
+        key,
+        request.headers.get("x-drive-lock-token")
+      )
+    } catch {
+      return NextResponse.json({ error: "Object is locked" }, { status: 409 })
+    }
   }
 
   await r2DeleteObject(r2.config, r2.bucketName, key)
