@@ -35,6 +35,25 @@ type UploadCompleteBody = {
   key?: unknown
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function headUploadedObjectWithRetry(
+  config: Parameters<typeof r2HeadObject>[0],
+  bucketName: string,
+  key: string,
+) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const head = await r2HeadObject(config, bucketName, key).catch(() => null)
+    if (head) return head
+    if (attempt < 3) {
+      await sleep(250 * (attempt + 1))
+    }
+  }
+  return null
+}
+
 function parseUploadMetadata(metadata: unknown) {
   return metadata && typeof metadata === "object"
     ? Object.fromEntries(
@@ -155,7 +174,7 @@ export async function completeProjectUpload(request: Request, body: UploadComple
   const resolved = await authorizeUploadTarget(request, projectId, bucketName)
   if ("response" in resolved) return resolved.response
 
-  const head = await r2HeadObject(resolved.r2.config, resolved.r2.bucketName, key).catch(() => null)
+  const head = await headUploadedObjectWithRetry(resolved.r2.config, resolved.r2.bucketName, key)
   if (!head) {
     await markTrackedBucketObjectDeleted({
       projectId: resolved.authorized.auth.project.id,
