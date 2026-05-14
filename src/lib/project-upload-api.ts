@@ -7,7 +7,6 @@ import {
 } from "@/lib/project-api-auth"
 import {
   assertProjectObjectWritable,
-  markTrackedBucketObjectDeleted,
   recordProjectApiEvent,
   syncTrackedBucketObject,
 } from "@/lib/project-operations-store"
@@ -44,10 +43,10 @@ async function headUploadedObjectWithRetry(
   bucketName: string,
   key: string,
 ) {
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     const head = await r2HeadObject(config, bucketName, key).catch(() => null)
     if (head) return head
-    if (attempt < 3) {
+    if (attempt < 7) {
       await sleep(250 * (attempt + 1))
     }
   }
@@ -176,12 +175,30 @@ export async function completeProjectUpload(request: Request, body: UploadComple
 
   const head = await headUploadedObjectWithRetry(resolved.r2.config, resolved.r2.bucketName, key)
   if (!head) {
-    await markTrackedBucketObjectDeleted({
-      projectId: resolved.authorized.auth.project.id,
-      bucketName: resolved.r2.bucketName,
-      key,
+    await recordProjectApiEvent({
+      project: resolved.authorized.auth.project,
+      apiKeyId: resolved.authorized.auth.apiKey.id,
+      action: "file.upload.complete",
+      objectKey: key,
+      request,
+      metadata: { bucketName: resolved.r2.bucketName, pending: true },
     }).catch(() => undefined)
-    return NextResponse.json({ error: "Uploaded object was not found in R2" }, { status: 404 })
+    return NextResponse.json(
+      {
+        ok: true,
+        pending: true,
+        projectId,
+        bucketName: resolved.r2.bucketName,
+        key,
+        fileId: null,
+        size: null,
+        etag: null,
+        contentType: null,
+        metadata: {},
+        lastModified: null,
+      },
+      { status: 202 }
+    )
   }
 
   const trackedObject = await syncTrackedBucketObject({
