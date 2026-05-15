@@ -8,7 +8,6 @@ import {
 import {
   assertProjectObjectWritable,
   recordProjectApiEvent,
-  syncTrackedBucketObject,
 } from "@/lib/project-operations-store"
 import {
   r2CreateMultipartUpload,
@@ -201,13 +200,6 @@ export async function completeProjectUpload(request: Request, body: UploadComple
     )
   }
 
-  const trackedObject = await syncTrackedBucketObject({
-    config: resolved.r2.config,
-    projectId: resolved.authorized.auth.project.id,
-    bucketName: resolved.r2.bucketName,
-    key,
-  }).catch(() => undefined)
-
   await recordProjectApiEvent({
     project: resolved.authorized.auth.project,
     apiKeyId: resolved.authorized.auth.apiKey.id,
@@ -222,7 +214,7 @@ export async function completeProjectUpload(request: Request, body: UploadComple
     projectId,
     bucketName: resolved.r2.bucketName,
     key,
-    fileId: trackedObject?.fileId ?? null,
+    fileId: null,
     size: head.ContentLength ?? 0,
     etag: head.ETag,
     contentType: head.ContentType,

@@ -6,7 +6,7 @@ import {
   projectBucketFromRequest,
   projectIdFromUrl,
 } from "@/lib/project-api-auth"
-import { recordProjectApiEvent, syncTrackedBucketObject } from "@/lib/project-operations-store"
+import { recordProjectApiEvent } from "@/lib/project-operations-store"
 import {
   r2AbortMultipartUpload,
   r2CompleteMultipartUpload,
@@ -133,12 +133,6 @@ export async function POST(request: Request) {
   }
 
   await r2CompleteMultipartUpload(r2.config, r2.bucketName, key, uploadId, parts)
-  const trackedObject = await syncTrackedBucketObject({
-    config: r2.config,
-    projectId: authorized.auth.project.id,
-    bucketName: r2.bucketName,
-    key,
-  }).catch(() => undefined)
   await recordProjectApiEvent({
     project: authorized.auth.project,
     apiKeyId: authorized.auth.apiKey.id,
@@ -154,6 +148,6 @@ export async function POST(request: Request) {
     key,
     bucketName: r2.bucketName,
     uploadId,
-    fileId: trackedObject?.fileId ?? null,
+    fileId: null,
   })
 }

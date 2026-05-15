@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server"
 import { authorizeProjectRequest, getActiveProjectBucketR2Config, projectBucketFromRequest, projectIdFromUrl } from "@/lib/project-api-auth"
 import { buildProjectStorageObjectUrl } from "@/lib/project-storage-gateway"
-import { assertProjectObjectWritable, markTrackedBucketObjectDeleted, recordProjectApiEvent, syncTrackedBucketObject } from "@/lib/project-operations-store"
-import { r2DeleteObject, r2PutObject } from "@/lib/r2-s3"
+import { assertProjectObjectWritable, markTrackedBucketObjectDeleted, recordProjectApiEvent } from "@/lib/project-operations-store"
+import { r2DeleteObject, r2HeadObject, r2PutObject } from "@/lib/r2-s3"
 
 const SYSTEM_DERIVATIVE_KEY_REGEX = /-(poster|preview|stream|subtitles(?:\.[a-z0-9_-]+)?)\.[a-z0-9]{1,8}$/i
 
@@ -12,6 +12,43 @@ function keyFromParams(parts: string[]) {
 
 function shouldBypassWriteLockForKey(key: string) {
   return SYSTEM_DERIVATIVE_KEY_REGEX.test(key)
+}
+
+export async function HEAD(
+  request: Request,
+  context: { params: Promise<{ key: string[] }> }
+) {
+  const { key: keyParts } = await context.params
+  const projectId = projectIdFromUrl(request)
+  const bucketName = projectBucketFromRequest(request)
+  const key = keyFromParams(keyParts)
+  if (!key || key.endsWith("/")) {
+    return new Response(null, { status: 400 })
+  }
+
+  const authorized = await authorizeProjectRequest(request, projectId, "read")
+  if ("response" in authorized) {
+    return new Response(null, { status: authorized.response?.status ?? 401 })
+  }
+  const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
+  if ("response" in r2) {
+    return new Response(null, { status: r2.response?.status ?? 409 })
+  }
+
+  const head = await r2HeadObject(r2.config, r2.bucketName, key).catch(() => null)
+  if (!head) {
+    return new Response(null, { status: 404 })
+  }
+
+  return new Response(null, {
+    status: 200,
+    headers: {
+      ...(typeof head.ContentLength === "number" ? { "Content-Length": String(head.ContentLength) } : {}),
+      ...(head.ContentType ? { "Content-Type": head.ContentType } : {}),
+      ...(head.ETag ? { ETag: head.ETag } : {}),
+      "Cache-Control": "no-store",
+    },
+  })
 }
 
 export async function PUT(
@@ -48,16 +85,9 @@ export async function PUT(
     const bodyBytes = request.body
       ? new Uint8Array(await request.arrayBuffer())
       : ""
-    const trackedObject = await r2PutObject(r2.config, r2.bucketName, key, bodyBytes, {
+    await r2PutObject(r2.config, r2.bucketName, key, bodyBytes, {
       contentType: request.headers.get("content-type") ?? undefined,
-    }).then(() =>
-      syncTrackedBucketObject({
-        config: r2.config,
-        projectId: authorized.auth.project.id,
-        bucketName: r2.bucketName,
-        key,
-      })
-    )
+    })
 
     await recordProjectApiEvent({
       project: authorized.auth.project,
@@ -65,14 +95,13 @@ export async function PUT(
       action: "storage.object.put",
       objectKey: key,
       request,
-      metadata: trackedObject?.fileId ? { fileId: trackedObject.fileId } : undefined,
     })
 
     return NextResponse.json({
       ok: true,
       key,
       bucketName: r2.bucketName,
-      fileId: trackedObject?.fileId ?? null,
+      fileId: null,
       url: buildProjectStorageObjectUrl(request, r2.bucketName, key),
     })
   } catch (error) {
