@@ -3,7 +3,7 @@
 import * as React from "react"
 import Link from "next/link"
 import { useParams } from "next/navigation"
-import { ArrowLeft, FolderPlus, KeyRound, RefreshCw, Star, Trash2 } from "lucide-react"
+import { ArrowLeft, FolderPlus, KeyRound, Star, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -224,7 +224,6 @@ export default function ProjectBucketsPage() {
               </Button>
             ) : null}
             <Button variant="outline" loading={loading} onClick={() => void loadAll()}>
-              {!loading ? <RefreshCw className="mr-2 h-4 w-4" /> : null}
               Refresh
             </Button>
           </>

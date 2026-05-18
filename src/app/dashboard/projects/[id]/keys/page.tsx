@@ -3,7 +3,7 @@
 import * as React from "react"
 import Link from "next/link"
 import { useParams } from "next/navigation"
-import { ArrowLeft, BookOpen, Copy, MoreHorizontal, Plus, RefreshCw } from "lucide-react"
+import { ArrowLeft, BookOpen, Copy, MoreHorizontal, Plus } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -317,7 +317,6 @@ export default function ProjectKeysPage() {
               API docs
             </Button>
             <Button variant="outline" loading={loading} onClick={() => void loadAll()}>
-              {!loading ? <RefreshCw className="mr-2 h-4 w-4" /> : null}
               Refresh
             </Button>
           </>

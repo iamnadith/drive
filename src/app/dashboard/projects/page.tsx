@@ -7,7 +7,6 @@ import {
   KeyRound,
   MoreHorizontal,
   Plus,
-  RefreshCw,
   Settings2,
   Trash2,
 } from "lucide-react"
@@ -261,7 +260,6 @@ export default function ProjectsPage() {
               className="h-9 w-full sm:w-56"
             />
             <Button className="!h-8 !min-h-8 px-3 text-sm" variant="outline" loading={loading} onClick={() => void loadProjects()}>
-              {!loading ? <RefreshCw className="mr-2 h-4 w-4" /> : null}
               Refresh
             </Button>
             <Button className="!h-8 !min-h-8 px-3 text-sm" onClick={openCreateDialog}>

@@ -7,7 +7,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Eye,
-  RefreshCw,
   RotateCcw,
   Search,
   X,
@@ -286,7 +285,6 @@ export default function ActivityPage() {
           onClick={() => void loadActivity(true)}
           disabled={refreshing}
         >
-          {!refreshing ? <RefreshCw className="h-4 w-4" /> : null}
           Refresh
         </Button>
         }

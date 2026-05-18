@@ -1112,7 +1112,6 @@ export default function AccountsPage() {
             loading={syncingAll}
             disabled={accounts.length === 0}
           >
-            {!syncingAll ? <RefreshCw className="mr-2 h-4 w-4" /> : null}
             Sync all
           </Button>
           <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>

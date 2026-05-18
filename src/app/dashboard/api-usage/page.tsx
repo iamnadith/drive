@@ -8,7 +8,6 @@ import {
   ChevronRight,
   Clock,
   KeyRound,
-  RefreshCw,
   Search,
   Server,
   ShieldAlert,
@@ -246,7 +245,6 @@ export default function ApiUsagePage() {
           onClick={() => void loadUsage(true)}
           disabled={refreshing}
         >
-          {!refreshing ? <RefreshCw className="h-4 w-4" /> : null}
           Refresh
         </Button>
         }
