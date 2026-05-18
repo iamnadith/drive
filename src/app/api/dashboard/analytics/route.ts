@@ -95,16 +95,6 @@ type RepairJobRow = {
   updated_at: string
 }
 
-type DashboardActivity = {
-  id: string
-  at: string
-  kind: "migration" | "repair" | "worker" | "failure" | "bucket_scan"
-  title: string
-  detail: string
-  status: string
-  href?: string
-}
-
 type BucketSnapshotRow = {
   account_id: string
   account_label: string | null
@@ -153,13 +143,6 @@ function dateKey(value: string | Date): string {
   const date = value instanceof Date ? value : new Date(value)
   if (!Number.isFinite(date.getTime())) return new Date().toISOString().slice(0, 10)
   return date.toISOString().slice(0, 10)
-}
-
-function isWithinRange(value: string | undefined | null, start: Date): boolean {
-  if (start.getTime() === 0) return true
-  if (!value) return false
-  const time = Date.parse(value)
-  return Number.isFinite(time) && time >= start.getTime()
 }
 
 function earliestDate(values: Array<string | undefined | null>): Date {
@@ -423,10 +406,6 @@ export async function GET(request: Request) {
 
   const url = new URL(request.url)
   const range = asRange(url.searchParams.get("range"))
-  const activityLimitRaw = Number(url.searchParams.get("activityLimit") ?? 12)
-  const activityLimit = Number.isFinite(activityLimitRaw)
-    ? Math.max(1, Math.min(200, Math.floor(activityLimitRaw)))
-    : 12
   const days = rangeDays(range)
   const generatedAt = new Date().toISOString()
   const start = new Date()
@@ -708,85 +687,16 @@ export async function GET(request: Request) {
 
   const totalStorageBytes = activeAnalyticsBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0)
   const totalObjects = activeAnalyticsBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0)
-  const failedMigrationCount = migrations.filter((m) => m.status === "failed" || m.syncStatus === "error").length
+  const migrationNeedsAttention = (migration: DriveMigration) =>
+    migration.status === "failed" ||
+    (migration.syncStatus === "error" && migration.status !== "completed" && migration.status !== "canceled")
+
+  const failedMigrationCount = migrations.filter(migrationNeedsAttention).length
   const activeMigrationCount = migrations.filter((m) => m.status === "running" || m.status === "verifying").length
   const failedRepairCount = repairJobs.filter((job) => job.status === "failed").length
   const activeRepairCount = repairJobs.filter((job) => ["pending", "claimed", "running"].includes(job.status)).length
   const failedBucketStats = bucketStats.filter((row) => row.status === "error").length
   const onlineWorkers = agents.filter((agent) => getEffectiveAgentStatus(agent) === "online").length
-  const recentActivity: DashboardActivity[] = [
-    ...migrations.flatMap((migration) => {
-      const metric = totalsByMigration.get(migration.id)
-      const source = accountById.get(migration.sourceAccountId)
-      const target = accountById.get(migration.targetAccountId)
-      const label = `${source?.label ?? "Source"} -> ${target?.label ?? "Target"}`
-      const base: DashboardActivity[] = [
-        {
-          id: `migration-created-${migration.id}`,
-          at: migration.createdAt,
-          kind: "migration",
-          title: `Migration ${migration.status}`,
-          detail: `${label}${metric ? `, ${metric.transferred.toLocaleString()} transferred objects` : ""}`,
-          status: migration.status,
-          href: `/dashboard/migrations/${migration.id}`,
-        },
-      ]
-      if (migration.completedAt) {
-        base.push({
-          id: `migration-completed-${migration.id}`,
-          at: migration.completedAt,
-          kind: "migration",
-          title: "Migration completed",
-          detail: label,
-          status: "completed",
-          href: `/dashboard/migrations/${migration.id}`,
-        })
-      }
-      return base
-    }),
-    ...repairJobs.map((job) => ({
-      id: `repair-${job.id}`,
-      at: job.updatedAt || job.createdAt,
-      kind: "repair" as const,
-      title: `Worker job ${job.status}`,
-      detail: job.summary || job.error || `${job.mode.replaceAll("_", " ")} for migration ${job.migrationId}`,
-      status: job.status,
-      href: `/dashboard/workers/jobs/${job.id}`,
-    })),
-    ...agents
-      .filter((agent) => agent.latestRun)
-      .map((agent) => ({
-        id: `worker-run-${agent.latestRun!.id}`,
-        at: agent.latestRun!.updatedAt || agent.latestRun!.createdAt,
-        kind: "worker" as const,
-        title: `${agent.name} ${agent.latestRun!.status}`,
-        detail: agent.latestRun!.summary || agent.latestRun!.runType,
-        status: agent.latestRun!.status,
-        href: `/dashboard/workers`,
-      })),
-    ...recentFailures.map((failure) => ({
-      id: `failure-${failure.id}`,
-      at: failure.occurred_at || failure.fetched_at || generatedAt,
-      kind: "failure" as const,
-      title: "Object failure recorded",
-      detail: `${failure.object_key}${failure.message ? `: ${failure.message}` : ""}`,
-      status: "failed",
-      href: "/dashboard/migrations/history",
-    })),
-    ...bucketScans.map((scan) => ({
-      id: `scan-${scan.id}`,
-      at: scan.updated_at || scan.completed_at || scan.started_at || generatedAt,
-      kind: "bucket_scan" as const,
-      title: `Bucket scan ${scan.status}`,
-      detail: `${scan.bucket_name} (${scan.kind}) - ${toNumber(scan.objects).toLocaleString()} objects`,
-      status: scan.status,
-      href: "/dashboard/storage",
-    })),
-  ]
-    .filter((activity) => isWithinRange(activity.at, start))
-    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
-    .slice(0, activityLimit)
-
   const topBuckets = activeAnalyticsBucketStats
     .map((row) => ({
       id: row.id,
@@ -803,11 +713,11 @@ export async function GET(request: Request) {
 
   const attentionItems = [
     ...migrations
-      .filter((m) => m.status === "failed" || m.syncStatus === "error")
+      .filter(migrationNeedsAttention)
       .map((m) => ({
         id: `migration-${m.id}`,
         severity: "critical",
-        title: `Migration ${m.status}`,
+        title: m.status === "failed" ? "Migration failed" : "Migration sync issue",
         detail: m.syncMessage || `Migration ${m.id} needs attention`,
         href: `/dashboard/migrations/${m.id}`,
         at: m.updatedAt || m.completedAt || m.createdAt,
@@ -911,7 +821,6 @@ export async function GET(request: Request) {
       repairs: repairBreakdown,
       bucketStats: bucketSyncBreakdown,
     },
-    recentActivity,
     topBuckets,
     attentionItems,
     syncHealth: {

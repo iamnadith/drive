@@ -74,14 +74,6 @@ type OverviewResponse = {
     objects: number
     capturedAt: string
   }>
-  recentActivity: Array<{
-    id: string
-    at: string
-    title: string
-    detail: string
-    status: string
-    href?: string
-  }>
   syncHealth: {
     partial: boolean
     warnings: string[]
@@ -91,6 +83,17 @@ type OverviewResponse = {
     accountSyncErrors: number
     bucketStatsErrors: number
   }
+}
+
+type RecentActivityItem = {
+  id: string
+  occurredAt: string
+  action: string
+  entityType: string
+  entityLabel?: string
+  summary: string
+  detail?: string
+  outcome: "success" | "failed" | "warning" | "info"
 }
 
 type UsageRange = "7d" | "30d" | "90d"
@@ -145,6 +148,26 @@ function formatRelative(value?: string | null): string {
   return `${Math.floor(hours / 24)}d ago`
 }
 
+function formatDateTime(value: string): string {
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return value
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date)
+}
+
+function formatAction(value: string): string {
+  return value
+    .split(/[._-]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ")
+}
+
 function formatRefreshTime(value?: string | null): string {
   if (!value) return "Never"
   const date = new Date(value)
@@ -155,11 +178,10 @@ function formatRefreshTime(value?: string | null): string {
   })
 }
 
-function statusVariant(status: string): "default" | "secondary" | "destructive" | "outline" {
-  const normalized = status.toLowerCase()
-  if (normalized.includes("failed") || normalized.includes("error")) return "destructive"
-  if (normalized === "completed" || normalized === "ok" || normalized === "online") return "default"
-  if (normalized === "running" || normalized === "verifying" || normalized === "syncing") return "secondary"
+function outcomeVariant(outcome: RecentActivityItem["outcome"]): "default" | "secondary" | "destructive" | "outline" {
+  if (outcome === "failed") return "destructive"
+  if (outcome === "success") return "default"
+  if (outcome === "warning") return "secondary"
   return "outline"
 }
 
@@ -221,16 +243,16 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
   }, [series, timeRange])
 
   return (
-    <Card className="@container/card">
-      <CardHeader>
-        <CardTitle>Storage Usage</CardTitle>
-        <CardDescription>
+    <Card className="@container/card pb-0 sm:pb-0.5">
+      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-0 md:gap-1">
+        <CardTitle className="leading-none md:leading-tight">Storage Usage</CardTitle>
+        <CardDescription className="-mt-1 leading-none md:mt-0 md:leading-tight">
           <span className="hidden @[540px]/card:block">
             Storage and objects for current and previous active accounts over time.
           </span>
           <span className="@[540px]/card:hidden">Active account history</span>
         </CardDescription>
-        <CardAction>
+        <CardAction className="col-start-2 row-start-1 mt-0 justify-self-end self-start">
           <ToggleGroup
             type="single"
             value={timeRange}
@@ -273,7 +295,7 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
           </div>
         ) : (
           <ChartContainer config={platformUsageChartConfig} className="aspect-auto h-[250px] w-full">
-            <AreaChart data={chartData}>
+            <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 28 }}>
               <defs>
                 <linearGradient id="fillStorage" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="var(--color-storageGb)" stopOpacity={1} />
@@ -289,7 +311,8 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                 dataKey="date"
                 tickLine={false}
                 axisLine={false}
-                tickMargin={8}
+                height={40}
+                tickMargin={12}
                 minTickGap={32}
                 tickFormatter={(value) =>
                   new Date(value).toLocaleDateString("en-US", {
@@ -336,8 +359,11 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
 
 export default function OverviewPage() {
   const [data, setData] = React.useState<OverviewResponse | null>(null)
+  const [recentActivity, setRecentActivity] = React.useState<RecentActivityItem[]>([])
   const [loading, setLoading] = React.useState(true)
   const [refreshing, setRefreshing] = React.useState(false)
+  const [activityLoading, setActivityLoading] = React.useState(true)
+  const [activityError, setActivityError] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
 
   const loadOverview = React.useCallback(async (quiet = false, signal?: AbortSignal) => {
@@ -369,15 +395,57 @@ export default function OverviewPage() {
     }
   }, [])
 
+  const loadRecentActivity = React.useCallback(async (quiet = false, signal?: AbortSignal) => {
+    if (quiet) setActivityLoading(true)
+    else setActivityLoading(true)
+    try {
+      const res = await fetch("/api/activity?limit=4", {
+        cache: "no-store",
+        signal,
+      })
+      const json: unknown = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const message =
+          isRecord(json) && typeof json.error === "string" ? json.error : "Unable to load recent activity"
+        throw new Error(message)
+      }
+      const events = isRecord(json) && Array.isArray(json.events) ? json.events : []
+      const validEvents = events.filter((event): event is RecentActivityItem => {
+        if (!isRecord(event)) return false
+        return (
+          typeof event.id === "string" &&
+          typeof event.occurredAt === "string" &&
+          typeof event.action === "string" &&
+          typeof event.entityType === "string" &&
+          typeof event.summary === "string" &&
+          typeof event.outcome === "string"
+        )
+      })
+      setRecentActivity(validEvents.slice(0, 4))
+      setActivityError(null)
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "AbortError") return
+      const message =
+        typeof caught === "object" && caught !== null && "message" in caught
+          ? String((caught as { message?: unknown }).message ?? "Unable to load recent activity")
+          : "Unable to load recent activity"
+      setActivityError(message)
+    } finally {
+      setActivityLoading(false)
+    }
+  }, [])
+
   React.useEffect(() => {
     const controller = new AbortController()
     void loadOverview(false, controller.signal)
+    void loadRecentActivity(false, controller.signal)
     return () => controller.abort()
-  }, [loadOverview])
+  }, [loadOverview, loadRecentActivity])
 
   React.useEffect(() => {
     const refreshIfActive = () => {
       if (document.visibilityState === "visible") void loadOverview(true)
+      if (document.visibilityState === "visible") void loadRecentActivity(true)
     }
     const interval = window.setInterval(refreshIfActive, 5_000)
     window.addEventListener("focus", refreshIfActive)
@@ -387,7 +455,7 @@ export default function OverviewPage() {
       window.removeEventListener("focus", refreshIfActive)
       document.removeEventListener("visibilitychange", refreshIfActive)
     }
-  }, [loadOverview])
+  }, [loadOverview, loadRecentActivity])
 
   if (loading && !data) {
     return (
@@ -412,24 +480,33 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div>
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
+        <div className="min-w-0 mt-1 md:mt-0">
           <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Retained analytics summary with active account <span className="font-medium text-foreground">{accountName}</span>. Last refreshed at {formatRefreshTime(data?.generatedAt)}.
-          </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={() => void loadOverview(true)} disabled={refreshing}>
+        <div className="flex justify-end gap-2 self-start">
+          <Button
+            variant="outline"
+            size="sm"
+            className="border border-border/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+            onClick={() => {
+              void loadOverview(true)
+              void loadRecentActivity(true)
+            }}
+            disabled={refreshing}
+          >
             <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
             Refresh
           </Button>
-          <Button asChild size="sm">
+          <Button asChild size="sm" className="border border-border/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
             <Link href="/dashboard/analytics">
               Analytics <ArrowRight className="h-4 w-4" />
             </Link>
           </Button>
         </div>
+        <p className="col-span-2 mt-2 text-sm text-muted-foreground md:col-span-1 md:mt-1">
+          Retained analytics summary with active account <span className="font-medium text-foreground">{accountName}</span>. Last refreshed at {formatRefreshTime(data?.generatedAt)}.
+        </p>
       </div>
 
       {error ? (
@@ -486,41 +563,109 @@ export default function OverviewPage() {
           <PlatformUsageChart series={data.activeAccountSeries ?? []} />
 
           <div className="grid gap-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>Recent Activity</CardTitle>
-                <CardDescription>Latest live events.</CardDescription>
+            <Card className="overflow-hidden gap-0 py-0">
+              <CardHeader className="border-b flex min-h-16 items-center px-4 py-2.5 pb-0 sm:min-h-0 sm:px-5 md:px-4 md:py-2">
+                <div className="flex w-full items-center justify-between gap-3 md:gap-2">
+                  <div className="min-w-0 flex-1 flex flex-col justify-center gap-0.5">
+                    <CardTitle className="text-base">Recent Activity</CardTitle>
+                    <CardDescription className="text-xs">Latest four actions from the feed.</CardDescription>
+                  </div>
+                  <Button
+                    asChild
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 shrink-0 rounded-full border border-border/70 bg-background/70 px-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] self-center hover:bg-muted/70"
+                  >
+                    <Link href="/dashboard/activity">
+                      View all <ArrowRight className="h-3.5 w-3.5" />
+                    </Link>
+                  </Button>
+                </div>
               </CardHeader>
-              <CardContent className="space-y-3">
-                {data.recentActivity.slice(0, 4).length === 0 ? (
-                  <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
-                    No recent activity
+              <CardContent className="p-0">
+                {activityLoading && recentActivity.length === 0 ? (
+                  <div className="space-y-2 p-3.5 sm:p-5">
+                    {Array.from({ length: 4 }).map((_, index) => (
+                      <div key={index} className="h-16 rounded-xl border border-dashed" />
+                    ))}
+                  </div>
+                ) : activityError ? (
+                  <div className="p-3.5 sm:p-5">
+                    <div className="rounded-xl border border-dashed p-3.5 text-sm text-muted-foreground">
+                      {activityError}
+                    </div>
+                  </div>
+                ) : recentActivity.length === 0 ? (
+                  <div className="p-3.5 sm:p-5">
+                    <div className="rounded-xl border border-dashed p-4 text-center text-sm text-muted-foreground">
+                      No recent activity
+                    </div>
                   </div>
                 ) : (
-                  data.recentActivity.slice(0, 4).map((activity) => (
-                    <Link
-                      key={activity.id}
-                      href={activity.href ?? "/dashboard/analytics"}
-                      className="block rounded-md border p-3 transition-colors hover:bg-muted/50"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-sm font-medium">{activity.title}</div>
-                          <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{activity.detail}</div>
-                        </div>
-                        <Badge variant={statusVariant(activity.status)}>{activity.status}</Badge>
-                      </div>
-                    </Link>
-                  ))
+                  <ul className="divide-y">
+                    {recentActivity.map((activity) => (
+                      <li key={activity.id} className="md:py-3 md:first:pt-0 md:last:pb-0">
+                        <Link
+                          href="/dashboard/activity"
+                          className="group relative block px-4 py-2.5 outline-none transition-[background-color,box-shadow] hover:bg-muted/40 active:bg-muted/60 focus-visible:bg-muted/50 focus-visible:ring-2 focus-visible:ring-primary/20 md:px-4 md:py-0 md:hover:bg-muted/30"
+                        >
+                          <ArrowRight className="absolute right-4 top-2.5 h-3.5 w-3.5 text-muted-foreground transition-transform group-hover:translate-x-0.5 md:hidden" />
+                          <div className="grid gap-2.5 md:grid-cols-[144px_minmax(0,1fr)_auto] md:items-center md:gap-4">
+                            <div className="flex items-center justify-between gap-3 md:block md:self-stretch md:border-r md:border-border/60 md:pr-4">
+                              <div className="flex items-center gap-2 md:mb-2">
+                                <span
+                                  className={`h-2 w-2 rounded-full ${
+                                    activity.outcome === "failed"
+                                      ? "bg-destructive"
+                                      : activity.outcome === "success"
+                                        ? "bg-primary"
+                                        : activity.outcome === "warning"
+                                          ? "bg-amber-500"
+                                          : "bg-muted-foreground"
+                                  }`}
+                                />
+                                <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                                  {formatAction(activity.action)}
+                                </span>
+                              </div>
+                              <div className="hidden text-[11px] leading-4 text-muted-foreground md:block">
+                                <div className="font-medium text-foreground">{formatRelative(activity.occurredAt)}</div>
+                                <div className="mt-0.5">{formatDateTime(activity.occurredAt)}</div>
+                              </div>
+                            </div>
+                            <div className="min-w-0 pr-6 md:pr-0">
+                              <div className="text-sm font-medium leading-5 md:text-[15px] md:leading-6">
+                                {activity.summary}
+                              </div>
+                              <div className="mt-1 text-[11px] leading-4 text-muted-foreground md:text-xs">
+                                <span>{activity.entityLabel ?? activity.entityType}</span>
+                                {activity.detail ? (
+                                  <span className="hidden md:inline">
+                                    {" "} - {activity.detail}
+                                  </span>
+                                ) : null}
+                              </div>
+                            </div>
+                            <div className="flex items-center justify-between gap-3 md:self-stretch md:flex-col md:items-end md:justify-between md:gap-1">
+                              <div className="text-[11px] leading-4 text-muted-foreground md:hidden">
+                                <div className="font-medium text-foreground">{formatRelative(activity.occurredAt)}</div>
+                                <div className="mt-0.5 truncate">{formatDateTime(activity.occurredAt)}</div>
+                              </div>
+                              <ArrowRight className="hidden h-3.5 w-3.5 text-muted-foreground transition-transform group-hover:translate-x-0.5 md:block" />
+                              <Badge
+                                variant={outcomeVariant(activity.outcome)}
+                                className="h-6 rounded-full px-2 text-[10px] capitalize"
+                              >
+                                {activity.outcome}
+                              </Badge>
+                            </div>
+                          </div>
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </CardContent>
-              <div className="border-t p-4">
-                <Button asChild variant="outline" className="w-full">
-                  <Link href="/dashboard/activity">
-                    View all activity <ArrowRight className="h-4 w-4" />
-                  </Link>
-                </Button>
-              </div>
             </Card>
           </div>
         </>

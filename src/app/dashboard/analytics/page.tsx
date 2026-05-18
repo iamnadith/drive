@@ -248,9 +248,17 @@ function filterByRange<T extends { date: string }>(items: T[], range: RangeKey):
   })
 }
 
-function RangeAction({ value, onChange }: { value: RangeKey; onChange: (value: RangeKey) => void }) {
+function RangeAction({
+  value,
+  onChange,
+  className,
+}: {
+  value: RangeKey
+  onChange: (value: RangeKey) => void
+  className?: string
+}) {
   return (
-    <CardAction>
+    <CardAction className={className}>
       <ToggleGroup
         type="single"
         value={value}
@@ -291,14 +299,18 @@ function UsageChart({ data }: { data: ReturnType<typeof withChartFields> }) {
   const chartData = React.useMemo(() => filterByRange(data, range), [data, range])
   return (
     <Card className="@container/card">
-      <CardHeader>
+      <CardHeader className="grid-cols-[minmax(0,1fr)_auto]">
         <CardTitle>Storage and Objects</CardTitle>
         <CardDescription>Active account storage and object totals over time.</CardDescription>
-        <RangeAction value={range} onChange={setRange} />
+        <RangeAction
+          value={range}
+          onChange={setRange}
+          className="col-start-2 row-start-1 mt-0 justify-self-end self-start"
+        />
       </CardHeader>
       <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
         <ChartContainer config={usageChartConfig} className="aspect-auto h-[300px] w-full">
-          <AreaChart data={chartData}>
+          <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 28 }}>
             <defs>
               <linearGradient id="fillStorageAnalytics" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="var(--color-storageGb)" stopOpacity={1} />
@@ -310,7 +322,7 @@ function UsageChart({ data }: { data: ReturnType<typeof withChartFields> }) {
               </linearGradient>
             </defs>
             <CartesianGrid vertical={false} />
-            <XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
+            <XAxis dataKey="date" tickLine={false} axisLine={false} height={40} tickMargin={12} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
             <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
             <Area dataKey="objectsK" type="natural" fill="url(#fillObjectsAnalytics)" stroke="var(--color-objectsK)" stackId="a" />
             <Area dataKey="storageGb" type="natural" fill="url(#fillStorageAnalytics)" stroke="var(--color-storageGb)" stackId="a" />
@@ -333,9 +345,9 @@ function MigrationChart({ data }: { data: ReturnType<typeof withChartFields> }) 
       </CardHeader>
       <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
         <ChartContainer config={migrationChartConfig} className="aspect-auto h-[300px] w-full">
-          <BarChart data={chartData}>
+          <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 28 }}>
             <CartesianGrid vertical={false} />
-            <XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
+            <XAxis dataKey="date" tickLine={false} axisLine={false} height={40} tickMargin={12} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
             <YAxis tickLine={false} axisLine={false} width={32} allowDecimals={false} />
             <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
             <Bar dataKey="createdMigrations" fill="var(--color-createdMigrations)" radius={[4, 4, 0, 0]} />
@@ -359,7 +371,7 @@ function TransferChart({ data }: { data: ReturnType<typeof withChartFields> }) {
       </CardHeader>
       <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
         <ChartContainer config={transferChartConfig} className="aspect-auto h-[300px] w-full">
-          <AreaChart data={chartData}>
+          <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 28 }}>
             <defs>
               <linearGradient id="fillTransferredAnalytics" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="var(--color-transferredObjects)" stopOpacity={0.9} />
@@ -371,7 +383,7 @@ function TransferChart({ data }: { data: ReturnType<typeof withChartFields> }) {
               </linearGradient>
             </defs>
             <CartesianGrid vertical={false} />
-            <XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
+            <XAxis dataKey="date" tickLine={false} axisLine={false} height={40} tickMargin={12} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
             <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
             <Area dataKey="failedObjects" type="natural" fill="url(#fillFailedAnalytics)" stroke="var(--color-failedObjects)" stackId="a" />
             <Area dataKey="verifyIssues" type="natural" fill="var(--color-verifyIssues)" fillOpacity={0.12} stroke="var(--color-verifyIssues)" stackId="a" />
