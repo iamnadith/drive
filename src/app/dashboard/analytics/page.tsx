@@ -507,9 +507,9 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div className="space-y-1">
+        <div>
           <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
-          <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
             <span>Active account: <span className="font-medium text-foreground">{activeAccountName}</span></span>
             <span className="hidden md:inline">-</span>
             <span>Last refreshed at {formatRefreshTime(data?.generatedAt)}</span>

@@ -824,17 +824,15 @@ export default function WorkersPage() {
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-2">
+        <div>
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Bot className="h-4 w-4" />
             Worker orchestration
           </div>
-          <div className="space-y-1">
-            <h1 className="text-3xl font-bold tracking-tight">Workers</h1>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              Manage GitHub-triggered and token-based workers, monitor heartbeat health, and keep repair jobs visible from one place.
-            </p>
-          </div>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight">Workers</h1>
+          <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            Manage GitHub-triggered and token-based workers, monitor heartbeat health, and keep repair jobs visible from one place.
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" onClick={() => void refreshAll(true)} disabled={loading}>

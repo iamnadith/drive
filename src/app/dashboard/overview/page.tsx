@@ -413,9 +413,9 @@ export default function OverviewPage() {
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div className="space-y-1">
+        <div>
           <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
-          <p className="text-sm text-muted-foreground">
+          <p className="mt-1 text-sm text-muted-foreground">
             Retained analytics summary with active account <span className="font-medium text-foreground">{accountName}</span>. Last refreshed at {formatRefreshTime(data?.generatedAt)}.
           </p>
         </div>
