@@ -100,8 +100,11 @@ export default function DashboardLayout({
   return (
     <SidebarProvider>
       <AppSidebar />
-      <SidebarInset className="h-svh min-w-0 overflow-x-hidden overflow-y-auto">
-        <header className="sticky top-0 z-20 flex min-h-14 shrink-0 items-center justify-between gap-2 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/70 sm:h-16">
+      <SidebarInset
+        data-dashboard-plain
+        className="h-svh min-w-0 overflow-x-hidden overflow-y-auto"
+      >
+        <header className="sticky top-0 z-20 flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-white/20 bg-white/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.45)] backdrop-blur-xl supports-[backdrop-filter]:bg-white/20 dark:border-white/10 dark:bg-white/10 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] sm:h-16">
           <div className="flex min-w-0 flex-1 items-center gap-2 px-3 sm:px-4">
             <SidebarTrigger className="-ml-1" />
             <Separator orientation="vertical" className="mr-1 h-4 sm:mr-2" />
