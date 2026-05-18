@@ -187,7 +187,8 @@ function Sidebar({
           data-sidebar="sidebar"
           data-slot="sidebar"
           data-mobile="true"
-          className="bg-background/60 text-sidebar-foreground w-(--sidebar-width) overflow-hidden border-r border-border/70 p-0 shadow-sm backdrop-blur-3xl backdrop-saturate-200 supports-[backdrop-filter]:bg-background/35 [&>button]:hidden"
+          overlayClassName="bg-black/8 backdrop-blur-sm dark:bg-black/30 dark:backdrop-blur-sm"
+          className="bg-transparent text-sidebar-foreground w-(--sidebar-width) overflow-hidden border-r border-border/70 p-0 shadow-none backdrop-blur-3xl backdrop-saturate-200 supports-[backdrop-filter]:bg-background/12 dark:bg-background/55 dark:supports-[backdrop-filter]:bg-background/30 [&>button]:hidden"
           style={
             {
               "--sidebar-width": SIDEBAR_WIDTH_MOBILE,
@@ -236,7 +237,7 @@ function Sidebar({
           // Adjust the padding for floating and inset variants.
           variant === "floating" || variant === "inset"
             ? "p-2 group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4))+2px)]"
-            : "group-data-[collapsible=icon]:w-(--sidebar-width-icon) group-data-[side=left]:border-r group-data-[side=right]:border-l",
+            : "group-data-[collapsible=icon]:w-(--sidebar-width-icon)",
           className
         )}
         {...props}
@@ -244,7 +245,7 @@ function Sidebar({
         <div
           data-sidebar="sidebar"
           data-slot="sidebar-inner"
-          className="bg-background/60 ring-border/40 flex h-full w-full flex-col overflow-hidden border-r border-border/70 ring-1 ring-inset shadow-sm backdrop-blur-3xl backdrop-saturate-200 supports-[backdrop-filter]:bg-background/35 group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:rounded-lg group-data-[side=right]:border-r-0 group-data-[side=right]:border-l"
+          className="bg-transparent flex h-full w-full flex-col overflow-hidden border-r border-border/70 backdrop-blur-3xl backdrop-saturate-200 supports-[backdrop-filter]:bg-background/12 group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:rounded-lg group-data-[side=right]:border-r-0 group-data-[side=right]:border-l dark:bg-background/55 dark:supports-[backdrop-filter]:bg-background/30"
         >
           {children}
         </div>

@@ -101,7 +101,7 @@ export default function DashboardLayout({
     <SidebarProvider>
       <AppSidebar />
       <SidebarInset className="h-svh min-w-0 overflow-x-hidden overflow-y-auto">
-        <header className="sticky top-0 z-50 overflow-hidden border-b border-border/70 bg-background/45 shadow-sm backdrop-blur-3xl backdrop-saturate-200 transition-[background-color,backdrop-filter,border-color,box-shadow] supports-[backdrop-filter]:bg-background/20">
+        <header className="sticky top-0 z-50 overflow-hidden border-b border-border/70 bg-background/45 backdrop-blur-3xl backdrop-saturate-200 transition-[background-color,backdrop-filter,border-color] supports-[backdrop-filter]:bg-background/20">
           <div className="relative z-10 flex min-h-14 items-center justify-between gap-2 sm:h-16">
             <div className="flex min-w-0 flex-1 items-center gap-2 px-3 sm:px-4">
             <SidebarTrigger className="-ml-1" />
