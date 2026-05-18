@@ -266,7 +266,7 @@ function RangeAction({
           if (next) onChange(next as RangeKey)
         }}
         variant="outline"
-        className="hidden *:data-[slot=toggle-group-item]:px-4! @[767px]/card:flex"
+        className="hidden *:data-[slot=toggle-group-item]:h-8! *:data-[slot=toggle-group-item]:px-3! @[767px]/card:flex"
       >
         <ToggleGroupItem value="90d">Last 3 months</ToggleGroupItem>
         <ToggleGroupItem value="30d">Last 30 days</ToggleGroupItem>
@@ -274,7 +274,7 @@ function RangeAction({
       </ToggleGroup>
       <Select value={value} onValueChange={(next) => onChange(next as RangeKey)}>
         <SelectTrigger
-          className="flex w-40 **:data-[slot=select-value]:block **:data-[slot=select-value]:truncate @[767px]/card:hidden"
+          className="flex h-8 w-32 **:data-[slot=select-value]:block **:data-[slot=select-value]:truncate @[767px]/card:hidden"
           size="sm"
           aria-label="Select chart range"
         >
@@ -298,19 +298,19 @@ function UsageChart({ data }: { data: ReturnType<typeof withChartFields> }) {
   }, [isMobile])
   const chartData = React.useMemo(() => filterByRange(data, range), [data, range])
   return (
-    <Card className="@container/card">
-      <CardHeader className="grid-cols-[minmax(0,1fr)_auto]">
-        <CardTitle>Storage and Objects</CardTitle>
-        <CardDescription>Active account storage and object totals over time.</CardDescription>
+    <Card className="@container/card gap-0 py-0">
+      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-1 px-4 pt-4.5 pb-2 sm:px-6 md:gap-1.5 md:px-4 md:pt-2.5 md:pb-2">
+        <CardTitle className="text-base leading-none">Storage and Objects</CardTitle>
+        <CardDescription className="text-[11px] leading-3.5 md:text-xs md:leading-4">Active account storage and object totals over time.</CardDescription>
         <RangeAction
           value={range}
           onChange={setRange}
-          className="col-start-2 row-start-1 mt-0 justify-self-end self-start"
+          className="col-start-2 row-start-1 row-span-2 mt-0 self-start justify-self-end"
         />
       </CardHeader>
-      <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
-        <ChartContainer config={usageChartConfig} className="aspect-auto h-[300px] w-full">
-          <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 28 }}>
+      <CardContent className="px-1.5 pt-3 pb-0 sm:px-4 sm:pt-3 sm:pb-1 md:px-3">
+        <ChartContainer config={usageChartConfig} className="aspect-auto h-[252px] w-full sm:h-[272px]">
+          <AreaChart data={chartData} margin={{ top: 14, right: 8, left: 0, bottom: 22 }}>
             <defs>
               <linearGradient id="fillStorageAnalytics" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="var(--color-storageGb)" stopOpacity={1} />
@@ -322,7 +322,7 @@ function UsageChart({ data }: { data: ReturnType<typeof withChartFields> }) {
               </linearGradient>
             </defs>
             <CartesianGrid vertical={false} />
-            <XAxis dataKey="date" tickLine={false} axisLine={false} height={40} tickMargin={12} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
+            <XAxis dataKey="date" tickLine={false} axisLine={false} height={48} tickMargin={18} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
             <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
             <Area dataKey="objectsK" type="natural" fill="url(#fillObjectsAnalytics)" stroke="var(--color-objectsK)" stackId="a" />
             <Area dataKey="storageGb" type="natural" fill="url(#fillStorageAnalytics)" stroke="var(--color-storageGb)" stackId="a" />
@@ -337,14 +337,14 @@ function MigrationChart({ data }: { data: ReturnType<typeof withChartFields> }) 
   const [range, setRange] = React.useState<RangeKey>("90d")
   const chartData = React.useMemo(() => filterByRange(data, range), [data, range])
   return (
-    <Card className="@container/card">
-      <CardHeader>
-        <CardTitle>Migration Activity</CardTitle>
-        <CardDescription>Created and completed migrations across the selected period.</CardDescription>
-        <RangeAction value={range} onChange={setRange} />
+    <Card className="@container/card gap-0 py-0">
+      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-1 px-4 pt-4.5 pb-2 sm:px-6 md:gap-1.5 md:px-4 md:pt-2.5 md:pb-2">
+        <CardTitle className="text-base leading-none">Migration Activity</CardTitle>
+        <CardDescription className="text-[11px] leading-3.5 md:text-xs md:leading-4">Created and completed migrations across the selected period.</CardDescription>
+        <RangeAction value={range} onChange={setRange} className="col-start-2 row-start-1 row-span-2 mt-0 self-start justify-self-end" />
       </CardHeader>
-      <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
-        <ChartContainer config={migrationChartConfig} className="aspect-auto h-[300px] w-full">
+      <CardContent className="px-1.5 pt-3 sm:px-4 sm:pt-3 md:px-3">
+        <ChartContainer config={migrationChartConfig} className="aspect-auto h-[240px] w-full sm:h-[260px]">
           <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 28 }}>
             <CartesianGrid vertical={false} />
             <XAxis dataKey="date" tickLine={false} axisLine={false} height={40} tickMargin={12} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
@@ -363,14 +363,14 @@ function TransferChart({ data }: { data: ReturnType<typeof withChartFields> }) {
   const [range, setRange] = React.useState<RangeKey>("90d")
   const chartData = React.useMemo(() => filterByRange(data, range), [data, range])
   return (
-    <Card className="@container/card">
-      <CardHeader>
-        <CardTitle>Transfer Health</CardTitle>
-        <CardDescription>Transferred objects, failures, and verification issues from migration progress.</CardDescription>
-        <RangeAction value={range} onChange={setRange} />
+    <Card className="@container/card gap-0 py-0">
+      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-1 px-4 pt-4.5 pb-2 sm:px-6 md:gap-1.5 md:px-4 md:pt-2.5 md:pb-2">
+        <CardTitle className="text-base leading-none">Transfer Health</CardTitle>
+        <CardDescription className="text-[11px] leading-3.5 md:text-xs md:leading-4">Transferred objects, failures, and verification issues from migration progress.</CardDescription>
+        <RangeAction value={range} onChange={setRange} className="col-start-2 row-start-1 row-span-2 mt-0 self-start justify-self-end" />
       </CardHeader>
-      <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
-        <ChartContainer config={transferChartConfig} className="aspect-auto h-[300px] w-full">
+      <CardContent className="px-1.5 pt-3 sm:px-4 sm:pt-3 md:px-3">
+        <ChartContainer config={transferChartConfig} className="aspect-auto h-[240px] w-full sm:h-[260px]">
           <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 28 }}>
             <defs>
               <linearGradient id="fillTransferredAnalytics" x1="0" y1="0" x2="0" y2="1">
@@ -415,14 +415,14 @@ function KpiCard({
         ? "text-green-500"
         : "text-muted-foreground"
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-sm font-medium">{title}</CardTitle>
-        <Icon className={`h-4 w-4 ${iconClass}`} />
+    <Card className="gap-0 py-0">
+      <CardHeader className="flex flex-row items-start justify-between gap-3 px-4 py-3 pb-1.5 lg:px-3 lg:py-1 lg:pb-0">
+        <CardTitle className="text-[13px] font-medium leading-4">{title}</CardTitle>
+        <Icon className={`h-4 w-4 shrink-0 ${iconClass}`} />
       </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-bold tabular-nums">{value}</div>
-        <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
+      <CardContent className="px-4 pb-3 pt-0 lg:px-3 lg:pb-1">
+        <div className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{value}</div>
+        <p className="mt-1 text-[11px] leading-4 text-muted-foreground">{detail}</p>
       </CardContent>
     </Card>
   )
@@ -496,18 +496,18 @@ export default function DashboardPage() {
 
   if (loading && !data) {
     return (
-      <div className="space-y-6">
-        <div className="space-y-2">
+      <div className="space-y-4">
+        <div className="space-y-1.5">
           <Skeleton className="h-8 w-44" />
           <Skeleton className="h-4 w-80" />
         </div>
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           {Array.from({ length: 8 }).map((_, index) => (
-            <Skeleton key={index} className="h-32" />
+            <Skeleton key={index} className="h-28" />
           ))}
         </div>
-        <Skeleton className="h-[360px]" />
-        <Skeleton className="h-[360px]" />
+        <Skeleton className="h-[280px]" />
+        <Skeleton className="h-[280px]" />
       </div>
     )
   }
@@ -517,18 +517,18 @@ export default function DashboardPage() {
   const activeAccountName = data?.activeAccount?.label || data?.activeAccount?.email || "No active account"
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div>
+    <div className="space-y-4 md:space-y-5">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
+        <div className="min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground sm:text-sm">
             <span>Active account: <span className="font-medium text-foreground">{activeAccountName}</span></span>
             <span className="hidden md:inline">-</span>
             <span>Last refreshed at {formatRefreshTime(data?.generatedAt)}</span>
             {refreshing ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null}
           </div>
         </div>
-        <Button variant="outline" size="icon" onClick={() => void loadOverview(undefined, true)} disabled={refreshing}>
+        <Button variant="outline" size="icon" className="h-8 w-8 self-start" onClick={() => void loadOverview(undefined, true)} disabled={refreshing}>
           <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
         </Button>
       </div>
@@ -556,7 +556,7 @@ export default function DashboardPage() {
 
       {metrics ? (
         <>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <KpiCard title="Active Storage" value={formatBytes(metrics.storageBytes)} detail={`${formatNumber(metrics.buckets)} active account buckets`} icon={HardDrive} />
             <KpiCard title="Active Objects" value={formatCompact(metrics.objects)} detail={`${formatNumber(metrics.objects)} active account objects`} icon={Database} />
             <KpiCard title="Accounts" value={`${metrics.activeAccounts}/${metrics.accounts}`} detail={`${syncHealth?.unsyncedAccounts ?? 0} unsynced, ${syncHealth?.accountSyncErrors ?? 0} errors`} icon={Server} />
@@ -567,17 +567,21 @@ export default function DashboardPage() {
             <KpiCard title="Attention" value={formatNumber(metrics.attentionItems)} detail={`${formatNumber(metrics.failedMigrations)} migration issues`} icon={AlertTriangle} tone={metrics.attentionItems > 0 ? "warning" : "default"} />
           </div>
 
-          <UsageChart data={chartData} />
-          <MigrationChart data={chartData} />
-          <TransferChart data={chartData} />
+          <div className="grid gap-3 xl:grid-cols-2">
+            <UsageChart data={chartData} />
+            <MigrationChart data={chartData} />
+            <div className="xl:col-span-2">
+              <TransferChart data={chartData} />
+            </div>
+          </div>
 
-          <div className="space-y-4">
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle>Buckets</CardTitle>
-                <CardDescription>All active account buckets with current storage, objects, and sync status.</CardDescription>
+          <div className="grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)] xl:items-start">
+            <Card className="xl:sticky xl:top-4 xl:self-start">
+              <CardHeader className="gap-1 pb-2 md:px-4">
+                <CardTitle className="text-base">Buckets</CardTitle>
+                <CardDescription className="text-xs leading-4">All active account buckets with current storage, objects, and sync status.</CardDescription>
               </CardHeader>
-              <CardContent className="space-y-1.5">
+              <CardContent className="space-y-1.5 md:px-4">
                 {data.topBuckets.length === 0 ? (
                   <EmptyLine text="No bucket stats yet" />
                 ) : (
@@ -585,21 +589,44 @@ export default function DashboardPage() {
                     <Link
                       key={bucket.id}
                       href={`/dashboard/analytics/buckets/${encodeURIComponent(bucket.name)}`}
-                      className="grid gap-2 rounded-md border px-3 py-2.5 transition-colors hover:bg-muted/50 md:grid-cols-[1fr_auto_auto_auto] md:items-center"
+                      className="group relative block rounded-xl border px-3 py-2 transition-colors hover:bg-muted/50 active:bg-muted/60 md:grid md:grid-cols-[minmax(0,1fr)_auto_auto_auto] md:items-center md:gap-2"
                     >
-                      <div className="min-w-0">
+                      <ArrowRight className="absolute top-2 right-3 h-3.5 w-3.5 text-muted-foreground transition-transform group-hover:translate-x-0.5 md:hidden" />
+                      <div className="grid gap-1.5 md:hidden">
+                        <div className="min-w-0 pr-6">
+                          <div className="truncate text-sm font-medium">{bucket.name}</div>
+                          <div className="truncate text-[11px] leading-4 text-muted-foreground">{bucket.accountLabel}</div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-1.5 text-sm">
+                          <div>
+                            <div className="font-medium">{formatBytes(bucket.bytes)}</div>
+                            <div className="text-[11px] text-muted-foreground">storage</div>
+                          </div>
+                          <div>
+                            <div className="font-medium">{formatCompact(bucket.objects)}</div>
+                            <div className="text-[11px] text-muted-foreground">objects</div>
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-between gap-1.5">
+                          <div className="text-[11px] text-muted-foreground md:hidden">
+                            {bucket.updatedAt ? formatRelative(bucket.updatedAt) : ""}
+                          </div>
+                          <Badge variant={statusVariant(bucket.status)}>{bucket.status}</Badge>
+                        </div>
+                      </div>
+                      <div className="hidden min-w-0 md:block">
                         <div className="truncate text-sm font-medium">{bucket.name}</div>
-                        <div className="truncate text-xs text-muted-foreground">{bucket.accountLabel}</div>
+                        <div className="truncate text-[11px] text-muted-foreground">{bucket.accountLabel}</div>
                       </div>
-                      <div className="text-sm md:text-right">
+                      <div className="hidden text-sm md:block md:text-right">
                         <div className="font-medium">{formatBytes(bucket.bytes)}</div>
-                        <div className="text-xs text-muted-foreground">storage</div>
+                        <div className="text-[11px] text-muted-foreground">storage</div>
                       </div>
-                      <div className="text-sm md:text-right">
+                      <div className="hidden text-sm md:block md:text-right">
                         <div className="font-medium">{formatCompact(bucket.objects)}</div>
-                        <div className="text-xs text-muted-foreground">objects</div>
+                        <div className="text-[11px] text-muted-foreground">objects</div>
                       </div>
-                      <div className="flex items-center justify-between gap-2 md:justify-end">
+                      <div className="hidden items-center justify-end gap-2 md:flex">
                         <Badge variant={statusVariant(bucket.status)}>{bucket.status}</Badge>
                         <ArrowRight className="h-4 w-4 text-muted-foreground" />
                       </div>
@@ -609,8 +636,10 @@ export default function DashboardPage() {
               </CardContent>
             </Card>
 
-            <SystemHealthCard data={data} completionRate={migrationCompletionRate} />
-            <AttentionQueueCard items={data.attentionItems} />
+            <div className="space-y-3 xl:sticky xl:top-4 xl:self-start">
+              <SystemHealthCard data={data} completionRate={migrationCompletionRate} />
+              <AttentionQueueCard items={data.attentionItems} />
+            </div>
           </div>
         </>
       ) : (
@@ -627,19 +656,19 @@ export default function DashboardPage() {
 function SystemHealthCard({ data, completionRate }: { data: OverviewResponse; completionRate: number }) {
   return (
     <Card>
-      <CardHeader className="pb-3">
-        <CardTitle>System Health</CardTitle>
-        <CardDescription>Operational status across migrations, workers, bucket stats, and repair jobs.</CardDescription>
+      <CardHeader className="gap-1 pb-2 md:px-4">
+        <CardTitle className="text-base">System Health</CardTitle>
+        <CardDescription className="text-xs leading-4">Operational status across migrations, workers, bucket stats, and repair jobs.</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="space-y-2 rounded-md border p-3">
+      <CardContent className="space-y-3 md:px-4">
+        <div className="space-y-2 rounded-xl border p-3">
           <div className="flex items-center justify-between text-sm">
             <span>Migration completion</span>
             <span className="font-medium">{completionRate.toFixed(1)}%</span>
           </div>
           <Progress value={completionRate} className="h-2" />
         </div>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-2.5 md:grid-cols-2">
           <Breakdown title="Migrations" values={data.breakdowns.migrations} />
           <Breakdown title="Workers" values={data.breakdowns.workers} />
           <Breakdown title="Bucket stats" values={data.breakdowns.bucketStats} />
@@ -651,31 +680,29 @@ function SystemHealthCard({ data, completionRate }: { data: OverviewResponse; co
 }
 
 function AttentionQueueCard({ items }: { items: OverviewResponse["attentionItems"] }) {
+  if (items.length === 0) return null
+
   return (
     <Card>
-      <CardHeader className="pb-3">
-        <CardTitle>Attention Queue</CardTitle>
-        <CardDescription>Failures, stale sync, and verification records that need review.</CardDescription>
+      <CardHeader className="gap-1 pb-2 md:px-4">
+        <CardTitle className="text-base">Attention Queue</CardTitle>
+        <CardDescription className="text-xs leading-4">Failures, stale sync, and verification records that need review.</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-1.5">
-        {items.length === 0 ? (
-          <EmptyLine icon={CheckCircle2} text="No attention items" />
-        ) : (
-          items.map((item) => (
-            <Link
-              key={item.id}
-              href={item.href ?? "/dashboard/overview"}
-              className="grid gap-2 rounded-md border px-3 py-2.5 transition-colors hover:bg-muted/50 md:grid-cols-[1fr_auto_auto] md:items-center"
-            >
-              <div className="min-w-0">
-                <div className="text-sm font-medium">{item.title}</div>
-                <div className="line-clamp-1 text-xs text-muted-foreground">{item.detail}</div>
-              </div>
-              <div className="text-xs text-muted-foreground md:text-right">{formatRelative(item.at)}</div>
-              <Badge variant={statusVariant(item.severity)}>{item.severity}</Badge>
-            </Link>
-          ))
-        )}
+      <CardContent className="space-y-1.5 md:px-4">
+        {items.map((item) => (
+          <Link
+            key={item.id}
+            href={item.href ?? "/dashboard/overview"}
+            className="grid gap-2 rounded-xl border px-3 py-2.5 transition-colors hover:bg-muted/50 active:bg-muted/60 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-center"
+          >
+            <div className="min-w-0">
+              <div className="text-sm font-medium">{item.title}</div>
+              <div className="line-clamp-1 text-[11px] text-muted-foreground">{item.detail}</div>
+            </div>
+            <div className="text-[11px] text-muted-foreground md:text-right">{formatRelative(item.at)}</div>
+            <Badge variant={statusVariant(item.severity)}>{item.severity}</Badge>
+          </Link>
+        ))}
       </CardContent>
     </Card>
   )
@@ -684,15 +711,15 @@ function AttentionQueueCard({ items }: { items: OverviewResponse["attentionItems
 function Breakdown({ title, values }: { title: string; values: Record<string, number> }) {
   const entries = Object.entries(values).sort((a, b) => b[1] - a[1])
   return (
-    <div className="space-y-2 rounded-md border px-3 py-2.5">
+    <div className="space-y-2 rounded-xl border px-3 py-2.5">
       <div className="flex items-center justify-between">
         <div className="text-sm font-medium">{title}</div>
-        <div className="text-xs text-muted-foreground">{formatNumber(entries.reduce((sum, [, count]) => sum + count, 0))} total</div>
+        <div className="text-[11px] text-muted-foreground">{formatNumber(entries.reduce((sum, [, count]) => sum + count, 0))} total</div>
       </div>
       {entries.length === 0 ? (
-        <div className="text-xs text-muted-foreground">No records</div>
+        <div className="text-[11px] text-muted-foreground">No records</div>
       ) : (
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-1.5">
           {entries.map(([status, count]) => (
             <Badge key={status} variant={statusVariant(status)}>
               {status}: {formatNumber(count)}
@@ -712,7 +739,7 @@ function EmptyLine({
   icon?: React.ComponentType<{ className?: string }>
 }) {
   return (
-    <div className="flex min-h-20 items-center justify-center gap-2 rounded-md border border-dashed text-sm text-muted-foreground">
+    <div className="flex min-h-16 items-center justify-center gap-2 rounded-xl border border-dashed px-3 text-sm text-muted-foreground">
       <Icon className="h-4 w-4" />
       {text}
     </div>

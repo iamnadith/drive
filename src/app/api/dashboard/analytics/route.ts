@@ -7,7 +7,7 @@ import {
   type DriveMigration,
   type DriveMigrationItem,
 } from "@/lib/migrations-store"
-import { readLiveBucketState, readSlurperResult } from "@/lib/migration-bucket-state"
+import { getMergedBucketSnapshot } from "@/lib/migration-bucket-state"
 import { syncMigrationLiveState } from "@/lib/migration-live-state"
 import { reconcileRepairJobs, type DriveRepairJob } from "@/lib/repair-jobs-store"
 import { isPostgresConfigured, queryDb } from "@/lib/db"
@@ -37,6 +37,7 @@ type MigrationItemRow = {
   target_bucket: string
   source_objects: number | string | null
   source_bytes: number | string | null
+  slurper_job_id: string | null
   slurper_status: string | null
   progress: Record<string, unknown> | null
   last_progress_at: string | null
@@ -182,17 +183,15 @@ function getEffectiveAgentStatus(agent: DriveAgent & { latestRun: DriveAgentRun 
   return agent.status
 }
 
-function itemMetrics(item: Pick<DriveMigrationItem, "sourceObjects" | "sourceBytes" | "progress">) {
-  const progress = item.progress && typeof item.progress === "object" ? item.progress : {}
-  const live = readLiveBucketState(progress)
-  const slurper = readSlurperResult(progress)
+function itemMetrics(item: DriveMigrationItem) {
+  const snapshot = getMergedBucketSnapshot(item)
   return {
-    totalObjects: live?.totalObjects || item.sourceObjects || slurper?.objects || 0,
+    totalObjects: snapshot.total || item.sourceObjects || 0,
     totalBytes: item.sourceBytes || 0,
-    transferred: live?.transferredObjects || slurper?.transferredObjects || 0,
-    skipped: live?.skippedObjects || slurper?.skippedObjects || 0,
-    failed: live?.failedObjects || slurper?.failedObjects || 0,
-    verifyIssues: live?.verifyIssues || 0,
+    transferred: snapshot.transferred,
+    skipped: snapshot.skipped,
+    failed: snapshot.failed,
+    verifyIssues: snapshot.verifyIssues,
   }
 }
 
@@ -509,8 +508,10 @@ export async function GET(request: Request) {
     targetBucket: row.target_bucket,
     sourceObjects: toNumber(row.source_objects) || undefined,
     sourceBytes: toNumber(row.source_bytes) || undefined,
+    slurperJobId: row.slurper_job_id ?? undefined,
     slurperStatus: row.slurper_status ?? undefined,
     progress: row.progress ?? {},
+    lastProgressAt: row.last_progress_at ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at ?? undefined,
   }))
@@ -603,7 +604,7 @@ export async function GET(request: Request) {
           ...activeAnalyticsBucketStats.map((row) => row.updated_at),
           ...migrations.map((migration) => migration.createdAt),
           ...migrations.map((migration) => migration.completedAt),
-          ...itemRowsAsItems.map((item) => item.updatedAt || item.createdAt),
+          ...itemRowsAsItems.map((item) => item.lastProgressAt || item.updatedAt || item.createdAt),
           ...repairJobs.map((job) => job.updatedAt || job.createdAt),
         ])
       : start
@@ -629,7 +630,7 @@ export async function GET(request: Request) {
     const createdMigrations = migrations.filter((m) => dateKey(m.createdAt) === day).length
     const completedMigrations = migrations.filter((m) => m.completedAt && dateKey(m.completedAt) === day).length
     const updatedItems = itemRowsAsItems.filter((item) => {
-      const anchor = item.updatedAt || item.createdAt
+      const anchor = item.lastProgressAt || item.updatedAt || item.createdAt
       return anchor && dateKey(anchor) === day
     })
     const transfer = updatedItems.reduce(

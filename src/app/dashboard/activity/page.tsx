@@ -7,8 +7,10 @@ import {
   ChevronLeft,
   ChevronRight,
   Eye,
+  RefreshCw,
   RotateCcw,
   Search,
+  SlidersHorizontal,
   X,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -35,8 +37,8 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Spinner } from "@/components/ui/spinner"
 import {
-  DashboardFilterGrid,
   DashboardPage,
   DashboardPageHeader,
   DashboardPageSkeleton,
@@ -147,6 +149,7 @@ export default function ActivityPage() {
   const [refreshing, setRefreshing] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [selected, setSelected] = React.useState<ActivityEvent | null>(null)
+  const [filtersOpen, setFiltersOpen] = React.useState(false)
   const [undoingId, setUndoingId] = React.useState<string | null>(null)
   const [cursorStack, setCursorStack] = React.useState<string[]>([])
   const [cursor, setCursor] = React.useState<string | null>(null)
@@ -254,6 +257,8 @@ export default function ActivityPage() {
   const events = data?.events ?? []
   const actions = Array.from(new Set(events.map((event) => event.action))).sort()
   const entityTypes = Array.from(new Set(events.map((event) => event.entityType))).sort()
+  const currentPage = cursorStack.length + 1
+  const totalKnownPages = currentPage + (data?.nextCursor ? 1 : 0)
   const activeFilterCount = [
     filters.q.trim(),
     filters.action !== ALL,
@@ -268,6 +273,40 @@ export default function ActivityPage() {
     return <DashboardPageSkeleton rows={8} />
   }
 
+  const goToPage = (page: number) => {
+    if (page < 1 || page === currentPage) return
+    if (page === 1) {
+      setCursor(null)
+      setCursorStack([])
+      return
+    }
+    const nextStack = cursorStack.slice(0, page - 1)
+    setCursorStack(nextStack)
+    setCursor(nextStack[page - 2] ?? null)
+  }
+
+  const getVisiblePages = (maxButtons: number) => {
+    if (totalKnownPages <= maxButtons) {
+      return Array.from({ length: totalKnownPages }, (_, index) => index + 1)
+    }
+    let start = Math.max(1, currentPage - Math.floor((maxButtons - 1) / 2))
+    let end = start + maxButtons - 1
+    if (end > totalKnownPages) {
+      end = totalKnownPages
+      start = Math.max(1, end - maxButtons + 1)
+    }
+    return Array.from({ length: end - start + 1 }, (_, index) => start + index)
+  }
+
+  const mobilePages = getVisiblePages(3)
+  const desktopPages = getVisiblePages(5)
+
+  const goToNextPage = () => {
+    if (!data?.nextCursor) return
+    setCursorStack((stack) => [...stack, data.nextCursor!])
+    setCursor(data.nextCursor)
+  }
+
   return (
     <DashboardPage>
       <DashboardPageHeader
@@ -279,14 +318,36 @@ export default function ActivityPage() {
           </>
         }
         actions={
-        <Button
-          variant="outline"
-          loading={refreshing}
-          onClick={() => void loadActivity(true)}
-          disabled={refreshing}
-        >
-          Refresh
-        </Button>
+          <div className="flex w-full items-center gap-2 sm:w-auto">
+            <div className="relative min-w-0 flex-1 sm:w-[320px] sm:flex-none">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={filters.q}
+                onChange={(event) => updateFilter("q", event.target.value)}
+                placeholder="Search"
+                className="h-10 pl-9"
+              />
+            </div>
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => setFiltersOpen(true)}
+              aria-label="Open filters"
+              className="h-10 min-h-10 w-10 min-w-10 shrink-0 aspect-square rounded-full [border-radius:9999px] p-0 border border-border/70 bg-background/85 shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
+            >
+              <SlidersHorizontal className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => void loadActivity(true)}
+              disabled={refreshing}
+              aria-busy={refreshing || undefined}
+              className="h-10 min-h-10 w-10 min-w-10 shrink-0 aspect-square rounded-full [border-radius:9999px] p-0 border border-border/70 bg-background/85 shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
+            >
+              {refreshing ? <Spinner className="size-4" /> : <RefreshCw className="h-4 w-4" />}
+            </Button>
+          </div>
         }
       />
 
@@ -298,31 +359,187 @@ export default function ActivityPage() {
         </Alert>
       ) : null}
 
-      <Card className="py-0">
-        <CardHeader className="border-b px-4 py-3">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <CardTitle className="text-base">Filters</CardTitle>
-             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={activeFilterCount ? "secondary" : "outline"}>{activeFilterCount} active</Badge>
-              <Button variant="outline" size="sm" onClick={resetFilters}>
-                <X className="h-4 w-4" />
-                Clear
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="p-4">
-          <DashboardFilterGrid className="xl:grid-cols-[minmax(280px,1.5fr)_repeat(4,minmax(140px,1fr))_112px]">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input
-                value={filters.q}
-                onChange={(event) => updateFilter("q", event.target.value)}
-                placeholder="Search activity"
-                className="h-10 pl-9"
-              />
-            </div>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <Badge variant={activeFilterCount ? "secondary" : "outline"}>{activeFilterCount} active</Badge>
+          {activeFilterCount > 0 ? (
+            <Button variant="outline" size="sm" onClick={resetFilters}>
+              <X className="h-4 w-4" />
+              Clear
+            </Button>
+          ) : null}
+        </div>
+        <div className="shrink-0 text-sm text-muted-foreground">Page {cursorStack.length + 1} / {events.length} shown</div>
+      </div>
 
+      <Card className="py-0">
+        <CardContent className="p-0">
+          {loading && !data ? (
+            <div className="space-y-2 p-4">
+              {Array.from({ length: 8 }).map((_, index) => (
+                <Skeleton key={index} className="h-16 w-full" />
+              ))}
+            </div>
+          ) : events.length === 0 ? (
+            <div className="flex min-h-64 items-center justify-center p-6 text-sm text-muted-foreground">
+              No matching activity.
+            </div>
+          ) : (
+            <ul className="divide-y">
+              {events.map((event) => (
+                <li key={event.id}>
+                  <div className="group px-4 py-3 transition-colors hover:bg-muted/30 md:px-0">
+                    <div className="grid gap-3 xl:grid-cols-[148px_minmax(0,1fr)_196px_auto] xl:items-start">
+                      <div className="text-sm">
+                        <div className="font-medium text-foreground">{formatRelative(event.occurredAt)}</div>
+                        <div className="mt-0.5 text-xs text-muted-foreground">{formatDateTime(event.occurredAt)}</div>
+                        <div className="mt-2 hidden text-[11px] uppercase tracking-[0.16em] text-muted-foreground xl:block">
+                          {formatAction(event.action)}
+                        </div>
+                      </div>
+
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium">{event.summary}</div>
+                        <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                          {event.entityLabel ?? event.entityType}
+                        </div>
+                        {event.detail ? (
+                          <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                            {event.detail}
+                          </div>
+                        ) : null}
+                        <div className="mt-2 flex flex-wrap gap-2 xl:hidden">
+                          <Badge variant={outcomeVariant(event.outcome)}>{event.outcome}</Badge>
+                          {event.undoStatus !== "available" ? (
+                            <Badge variant="outline">{undoLabel(event)}</Badge>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      <div className="min-w-0 text-sm">
+                        <div className="truncate font-medium">{event.actorName ?? "System"}</div>
+                        <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                          {event.actorEmail ?? event.ipAddress ?? "Background process"}
+                        </div>
+                        <div className="mt-1 truncate text-xs text-muted-foreground">
+                          {formatAction(event.action)} / {event.entityType}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-3 xl:flex-col xl:items-end xl:justify-start">
+                        <div className="hidden flex-wrap justify-end gap-2 xl:flex">
+                          <Badge variant={outcomeVariant(event.outcome)}>{event.outcome}</Badge>
+                          {event.undoStatus !== "available" ? (
+                            <Badge variant="outline">{undoLabel(event)}</Badge>
+                          ) : null}
+                        </div>
+                        <div className="flex justify-start lg:justify-end">
+                          <Button size="sm" variant="ghost" onClick={() => setSelected(event)}>
+                            <Eye className="h-4 w-4" />
+                            View
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+
+        <div className="border-t p-4">
+          <div className="grid w-full grid-cols-[1fr_auto_1fr] items-center gap-2">
+            <Button
+              variant="outline"
+              disabled={currentPage === 1 || loading}
+              onClick={() => {
+                goToPage(currentPage - 1)
+              }}
+              className="justify-self-start border border-border/70 bg-background/85 shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
+            >
+              <ChevronLeft className="h-4 w-4" />
+              Previous
+            </Button>
+            <div className="justify-self-center">
+              <div className="flex items-center justify-center gap-1.5 md:hidden">
+                {mobilePages.map((page) => (
+                  page === currentPage ? (
+                    <button
+                      key={`mobile-${page}`}
+                      type="button"
+                      aria-current="page"
+                      disabled
+                      className="flex h-8 w-8 min-h-8 min-w-8 max-h-8 max-w-8 shrink-0 items-center justify-center rounded-full border border-white bg-white p-0 text-sm font-medium leading-none text-black opacity-100"
+                    >
+                      {page}
+                    </button>
+                  ) : (
+                    <Button
+                      key={`mobile-${page}`}
+                      variant="outline"
+                      disabled={loading}
+                      onClick={() => (page === currentPage + 1 && data?.nextCursor ? goToNextPage() : goToPage(page))}
+                      className="h-8 w-8 min-h-8 min-w-8 max-h-8 max-w-8 shrink-0 rounded-full [border-radius:9999px] border border-border/70 bg-background/85 p-0 text-center text-sm font-medium leading-none shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
+                    >
+                      {page}
+                    </Button>
+                  )
+                ))}
+              </div>
+              <div className="hidden items-center justify-center gap-1.5 md:flex">
+                {desktopPages.map((page) => (
+                  page === currentPage ? (
+                    <button
+                      key={`desktop-${page}`}
+                      type="button"
+                      aria-current="page"
+                      disabled
+                      className="flex h-8 w-8 min-h-8 min-w-8 max-h-8 max-w-8 shrink-0 items-center justify-center rounded-full border border-white bg-white p-0 text-sm font-medium leading-none text-black opacity-100"
+                    >
+                      {page}
+                    </button>
+                  ) : (
+                    <Button
+                      key={`desktop-${page}`}
+                      variant="outline"
+                      disabled={loading}
+                      onClick={() => (page === currentPage + 1 && data?.nextCursor ? goToNextPage() : goToPage(page))}
+                      className="h-8 w-8 min-h-8 min-w-8 max-h-8 max-w-8 shrink-0 rounded-full [border-radius:9999px] border border-border/70 bg-background/85 p-0 text-center text-sm font-medium leading-none shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
+                    >
+                      {page}
+                    </Button>
+                  )
+                ))}
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              disabled={!data?.nextCursor || loading}
+              onClick={() => {
+                if (!data?.nextCursor) return
+                setCursorStack((stack) => [...stack, data.nextCursor!])
+                setCursor(data.nextCursor)
+              }}
+              className="justify-self-end border border-border/70 bg-background/85 shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
+            >
+              Next
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      <Dialog open={filtersOpen} onOpenChange={setFiltersOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Filters</DialogTitle>
+            <DialogDescription>
+              Narrow the activity stream by action, entity, status, undo state, date, and page size.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             <Select value={filters.action} onValueChange={(value) => updateFilter("action", value)}>
               <SelectTrigger className="h-10 w-full">
                 <SelectValue placeholder="Action" />
@@ -377,13 +594,11 @@ export default function ActivityPage() {
               </SelectTrigger>
               <SelectContent>
                 {pageSizeOptions.map((size) => (
-                  <SelectItem key={size} value={String(size)}>{size}</SelectItem>
+                  <SelectItem key={size} value={String(size)}>{size} per page</SelectItem>
                 ))}
               </SelectContent>
             </Select>
-          </DashboardFilterGrid>
 
-          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:max-w-md">
             <div className="relative">
               <CalendarDays className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
@@ -394,6 +609,7 @@ export default function ActivityPage() {
                 className="h-10 pl-9"
               />
             </div>
+
             <Input
               aria-label="Activity to date"
               type="date"
@@ -402,104 +618,16 @@ export default function ActivityPage() {
               className="h-10"
             />
           </div>
-        </CardContent>
-      </Card>
 
-      <Card className="py-0">
-        <CardHeader className="border-b px-4 py-3">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <CardTitle className="text-base">Activity List</CardTitle>
-            <div className="text-sm text-muted-foreground">
-              Page {cursorStack.length + 1} / {events.length} shown
-            </div>
-          </div>
-        </CardHeader>
-
-        <CardContent className="p-0">
-          {loading && !data ? (
-            <div className="space-y-2 p-4">
-              {Array.from({ length: 8 }).map((_, index) => (
-                <Skeleton key={index} className="h-16 w-full" />
-              ))}
-            </div>
-          ) : events.length === 0 ? (
-            <div className="flex min-h-64 items-center justify-center p-6 text-sm text-muted-foreground">
-              No matching activity.
-            </div>
-          ) : (
-            <ul className="divide-y">
-              {events.map((event) => (
-                <li key={event.id} className="px-4 py-3">
-                  <div className="grid gap-3 xl:grid-cols-[160px_minmax(0,1fr)_180px_120px_88px] xl:items-center">
-                    <div className="text-sm">
-                      <div className="font-medium">{formatRelative(event.occurredAt)}</div>
-                      <div className="mt-0.5 text-xs text-muted-foreground">{formatDateTime(event.occurredAt)}</div>
-                    </div>
-
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{event.summary}</div>
-                      <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                        {formatAction(event.action)} / {event.entityLabel ?? event.entityType}
-                      </div>
-                    </div>
-
-                    <div className="min-w-0 text-sm">
-                      <div className="truncate">{event.actorName ?? "System"}</div>
-                      <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                        {event.actorEmail ?? event.ipAddress ?? "Background process"}
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap gap-2">
-                      <Badge variant={outcomeVariant(event.outcome)}>{event.outcome}</Badge>
-                      <Badge variant={event.undoStatus === "available" ? "secondary" : "outline"}>{undoLabel(event)}</Badge>
-                    </div>
-
-                    <div className="flex justify-start lg:justify-end">
-                      <Button size="sm" variant="ghost" onClick={() => setSelected(event)}>
-                        <Eye className="h-4 w-4" />
-                        View
-                      </Button>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </CardContent>
-
-        <div className="flex flex-col gap-3 border-t p-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="text-sm text-muted-foreground">
-            {loading ? "Loading" : `${events.length} activities on this page`}
-          </div>
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              disabled={cursorStack.length === 0 || loading}
-              onClick={() => {
-                const nextStack = cursorStack.slice(0, -1)
-                setCursor(nextStack[nextStack.length - 1] ?? null)
-                setCursorStack(nextStack)
-              }}
-            >
-              <ChevronLeft className="h-4 w-4" />
-              Previous
+          <DialogFooter>
+            <Button variant="outline" onClick={resetFilters}>
+              <X className="h-4 w-4" />
+              Clear
             </Button>
-            <Button
-              variant="outline"
-              disabled={!data?.nextCursor || loading}
-              onClick={() => {
-                if (!data?.nextCursor) return
-                setCursorStack((stack) => [...stack, data.nextCursor!])
-                setCursor(data.nextCursor)
-              }}
-            >
-              Next
-              <ChevronRight className="h-4 w-4" />
-            </Button>
-          </div>
-        </div>
-      </Card>
+            <Button onClick={() => setFiltersOpen(false)}>Done</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(null)}>
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
@@ -554,3 +682,4 @@ export default function ActivityPage() {
     </DashboardPage>
   )
 }
+

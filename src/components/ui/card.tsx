@@ -7,7 +7,7 @@ function Card({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="card"
       className={cn(
-        "glass-surface text-card-foreground flex min-w-0 flex-col gap-4 overflow-hidden rounded-3xl border py-4 shadow-sm sm:gap-6 sm:py-6",
+        "glass-surface text-card-foreground flex min-w-0 flex-col gap-4 overflow-hidden rounded-3xl border py-4 shadow-sm sm:gap-5 sm:py-5 md:gap-4 md:py-4",
         className
       )}
       {...props}
@@ -20,7 +20,7 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="card-header"
       className={cn(
-        "@container/card-header grid min-w-0 auto-rows-min grid-rows-[auto_auto] items-start gap-2 px-4 sm:px-6 sm:has-data-[slot=card-action]:grid-cols-[minmax(0,1fr)_auto] [.border-b]:pb-4 sm:[.border-b]:pb-6",
+        "@container/card-header grid min-w-0 auto-rows-min grid-rows-[auto_auto] items-start gap-2 px-4 sm:px-5 md:px-4 sm:has-data-[slot=card-action]:grid-cols-[minmax(0,1fr)_auto] [.border-b]:pb-4 sm:[.border-b]:pb-5 md:[.border-b]:pb-4",
         className
       )}
       {...props}
@@ -65,7 +65,7 @@ function CardContent({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-content"
-      className={cn("min-w-0 px-4 sm:px-6", className)}
+      className={cn("min-w-0 px-4 sm:px-5 md:px-4", className)}
       {...props}
     />
   )
@@ -75,7 +75,7 @@ function CardFooter({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card-footer"
-      className={cn("flex min-w-0 flex-wrap items-center gap-2 px-4 sm:px-6 [.border-t]:pt-4 sm:[.border-t]:pt-6", className)}
+      className={cn("flex min-w-0 flex-wrap items-center gap-2 px-4 sm:px-5 md:px-4 [.border-t]:pt-4 sm:[.border-t]:pt-5 md:[.border-t]:pt-4", className)}
       {...props}
     />
   )
