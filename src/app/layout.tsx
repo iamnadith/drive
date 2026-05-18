@@ -3,6 +3,7 @@ import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider } from "@/components/auth-provider";
+import { SiteHeader } from "@/components/site-header";
 import { SuperAdminGate } from "@/components/superadmin-gate";
 import { ThemeProvider } from "@/components/theme-provider";
 
@@ -41,6 +42,7 @@ export default function RootLayout({
           <div className="site-content">
             <ThemeProvider>
               <AuthProvider>
+                <SiteHeader />
                 <SuperAdminGate>{children}</SuperAdminGate>
               </AuthProvider>
               <Toaster />

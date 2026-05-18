@@ -200,7 +200,7 @@ export default function GoogleCompletePage() {
 
   if (step === "loading") {
     return (
-      <div className="auth-flow-bg flex min-h-svh flex-col items-center justify-center gap-6 p-4 sm:p-6 md:p-10">
+      <div className="auth-flow-bg page-under-header flex flex-col items-center justify-center gap-6 p-4 sm:p-6 md:p-10">
         <div className="flex w-full max-w-sm flex-col items-center gap-2 text-center">
           <div className="flex size-8 items-center justify-center rounded-2xl">
             <GalleryVerticalEnd className="size-6" />
@@ -213,7 +213,7 @@ export default function GoogleCompletePage() {
   }
 
   return (
-    <div className="auth-flow-bg flex min-h-svh flex-col items-center justify-center gap-6 p-4 sm:p-6 md:p-10">
+    <div className="auth-flow-bg page-under-header flex flex-col items-center justify-center gap-6 p-4 sm:p-6 md:p-10">
       <div className="auth-flow-panel w-full max-w-sm rounded-3xl p-5 backdrop-blur sm:p-6">
         <div className="flex flex-col gap-6">
           <div className="flex flex-col items-center gap-2 text-center">

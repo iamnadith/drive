@@ -102,8 +102,8 @@ export default function DashboardLayout({
       <AppSidebar />
       <SidebarInset className="h-svh min-w-0 overflow-x-hidden overflow-y-auto">
         <header className="dashboard-header-glass sticky top-0 z-50 overflow-hidden border-b transition-[background-color,backdrop-filter,border-color]">
-          <div className="relative z-10 flex min-h-14 items-center justify-between gap-2 sm:h-16">
-            <div className="flex min-w-0 flex-1 items-center gap-2 px-3 sm:px-4">
+          <div className="page-shell relative z-10 flex min-h-14 items-center justify-between gap-2 px-4 sm:h-16 sm:px-6">
+            <div className="flex min-w-0 flex-1 items-center gap-2">
             <SidebarTrigger className="-ml-1" />
             <Separator orientation="vertical" className="mr-1 h-4 sm:mr-2" />
             <Breadcrumb className="min-w-0">
@@ -128,8 +128,11 @@ export default function DashboardLayout({
               </BreadcrumbList>
             </Breadcrumb>
             </div>
-            <div className="flex shrink-0 items-center gap-1 px-2 sm:px-4">
-              <ThemeToggle />
+            <div className="flex shrink-0 items-center gap-1">
+              <ThemeToggle
+                className="h-9 w-9 rounded-full border border-[var(--border)] bg-transparent p-0 text-[var(--foreground)] hover:bg-transparent"
+                iconClassName="h-[18px] w-[18px] stroke-[2.25]"
+              />
             </div>
           </div>
         </header>

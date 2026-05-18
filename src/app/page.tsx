@@ -1,173 +1,82 @@
 "use client"
 
-import * as React from "react"
-import { useRouter, useSearchParams } from "next/navigation"
-import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-} from "@/components/ui/card"
-import { useAuth } from "@/components/auth-provider"
-import { HardDrive, Shield, Users, LogOut } from "lucide-react"
-import { toast } from "sonner"
+import Link from "next/link"
+import { Github, Globe, Mail } from "lucide-react"
+
+const links = [
+  { label: "GitHub", href: "https://github.com/iamnadith", icon: Github },
+  { label: "Portfolio", href: "https://nadith.pro", icon: Globe },
+  { label: "Email", href: "mailto:contact@nadith.pro", icon: Mail },
+]
 
 export default function HomePage() {
-  const router = useRouter()
-  const searchParams = useSearchParams()
-  const { user, loading, setUserDirect } = useAuth()
-
-  const forbidden = searchParams.get("forbidden")
-
-  const [shownForbiddenToast, setShownForbiddenToast] = React.useState(false)
-  const [needsSuperAdmin, setNeedsSuperAdmin] = React.useState(false)
-
-  React.useEffect(() => {
-    ;(async () => {
-      try {
-        const res = await fetch("/api/setup/status")
-        const data = await res.json()
-        if (res.ok) {
-          setNeedsSuperAdmin(!data.hasSuperAdmin)
-        }
-      } catch {
-        // ignore; if this fails we just don't show the prompt
-      }
-    })()
-  }, [])
-
-  React.useEffect(() => {
-    if (loading) return
-    if (forbidden === "dashboard" && !shownForbiddenToast) {
-      if (!user || (user.role !== "admin" && user.role !== "superadmin")) {
-        toast.error(
-          "Only admin or super admin users can access the dashboard"
-        )
-      }
-      setShownForbiddenToast(true)
-      router.replace("/")
-    }
-  }, [forbidden, shownForbiddenToast, user, loading, router])
-
-  const handleDashboardClick = () => {
-    if (!user) {
-      router.push("/login?redirect=/dashboard/overview")
-      return
-    }
-    router.push("/dashboard/overview")
-  }
-
   return (
-    <main className="flex min-h-svh min-w-0 items-center justify-center bg-transparent p-4 sm:p-6">
-      <Card className="w-full max-w-2xl rounded-3xl">
-        <CardHeader className="space-y-4 text-center">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10">
-            <HardDrive className="h-6 w-6 text-primary" />
-          </div>
-          <div className="space-y-2">
-            <CardTitle className="text-balance text-2xl font-bold tracking-tight sm:text-3xl">
-              Cloud Storage Panel
-            </CardTitle>
-            <CardDescription className="text-pretty text-base">
-              Secure, role-based control panel for your R2 storage and migrations.
-            </CardDescription>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          {needsSuperAdmin && !user && (
-            <div className="rounded-2xl border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-              <p className="font-medium">Super admin required</p>
-              <p className="mt-1 text-xs text-destructive/80">
-                No super admin account exists yet. Create a super admin user to
-                manage this panel.
+    <main className="page-under-header overflow-hidden bg-transparent">
+      <section className="mx-auto flex h-full w-full max-w-6xl flex-col justify-between px-4 py-5 sm:px-6 sm:py-6">
+        <div className="grid gap-8 lg:grid-cols-[minmax(0,1.15fr)_minmax(18rem,0.85fr)] lg:gap-12">
+          <div className="min-w-0 space-y-5">
+            <p className="text-[11px] font-medium uppercase tracking-[0.28em] text-[var(--muted-foreground)]">
+              Nadith Dhanula
+            </p>
+
+            <div className="space-y-4">
+              <h1 className="max-w-4xl text-[clamp(2.35rem,5vw,5.4rem)] font-semibold leading-[0.95] tracking-[-0.085em] text-[var(--foreground)]">
+                Storage management,
+                <br />
+                migration control,
+                <br />
+                and operational visibility.
+              </h1>
+
+              <p className="max-w-2xl text-sm leading-7 text-[var(--muted-foreground)] sm:text-base sm:leading-8">
+                Drive is a cloud storage control panel for managing accounts, projects, buckets,
+                file access, migrations, and operational workflows from one place.
               </p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button
-                  size="sm"
-                  onClick={() => router.push("/signup")}
-                >
-                  Create super admin
-                </Button>
+            </div>
+          </div>
+
+          <div className="min-w-0 space-y-6 lg:pt-2">
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-[var(--foreground)]">What this does</p>
+              <p className="text-sm leading-7 text-[var(--muted-foreground)] sm:text-base">
+                It lets you manage S3-style storage accounts, connect and organize projects,
+                inspect buckets and objects, work with file explorer flows, configure custom URL
+                endpoints, monitor API usage, review analytics, and coordinate migrations between
+                storage environments with worker-backed execution and history tracking.
+              </p>
+            </div>
+
+            <blockquote className="border-l border-[var(--border)] pl-4 text-sm leading-7 text-[var(--foreground)] sm:text-base">
+              “The best control panels make complex infrastructure feel ordered, visible, and
+              dependable.”
+            </blockquote>
+
+              <div className="flex flex-wrap gap-2.5">
+                {links.map((item) => (
+                  <Link
+                    key={item.label}
+                    href={item.href}
+                    target={item.href.startsWith("http") ? "_blank" : undefined}
+                    rel={item.href.startsWith("http") ? "noreferrer" : undefined}
+                    aria-label={item.label}
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-[var(--border)] text-[var(--foreground)] transition-colors hover:bg-white/50 dark:hover:bg-white/5"
+                  >
+                    <item.icon className="h-4 w-4" />
+                  </Link>
+                ))}
+              </div>
+
+              <div className="space-y-1 text-sm leading-7 text-[var(--muted-foreground)]">
+                <p>Phone: +94 77 771 7578</p>
               </div>
             </div>
-          )}
-          <>
-              <div className="grid w-full gap-3 sm:grid-cols-3">
-                {!user && (
-                  <>
-                    <Button
-                      variant="outline"
-                      className="w-full"
-                      onClick={() => router.push("/login")}
-                    >
-                      Log in
-                    </Button>
-                    <Button
-                      className="w-full"
-                      onClick={() => router.push("/signup")}
-                    >
-                      Sign up
-                    </Button>
-                  </>
-                )}
-                {user && (user.role === "admin" || user.role === "superadmin") && (
-                  <Button
-                    variant="secondary"
-                    className="w-full"
-                    onClick={handleDashboardClick}
-                  >
-                    Overview
-                  </Button>
-                )}
-                {user && (
-                  <Button
-                    variant="outline"
-                    className="w-full flex items-center justify-center gap-2"
-                    onClick={async () => {
-      // Client-only logout; session is stored in localStorage
-      setUserDirect(null)
-                      router.push("/")
-                    }}
-                  >
-                    <LogOut className="h-4 w-4" />
-                    Logout
-                  </Button>
-                )}
-              </div>
-              <div className="grid gap-3 text-sm text-muted-foreground sm:grid-cols-3">
-                <div className="min-w-0 rounded-2xl border bg-muted/20 p-3">
-                  <div className="flex items-start gap-2">
-                  <Shield className="mt-0.5 h-4 w-4 text-primary" />
-                  <div className="min-w-0">
-                    <p className="font-medium text-foreground">Role-based access</p>
-                    <p>Only admin and super admin users can see and open the dashboard.</p>
-                  </div>
-                  </div>
-                </div>
-                <div className="min-w-0 rounded-2xl border bg-muted/20 p-3">
-                  <div className="flex items-start gap-2">
-                  <Users className="mt-0.5 h-4 w-4 text-primary" />
-                  <div className="min-w-0">
-                    <p className="font-medium text-foreground">User accounts</p>
-                    <p>Sign up with email and password, then manage your profile.</p>
-                  </div>
-                  </div>
-                </div>
-                <div className="min-w-0 rounded-2xl border bg-muted/20 p-3">
-                  <div className="flex items-start gap-2">
-                  <HardDrive className="mt-0.5 h-4 w-4 text-primary" />
-                  <div className="min-w-0">
-                    <p className="font-medium text-foreground">Admin tools</p>
-                    <p>Admins and super admins can manage users, quotas and storage in the dashboard.</p>
-                  </div>
-                  </div>
-                </div>
-              </div>
-            </>
-        </CardContent>
-      </Card>
+          </div>
+
+        <footer className="flex flex-col gap-2 pt-6 text-xs text-[var(--muted-foreground)] sm:flex-row sm:items-end sm:justify-between">
+          <p>© 2026 Nadith Dhanula, CC-BY-SA</p>
+          <p className="uppercase tracking-[0.22em]">Minimal, focused, and quietly polished.</p>
+        </footer>
+      </section>
     </main>
   )
 }

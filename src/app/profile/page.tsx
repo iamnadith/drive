@@ -334,7 +334,7 @@ export default function ProfilePage() {
   }
 
   return (
-    <main className="min-h-screen px-4 py-6 sm:px-6 sm:py-8 lg:px-10">
+    <main className="page-under-header px-4 py-6 sm:px-6 sm:py-8 lg:px-10">
       <form onSubmit={(event) => void saveProfile(event)} className="mx-auto flex w-full max-w-6xl flex-col gap-5">
         <section className="rounded-3xl border bg-card p-5 shadow-sm sm:p-6">
           <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
