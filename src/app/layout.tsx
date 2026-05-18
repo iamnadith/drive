@@ -36,6 +36,7 @@ export default function RootLayout({
             <div className="site-ambient-orb site-ambient-orb-1" />
             <div className="site-ambient-orb site-ambient-orb-2" />
             <div className="site-ambient-orb site-ambient-orb-3" />
+            <div className="site-ambient-orb site-ambient-orb-4" />
           </div>
           <div className="site-content">
             <ThemeProvider>
