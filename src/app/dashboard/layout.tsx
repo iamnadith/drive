@@ -100,12 +100,10 @@ export default function DashboardLayout({
   return (
     <SidebarProvider>
       <AppSidebar />
-      <SidebarInset
-        data-dashboard-plain
-        className="h-svh min-w-0 overflow-x-hidden overflow-y-auto"
-      >
-        <header className="sticky top-0 z-20 flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-white/20 bg-white/35 shadow-[inset_0_1px_0_rgba(255,255,255,0.45)] backdrop-blur-xl supports-[backdrop-filter]:bg-white/20 dark:border-white/10 dark:bg-white/10 dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] sm:h-16">
-          <div className="flex min-w-0 flex-1 items-center gap-2 px-3 sm:px-4">
+      <SidebarInset className="h-svh min-w-0 overflow-x-hidden overflow-y-auto">
+        <header className="sticky top-0 z-50 overflow-hidden border-b border-border/70 bg-background/45 shadow-sm backdrop-blur-3xl backdrop-saturate-200 transition-[background-color,backdrop-filter,border-color,box-shadow] supports-[backdrop-filter]:bg-background/20">
+          <div className="relative z-10 flex min-h-14 items-center justify-between gap-2 sm:h-16">
+            <div className="flex min-w-0 flex-1 items-center gap-2 px-3 sm:px-4">
             <SidebarTrigger className="-ml-1" />
             <Separator orientation="vertical" className="mr-1 h-4 sm:mr-2" />
             <Breadcrumb className="min-w-0">
@@ -129,12 +127,13 @@ export default function DashboardLayout({
                 })}
               </BreadcrumbList>
             </Breadcrumb>
-          </div>
-          <div className="flex shrink-0 items-center gap-1 px-2 sm:px-4">
-            <ThemeToggle />
+            </div>
+            <div className="flex shrink-0 items-center gap-1 px-2 sm:px-4">
+              <ThemeToggle />
+            </div>
           </div>
         </header>
-        <div className="flex min-w-0 flex-1 flex-col gap-4 overflow-x-hidden px-3 py-4 sm:px-4 lg:px-6">
+        <div className="-mt-16 flex min-w-0 flex-1 flex-col gap-4 overflow-x-hidden px-3 pt-20 pb-4 sm:px-4 lg:px-6">
           {children}
         </div>
       </SidebarInset>

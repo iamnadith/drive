@@ -60,7 +60,7 @@ export default function HomePage() {
   }
 
   return (
-    <main className="flex min-h-svh min-w-0 items-center justify-center bg-[radial-gradient(circle_at_top,var(--muted),transparent_34rem)] p-4 sm:p-6">
+    <main className="flex min-h-svh min-w-0 items-center justify-center bg-background p-4 sm:p-6">
       <Card className="w-full max-w-2xl rounded-3xl">
         <CardHeader className="space-y-4 text-center">
           <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10">
