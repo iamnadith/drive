@@ -31,12 +31,21 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <ThemeProvider>
-          <AuthProvider>
-            <SuperAdminGate>{children}</SuperAdminGate>
-          </AuthProvider>
-          <Toaster />
-        </ThemeProvider>
+        <div className="site-shell">
+          <div aria-hidden="true" className="site-ambient">
+            <div className="site-ambient-orb site-ambient-orb-1" />
+            <div className="site-ambient-orb site-ambient-orb-2" />
+            <div className="site-ambient-orb site-ambient-orb-3" />
+          </div>
+          <div className="site-content">
+            <ThemeProvider>
+              <AuthProvider>
+                <SuperAdminGate>{children}</SuperAdminGate>
+              </AuthProvider>
+              <Toaster />
+            </ThemeProvider>
+          </div>
+        </div>
       </body>
     </html>
   );

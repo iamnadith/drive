@@ -93,7 +93,7 @@ function DashboardPanel({
   return (
     <div
       data-slot="dashboard-panel"
-      className={cn("min-w-0 overflow-hidden rounded-3xl border bg-card", className)}
+      className={cn("glass-surface min-w-0 overflow-hidden rounded-3xl border", className)}
       {...props}
     />
   )

@@ -139,7 +139,7 @@ function SidebarProvider({
             } as React.CSSProperties
           }
           className={cn(
-            "group/sidebar-wrapper has-data-[variant=inset]:bg-sidebar flex min-h-svh w-full",
+            "group/sidebar-wrapper flex min-h-svh w-full",
             className
           )}
           {...props}
@@ -188,7 +188,7 @@ function Sidebar({
           data-slot="sidebar"
           data-mobile="true"
           overlayClassName="bg-transparent backdrop-blur-sm"
-          className="!bg-transparent text-sidebar-foreground w-(--sidebar-width) overflow-hidden border-r border-border/70 p-0 !shadow-none backdrop-blur-3xl backdrop-brightness-100 backdrop-contrast-100 backdrop-saturate-150 supports-[backdrop-filter]:!bg-background/[0.01] dark:!bg-background/55 dark:backdrop-brightness-100 dark:backdrop-contrast-100 dark:backdrop-saturate-200 dark:supports-[backdrop-filter]:!bg-background/30 [&>button]:hidden"
+          className="glass-sidebar text-sidebar-foreground w-(--sidebar-width) overflow-hidden border-r p-0 [&>button]:hidden"
           style={
             {
               "--sidebar-width": SIDEBAR_WIDTH_MOBILE,
@@ -245,7 +245,7 @@ function Sidebar({
         <div
           data-sidebar="sidebar"
           data-slot="sidebar-inner"
-          className="bg-transparent flex h-full w-full flex-col overflow-hidden border-r border-border/70 backdrop-blur-3xl backdrop-brightness-100 backdrop-contrast-125 backdrop-saturate-200 supports-[backdrop-filter]:bg-background/[0.02] group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:rounded-lg group-data-[side=right]:border-r-0 group-data-[side=right]:border-l dark:bg-background/55 dark:backdrop-brightness-100 dark:backdrop-contrast-100 dark:supports-[backdrop-filter]:bg-background/30"
+          className="glass-sidebar flex h-full w-full flex-col overflow-hidden border-r group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:rounded-lg group-data-[side=right]:border-r-0 group-data-[side=right]:border-l"
         >
           {children}
         </div>
@@ -310,7 +310,7 @@ function SidebarInset({ className, ...props }: React.ComponentProps<"main">) {
     <main
       data-slot="sidebar-inset"
       className={cn(
-        "bg-background relative flex w-full min-w-0 flex-1 flex-col",
+        "relative flex w-full min-w-0 flex-1 flex-col bg-transparent",
         "md:peer-data-[variant=inset]:m-2 md:peer-data-[variant=inset]:ml-0 md:peer-data-[variant=inset]:rounded-xl md:peer-data-[variant=inset]:peer-data-[state=collapsed]:ml-2",
         className
       )}
