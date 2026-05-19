@@ -20,6 +20,8 @@ import {
   ClipboardPaste,
   BookOpen,
   X,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -1053,7 +1055,7 @@ export default function AccountsPage() {
             <Button
               variant="ghost"
               size="icon"
-              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !p-0 bg-transparent shadow-none"
+              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md"
               onClick={() => setViewAccount(account)}
               aria-label="View account details"
             >
@@ -1062,7 +1064,7 @@ export default function AccountsPage() {
             <Button
               variant="ghost"
               size="icon"
-              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !p-0 bg-transparent shadow-none"
+              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md"
               onClick={() => handleSync(account.id)}
               disabled={syncingId === account.id}
               aria-label="Sync account"
@@ -1074,7 +1076,7 @@ export default function AccountsPage() {
             <Button
               variant="ghost"
               size="icon"
-              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !p-0 bg-transparent shadow-none"
+              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md"
               onClick={() => setSettingsAccount(account)}
               aria-label="Account settings"
             >
@@ -1084,7 +1086,7 @@ export default function AccountsPage() {
               <Button
                 variant="ghost"
                 size="icon"
-                className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !p-0 bg-transparent shadow-none text-destructive"
+                className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 text-destructive shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md"
                 onClick={() => setConfirmAction({ type: "disable", account })}
                 aria-label="Disable account"
               >
@@ -1094,7 +1096,7 @@ export default function AccountsPage() {
             <Button
               variant="ghost"
               size="icon"
-              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !p-0 bg-transparent shadow-none text-destructive"
+              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 text-destructive shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md"
               onClick={() => setConfirmAction({ type: "delete", account })}
               aria-label="Remove account"
             >
@@ -1121,6 +1123,27 @@ export default function AccountsPage() {
       currentPageIndex * pageSize,
       currentPageIndex * pageSize + pageSize,
     );
+  const pageWindow = totalPages <= 3 ? totalPages : 3;
+  const desktopPageWindow = totalPages <= 5 ? totalPages : 5;
+  const mobileStart = Math.max(
+    0,
+    Math.min(
+      currentPageIndex - Math.floor(pageWindow / 2),
+      Math.max(0, totalPages - pageWindow),
+    ),
+  );
+  const desktopStart = Math.max(
+    0,
+    Math.min(
+      currentPageIndex - Math.floor(desktopPageWindow / 2),
+      Math.max(0, totalPages - desktopPageWindow),
+    ),
+  );
+  const mobilePages = Array.from({ length: pageWindow }, (_, index) => mobileStart + index);
+  const desktopPages = Array.from(
+    { length: desktopPageWindow },
+    (_, index) => desktopStart + index,
+  );
 
   if (accountsLoading && accounts.length === 0) {
     return (
@@ -1153,17 +1176,21 @@ export default function AccountsPage() {
             <Button
               variant="outline"
               size="icon"
-              className="shrink-0 rounded-full border-border/70 bg-background/80 shadow-sm ring-1 ring-inset ring-white/10 backdrop-blur-sm hover:bg-muted/60"
-              onClick={handleSyncAll}
-              loading={syncingAll}
+              className="size-9 shrink-0 rounded-full border border-border/70 bg-background/85 text-foreground shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
+              onClick={() => {
+                void handleSyncAll();
+              }}
               disabled={accounts.length === 0}
               aria-label="Sync all accounts"
             >
-              <RefreshCw className="h-4 w-4" />
+              <RefreshCw className={`h-4 w-4 ${syncingAll ? "animate-spin" : ""}`} />
             </Button>
             <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
               <DialogTrigger asChild>
-                <Button className="shrink-0 rounded-full border border-border/70 bg-background/80 shadow-sm ring-1 ring-inset ring-white/10 backdrop-blur-sm hover:bg-muted/60 sm:w-auto">
+                <Button
+                  size="icon"
+                  className="size-9 min-w-9 shrink-0 rounded-full border border-border/70 bg-background/85 p-0 text-foreground shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md sm:h-9 sm:w-auto sm:min-w-0 sm:px-3 sm:py-2"
+                >
                   <Plus className="h-4 w-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">Add Account</span>
                 </Button>
@@ -3100,40 +3127,72 @@ export default function AccountsPage() {
                   </TableRow>
                 )}
               </TableBody>
-             </Table>
-        </div>
-      </div>
-      <div className="flex flex-col gap-3 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center justify-between gap-3 sm:justify-end">
-          <span>
-            Page {totalRows ? currentPageIndex + 1 : 0} of{" "}
-            {totalRows ? totalPages : 0}
-          </span>
-          <div className="flex items-center gap-1">
-            <Button
+              </Table>
+            </div>
+        <div className="border-t px-3 py-2 text-xs text-muted-foreground">
+          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+            <button
               type="button"
-              variant="outline"
-              size="sm"
-              className="h-8 px-3"
+              className="justify-self-start inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/15 bg-background/85 p-0 text-foreground shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-white/25 hover:bg-muted/55 hover:shadow-md disabled:pointer-events-none disabled:opacity-50 sm:w-auto sm:gap-1 sm:px-2.5"
               disabled={currentPageIndex === 0}
               onClick={() => setPageIndex((prev) => Math.max(0, prev - 1))}
             >
-              Prev
-            </Button>
-            <Button
+              <ChevronLeft className="h-4 w-4 sm:mr-1" />
+              <span className="hidden sm:inline">Previous</span>
+            </button>
+            <div className="flex items-center justify-center gap-1 justify-self-center">
+              <div className="flex items-center gap-1 sm:hidden">
+                {mobilePages.map((page) => (
+                  <button
+                    key={`m-${page}`}
+                    type="button"
+                    className={`inline-flex h-[1.875rem] w-[1.875rem] shrink-0 items-center justify-center rounded-full border p-0 text-[11px] font-medium leading-none transition-[border-color,background-color,color,box-shadow] ${
+                      page === currentPageIndex
+                        ? "border-white/25 bg-white text-black shadow-sm"
+                        : "border-white/15 bg-background/85 text-foreground shadow-sm backdrop-blur-sm hover:border-white/25 hover:bg-muted/55 hover:shadow-md"
+                    }`}
+                    onClick={() => setPageIndex(page)}
+                    disabled={page === currentPageIndex}
+                  >
+                    {page + 1}
+                  </button>
+                ))}
+              </div>
+              <div className="hidden items-center gap-1 sm:flex">
+                {desktopPages.map((page) => (
+                  <button
+                    key={`d-${page}`}
+                    type="button"
+                    className={`inline-flex h-[1.875rem] w-[1.875rem] shrink-0 items-center justify-center rounded-full border p-0 text-[11px] font-medium leading-none transition-[border-color,background-color,color,box-shadow] ${
+                      page === currentPageIndex
+                        ? "border-white/25 bg-white text-black shadow-sm"
+                        : "border-white/15 bg-background/85 text-foreground shadow-sm backdrop-blur-sm hover:border-white/25 hover:bg-muted/55 hover:shadow-md"
+                    }`}
+                    onClick={() => setPageIndex(page)}
+                    disabled={page === currentPageIndex}
+                  >
+                    {page + 1}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button
               type="button"
-              variant="outline"
-              size="sm"
-              className="h-8 px-3"
+              className="justify-self-end inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/15 bg-background/85 p-0 text-foreground shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-white/25 hover:bg-muted/55 hover:shadow-md disabled:pointer-events-none disabled:opacity-50 sm:w-auto sm:gap-1 sm:px-2.5"
               disabled={currentPageIndex >= totalPages - 1 || totalRows === 0}
               onClick={() =>
                 setPageIndex((prev) => Math.min(totalPages - 1, prev + 1))
               }
             >
-              Next
-            </Button>
+              <ChevronRight className="h-4 w-4 sm:mr-1" />
+              <span className="hidden sm:inline">Next</span>
+            </button>
           </div>
         </div>
+      </div>
+      <div className="-mt-2 text-center text-xs text-muted-foreground">
+        Page {totalRows ? currentPageIndex + 1 : 0} of{" "}
+        {totalRows ? totalPages : 0}
       </div>
     </DashboardPage>
   );
