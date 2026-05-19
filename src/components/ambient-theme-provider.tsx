@@ -13,6 +13,7 @@ export type AmbientThemeConfig = {
 
 type AmbientThemeContextValue = {
   activeThemeId: string
+  hydrated: boolean
   themes: AmbientThemeConfig[]
   addTheme: (label: string) => string
   resetThemes: () => void
@@ -457,6 +458,7 @@ export function AmbientThemeProvider({
   const value = React.useMemo<AmbientThemeContextValue>(
     () => ({
       activeThemeId: state.activeThemeId,
+      hydrated,
       themes: state.themes,
       addTheme,
       resetThemes,
@@ -466,6 +468,7 @@ export function AmbientThemeProvider({
     }),
     [
       addTheme,
+      hydrated,
       resetThemes,
       setActiveThemeId,
       state.activeThemeId,

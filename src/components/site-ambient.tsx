@@ -110,7 +110,7 @@ function getOrbitPosition(index: number): React.CSSProperties {
 }
 
 export function SiteAmbient() {
-  const { activeThemeId, themes } = useAmbientTheme()
+  const { activeThemeId, hydrated, themes } = useAmbientTheme()
   const { resolvedTheme } = useTheme()
   const [mounted, setMounted] = React.useState(false)
 
@@ -118,14 +118,11 @@ export function SiteAmbient() {
     setMounted(true)
   }, [])
 
-  const activeTheme =
-    themes.find((theme) => theme.id === activeThemeId) ??
-    themes[0] ?? {
-      id: "fallback",
-      label: "Fallback",
-      orbitCount: 1,
-      colors: { light: ["#ffffff"], dark: ["#ffffff"] },
-    }
+  const activeTheme = themes.find((theme) => theme.id === activeThemeId) ?? themes[0]
+
+  if (!hydrated || !activeTheme) {
+    return <div aria-hidden="true" className="site-ambient" />
+  }
 
   const mode: AmbientPaletteMode = mounted && resolvedTheme === "dark" ? "dark" : "light"
   const colors = activeTheme.colors[mode]
