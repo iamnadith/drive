@@ -76,6 +76,7 @@ function isTransientConnectionError(error: unknown): boolean {
     code === "57P02" || // crash_shutdown
     code === "57P03" || // cannot_connect_now
     message.includes("Connection terminated unexpectedly") ||
+    message.includes("Connection terminated due to connection timeout") ||
     message.includes("terminating connection due to administrator command") ||
     message.includes("{:shutdown, :db_termination}")
   )

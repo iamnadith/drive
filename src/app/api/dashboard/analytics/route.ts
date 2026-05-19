@@ -176,7 +176,8 @@ async function capture<T>(
   label: string,
   warnings: string[],
   fn: () => Promise<T>,
-  fallback: T
+  fallback: T,
+  options?: { reportWarning?: boolean }
 ): Promise<T> {
   try {
     return await fn()
@@ -185,7 +186,11 @@ async function capture<T>(
       typeof error === "object" && error !== null && "message" in error
         ? String((error as { message?: unknown }).message ?? label)
         : label
-    warnings.push(`${label}: ${message}`)
+    if (options?.reportWarning === false) {
+      console.warn(`[analytics] ${label}: ${message}`)
+    } else {
+      warnings.push(`${label}: ${message}`)
+    }
     return fallback
   }
 }
@@ -476,8 +481,16 @@ async function buildAnalyticsPayload(range: RangeKey) {
       capture("verification diff count", warnings, () => countRows("drive_bucket_verify_diffs"), 0),
     ])
 
-  await capture("analytics archive write", warnings, () => archiveBucketStats(accounts, bucketStats), undefined)
-  const archivedBucketStats = await capture("analytics archive read", warnings, listBucketSnapshots, [] as BucketSnapshotRow[])
+  await capture("analytics archive write", warnings, () => archiveBucketStats(accounts, bucketStats), undefined, {
+    reportWarning: false,
+  })
+  const archivedBucketStats = await capture(
+    "analytics archive read",
+    warnings,
+    listBucketSnapshots,
+    [] as BucketSnapshotRow[],
+    { reportWarning: false }
+  )
 
   const itemRowsAsItems: DriveMigrationItem[] = migrationItemRows.map((row) => ({
     id: row.id,
