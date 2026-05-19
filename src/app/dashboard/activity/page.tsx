@@ -1,6 +1,8 @@
 "use client"
 
 import * as React from "react"
+import * as DialogPrimitive from "@radix-ui/react-dialog"
+import { AnimatePresence, motion } from "framer-motion"
 import {
   AlertTriangle,
   CalendarDays,
@@ -20,6 +22,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -71,6 +74,8 @@ type ActivityResponse = {
   events: ActivityEvent[]
   nextCursor: string | null
   hasMore: boolean
+  totalCount: number
+  totalPages: number
   generatedAt: string
 }
 
@@ -143,8 +148,46 @@ function DetailRow({ label, value }: { label: string; value: React.ReactNode }) 
   )
 }
 
+const popupContentVariants = {
+  closed: {
+    opacity: 0,
+    y: 18,
+    scale: 0.982,
+    filter: "saturate(0.92)",
+  },
+  open: {
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    filter: "saturate(1)",
+    transition: {
+      type: "spring" as const,
+      stiffness: 280,
+      damping: 28,
+      mass: 0.9,
+      staggerChildren: 0.035,
+      delayChildren: 0.02,
+    },
+  },
+}
+
+const popupSectionVariants = {
+  closed: { opacity: 0, y: 10 },
+  open: {
+    opacity: 1,
+    y: 0,
+    transition: {
+      duration: 0.22,
+      ease: [0.22, 1, 0.36, 1] as const,
+    },
+  },
+}
+
 export default function ActivityPage() {
   const [selected, setSelected] = React.useState<ActivityEvent | null>(null)
+  const [detailOpen, setDetailOpen] = React.useState(false)
+  const [detailOpening, setDetailOpening] = React.useState(false)
+  const [activeRowId, setActiveRowId] = React.useState<string | null>(null)
   const [filtersOpen, setFiltersOpen] = React.useState(false)
   const [undoingId, setUndoingId] = React.useState<string | null>(null)
   const [cursorStack, setCursorStack] = React.useState<string[]>([])
@@ -160,6 +203,55 @@ export default function ActivityPage() {
     limit: 25,
   })
   const deferredQuery = React.useDeferredValue(filters.q.trim())
+  const clearSelectedTimeoutRef = React.useRef<number | null>(null)
+  const openDetailTimeoutRef = React.useRef<number | null>(null)
+
+  const clearSelectedCleanup = React.useCallback(() => {
+    if (clearSelectedTimeoutRef.current === null) return
+    window.clearTimeout(clearSelectedTimeoutRef.current)
+    clearSelectedTimeoutRef.current = null
+  }, [])
+
+  const clearOpenDetailTimeout = React.useCallback(() => {
+    if (openDetailTimeoutRef.current === null) return
+    window.clearTimeout(openDetailTimeoutRef.current)
+    openDetailTimeoutRef.current = null
+    setDetailOpening(false)
+  }, [])
+
+  React.useEffect(() => {
+    if (detailOpen && selected) {
+      setActiveRowId(selected.id)
+      return
+    }
+
+    if (!activeRowId) return
+
+    const timeout = window.setTimeout(() => {
+      setActiveRowId((current) => (current === activeRowId ? null : current))
+    }, 220)
+
+    return () => window.clearTimeout(timeout)
+  }, [activeRowId, detailOpen, selected])
+
+  React.useEffect(() => {
+    clearSelectedCleanup()
+    if (detailOpen || detailOpening || !selected) return
+
+    clearSelectedTimeoutRef.current = window.setTimeout(() => {
+      setSelected((current) => (current?.id === selected.id ? null : current))
+      clearSelectedTimeoutRef.current = null
+    }, 140)
+
+    return () => clearSelectedCleanup()
+  }, [clearSelectedCleanup, detailOpen, detailOpening, selected])
+
+  React.useEffect(() => {
+    return () => {
+      clearSelectedCleanup()
+      clearOpenDetailTimeout()
+    }
+  }, [clearOpenDetailTimeout, clearSelectedCleanup])
 
   const queryString = React.useMemo(() => {
     const params = new URLSearchParams()
@@ -184,6 +276,7 @@ export default function ActivityPage() {
   } = useDashboardResource<ActivityResponse>({
     key: `dashboard-activity:${queryString}`,
     refreshIntervalMs: 20_000,
+    staleTimeMs: 8_000,
     fetcher: async ({ signal }) => {
       const res = await fetch(`/api/activity?${queryString}`, {
         cache: "no-store",
@@ -241,7 +334,8 @@ export default function ActivityPage() {
   const actions = Array.from(new Set(events.map((event) => event.action))).sort()
   const entityTypes = Array.from(new Set(events.map((event) => event.entityType))).sort()
   const currentPage = cursorStack.length + 1
-  const totalKnownPages = currentPage + (data?.nextCursor ? 1 : 0)
+  const totalPages = Math.max(1, data?.totalPages ?? 1)
+  const totalCount = Math.max(0, data?.totalCount ?? 0)
   const activeFilterCount = [
     filters.q.trim(),
     filters.action !== ALL,
@@ -269,13 +363,13 @@ export default function ActivityPage() {
   }
 
   const getVisiblePages = (maxButtons: number) => {
-    if (totalKnownPages <= maxButtons) {
-      return Array.from({ length: totalKnownPages }, (_, index) => index + 1)
+    if (totalPages <= maxButtons) {
+      return Array.from({ length: totalPages }, (_, index) => index + 1)
     }
     let start = Math.max(1, currentPage - Math.floor((maxButtons - 1) / 2))
     let end = start + maxButtons - 1
-    if (end > totalKnownPages) {
-      end = totalKnownPages
+    if (end > totalPages) {
+      end = totalPages
       start = Math.max(1, end - maxButtons + 1)
     }
     return Array.from({ length: end - start + 1 }, (_, index) => start + index)
@@ -283,6 +377,7 @@ export default function ActivityPage() {
 
   const mobilePages = getVisiblePages(3)
   const desktopPages = getVisiblePages(5)
+  const recordsLabel = `${totalCount} Record${totalCount === 1 ? "" : "s"}`
 
   const goToNextPage = () => {
     if (!data?.nextCursor) return
@@ -345,7 +440,7 @@ export default function ActivityPage() {
 
       <div className="dashboard-motion-item dashboard-motion-delay-1 flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <Badge variant={activeFilterCount ? "secondary" : "outline"}>{activeFilterCount} active</Badge>
+          <div className="text-sm font-medium text-muted-foreground">{recordsLabel}</div>
           {activeFilterCount > 0 ? (
             <Button variant="outline" size="sm" onClick={resetFilters}>
               <X className="h-4 w-4" />
@@ -353,7 +448,7 @@ export default function ActivityPage() {
             </Button>
           ) : null}
         </div>
-        <div className="shrink-0 text-sm text-muted-foreground">Page {cursorStack.length + 1} / {events.length} shown</div>
+        <div className="shrink-0 text-sm text-muted-foreground">Page {currentPage} of {totalPages}</div>
       </div>
 
       <Card className="dashboard-motion-item dashboard-motion-delay-2 py-0">
@@ -370,13 +465,28 @@ export default function ActivityPage() {
             </div>
           ) : (
             <ul className="divide-y">
-              {events.map((event) => (
+              {events.map((event, index) => (
                 <li key={event.id}>
                   <button
                     type="button"
-                    onClick={() => setSelected(event)}
-                    className={`group block w-full px-4 py-2.5 text-left transition-[background-color,border-color,box-shadow,transform] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-muted/35 focus-visible:bg-muted/35 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-inset md:px-0 md:py-3 ${
-                      selected?.id === event.id ? "bg-muted/45 shadow-[inset_0_0_0_1px_hsl(var(--border)/0.65)]" : ""
+                    onClick={() => {
+                      clearSelectedCleanup()
+                      clearOpenDetailTimeout()
+                      setActiveRowId(event.id)
+                      setSelected(event)
+                      setDetailOpening(true)
+                      openDetailTimeoutRef.current = window.setTimeout(() => {
+                        setDetailOpen(true)
+                        setDetailOpening(false)
+                        openDetailTimeoutRef.current = null
+                      }, 140)
+                    }}
+                    className={`group block w-full px-4 pt-2.5 pb-0 text-left transition-[background-color,border-color,box-shadow,transform] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-muted/35 focus-visible:bg-muted/35 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-inset md:px-0 md:pt-3 md:pb-3 ${
+                      index === events.length - 1 ? "-mb-4 md:mb-0" : ""
+                    } ${
+                      activeRowId === event.id
+                        ? "bg-primary/[0.085] shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.4),inset_3px_0_0_hsl(var(--primary)/0.9)]"
+                        : ""
                     }`}
                   >
                     <div className="grid gap-3 xl:grid-cols-[148px_minmax(0,1fr)_196px_auto] xl:items-start">
@@ -410,13 +520,13 @@ export default function ActivityPage() {
                             {event.detail}
                           </div>
                         ) : null}
-                        <div className="mt-1.5 flex items-center justify-between gap-2 xl:hidden">
-                          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+                        <div className="mt-0 flex items-center justify-between gap-1.5 xl:hidden">
+                          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] leading-4 text-muted-foreground">
                             <span>{formatAction(event.action)}</span>
                             <span>•</span>
                             <span className="truncate">{event.actorEmail ?? event.ipAddress ?? "Background process"}</span>
                           </div>
-                          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-transparent bg-transparent text-muted-foreground/80 transition-[transform,background-color,border-color,color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:border-border/55 group-hover:bg-muted/45 group-hover:text-foreground group-focus-visible:border-border/55 group-focus-visible:bg-muted/45 group-focus-visible:text-foreground group-hover:translate-x-0.5 group-focus-visible:translate-x-0.5">
+                          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-transparent bg-transparent text-muted-foreground/80 transition-[transform,background-color,border-color,color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:border-border/55 group-hover:bg-muted/45 group-hover:text-foreground group-focus-visible:border-border/55 group-focus-visible:bg-muted/45 group-focus-visible:text-foreground group-hover:translate-x-0.5 group-focus-visible:translate-x-0.5">
                             <ChevronRight className="h-3.5 w-3.5" />
                           </span>
                         </div>
@@ -453,19 +563,35 @@ export default function ActivityPage() {
           )}
         </CardContent>
 
-        <div className="border-t p-4">
+        <div className="border-t px-4 pb-4 pt-2.5 md:p-4">
           <div className="grid w-full grid-cols-[1fr_auto_1fr] items-center gap-2">
-            <Button
-              variant="outline"
-              disabled={currentPage === 1 || loading}
-              onClick={() => {
-                goToPage(currentPage - 1)
-              }}
-              className="justify-self-start border border-border/70 bg-background/85 shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
-            >
-              <ChevronLeft className="h-4 w-4" />
-              Previous
-            </Button>
+            <div className="justify-self-start">
+              <button
+                type="button"
+                disabled={currentPage === 1 || loading}
+                onClick={() => {
+                  goToPage(currentPage - 1)
+                }}
+                aria-label="Previous page"
+                className="flex h-8 w-8 min-h-8 min-w-8 items-center justify-center rounded-full border border-border/60 bg-background/80 p-0 text-muted-foreground shadow-sm backdrop-blur-sm transition-[border-color,background-color,color,box-shadow,opacity] hover:border-border hover:bg-muted/50 hover:text-foreground hover:shadow-md disabled:pointer-events-none disabled:opacity-50 md:hidden"
+              >
+                <span className="flex h-full w-full items-center justify-center">
+                  <ChevronLeft className="block h-[0.9rem] w-[0.9rem] shrink-0 stroke-[2.35]" />
+                </span>
+              </button>
+              <Button
+                variant="outline"
+                disabled={currentPage === 1 || loading}
+                onClick={() => {
+                  goToPage(currentPage - 1)
+                }}
+                className="hidden justify-self-start md:inline-flex md:h-9 md:min-w-0 md:rounded-full md:px-3 border border-border/70 bg-background/85 shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
+                aria-label="Previous page"
+              >
+                <ChevronLeft className="h-4 w-4" />
+                <span>Previous</span>
+              </Button>
+            </div>
             <div className="justify-self-center">
               <div className="flex items-center justify-center gap-1.5 md:hidden">
                 {mobilePages.map((page) => (
@@ -518,19 +644,37 @@ export default function ActivityPage() {
                 ))}
               </div>
             </div>
-            <Button
-              variant="outline"
-              disabled={!data?.nextCursor || loading}
-              onClick={() => {
-                if (!data?.nextCursor) return
-                setCursorStack((stack) => [...stack, data.nextCursor!])
-                setCursor(data.nextCursor)
-              }}
-              className="justify-self-end border border-border/70 bg-background/85 shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
-            >
-              Next
-              <ChevronRight className="h-4 w-4" />
-            </Button>
+            <div className="justify-self-end">
+              <button
+                type="button"
+                disabled={!data?.nextCursor || loading}
+                onClick={() => {
+                  if (!data?.nextCursor) return
+                  setCursorStack((stack) => [...stack, data.nextCursor!])
+                  setCursor(data.nextCursor)
+                }}
+                aria-label="Next page"
+                className="flex h-8 w-8 min-h-8 min-w-8 items-center justify-center rounded-full border border-border/60 bg-background/80 p-0 text-muted-foreground shadow-sm backdrop-blur-sm transition-[border-color,background-color,color,box-shadow,opacity] hover:border-border hover:bg-muted/50 hover:text-foreground hover:shadow-md disabled:pointer-events-none disabled:opacity-50 md:hidden"
+              >
+                <span className="flex h-full w-full items-center justify-center">
+                  <ChevronRight className="block h-[0.9rem] w-[0.9rem] shrink-0 stroke-[2.35]" />
+                </span>
+              </button>
+              <Button
+                variant="outline"
+                disabled={!data?.nextCursor || loading}
+                onClick={() => {
+                  if (!data?.nextCursor) return
+                  setCursorStack((stack) => [...stack, data.nextCursor!])
+                  setCursor(data.nextCursor)
+                }}
+                className="hidden justify-self-end md:inline-flex md:h-9 md:min-w-0 md:rounded-full md:px-3 border border-border/70 bg-background/85 shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
+                aria-label="Next page"
+              >
+                <span>Next</span>
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
         </div>
       </Card>
@@ -634,10 +778,56 @@ export default function ActivityPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(null)}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto duration-300 data-[state=closed]:slide-out-to-bottom-2 data-[state=closed]:zoom-out-[0.985] data-[state=open]:slide-in-from-bottom-3 data-[state=open]:zoom-in-[0.985] sm:max-w-3xl">
+      <Dialog
+        open={detailOpen}
+        onOpenChange={(open) => {
+          clearSelectedCleanup()
+          clearOpenDetailTimeout()
+          if (open) {
+            if (selected) setActiveRowId(selected.id)
+            setDetailOpen(true)
+            return
+          }
+          setDetailOpen(false)
+        }}
+      >
+        <AnimatePresence>
           {selected ? (
-            <>
+            <DialogPrimitive.Portal forceMount>
+              <DialogPrimitive.Overlay asChild>
+                <motion.div
+                  key="activity-overlay"
+                  initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                  animate={{ opacity: 1, backdropFilter: "blur(12px)" }}
+                  exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
+                  transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+                  className="fixed inset-0 z-50 bg-black/55"
+                />
+              </DialogPrimitive.Overlay>
+              <DialogPrimitive.Content
+                asChild
+                onCloseAutoFocus={(event) => event.preventDefault()}
+              >
+                <motion.div
+                  key={`activity-dialog-${selected.id}`}
+                  variants={popupContentVariants}
+                  initial="closed"
+                  animate="open"
+                  exit="closed"
+                  transition={{
+                    type: "spring",
+                    stiffness: 280,
+                    damping: 30,
+                    mass: 0.88,
+                  }}
+                  className="fixed top-[50%] left-[50%] z-50 grid max-h-[90vh] w-[calc(100vw-1rem)] max-w-3xl translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto overscroll-contain rounded-3xl border border-white/10 bg-background/70 p-4 shadow-[0_18px_48px_rgba(0,0,0,0.16)] backdrop-blur-[32px] sm:w-full sm:p-6 supports-[backdrop-filter]:bg-background/52"
+                >
+                  <DialogClose className="absolute top-3 right-3 inline-flex size-9 items-center justify-center rounded-full border border-border/65 bg-background/40 text-muted-foreground shadow-sm ring-1 ring-inset ring-white/10 backdrop-blur-sm transition-[border-color,background-color,box-shadow,color] hover:border-border hover:bg-muted/45 hover:text-foreground focus:outline-hidden disabled:pointer-events-none disabled:opacity-50 sm:top-4 sm:right-4">
+                    <X className="size-4" />
+                    <span className="sr-only">Close</span>
+                  </DialogClose>
+          {selected ? (
+            <motion.div variants={popupSectionVariants} className="contents">
               <DialogHeader>
                 <DialogTitle>{selected.summary}</DialogTitle>
                 <DialogDescription>
@@ -645,44 +835,61 @@ export default function ActivityPage() {
                 </DialogDescription>
               </DialogHeader>
 
-              <dl className="grid gap-3 sm:grid-cols-2">
+              <motion.dl variants={popupSectionVariants} className="grid gap-3 sm:grid-cols-2">
                 <DetailRow label="Actor" value={selected.actorName ?? "System"} />
                 <DetailRow label="Contact" value={selected.actorEmail ?? selected.ipAddress ?? "Background process"} />
                 <DetailRow label="Entity" value={selected.entityLabel ?? selected.entityType} />
                 <DetailRow label="Entity type" value={selected.entityType} />
                 <DetailRow label="Status" value={<Badge variant={outcomeVariant(selected.outcome)}>{selected.outcome}</Badge>} />
                 <DetailRow label="Undo" value={`${undoLabel(selected)}${selected.undoReason ? `: ${selected.undoReason}` : ""}`} />
-              </dl>
+              </motion.dl>
 
-              <div className="rounded-md border bg-muted/25 p-3 text-sm">
+              <motion.div variants={popupSectionVariants} className="rounded-md border bg-muted/25 p-3 text-sm">
                 {selected.detail ?? "No additional detail."}
-              </div>
+              </motion.div>
 
-              <div className="grid gap-3 md:grid-cols-2">
+              <motion.div variants={popupSectionVariants} className="grid gap-3 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label>Before</Label>
-                  <pre className="max-h-64 overflow-auto rounded-md border bg-background p-3 text-xs">{compactJson(selected.before)}</pre>
+                  <pre className="max-h-64 overflow-auto rounded-md border bg-muted/25 p-3 text-xs">
+                    {compactJson(selected.before)}
+                  </pre>
                 </div>
                 <div className="space-y-2">
                   <Label>After</Label>
-                  <pre className="max-h-64 overflow-auto rounded-md border bg-background p-3 text-xs">{compactJson(selected.after)}</pre>
+                  <pre className="max-h-64 overflow-auto rounded-md border bg-muted/25 p-3 text-xs">
+                    {compactJson(selected.after)}
+                  </pre>
                 </div>
-              </div>
+              </motion.div>
 
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setSelected(null)}>Close</Button>
+              <motion.div variants={popupSectionVariants}>
+                <DialogFooter>
+                <Button
+                  variant="outline"
+                  className="border border-border/70 bg-background/70 shadow-sm ring-1 ring-inset ring-white/10 backdrop-blur-sm hover:bg-muted/55"
+                  onClick={() => setDetailOpen(false)}
+                >
+                  Close
+                </Button>
                 <Button
                   loading={undoingId === selected.id}
                   disabled={selected.undoStatus !== "available"}
+                  className="border border-border/60 shadow-sm ring-1 ring-inset ring-white/10"
                   onClick={() => void undoActivity(selected)}
                 >
                   {undoingId !== selected.id ? <RotateCcw className="h-4 w-4" /> : null}
                   Undo
                 </Button>
-              </DialogFooter>
-            </>
+                </DialogFooter>
+              </motion.div>
+            </motion.div>
           ) : null}
-        </DialogContent>
+                </motion.div>
+              </DialogPrimitive.Content>
+            </DialogPrimitive.Portal>
+          ) : null}
+        </AnimatePresence>
       </Dialog>
     </DashboardPage>
   )

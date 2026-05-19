@@ -52,16 +52,120 @@ function MetricCardsSkeleton({ count = 4 }: { count?: number }) {
 
 function OverviewHeaderSkeleton() {
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-      <div className="min-w-0 mt-1 md:mt-0">
+    <div className="mb-[0.7rem] grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-0.5">
+      <div className="-mt-1 min-w-0">
         <Skeleton className="h-8 w-36" />
+        <div className="mt-px flex flex-wrap items-center gap-x-2 gap-y-1">
+          <Skeleton className="h-4 w-40" />
+          <Skeleton className="hidden h-4 w-2 md:block" />
+          <Skeleton className="h-4 w-28" />
+          <Skeleton className="h-3.5 w-3.5 rounded-full" />
+        </div>
       </div>
       <div className="flex justify-end gap-2 self-start">
-        <Skeleton className="h-9 w-24 rounded-full" />
-        <Skeleton className="h-9 w-24 rounded-full" />
+        <Skeleton className="h-9 w-9 rounded-full" />
+        <Skeleton className="h-9 w-28 rounded-full" />
       </div>
-      <Skeleton className="col-span-2 mt-2 h-4 w-[min(34rem,88vw)] md:col-span-1 md:mt-1" />
     </div>
+  )
+}
+
+function OverviewMetricCardsSkeleton() {
+  return (
+    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      {Array.from({ length: 4 }).map((_, index) => (
+        <Card key={index}>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <Skeleton className="h-4 w-24" />
+            <Skeleton className="h-4 w-4 rounded-md" />
+          </CardHeader>
+          <CardContent>
+            <Skeleton className="h-8 w-24" />
+            <Skeleton className="mt-1 h-3 w-32" />
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  )
+}
+
+function OverviewUsageChartSkeleton() {
+  return (
+    <Card className="@container/card pb-0 sm:pb-0.5">
+      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-0 md:gap-1">
+        <div className="space-y-2">
+          <Skeleton className="h-5 w-32" />
+          <Skeleton className="h-3.5 w-32 @[540px]/card:w-52 md:h-4" />
+        </div>
+        <div className="col-start-2 row-start-1 mt-0 justify-self-end self-start">
+          <Skeleton className="h-9 w-40 rounded-xl @[767px]/card:hidden" />
+          <Skeleton className="hidden h-8 w-[22rem] rounded-full @[767px]/card:block" />
+        </div>
+      </CardHeader>
+      <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
+        <div className="rounded-2xl border border-border/40 bg-muted/20 px-3 pt-3">
+          <div className="flex h-[250px] items-end gap-1.5 sm:gap-2">
+            {Array.from({ length: 12 }).map((_, index) => (
+              <Skeleton
+                key={index}
+                className="w-full rounded-full"
+                style={{ height: `${24 + ((index * 9) % 54)}%` }}
+              />
+            ))}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function OverviewRecentActivitySkeleton({ rows = 4 }: { rows?: number }) {
+  return (
+    <Card className="overflow-hidden gap-0 py-0">
+      <CardHeader className="border-b flex min-h-16 items-center px-4 py-2.5 pb-0 sm:min-h-0 sm:px-5 md:px-4 md:py-2">
+        <div className="flex w-full items-center justify-between gap-3 md:gap-2">
+          <div className="min-w-0 flex-1 flex-col justify-center gap-0.5 space-y-1">
+            <Skeleton className="h-5 w-28" />
+            <Skeleton className="h-4 w-36" />
+          </div>
+          <Skeleton className="h-8 w-24 rounded-full" />
+        </div>
+      </CardHeader>
+      <CardContent className="p-0">
+        <ul className="divide-y">
+          {Array.from({ length: rows }).map((_, index) => (
+            <li key={index} className="md:py-3 md:first:pt-0 md:last:pb-0">
+              <div className="px-4 py-2.5 md:px-4 md:py-0">
+                <div className="grid gap-2.5 md:grid-cols-[144px_minmax(0,1fr)_auto] md:items-center md:gap-4">
+                  <div className="flex items-center justify-between gap-3 md:block md:self-stretch md:border-r md:border-border/60 md:pr-4">
+                    <div className="flex items-center gap-2 md:mb-2">
+                      <Skeleton className="h-2 w-2 rounded-full" />
+                      <Skeleton className="h-3 w-20" />
+                    </div>
+                    <div className="hidden space-y-1 md:block">
+                      <Skeleton className="h-4 w-20" />
+                      <Skeleton className="h-3 w-24" />
+                    </div>
+                  </div>
+                  <div className="min-w-0 pr-6 md:pr-0 space-y-2">
+                    <Skeleton className="h-4 w-[85%]" />
+                    <Skeleton className="h-3 w-[52%]" />
+                  </div>
+                  <div className="flex items-center justify-between gap-3 md:self-stretch md:flex-col md:items-end md:justify-between md:gap-1">
+                    <div className="space-y-1 md:hidden">
+                      <Skeleton className="h-4 w-16" />
+                      <Skeleton className="h-3 w-24" />
+                    </div>
+                    <Skeleton className="hidden h-4 w-4 rounded-full md:block" />
+                    <Skeleton className="h-6 w-20 rounded-full" />
+                  </div>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -70,13 +174,33 @@ function AnalyticsHeaderSkeleton() {
     <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
       <div className="min-w-0">
         <Skeleton className="h-8 w-40" />
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <Skeleton className="h-4 w-40" />
-          <Skeleton className="hidden h-4 w-3 md:block" />
-          <Skeleton className="h-4 w-28" />
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <Skeleton className="h-4 w-36" />
+          <Skeleton className="hidden h-4 w-2 md:block" />
+          <Skeleton className="h-4 w-32" />
+          <Skeleton className="h-3.5 w-3.5 rounded-full" />
         </div>
       </div>
       <Skeleton className="h-8 w-8 rounded-full" />
+    </div>
+  )
+}
+
+function AnalyticsMetricCardsSkeleton() {
+  return (
+    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      {Array.from({ length: 8 }).map((_, index) => (
+        <Card key={index} className="gap-0 py-0">
+          <CardHeader className="flex flex-row items-start justify-between gap-3 px-4 py-3 pb-1.5 lg:px-3 lg:py-1 lg:pb-0">
+            <Skeleton className="h-4 w-24" />
+            <Skeleton className="h-4 w-4 rounded-md" />
+          </CardHeader>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-3 lg:pb-1">
+            <Skeleton className="h-7 w-24 sm:h-8" />
+            <Skeleton className="mt-1 h-3 w-32" />
+          </CardContent>
+        </Card>
+      ))}
     </div>
   )
 }
@@ -109,18 +233,21 @@ function ChartCardSkeleton({
       <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-1 px-4 pt-4.5 pb-2 sm:px-6 md:gap-1.5 md:px-4 md:pt-2.5 md:pb-2">
         <div className="space-y-2">
           <Skeleton className="h-5 w-36" />
-          <Skeleton className="h-4 w-56" />
+          <Skeleton className="h-3.5 w-48 md:h-4 md:w-56" />
         </div>
-        <Skeleton className={`h-8 ${rangeWidth} rounded-full`} />
+        <div className="justify-self-end">
+          <Skeleton className="h-8 w-32 rounded-full @[767px]/card:hidden" />
+          <Skeleton className={`hidden h-8 ${rangeWidth} rounded-full @[767px]/card:block`} />
+        </div>
       </CardHeader>
-      <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
-        <div className={`rounded-2xl border border-border/50 bg-muted/20 p-4 ${chartHeight}`}>
-          <div className="flex h-full items-end gap-2">
-            {Array.from({ length: 10 }).map((_, index) => (
+      <CardContent className="px-1.5 pt-3 pb-0 sm:px-4 sm:pt-3 sm:pb-1 md:px-3">
+        <div className={`rounded-2xl border border-border/40 bg-muted/20 px-3 pt-3 ${chartHeight}`}>
+          <div className="flex h-full items-end gap-1.5 sm:gap-2">
+            {Array.from({ length: 12 }).map((_, index) => (
               <Skeleton
                 key={index}
                 className="w-full rounded-full"
-                style={{ height: `${42 + ((index * 13) % 48)}%` }}
+                style={{ height: `${28 + ((index * 11) % 50)}%` }}
               />
             ))}
           </div>
@@ -185,21 +312,41 @@ function BucketsListSkeleton({ rows = 7 }: { rows?: number }) {
             key={index}
             className="rounded-xl border px-3 py-2 md:grid md:grid-cols-[minmax(0,1fr)_auto_auto_auto] md:items-center md:gap-2"
           >
-            <div className="space-y-2">
+            <div className="grid gap-1.5 md:hidden">
+              <div className="min-w-0 space-y-1.5 pr-6">
+                <Skeleton className="h-4 w-32" />
+                <Skeleton className="h-3 w-24" />
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <div className="space-y-1.5">
+                  <Skeleton className="h-4 w-16" />
+                  <Skeleton className="h-3 w-10" />
+                </div>
+                <div className="space-y-1.5">
+                  <Skeleton className="h-4 w-16" />
+                  <Skeleton className="h-3 w-10" />
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-1.5">
+                <Skeleton className="h-3 w-16" />
+                <Skeleton className="h-6 w-20 rounded-full" />
+              </div>
+            </div>
+            <div className="hidden min-w-0 space-y-2 md:block">
               <Skeleton className="h-4 w-32" />
               <Skeleton className="h-3 w-24" />
             </div>
-            <div className="mt-3 space-y-2 md:mt-0 md:text-right">
+            <div className="hidden space-y-2 md:block md:text-right">
               <Skeleton className="h-4 w-20 md:ml-auto" />
               <Skeleton className="h-3 w-12 md:ml-auto" />
             </div>
-            <div className="mt-3 space-y-2 md:mt-0 md:text-right">
+            <div className="hidden space-y-2 md:block md:text-right">
               <Skeleton className="h-4 w-16 md:ml-auto" />
               <Skeleton className="h-3 w-12 md:ml-auto" />
             </div>
-            <div className="mt-3 flex items-center justify-between gap-2 md:mt-0 md:justify-end">
+            <div className="hidden items-center justify-end gap-2 md:flex">
               <Skeleton className="h-6 w-20 rounded-full" />
-              <Skeleton className="hidden h-4 w-4 rounded-full md:block" />
+              <Skeleton className="h-4 w-4 rounded-full" />
             </div>
           </div>
         ))}
@@ -249,7 +396,10 @@ function AttentionPanelSkeleton() {
           <div key={index} className="rounded-xl border p-3 space-y-2">
             <Skeleton className="h-4 w-36" />
             <Skeleton className="h-3 w-[92%]" />
-            <Skeleton className="h-3 w-20" />
+            <div className="flex items-center justify-between gap-2">
+              <Skeleton className="h-3 w-16" />
+              <Skeleton className="h-6 w-20 rounded-full" />
+            </div>
           </div>
         ))}
       </CardContent>
@@ -293,9 +443,9 @@ function DashboardOverviewSkeleton() {
   return (
     <DashboardPage>
       <OverviewHeaderSkeleton />
-      <MetricCardsSkeleton count={4} />
-      <ChartCardSkeleton chartHeight="h-[250px]" rangeWidth="w-40" />
-      <RecentActivitySkeleton rows={4} />
+      <OverviewMetricCardsSkeleton />
+      <OverviewUsageChartSkeleton />
+      <OverviewRecentActivitySkeleton rows={4} />
     </DashboardPage>
   )
 }
@@ -304,12 +454,12 @@ function DashboardAnalyticsSkeleton() {
   return (
     <DashboardPage>
       <AnalyticsHeaderSkeleton />
-      <MetricCardsSkeleton count={8} />
+      <AnalyticsMetricCardsSkeleton />
       <div className="grid gap-3 xl:grid-cols-2">
-        <ChartCardSkeleton chartHeight="h-[252px]" />
-        <ChartCardSkeleton chartHeight="h-[240px]" />
+        <ChartCardSkeleton chartHeight="h-[252px] sm:h-[272px]" />
+        <ChartCardSkeleton chartHeight="h-[240px] sm:h-[260px]" />
       </div>
-      <ChartCardSkeleton chartHeight="h-[240px]" rangeWidth="w-32" />
+      <ChartCardSkeleton chartHeight="h-[240px] sm:h-[260px]" rangeWidth="w-32" />
       <div className="grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)] xl:items-start">
         <BucketsListSkeleton rows={7} />
         <div className="space-y-3 xl:sticky xl:top-4 xl:self-start">
@@ -323,54 +473,92 @@ function DashboardAnalyticsSkeleton() {
 
 function DashboardActivitySkeleton() {
   return (
-    <DashboardPage>
-      <ActivityHeaderSkeleton />
-      <div className="flex items-center justify-between gap-3">
+    <DashboardPage className="dashboard-motion-stage">
+      <div className="dashboard-motion-item">
+        <ActivityHeaderSkeleton />
+      </div>
+      <div className="dashboard-motion-item dashboard-motion-delay-1 flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <Skeleton className="h-6 w-20 rounded-full" />
+          <Skeleton className="h-4 w-20" />
           <Skeleton className="h-8 w-[4.5rem] rounded-full" />
         </div>
-        <Skeleton className="h-4 w-28" />
+        <Skeleton className="h-4 w-24" />
       </div>
-      <Card className="py-0">
+      <Card className="dashboard-motion-item dashboard-motion-delay-2 py-0">
         <CardContent className="p-0">
           <ul className="divide-y">
             {Array.from({ length: 8 }).map((_, index) => (
-              <li key={index} className="px-4 py-3">
+              <li
+                key={index}
+                className="dashboard-motion-item px-4 pt-2.5 pb-0 md:px-0 md:pt-3 md:pb-3"
+                style={{ ["--dashboard-motion-delay" as string]: `${260 + index * 55}ms` }}
+              >
                 <div className="grid gap-3 xl:grid-cols-[148px_minmax(0,1fr)_196px_auto] xl:items-start">
                   <div className="space-y-2">
-                    <Skeleton className="h-4 w-20" />
-                    <Skeleton className="h-3 w-28" />
+                    <div className="flex items-center justify-between gap-3 xl:block">
+                      <div className="space-y-2">
+                        <Skeleton className="h-4 w-20" />
+                        <Skeleton className="h-3 w-28" />
+                      </div>
+                      <div className="flex flex-wrap gap-2 xl:hidden">
+                        <Skeleton className="h-6 w-20 rounded-full" />
+                        <Skeleton className="h-6 w-24 rounded-full" />
+                      </div>
+                    </div>
                     <Skeleton className="hidden h-3 w-24 xl:block" />
                   </div>
                   <div className="space-y-2">
                     <Skeleton className="h-4 w-[82%]" />
-                    <Skeleton className="h-3 w-[46%]" />
+                    <Skeleton className="h-3 w-[58%]" />
                     <Skeleton className="h-3 w-[70%]" />
+                    <div className="flex items-center justify-between gap-2 xl:hidden">
+                      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+                        <Skeleton className="h-3 w-16" />
+                        <Skeleton className="h-2 w-2 rounded-full" />
+                        <Skeleton className="h-3 w-28" />
+                      </div>
+                      <Skeleton className="h-6 w-6 rounded-full" />
+                    </div>
                   </div>
-                  <div className="space-y-2">
+                  <div className="hidden space-y-2 xl:block">
                     <Skeleton className="h-4 w-28" />
                     <Skeleton className="h-3 w-36" />
                     <Skeleton className="h-3 w-24" />
                   </div>
                   <div className="flex items-center justify-between gap-3 xl:flex-col xl:items-end xl:justify-start">
-                    <Skeleton className="h-6 w-[4.5rem] rounded-full" />
-                    <Skeleton className="h-8 w-16 rounded-full" />
+                    <div className="hidden flex-wrap justify-end gap-2 xl:flex">
+                      <Skeleton className="h-6 w-[4.5rem] rounded-full" />
+                      <Skeleton className="h-6 w-24 rounded-full" />
+                    </div>
+                    <Skeleton className="hidden h-8 w-8 rounded-full xl:block" />
                   </div>
                 </div>
               </li>
             ))}
           </ul>
         </CardContent>
-        <div className="border-t p-4">
+        <div className="border-t px-4 pb-4 pt-2.5 md:p-4">
           <div className="grid w-full grid-cols-[1fr_auto_1fr] items-center gap-2">
-            <Skeleton className="h-9 w-24 rounded-full justify-self-start" />
-            <div className="flex justify-center gap-1.5">
-              {Array.from({ length: 3 }).map((_, index) => (
-                <Skeleton key={index} className="h-8 w-8 rounded-full" />
-              ))}
+            <div className="justify-self-start">
+              <Skeleton className="h-8 w-8 rounded-full md:hidden" />
+              <Skeleton className="hidden h-9 w-24 rounded-full md:block" />
             </div>
-            <Skeleton className="h-9 w-20 rounded-full justify-self-end" />
+            <div className="justify-self-center">
+              <div className="flex justify-center gap-1.5 md:hidden">
+                {Array.from({ length: 3 }).map((_, index) => (
+                  <Skeleton key={index} className="h-8 w-8 rounded-full" />
+                ))}
+              </div>
+              <div className="hidden justify-center gap-1.5 md:flex">
+                {Array.from({ length: 5 }).map((_, index) => (
+                  <Skeleton key={index} className="h-8 w-8 rounded-full" />
+                ))}
+              </div>
+            </div>
+            <div className="justify-self-end">
+              <Skeleton className="h-8 w-8 rounded-full md:hidden" />
+              <Skeleton className="hidden h-9 w-20 rounded-full md:block" />
+            </div>
           </div>
         </div>
       </Card>

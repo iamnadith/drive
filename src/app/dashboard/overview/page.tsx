@@ -114,6 +114,8 @@ const platformUsageChartConfig = {
   },
 } satisfies ChartConfig
 
+const DASHBOARD_ANALYTICS_CACHE_KEY = "dashboard-analytics:range=all"
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
@@ -370,8 +372,9 @@ export default function OverviewPage() {
     refreshing,
     refresh: refreshOverview,
   } = useDashboardResource<OverviewResponse>({
-    key: "dashboard-overview-analytics",
+    key: DASHBOARD_ANALYTICS_CACHE_KEY,
     refreshIntervalMs: 20_000,
+    staleTimeMs: 10_000,
     fetcher: async ({ signal, force }) => {
       const res = await fetch(`/api/dashboard/analytics?range=all${force ? "&refresh=1" : ""}`, {
         cache: "no-store",
@@ -395,6 +398,7 @@ export default function OverviewPage() {
   } = useDashboardResource<RecentActivityItem[]>({
     key: "dashboard-overview-activity",
     refreshIntervalMs: 15_000,
+    staleTimeMs: 8_000,
     fetcher: async ({ signal }) => {
       const res = await fetch("/api/activity?limit=4", {
         cache: "no-store",

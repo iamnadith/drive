@@ -73,6 +73,10 @@ export type ListActivityInput = {
   limit?: number
 }
 
+type CountRow = {
+  total: string | number
+}
+
 export type RecordActivityInput = {
   actorUserId?: string | null
   action: string
@@ -274,33 +278,43 @@ export async function listActivity(input: ListActivityInput) {
   await ensureActivitySchema()
   const limit = Math.max(1, Math.min(100, Math.floor(input.limit ?? 25)))
   const cursor = decodeCursor(input.cursor)
-  const clauses: string[] = []
+  const baseClauses: string[] = []
   const params: unknown[] = []
   const add = (value: unknown) => {
     params.push(value)
     return `$${params.length}`
   }
 
-  if (input.q?.trim()) clauses.push(`search_text ilike ${add(`%${input.q.trim()}%`)}`)
-  if (input.actorUserId) clauses.push(`actor_user_id = ${add(input.actorUserId)}`)
-  if (input.action) clauses.push(`action = ${add(input.action)}`)
-  if (input.entityType) clauses.push(`entity_type = ${add(input.entityType)}`)
-  if (input.outcome) clauses.push(`outcome = ${add(input.outcome)}`)
-  if (input.undoable !== undefined) clauses.push(`undoable = ${add(input.undoable)}`)
-  if (input.from) clauses.push(`occurred_at >= ${add(input.from)}`)
-  if (input.to) clauses.push(`occurred_at <= ${add(input.to)}`)
-  if (cursor) clauses.push(`(occurred_at, id) < (${add(cursor.at)}::timestamptz, ${add(cursor.id)}::uuid)`)
+  if (input.q?.trim()) baseClauses.push(`search_text ilike ${add(`%${input.q.trim()}%`)}`)
+  if (input.actorUserId) baseClauses.push(`actor_user_id = ${add(input.actorUserId)}`)
+  if (input.action) baseClauses.push(`action = ${add(input.action)}`)
+  if (input.entityType) baseClauses.push(`entity_type = ${add(input.entityType)}`)
+  if (input.outcome) baseClauses.push(`outcome = ${add(input.outcome)}`)
+  if (input.undoable !== undefined) baseClauses.push(`undoable = ${add(input.undoable)}`)
+  if (input.from) baseClauses.push(`occurred_at >= ${add(input.from)}`)
+  if (input.to) baseClauses.push(`occurred_at <= ${add(input.to)}`)
 
-  const where = clauses.length ? `where ${clauses.join(" and ")}` : ""
-  const { rows } = await queryDb<ActivityRow>(
-    `select * from ${TABLE} ${where} order by occurred_at desc, id desc limit ${add(limit + 1)}`,
-    params
-  )
+  const countParams = [...params]
+  const pageClauses = [...baseClauses]
+  if (cursor) pageClauses.push(`(occurred_at, id) < (${add(cursor.at)}::timestamptz, ${add(cursor.id)}::uuid)`)
+
+  const baseWhere = baseClauses.length ? `where ${baseClauses.join(" and ")}` : ""
+  const where = pageClauses.length ? `where ${pageClauses.join(" and ")}` : ""
+  const [{ rows: countRows }, { rows }] = await Promise.all([
+    queryDb<CountRow>(`select count(*)::bigint as total from ${TABLE} ${baseWhere}`, countParams),
+    queryDb<ActivityRow>(
+      `select * from ${TABLE} ${where} order by occurred_at desc, id desc limit ${add(limit + 1)}`,
+      params
+    ),
+  ])
   const pageRows = rows.slice(0, limit)
+  const totalCount = Number(countRows[0]?.total ?? 0)
   return {
     events: pageRows.map(mapRow),
     nextCursor: rows.length > limit && pageRows.length > 0 ? encodeCursor(pageRows[pageRows.length - 1]) : null,
     hasMore: rows.length > limit,
+    totalCount,
+    totalPages: Math.max(1, Math.ceil(totalCount / limit)),
     generatedAt: new Date().toISOString(),
   }
 }
