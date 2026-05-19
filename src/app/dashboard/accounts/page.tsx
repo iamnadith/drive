@@ -947,13 +947,19 @@ export default function AccountsPage() {
       accessorKey: "name",
       header: () => <div className="text-center">Account</div>,
       cell: ({ row }) => (
-        <div>
-          <div className="font-medium flex items-center gap-2">
-            <Globe className="h-3 w-3 text-muted-foreground" />
-            <span>{row.getValue("name")}</span>
-          </div>
-          <div className="text-xs text-muted-foreground break-all">
-            {row.original.accountId}
+        <div className="flex min-h-[40px] items-center">
+          <div className="flex items-center gap-1.5">
+            <span className="flex h-7 w-7 shrink-0 self-center items-center justify-center rounded-lg border bg-background">
+              <Globe className="h-3 w-3 text-muted-foreground" />
+            </span>
+            <div className="min-w-0">
+              <div className="truncate text-[13px] font-medium leading-4">
+                {row.getValue("name")}
+              </div>
+              <div className="text-[10px] font-mono leading-3.5 text-muted-foreground break-all">
+                {row.original.accountId}
+              </div>
+            </div>
           </div>
         </div>
       ),
@@ -962,7 +968,7 @@ export default function AccountsPage() {
       accessorKey: "email",
       header: () => <div className="text-center">Email</div>,
       cell: ({ row }) => (
-        <span className="block text-xs text-center text-muted-foreground break-all">
+        <span className="flex min-h-[40px] w-full items-center justify-center text-center text-[11px] leading-4 text-muted-foreground break-all">
           {row.original.email}
         </span>
       ),
@@ -973,33 +979,26 @@ export default function AccountsPage() {
       cell: ({ row }) => {
         const status = row.getValue("status") as string;
         const syncStatus = row.original.syncStatus;
-
-        if (syncStatus === "error") {
-          return (
-            <div className="flex justify-center">
-              <Badge className="bg-red-600 text-white hover:bg-red-700">
-                Error
-              </Badge>
-            </div>
-          );
-        }
-
         return (
-          <div className="flex justify-center">
+          <div className="flex min-h-[40px] w-full items-center justify-center text-center">
             <Badge
               variant={
-                status === "active"
-                  ? "default"
-                  : status === "available"
-                    ? "outline"
-                    : "secondary"
+                syncStatus === "error"
+                  ? "destructive"
+                  : status === "active"
+                    ? "default"
+                    : status === "available"
+                      ? "outline"
+                      : "secondary"
               }
               className={
-                status === "active"
-                  ? "bg-green-500 hover:bg-green-600"
-                  : status === "available"
-                    ? "border-primary/25 bg-primary/10 text-primary hover:bg-primary/15"
-                    : ""
+                syncStatus === "error"
+                  ? "bg-red-600 text-white hover:bg-red-700"
+                  : status === "active"
+                    ? "bg-green-500 hover:bg-green-600"
+                    : status === "available"
+                      ? "border-primary/25 bg-primary/10 text-primary hover:bg-primary/15"
+                      : ""
               }
             >
               {status.charAt(0).toUpperCase() + status.slice(1)}
@@ -1010,31 +1009,38 @@ export default function AccountsPage() {
     },
     {
       accessorKey: "createdAt",
-      header: () => <div className="text-center">Added date</div>,
+      header: () => <div className="text-center">Added</div>,
       cell: ({ row }) => (
-        <span className="block text-xs text-center text-muted-foreground">
-          {row.original.createdAt
-            ? new Date(row.original.createdAt).toLocaleString()
-            : "-"}
-        </span>
-      ),
-    },
-    {
-      accessorKey: "totalBuckets",
-      header: () => <div className="text-center">Total buckets</div>,
-      cell: ({ row }) => (
-        <div className="flex w-full justify-center">
-          <span className="text-sm text-center">
-            {row.original.totalBuckets}
-          </span>
+        <div className="flex min-h-[40px] w-full flex-col items-center justify-center space-y-0.5 text-center text-[11px] text-muted-foreground">
+          <div>
+            {row.original.createdAt
+              ? new Date(row.original.createdAt).toLocaleDateString()
+              : "-"}
+          </div>
+          <div>
+            {row.original.createdAt
+              ? new Date(row.original.createdAt).toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })
+              : ""}
+          </div>
         </div>
       ),
     },
     {
-      id: "spacer",
-      enableHiding: false,
-      header: () => <div className="text-center" />,
-      cell: () => <span />,
+      accessorKey: "totalBuckets",
+      header: () => <div className="text-center">Usage</div>,
+      cell: ({ row }) => (
+        <div className="flex min-h-[40px] w-full flex-col items-center justify-center space-y-0.5 text-center">
+          <div className="text-[13px] font-medium leading-4">
+            {row.original.totalBuckets} buckets
+          </div>
+          <div className="text-[10px] leading-4 text-muted-foreground">
+            {formatBytes(row.original.totalBytes)}
+          </div>
+        </div>
+      ),
     },
     {
       id: "actions",
@@ -1043,54 +1049,56 @@ export default function AccountsPage() {
       cell: ({ row }) => {
         const account = row.original;
         return (
-          <div className="flex w-full items-center justify-center gap-1">
+          <div className="flex min-h-[40px] w-full items-center justify-center gap-1.5 text-center">
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8"
+              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !p-0 bg-transparent shadow-none"
               onClick={() => setViewAccount(account)}
               aria-label="View account details"
             >
-              <Eye className="h-4 w-4" />
+              <Eye className="h-3.5 w-3.5" />
             </Button>
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8"
+              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !p-0 bg-transparent shadow-none"
               onClick={() => handleSync(account.id)}
               disabled={syncingId === account.id}
               aria-label="Sync account"
             >
-              <RefreshCw className="h-4 w-4" />
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${syncingId === account.id ? "animate-spin" : ""}`}
+              />
             </Button>
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8"
+              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !p-0 bg-transparent shadow-none"
               onClick={() => setSettingsAccount(account)}
               aria-label="Account settings"
             >
-              <Settings className="h-4 w-4" />
+              <Settings className="h-3.5 w-3.5" />
             </Button>
             {account.status === "available" && (
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-8 w-8 text-destructive"
+                className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !p-0 bg-transparent shadow-none text-destructive"
                 onClick={() => setConfirmAction({ type: "disable", account })}
                 aria-label="Disable account"
               >
-                <Ban className="h-4 w-4" />
+                <Ban className="h-3.5 w-3.5" />
               </Button>
             )}
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 text-destructive"
+              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !p-0 bg-transparent shadow-none text-destructive"
               onClick={() => setConfirmAction({ type: "delete", account })}
               aria-label="Remove account"
             >
-              <Trash2 className="h-4 w-4" />
+              <Trash2 className="h-3.5 w-3.5" />
             </Button>
           </div>
         );
@@ -1145,7 +1153,7 @@ export default function AccountsPage() {
             <Button
               variant="outline"
               size="icon"
-              className="shrink-0"
+              className="shrink-0 rounded-full border-border/70 bg-background/80 shadow-sm ring-1 ring-inset ring-white/10 backdrop-blur-sm hover:bg-muted/60"
               onClick={handleSyncAll}
               loading={syncingAll}
               disabled={accounts.length === 0}
@@ -1155,7 +1163,7 @@ export default function AccountsPage() {
             </Button>
             <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
               <DialogTrigger asChild>
-                <Button className="shrink-0 sm:w-auto">
+                <Button className="shrink-0 rounded-full border border-border/70 bg-background/80 shadow-sm ring-1 ring-inset ring-white/10 backdrop-blur-sm hover:bg-muted/60 sm:w-auto">
                   <Plus className="h-4 w-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">Add Account</span>
                 </Button>
@@ -1693,7 +1701,9 @@ export default function AccountsPage() {
           </CardHeader>
           <CardContent className="px-4 pb-3 pt-0 lg:px-3 lg:pb-1">
             <p className="text-[11px] leading-4 text-muted-foreground">
-              {activeAccount ? activeAccount.name : "No active account selected"}
+              {activeAccount
+                ? activeAccount.name
+                : "No active account selected"}
             </p>
           </CardContent>
         </Card>
@@ -3012,83 +3022,88 @@ export default function AccountsPage() {
           </DialogContent>
         </Dialog>
       )}
-      <div className="overflow-x-auto rounded-lg border bg-muted/40 px-2 py-1 sm:px-3 sm:py-2">
-        <div className="min-w-[860px]">
-          <Table className="table-fixed w-full">
+      <div className="overflow-hidden rounded-xl border bg-card shadow-sm">
+        <div className="overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:thin]">
+          <Table className="min-w-[900px] w-full">
             <TableHeader>
               {table.getHeaderGroups().map((headerGroup) => (
-                <TableRow key={headerGroup.id} className="h-9">
-                  {headerGroup.headers.map((header) => {
-                    const columnId = header.column.id;
-                    const colWidth =
-                      columnId === "name"
-                        ? "w-[20%]"
-                        : columnId === "email"
-                          ? "w-[18%]"
-                          : columnId === "status"
-                            ? "w-[10%]"
-                            : columnId === "createdAt"
-                              ? "w-[16%]"
-                              : columnId === "totalBuckets"
-                                ? "w-[10%]"
-                                : columnId === "spacer"
-                                  ? "w-[4%]"
+                  <TableRow key={headerGroup.id} className="h-9 border-b">
+                    {headerGroup.headers.map((header) => {
+                      const columnId = header.column.id;
+                      const colWidth =
+                        columnId === "name"
+                          ? "min-w-[240px]"
+                          : columnId === "email"
+                            ? "min-w-[220px]"
+                            : columnId === "status"
+                              ? "min-w-[120px]"
+                              : columnId === "createdAt"
+                                ? "min-w-[140px]"
+                                : columnId === "totalBuckets"
+                                  ? "min-w-[130px]"
                                   : columnId === "actions"
-                                    ? "w-[20%]"
-                                    : "";
+                                      ? "min-w-[170px]"
+                                      : "";
 
-                    return (
-                      <TableHead key={header.id} className={colWidth}>
-                        {header.isPlaceholder
-                          ? null
-                          : flexRender(
-                              header.column.columnDef.header,
-                              header.getContext(),
-                            )}
-                      </TableHead>
-                    );
-                  })}
-                </TableRow>
-              ))}
-            </TableHeader>
-            <TableBody>
-              {paginatedRows.length ? (
-                paginatedRows.map((row) => (
-                  <TableRow
-                    key={row.id}
-                    data-state={row.getIsSelected() && "selected"}
-                    className="h-10"
-                  >
-                    {row.getVisibleCells().map((cell) => (
-                      <TableCell key={cell.id} className="align-middle">
-                        {flexRender(
-                          cell.column.columnDef.cell,
-                          cell.getContext(),
-                        )}
-                      </TableCell>
-                    ))}
+                      return (
+                        <TableHead
+                          key={header.id}
+                          className={`${colWidth} relative px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground`}
+                        >
+                          {header.isPlaceholder
+                            ? null
+                            : flexRender(
+                                header.column.columnDef.header,
+                                header.getContext(),
+                              )}
+                          {header.column.id !== "actions" ? (
+                            <span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" />
+                          ) : null}
+                        </TableHead>
+                      );
+                    })}
                   </TableRow>
-                ))
-              ) : (
-                <TableRow>
-                  <TableCell
-                    colSpan={columns.length}
-                    className="h-24 text-center"
-                  >
-                    No results.
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
+                ))}
+              </TableHeader>
+              <TableBody>
+                {paginatedRows.length ? (
+                  paginatedRows.map((row) => (
+                    <TableRow
+                      key={row.id}
+                      data-state={row.getIsSelected() && "selected"}
+                      className="h-[64px] border-b last:border-b-0 hover:bg-muted/30"
+                    >
+                      {row.getVisibleCells().map((cell) => (
+                        <TableCell
+                          key={cell.id}
+                          className="relative px-2.5 py-2 align-middle"
+                        >
+                          {flexRender(
+                            cell.column.columnDef.cell,
+                            cell.getContext(),
+                          )}
+                          {cell.column.id !== "actions" ? (
+                            <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
+                          ) : null}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))
+                ) : (
+                  <TableRow>
+                    <TableCell
+                      colSpan={columns.length}
+                      className="h-24 text-center"
+                    >
+                      No results.
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+             </Table>
         </div>
       </div>
       <div className="flex flex-col gap-3 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-        <span>
-          Showing {totalRows === 0 ? 0 : currentPageIndex * pageSize + 1} -{" "}
-          {Math.min((currentPageIndex + 1) * pageSize, totalRows)} of{" "}
-          {totalRows} accounts
-        </span>
         <div className="flex items-center justify-between gap-3 sm:justify-end">
           <span>
             Page {totalRows ? currentPageIndex + 1 : 0} of{" "}
