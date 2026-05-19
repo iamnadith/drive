@@ -59,13 +59,14 @@ import {
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
 import { Switch } from "@/components/ui/switch";
-import { DashboardTableSkeleton } from "@/components/dashboard/loading-skeletons";
+import { AccountsPageSkeleton } from "@/components/dashboard/loading-skeletons";
 import {
   DashboardPage,
   DashboardPageHeader,
 } from "@/components/dashboard/page-shell";
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+const ACCOUNTS_CACHE_KEY = "dashboard:accounts:v1";
 
 function base32ToBytes(secret: string): Uint8Array {
   const cleaned = secret.replace(/[^A-Z2-7]/gi, "").toUpperCase();
@@ -167,9 +168,82 @@ type AccountMigrationRecord = {
   createdAt: string;
 };
 
+type AccountApiRecord = {
+  id: string;
+  label?: string;
+  email?: string;
+  password?: string;
+  twoFactorSecret?: string;
+  apiToken?: string;
+  r2AccessKeyId?: string;
+  r2SecretAccessKey?: string;
+  cloudflareAccountId?: string;
+  status?: Account["status"];
+  createdAt?: string;
+  totalBuckets?: number;
+  totalObjects?: number;
+  totalBytes?: number;
+  syncStatus?: Account["syncStatus"];
+  syncMessage?: string;
+  lastSyncedAt?: string;
+};
+
+function mapAccount(acc: AccountApiRecord): Account {
+  return {
+    id: acc.id,
+    name: acc.label ?? "",
+    email: acc.email ?? "",
+    password: acc.password ?? "",
+    twoFactorSecret: acc.twoFactorSecret ?? "",
+    apiToken: acc.apiToken ?? "",
+    r2AccessKeyId: acc.r2AccessKeyId ?? "",
+    r2SecretAccessKey: acc.r2SecretAccessKey ?? "",
+    accountId: acc.cloudflareAccountId ?? "-",
+    status: acc.status ?? "available",
+    createdAt: acc.createdAt ?? "-",
+    totalBuckets: acc.totalBuckets ?? 0,
+    totalObjects: acc.totalObjects ?? 0,
+    totalBytes: acc.totalBytes ?? 0,
+    syncStatus: acc.syncStatus ?? "idle",
+    syncMessage: acc.syncMessage ?? "",
+    lastSyncedAt: acc.lastSyncedAt ?? undefined,
+  };
+}
+
+function mergeAccounts(current: Account[], next: Account[]) {
+  const currentMap = new Map(current.map((account) => [account.id, account]));
+  return next.map((account) => ({
+    ...currentMap.get(account.id),
+    ...account,
+  }));
+}
+
+function readAccountsCache(): Account[] | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(ACCOUNTS_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    return parsed as Account[];
+  } catch {
+    return null;
+  }
+}
+
+function writeAccountsCache(accounts: Account[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(ACCOUNTS_CACHE_KEY, JSON.stringify(accounts));
+  } catch {
+    // Ignore cache write errors.
+  }
+}
+
 export default function AccountsPage() {
   const [accounts, setAccounts] = React.useState<Account[]>([]);
   const [accountsLoading, setAccountsLoading] = React.useState(true);
+  const [accountsRefreshing, setAccountsRefreshing] = React.useState(false);
   const [isAddOpen, setIsAddOpen] = React.useState(false);
 
   const [label, setLabel] = React.useState("");
@@ -241,44 +315,66 @@ export default function AccountsPage() {
     Record<string, boolean>
   >({});
   const hasAutoSyncedRef = React.useRef(false);
+  const didHydrateCacheRef = React.useRef(false);
+  const didLoadServerSnapshotRef = React.useRef(false);
 
-  React.useEffect(() => {
-    const load = async () => {
-      setAccountsLoading(true);
+  const loadAccounts = React.useCallback(
+    async ({
+      useSkeleton = false,
+      silent = false,
+    }: {
+      useSkeleton?: boolean;
+      silent?: boolean;
+    } = {}) => {
+      if (useSkeleton) {
+        setAccountsLoading(true);
+      } else {
+        setAccountsRefreshing(true);
+      }
+
       try {
-        const res = await fetch("/api/accounts");
+        const res = await fetch("/api/accounts", { cache: "no-store" });
         if (!res.ok) throw new Error("Failed to load accounts");
         const data = await res.json();
-        const rows: Account[] = (data.accounts ?? []).map((acc: any) => ({
-          id: acc.id,
-          name: acc.label ?? "",
-          email: acc.email ?? "",
-          password: acc.password ?? "",
-          twoFactorSecret: acc.twoFactorSecret ?? "",
-          apiToken: acc.apiToken ?? "",
-          r2AccessKeyId: acc.r2AccessKeyId ?? "",
-          r2SecretAccessKey: acc.r2SecretAccessKey ?? "",
-          accountId: acc.cloudflareAccountId ?? "-",
-          status: acc.status ?? "available",
-          createdAt: acc.createdAt ?? "-",
-          totalBuckets: acc.totalBuckets ?? 0,
-          totalObjects: acc.totalObjects ?? 0,
-          totalBytes: acc.totalBytes ?? 0,
-          syncStatus: acc.syncStatus ?? "idle",
-          syncMessage: acc.syncMessage ?? "",
-          lastSyncedAt: acc.lastSyncedAt ?? undefined,
-        }));
-        setAccounts(rows);
+        const rows: Account[] = (data.accounts ?? []).map((acc: AccountApiRecord) =>
+          mapAccount(acc),
+        );
+
+        React.startTransition(() => {
+          setAccounts((prev) => {
+            const merged = mergeAccounts(prev, rows);
+            writeAccountsCache(merged);
+            return merged;
+          });
+        });
+        didLoadServerSnapshotRef.current = true;
+        return rows;
       } catch (err) {
         console.error(err);
-        toast.error("Unable to load Cloudflare accounts");
+        if (!silent) {
+          toast.error("Unable to load Cloudflare accounts");
+        }
+        throw err;
       } finally {
         setAccountsLoading(false);
+        setAccountsRefreshing(false);
       }
-    };
+    },
+    [],
+  );
 
-    load();
-  }, []);
+  React.useEffect(() => {
+    if (!didHydrateCacheRef.current) {
+      didHydrateCacheRef.current = true;
+      const cached = readAccountsCache();
+      if (cached?.length) {
+        setAccounts(cached);
+        setAccountsLoading(false);
+      }
+    }
+
+    void loadAccounts({ useSkeleton: !readAccountsCache()?.length, silent: true });
+  }, [loadAccounts]);
 
   React.useEffect(() => {
     if (!settingsAccount) return;
@@ -297,11 +393,10 @@ export default function AccountsPage() {
 
   React.useEffect(() => {
     if (!accounts.length) return;
+    if (!didLoadServerSnapshotRef.current) return;
     if (hasAutoSyncedRef.current) return;
     hasAutoSyncedRef.current = true;
-    // Fire-and-forget auto sync of all accounts on first load.
-    // Errors will be reflected via syncStatus = "error".
-    handleSyncAll().catch(() => {
+    handleSyncAll({ silent: true }).catch(() => {
       // errors already handled inside handleSyncAll
     });
   }, [accounts]);
@@ -708,91 +803,98 @@ export default function AccountsPage() {
     }
   };
 
-  const handleSync = async (id: string) => {
+  const handleSync = async (id: string, options?: { silent?: boolean }) => {
     try {
       setSyncingId(id);
-      const res = await fetch(`/api/accounts/${id}/sync`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Unable to sync account");
-
-      const updated = data.account;
       setAccounts((prev) =>
         prev.map((acc) =>
-          acc.id === updated.id
+          acc.id === id
             ? {
-                id: updated.id,
-                name: updated.label ?? acc.name,
-                email: updated.email ?? acc.email,
-                password: updated.password ?? acc.password,
-                twoFactorSecret: updated.twoFactorSecret ?? acc.twoFactorSecret,
-                apiToken: updated.apiToken ?? acc.apiToken,
-                r2AccessKeyId: updated.r2AccessKeyId ?? acc.r2AccessKeyId,
-                r2SecretAccessKey:
-                  updated.r2SecretAccessKey ?? acc.r2SecretAccessKey,
-                accountId: updated.cloudflareAccountId ?? "-",
-                status: updated.status ?? "available",
-                createdAt: updated.createdAt ?? acc.createdAt ?? "-",
-                totalBuckets: updated.totalBuckets ?? acc.totalBuckets,
-                totalObjects: updated.totalObjects ?? acc.totalObjects,
-                totalBytes: updated.totalBytes ?? acc.totalBytes,
+                ...acc,
+                syncStatus: "syncing",
+                syncMessage: "Sync in progress",
               }
             : acc,
         ),
       );
-      toast.success("Account synced");
+      const res = await fetch(`/api/accounts/${id}/sync`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Unable to sync account");
+
+      const updated = mapAccount(data.account as AccountApiRecord);
+      setAccounts((prev) =>
+        {
+          const next = prev.map((acc) =>
+            acc.id === updated.id
+              ? { ...acc, ...updated }
+              : acc,
+          );
+          writeAccountsCache(next);
+          return next;
+        },
+      );
+      if (!options?.silent) {
+        toast.success("Account synced");
+      }
     } catch (err: any) {
       console.error(err);
-      toast.error(err?.message || "Unable to sync account");
+      setAccounts((prev) =>
+        prev.map((acc) =>
+          acc.id === id
+            ? {
+                ...acc,
+                syncStatus: "error",
+                syncMessage: err?.message || "Unable to sync account",
+              }
+            : acc,
+        ),
+      );
+      if (!options?.silent) {
+        toast.error(err?.message || "Unable to sync account");
+      }
     } finally {
       setSyncingId(null);
     }
   };
 
-  const handleSyncAll = async () => {
+  const handleSyncAll = async (options?: { silent?: boolean }) => {
     if (!accounts.length) return;
     try {
       setSyncingAll(true);
-      await Promise.all(
-        accounts.map(async (acc) => {
-          const res = await fetch(`/api/accounts/${acc.id}/sync`, {
+      setAccounts((prev) =>
+        prev.map((acc) => ({
+          ...acc,
+          syncStatus: "syncing",
+          syncMessage: "Sync in progress",
+        })),
+      );
+      const results = await Promise.allSettled(
+        accounts.map((acc) =>
+          fetch(`/api/accounts/${acc.id}/sync`, {
             method: "POST",
-          });
-          if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || "Unable to sync one of the accounts");
-          }
-        }),
+          }).then(async (res) => {
+            if (!res.ok) {
+              const data = await res.json().catch(() => ({}));
+              throw new Error(data.error || `Unable to sync ${acc.name || acc.email}`);
+            }
+            return res.json();
+          }),
+        ),
       );
 
-      const res = await fetch("/api/accounts");
-      if (res.ok) {
-        const data = await res.json();
-        const rows: Account[] = (data.accounts ?? []).map((acc: any) => ({
-          id: acc.id,
-          name: acc.label ?? "",
-          email: acc.email ?? "",
-          password: acc.password ?? "",
-          twoFactorSecret: acc.twoFactorSecret ?? "",
-          apiToken: acc.apiToken ?? "",
-          r2AccessKeyId: acc.r2AccessKeyId ?? "",
-          r2SecretAccessKey: acc.r2SecretAccessKey ?? "",
-          accountId: acc.cloudflareAccountId ?? "-",
-          status: acc.status ?? "available",
-          createdAt: acc.createdAt ?? "-",
-          totalBuckets: acc.totalBuckets ?? 0,
-          totalObjects: acc.totalObjects ?? 0,
-          totalBytes: acc.totalBytes ?? 0,
-          syncStatus: acc.syncStatus ?? "idle",
-          syncMessage: acc.syncMessage ?? "",
-          lastSyncedAt: acc.lastSyncedAt ?? undefined,
-        }));
-        setAccounts(rows);
-      }
+      await loadAccounts({ silent: true });
 
-      toast.success("All accounts synced");
+      const failed = results.filter((result) => result.status === "rejected").length;
+      if (!options?.silent) {
+        if (failed === results.length) {
+          toast.error("Unable to sync accounts");
+        }
+      }
     } catch (err: any) {
       console.error(err);
-      toast.error(err?.message || "Unable to sync all accounts");
+      if (!options?.silent) {
+        toast.error(err?.message || "Unable to sync all accounts");
+      }
     } finally {
       setSyncingAll(false);
     }
@@ -1117,6 +1219,17 @@ export default function AccountsPage() {
   const totalRows = filteredAccounts.length;
   const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
   const currentPageIndex = Math.min(pageIndex, totalPages - 1);
+  const latestSyncedAt = accounts.reduce<string | null>((latest, account) => {
+    if (!account.lastSyncedAt) return latest;
+    if (!latest) return account.lastSyncedAt;
+    return new Date(account.lastSyncedAt).getTime() >
+      new Date(latest).getTime()
+      ? account.lastSyncedAt
+      : latest;
+  }, null);
+  const accountsHeaderDescription = latestSyncedAt
+    ? `Last refreshed ${new Date(latestSyncedAt).toLocaleString()}`
+    : "Last refreshed Never";
   const paginatedRows = table
     .getRowModel()
     .rows.slice(
@@ -1125,6 +1238,7 @@ export default function AccountsPage() {
     );
   const pageWindow = totalPages <= 3 ? totalPages : 3;
   const desktopPageWindow = totalPages <= 5 ? totalPages : 5;
+  const isRefreshingAccounts = syncingAll || accountsRefreshing;
   const mobileStart = Math.max(
     0,
     Math.min(
@@ -1146,56 +1260,49 @@ export default function AccountsPage() {
   );
 
   if (accountsLoading && accounts.length === 0) {
-    return (
-      <DashboardTableSkeleton
-        actions={2}
-        columns={6}
-        filters={1}
-        rows={10}
-        titleWidth="w-36"
-      />
-    );
+    return <AccountsPageSkeleton />;
   }
 
   return (
-    <DashboardPage>
-      <DashboardPageHeader
-        title="Accounts"
-        description="Manage your Cloudflare R2 accounts"
-        actions={
-          <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
-            <div className="relative h-9 min-w-0 flex-1 sm:w-[220px] sm:flex-none">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="Search accounts..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="h-9 w-full pl-8"
-              />
-            </div>
-            <Button
-              variant="outline"
-              size="icon"
-              className="size-9 shrink-0 rounded-full border border-border/70 bg-background/85 text-foreground shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
-              onClick={() => {
-                void handleSyncAll();
-              }}
-              disabled={accounts.length === 0}
-              aria-label="Sync all accounts"
-            >
-              <RefreshCw className={`h-4 w-4 ${syncingAll ? "animate-spin" : ""}`} />
-            </Button>
-            <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
-              <DialogTrigger asChild>
-                <Button
-                  size="icon"
-                  className="size-9 min-w-9 shrink-0 rounded-full border border-border/70 bg-background/85 p-0 text-foreground shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md sm:h-9 sm:w-auto sm:min-w-0 sm:px-3 sm:py-2"
-                >
-                  <Plus className="h-4 w-4 sm:mr-2" />
-                  <span className="sr-only sm:not-sr-only">Add Account</span>
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-h-[88vh] sm:max-h-[94vh] sm:max-w-3xl flex flex-col rounded-2xl">
+    <DashboardPage className="dashboard-motion-stage">
+      <div className="dashboard-motion-item">
+        <DashboardPageHeader
+          title="Accounts"
+          description={accountsHeaderDescription}
+          actions={
+            <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
+              <div className="relative h-9 min-w-0 flex-1 sm:w-[220px] sm:flex-none">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  placeholder="Search accounts..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="h-9 w-full pl-8"
+                />
+              </div>
+              <Button
+                variant="outline"
+                size="icon"
+                className="size-9 shrink-0 rounded-full border border-border/70 bg-background/85 text-foreground shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
+                onClick={() => {
+                  void handleSyncAll();
+                }}
+                disabled={accounts.length === 0}
+                aria-label="Sync all accounts"
+              >
+                <RefreshCw className={`h-4 w-4 ${isRefreshingAccounts ? "animate-spin" : ""}`} />
+              </Button>
+              <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
+                <DialogTrigger asChild>
+                  <Button
+                    size="icon"
+                    className="size-9 min-w-9 shrink-0 rounded-full border border-border/70 bg-background/85 p-0 text-foreground shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md sm:h-9 sm:w-auto sm:min-w-0 sm:px-3 sm:py-2"
+                  >
+                    <Plus className="h-4 w-4 sm:mr-2" />
+                    <span className="sr-only sm:not-sr-only">Add Account</span>
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-h-[88vh] sm:max-h-[94vh] sm:max-w-3xl flex flex-col rounded-2xl">
                 <DialogHeader>
                   <DialogTitle>Add Cloudflare Account</DialogTitle>
                   <DialogDescription>
@@ -1695,13 +1802,14 @@ export default function AccountsPage() {
                     Save Account
                   </Button>
                 </DialogFooter>
-              </DialogContent>
-            </Dialog>
-          </div>
-        }
-      />
+                </DialogContent>
+              </Dialog>
+            </div>
+          }
+        />
+      </div>
 
-      <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+      <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-4">
         <Card className="gap-0 py-0">
           <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
             <CardDescription className="text-[13px] leading-4">
@@ -3049,7 +3157,7 @@ export default function AccountsPage() {
           </DialogContent>
         </Dialog>
       )}
-      <Card className="overflow-hidden gap-0 sm:gap-0 md:gap-0">
+      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
         <Table
           className="min-w-[900px] w-full"
           containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full [-ms-overflow-style:none] [scrollbar-width:thin]"
