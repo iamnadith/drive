@@ -6,7 +6,6 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
-  Eye,
   RefreshCw,
   RotateCcw,
   Search,
@@ -18,7 +17,7 @@ import { toast } from "sonner"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
@@ -38,11 +37,12 @@ import {
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
+import { DashboardActivitySkeleton } from "@/components/dashboard/loading-skeletons"
 import {
   DashboardPage,
   DashboardPageHeader,
-  DashboardPageSkeleton,
 } from "@/components/dashboard/page-shell"
+import { useDashboardResource } from "@/hooks/use-dashboard-resource"
 
 type ActivityEvent = {
   id: string
@@ -144,10 +144,6 @@ function DetailRow({ label, value }: { label: string; value: React.ReactNode }) 
 }
 
 export default function ActivityPage() {
-  const [data, setData] = React.useState<ActivityResponse | null>(null)
-  const [loading, setLoading] = React.useState(true)
-  const [refreshing, setRefreshing] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
   const [selected, setSelected] = React.useState<ActivityEvent | null>(null)
   const [filtersOpen, setFiltersOpen] = React.useState(false)
   const [undoingId, setUndoingId] = React.useState<string | null>(null)
@@ -163,58 +159,45 @@ export default function ActivityPage() {
     to: "",
     limit: 25,
   })
+  const deferredQuery = React.useDeferredValue(filters.q.trim())
 
-  const buildParams = React.useCallback(() => {
+  const queryString = React.useMemo(() => {
     const params = new URLSearchParams()
     params.set("limit", String(filters.limit))
     if (cursor) params.set("cursor", cursor)
-    if (filters.q.trim()) params.set("q", filters.q.trim())
+    if (deferredQuery) params.set("q", deferredQuery)
     if (filters.action !== ALL) params.set("action", filters.action)
     if (filters.entityType !== ALL) params.set("entityType", filters.entityType)
     if (filters.outcome !== ALL) params.set("outcome", filters.outcome)
     if (filters.undoable !== ALL) params.set("undoable", filters.undoable)
     if (filters.from) params.set("from", `${filters.from}T00:00:00.000Z`)
     if (filters.to) params.set("to", `${filters.to}T23:59:59.999Z`)
-    return params
-  }, [cursor, filters])
+    return params.toString()
+  }, [cursor, deferredQuery, filters.action, filters.entityType, filters.from, filters.limit, filters.outcome, filters.to, filters.undoable])
 
-  const loadActivity = React.useCallback(
-    async (quiet = false, signal?: AbortSignal) => {
-      if (quiet) setRefreshing(true)
-      else setLoading(true)
-      try {
-        const res = await fetch(`/api/activity?${buildParams().toString()}`, {
-          cache: "no-store",
-          signal,
-        })
-        const json: unknown = await res.json().catch(() => ({}))
-        if (!res.ok) {
-          const message =
-            isRecord(json) && typeof json.error === "string" ? json.error : "Unable to load activity"
-          throw new Error(message)
-        }
-        setData(json as ActivityResponse)
-        setError(null)
-      } catch (caught) {
-        if (caught instanceof DOMException && caught.name === "AbortError") return
+  const {
+    data,
+    error,
+    loading,
+    refreshing,
+    refresh,
+  } = useDashboardResource<ActivityResponse>({
+    key: `dashboard-activity:${queryString}`,
+    refreshIntervalMs: 20_000,
+    fetcher: async ({ signal }) => {
+      const res = await fetch(`/api/activity?${queryString}`, {
+        cache: "no-store",
+        signal,
+      })
+      const json: unknown = await res.json().catch(() => ({}))
+      if (!res.ok) {
         const message =
-          typeof caught === "object" && caught !== null && "message" in caught
-            ? String((caught as { message?: unknown }).message ?? "Unable to load activity")
-            : "Unable to load activity"
-        setError(message)
-      } finally {
-        setLoading(false)
-        setRefreshing(false)
+          isRecord(json) && typeof json.error === "string" ? json.error : "Unable to load activity"
+        throw new Error(message)
       }
+      return json as ActivityResponse
     },
-    [buildParams]
-  )
-
-  React.useEffect(() => {
-    const controller = new AbortController()
-    void loadActivity(false, controller.signal)
-    return () => controller.abort()
-  }, [loadActivity])
+  })
 
   const resetPagination = React.useCallback(() => {
     setCursor(null)
@@ -242,7 +225,7 @@ export default function ActivityPage() {
         throw new Error(message)
       }
       toast.success("Undo completed")
-      await loadActivity(true)
+      await refresh({ background: true, force: true })
     } catch (caught) {
       const message =
         typeof caught === "object" && caught !== null && "message" in caught
@@ -270,7 +253,7 @@ export default function ActivityPage() {
   ].filter(Boolean).length
 
   if (loading && !data) {
-    return <DashboardPageSkeleton rows={8} />
+    return <DashboardActivitySkeleton />
   }
 
   const goToPage = (page: number) => {
@@ -308,8 +291,9 @@ export default function ActivityPage() {
   }
 
   return (
-    <DashboardPage>
+    <DashboardPage className="dashboard-motion-stage">
       <DashboardPageHeader
+        className="dashboard-motion-item"
         title="Activity"
         description={
           <>
@@ -340,7 +324,7 @@ export default function ActivityPage() {
             <Button
               variant="outline"
               size="icon"
-              onClick={() => void loadActivity(true)}
+              onClick={() => void refresh({ background: true, force: true })}
               disabled={refreshing}
               aria-busy={refreshing || undefined}
               className="h-10 min-h-10 w-10 min-w-10 shrink-0 aspect-square rounded-full [border-radius:9999px] p-0 border border-border/70 bg-background/85 shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
@@ -359,7 +343,7 @@ export default function ActivityPage() {
         </Alert>
       ) : null}
 
-      <div className="flex items-center justify-between gap-3">
+      <div className="dashboard-motion-item dashboard-motion-delay-1 flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Badge variant={activeFilterCount ? "secondary" : "outline"}>{activeFilterCount} active</Badge>
           {activeFilterCount > 0 ? (
@@ -372,7 +356,7 @@ export default function ActivityPage() {
         <div className="shrink-0 text-sm text-muted-foreground">Page {cursorStack.length + 1} / {events.length} shown</div>
       </div>
 
-      <Card className="py-0">
+      <Card className="dashboard-motion-item dashboard-motion-delay-2 py-0">
         <CardContent className="p-0">
           {loading && !data ? (
             <div className="space-y-2 p-4">
@@ -388,35 +372,57 @@ export default function ActivityPage() {
             <ul className="divide-y">
               {events.map((event) => (
                 <li key={event.id}>
-                  <div className="group px-4 py-3 transition-colors hover:bg-muted/30 md:px-0">
+                  <button
+                    type="button"
+                    onClick={() => setSelected(event)}
+                    className={`group block w-full px-4 py-2.5 text-left transition-[background-color,border-color,box-shadow,transform] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-muted/35 focus-visible:bg-muted/35 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-inset md:px-0 md:py-3 ${
+                      selected?.id === event.id ? "bg-muted/45 shadow-[inset_0_0_0_1px_hsl(var(--border)/0.65)]" : ""
+                    }`}
+                  >
                     <div className="grid gap-3 xl:grid-cols-[148px_minmax(0,1fr)_196px_auto] xl:items-start">
                       <div className="text-sm">
-                        <div className="font-medium text-foreground">{formatRelative(event.occurredAt)}</div>
-                        <div className="mt-0.5 text-xs text-muted-foreground">{formatDateTime(event.occurredAt)}</div>
+                        <div className="flex items-center justify-between gap-3 xl:block">
+                          <div>
+                            <div className="font-medium text-foreground">{formatRelative(event.occurredAt)}</div>
+                            <div className="mt-0.5 text-xs text-muted-foreground">{formatDateTime(event.occurredAt)}</div>
+                          </div>
+                          <div className="flex flex-wrap gap-2 xl:hidden">
+                            <Badge variant={outcomeVariant(event.outcome)}>{event.outcome}</Badge>
+                            {event.undoStatus !== "available" ? (
+                              <Badge variant="outline">{undoLabel(event)}</Badge>
+                            ) : null}
+                          </div>
+                        </div>
                         <div className="mt-2 hidden text-[11px] uppercase tracking-[0.16em] text-muted-foreground xl:block">
                           {formatAction(event.action)}
                         </div>
                       </div>
 
                       <div className="min-w-0">
-                        <div className="truncate text-sm font-medium">{event.summary}</div>
-                        <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                          {event.entityLabel ?? event.entityType}
+                        <div className="text-sm font-medium leading-5">{event.summary}</div>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                          <span className="truncate">{event.entityLabel ?? event.entityType}</span>
+                          <span className="hidden xl:inline">/</span>
+                          <span className="truncate">{event.actorName ?? "System"}</span>
                         </div>
                         {event.detail ? (
-                          <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                          <div className="mt-1 line-clamp-2 text-xs leading-4.5 text-muted-foreground">
                             {event.detail}
                           </div>
                         ) : null}
-                        <div className="mt-2 flex flex-wrap gap-2 xl:hidden">
-                          <Badge variant={outcomeVariant(event.outcome)}>{event.outcome}</Badge>
-                          {event.undoStatus !== "available" ? (
-                            <Badge variant="outline">{undoLabel(event)}</Badge>
-                          ) : null}
+                        <div className="mt-1.5 flex items-center justify-between gap-2 xl:hidden">
+                          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+                            <span>{formatAction(event.action)}</span>
+                            <span>•</span>
+                            <span className="truncate">{event.actorEmail ?? event.ipAddress ?? "Background process"}</span>
+                          </div>
+                          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-transparent bg-transparent text-muted-foreground/80 transition-[transform,background-color,border-color,color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:border-border/55 group-hover:bg-muted/45 group-hover:text-foreground group-focus-visible:border-border/55 group-focus-visible:bg-muted/45 group-focus-visible:text-foreground group-hover:translate-x-0.5 group-focus-visible:translate-x-0.5">
+                            <ChevronRight className="h-3.5 w-3.5" />
+                          </span>
                         </div>
                       </div>
 
-                      <div className="min-w-0 text-sm">
+                      <div className="hidden min-w-0 text-sm xl:block">
                         <div className="truncate font-medium">{event.actorName ?? "System"}</div>
                         <div className="mt-0.5 truncate text-xs text-muted-foreground">
                           {event.actorEmail ?? event.ipAddress ?? "Background process"}
@@ -433,15 +439,14 @@ export default function ActivityPage() {
                             <Badge variant="outline">{undoLabel(event)}</Badge>
                           ) : null}
                         </div>
-                        <div className="flex justify-start lg:justify-end">
-                          <Button size="sm" variant="ghost" onClick={() => setSelected(event)}>
-                            <Eye className="h-4 w-4" />
-                            View
-                          </Button>
+                        <div className="hidden xl:flex xl:justify-end">
+                          <span className="flex h-8 w-8 items-center justify-center rounded-full border border-transparent bg-transparent text-muted-foreground/80 transition-[transform,background-color,border-color,color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:border-border/55 group-hover:bg-muted/45 group-hover:text-foreground group-focus-visible:border-border/55 group-focus-visible:bg-muted/45 group-focus-visible:text-foreground group-hover:translate-x-0.5 group-focus-visible:translate-x-0.5">
+                            <ChevronRight className="h-4 w-4" />
+                          </span>
                         </div>
                       </div>
                     </div>
-                  </div>
+                  </button>
                 </li>
               ))}
             </ul>
@@ -630,7 +635,7 @@ export default function ActivityPage() {
       </Dialog>
 
       <Dialog open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(null)}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
+        <DialogContent className="max-h-[90vh] overflow-y-auto duration-300 data-[state=closed]:slide-out-to-bottom-2 data-[state=closed]:zoom-out-[0.985] data-[state=open]:slide-in-from-bottom-3 data-[state=open]:zoom-in-[0.985] sm:max-w-3xl">
           {selected ? (
             <>
               <DialogHeader>

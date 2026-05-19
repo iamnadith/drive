@@ -185,9 +185,19 @@ function normalizePayload(value: unknown): AmbientThemePayload {
   }
 }
 
-export function AmbientThemeProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = React.useState<AmbientThemePayload>(() => buildDefaultPayload())
-  const [hydrated, setHydrated] = React.useState(false)
+export function AmbientThemeProvider({
+  children,
+  initialState,
+}: {
+  children: React.ReactNode
+  initialState?: AmbientThemePayload
+}) {
+  const normalizedInitialState = React.useMemo(
+    () => normalizePayload(initialState ?? buildDefaultPayload()),
+    [initialState]
+  )
+  const [state, setState] = React.useState<AmbientThemePayload>(normalizedInitialState)
+  const [hydrated, setHydrated] = React.useState(Boolean(initialState))
   const [dirty, setDirty] = React.useState(false)
 
   const fetchState = React.useCallback(async () => {
@@ -207,6 +217,21 @@ export function AmbientThemeProvider({ children }: { children: React.ReactNode }
   }, [])
 
   React.useEffect(() => {
+    if (initialState) {
+      setState((current) => {
+        const currentSignature = JSON.stringify(current)
+        const nextSignature = JSON.stringify(normalizedInitialState)
+        return currentSignature === nextSignature ? current : normalizedInitialState
+      })
+      setHydrated(true)
+    }
+  }, [initialState, normalizedInitialState])
+
+  React.useEffect(() => {
+    if (initialState) {
+      return
+    }
+
     let cancelled = false
 
     ;(async () => {
@@ -227,7 +252,7 @@ export function AmbientThemeProvider({ children }: { children: React.ReactNode }
     return () => {
       cancelled = true
     }
-  }, [fetchState])
+  }, [fetchState, initialState])
 
   React.useEffect(() => {
     if (!hydrated || dirty) {

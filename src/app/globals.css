@@ -271,7 +271,7 @@
     @apply transition-[border-color,box-shadow,background-color] duration-200 ease-out;
   }
   [data-slot="dashboard-page"] {
-    animation: page-enter 180ms ease-out;
+    animation: page-enter 420ms cubic-bezier(0.22, 1, 0.36, 1);
   }
   @media (max-width: 640px) {
     [data-slot="dashboard-page"] {
@@ -469,6 +469,70 @@
       0 24px 54px color-mix(in oklch, var(--accent) 12%, transparent);
     backdrop-filter: blur(38px) saturate(185%);
   }
+
+  .dashboard-motion-stage {
+    --dashboard-motion-distance: 12px;
+    --dashboard-motion-duration: 920ms;
+    --dashboard-motion-ease: cubic-bezier(0.2, 0.9, 0.28, 1);
+  }
+
+  .dashboard-motion-item {
+    opacity: 0;
+    transform: translate3d(0, var(--dashboard-motion-distance), 0) scale(0.996);
+    animation: dashboard-surface-enter var(--dashboard-motion-duration) var(--dashboard-motion-ease) forwards;
+    animation-delay: var(--dashboard-motion-delay, 0ms);
+    will-change: transform, opacity;
+  }
+
+  .dashboard-motion-delay-1 {
+    --dashboard-motion-delay: 110ms;
+  }
+
+  .dashboard-motion-delay-2 {
+    --dashboard-motion-delay: 210ms;
+  }
+
+  .dashboard-motion-delay-3 {
+    --dashboard-motion-delay: 310ms;
+  }
+
+  .dashboard-motion-delay-4 {
+    --dashboard-motion-delay: 410ms;
+  }
+
+  .sidebar-mobile-overlay {
+    background: oklch(0.12 0 0 / 0.18);
+    backdrop-filter: blur(3px);
+    animation-duration: 680ms;
+    animation-timing-function: cubic-bezier(0.2, 1, 0.3, 1);
+  }
+
+  .sidebar-mobile-panel {
+    will-change: transform;
+    animation-duration: 980ms;
+    animation-fill-mode: forwards;
+    animation-timing-function: cubic-bezier(0.18, 1, 0.32, 1);
+  }
+
+  .sidebar-mobile-panel-left[data-state="open"] {
+    animation-name: sidebar-panel-enter-left;
+  }
+
+  .sidebar-mobile-panel-left[data-state="closed"] {
+    animation-name: sidebar-panel-exit-left;
+    animation-duration: 920ms;
+    animation-timing-function: cubic-bezier(0.3, 0.88, 0.32, 1);
+  }
+
+  .sidebar-mobile-panel-right[data-state="open"] {
+    animation-name: sidebar-panel-enter-right;
+  }
+
+  .sidebar-mobile-panel-right[data-state="closed"] {
+    animation-name: sidebar-panel-exit-right;
+    animation-duration: 920ms;
+    animation-timing-function: cubic-bezier(0.3, 0.88, 0.32, 1);
+  }
 }
 
 @media (max-width: 640px) {
@@ -513,11 +577,24 @@
 @keyframes page-enter {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes dashboard-surface-enter {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, var(--dashboard-motion-distance, 12px), 0) scale(0.996);
+    filter: blur(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+    filter: blur(0);
   }
 }
 
@@ -527,6 +604,48 @@
   }
   100% {
     opacity: 0.92;
+  }
+}
+
+@keyframes sidebar-panel-enter-left {
+  0% {
+    transform: translate3d(-108%, 0, 0);
+  }
+  72% {
+    transform: translate3d(1.2%, 0, 0);
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes sidebar-panel-exit-left {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-108%, 0, 0);
+  }
+}
+
+@keyframes sidebar-panel-enter-right {
+  0% {
+    transform: translate3d(108%, 0, 0);
+  }
+  72% {
+    transform: translate3d(-1.2%, 0, 0);
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes sidebar-panel-exit-right {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(108%, 0, 0);
   }
 }
 

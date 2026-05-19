@@ -45,29 +45,6 @@ type MigrationItemRow = {
   updated_at: string | null
 }
 
-type BucketScanRow = {
-  id: string
-  account_id: string
-  bucket_name: string
-  kind: string
-  status: string
-  objects: number | string | null
-  bytes: number | string | null
-  error: string | null
-  started_at: string | null
-  completed_at: string | null
-  updated_at: string | null
-}
-
-type FailureRecordRow = {
-  id: string
-  migration_item_id: string
-  object_key: string
-  message: string | null
-  occurred_at: string | null
-  fetched_at: string | null
-}
-
 type VerifyDiffRow = {
   id: string
   migration_item_id: string
@@ -373,6 +350,16 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
   })
 }
 
+const ANALYTICS_CACHE_TTL_MS = 20_000
+const ANALYTICS_RECONCILE_TTL_MS = 45_000
+const ANALYTICS_REPAIR_RECONCILE_TTL_MS = 30_000
+
+let lastAnalyticsReconcileAt = 0
+let lastRepairReconcileAt = 0
+
+const analyticsCache = new Map<RangeKey, { expiresAt: number; payload: unknown }>()
+const analyticsInFlight = new Map<RangeKey, Promise<unknown>>()
+
 function mapRepairJobRow(row: RepairJobRow): DriveRepairJob {
   const status = ["pending", "claimed", "running", "completed", "failed", "canceled"].includes(row.status)
     ? row.status
@@ -399,12 +386,38 @@ function mapRepairJobRow(row: RepairJobRow): DriveRepairJob {
   }
 }
 
-export async function GET(request: Request) {
-  const auth = await requireAdmin()
-  if (!auth.ok) return auth.response
+async function maybeReconcileAnalyticsState(migrations: DriveMigration[], warnings: string[]) {
+  if (Date.now() - lastAnalyticsReconcileAt < ANALYTICS_RECONCILE_TTL_MS) return migrations
 
-  const url = new URL(request.url)
-  const range = asRange(url.searchParams.get("range"))
+  lastAnalyticsReconcileAt = Date.now()
+  const reconcileCandidates = migrations
+    .filter((m) => m.status === "running" || m.status === "verifying" || m.syncStatus === "syncing")
+    .slice(0, 5)
+
+  if (reconcileCandidates.length === 0) return migrations
+
+  await Promise.all(
+    reconcileCandidates.map((migration) =>
+      withTimeout(syncMigrationLiveState(migration.id), 4_000).catch((error: unknown) => {
+        const message =
+          typeof error === "object" && error !== null && "message" in error
+            ? String((error as { message?: unknown }).message ?? "Unable to reconcile migration")
+            : "Unable to reconcile migration"
+        warnings.push(`migration ${migration.id}: ${message}`)
+      })
+    )
+  )
+
+  return capture("refreshed migrations", warnings, () => listMigrations(100), migrations)
+}
+
+function kickRepairJobReconcile() {
+  if (Date.now() - lastRepairReconcileAt < ANALYTICS_REPAIR_RECONCILE_TTL_MS) return
+  lastRepairReconcileAt = Date.now()
+  void reconcileRepairJobs().catch(() => undefined)
+}
+
+async function buildAnalyticsPayload(range: RangeKey) {
   const days = rangeDays(range)
   const generatedAt = new Date().toISOString()
   const start = new Date()
@@ -418,23 +431,8 @@ export async function GET(request: Request) {
   const warnings: string[] = []
 
   let migrations = await capture("migrations", warnings, () => listMigrations(100), [] as DriveMigration[])
-  const reconcileCandidates = migrations
-    .filter((m) => m.status === "running" || m.status === "verifying" || m.syncStatus === "syncing")
-    .slice(0, 5)
-  await Promise.all(
-    reconcileCandidates.map((migration) =>
-      withTimeout(syncMigrationLiveState(migration.id), 4_000).catch((error: unknown) => {
-        const message =
-          typeof error === "object" && error !== null && "message" in error
-            ? String((error as { message?: unknown }).message ?? "Unable to reconcile migration")
-            : "Unable to reconcile migration"
-        warnings.push(`migration ${migration.id}: ${message}`)
-      })
-    )
-  )
-  migrations = await capture("refreshed migrations", warnings, () => listMigrations(100), migrations)
-
-  void reconcileRepairJobs().catch(() => undefined)
+  migrations = await maybeReconcileAnalyticsState(migrations, warnings)
+  kickRepairJobReconcile()
 
   const [
     accounts,
@@ -443,8 +441,6 @@ export async function GET(request: Request) {
     repairJobs,
     bucketStats,
     migrationItemRows,
-    bucketScans,
-    recentFailures,
     recentDiffs,
     failureRecordCount,
     verifyDiffCount,
@@ -464,24 +460,6 @@ export async function GET(request: Request) {
       ),
       capture("bucket stats", warnings, () => selectRows<BucketStatsRow>("drive_bucket_stats"), [] as BucketStatsRow[]),
       capture("migration items", warnings, () => selectRows<MigrationItemRow>("drive_migration_items"), [] as MigrationItemRow[]),
-      capture(
-        "bucket scans",
-        warnings,
-        () => selectRows<BucketScanRow>("drive_bucket_scans", "*", { column: "updated_at", ascending: false }, 50),
-        [] as BucketScanRow[]
-      ),
-      capture(
-        "failure records",
-        warnings,
-        () =>
-          selectRows<FailureRecordRow>(
-            "drive_migration_item_failure_records",
-            "id,migration_item_id,object_key,message,occurred_at,fetched_at",
-            { column: "fetched_at", ascending: false },
-            25
-          ),
-        [] as FailureRecordRow[]
-      ),
       capture(
         "verification diffs",
         warnings,
@@ -780,7 +758,7 @@ export async function GET(request: Request) {
     activeBucketStatsIncomplete ||
     (Boolean(activeAccount) && activeBucketStats.length > 0 && !Number.isFinite(newestBucketStat))
 
-  return NextResponse.json({
+  return {
     range,
     generatedAt,
     activeAccount: activeAccount
@@ -833,5 +811,47 @@ export async function GET(request: Request) {
       accountSyncErrors: accounts.filter((account) => account.syncStatus === "error").length,
       bucketStatsErrors: failedBucketStats,
     },
-  })
+  }
+}
+
+function queueAnalyticsPayload(range: RangeKey): Promise<unknown> {
+  const existing = analyticsInFlight.get(range)
+  if (existing) return existing
+
+  const promise = buildAnalyticsPayload(range)
+    .then((payload) => {
+      analyticsCache.set(range, {
+        expiresAt: Date.now() + ANALYTICS_CACHE_TTL_MS,
+        payload,
+      })
+      return payload
+    })
+    .finally(() => {
+      analyticsInFlight.delete(range)
+    })
+
+  analyticsInFlight.set(range, promise)
+  return promise
+}
+
+export async function GET(request: Request) {
+  const auth = await requireAdmin()
+  if (!auth.ok) return auth.response
+
+  const url = new URL(request.url)
+  const range = asRange(url.searchParams.get("range"))
+  const forceRefresh = url.searchParams.get("refresh") === "1"
+  const cached = analyticsCache.get(range)
+
+  if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
+    return NextResponse.json(cached.payload)
+  }
+
+  if (!forceRefresh && cached) {
+    void queueAnalyticsPayload(range)
+    return NextResponse.json(cached.payload)
+  }
+
+  const payload = await queueAnalyticsPayload(range)
+  return NextResponse.json(payload)
 }

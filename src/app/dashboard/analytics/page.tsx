@@ -51,7 +51,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Skeleton } from "@/components/ui/skeleton"
+import { DashboardAnalyticsSkeleton } from "@/components/dashboard/loading-skeletons"
+import { useDashboardResource } from "@/hooks/use-dashboard-resource"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useIsMobile } from "@/hooks/use-mobile"
 
@@ -429,16 +430,17 @@ function KpiCard({
 }
 
 export default function DashboardPage() {
-  const [data, setData] = React.useState<OverviewResponse | null>(null)
-  const [loading, setLoading] = React.useState(true)
-  const [refreshing, setRefreshing] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
-
-  const loadOverview = React.useCallback(async (signal?: AbortSignal, quiet = false) => {
-    if (quiet) setRefreshing(true)
-    else setLoading(true)
-    try {
-      const res = await fetch("/api/dashboard/analytics?range=all", {
+  const {
+    data,
+    error,
+    loading,
+    refreshing,
+    refresh,
+  } = useDashboardResource<OverviewResponse>({
+    key: "dashboard-analytics",
+    refreshIntervalMs: 20_000,
+    fetcher: async ({ signal, force }) => {
+      const res = await fetch(`/api/dashboard/analytics?range=all${force ? "&refresh=1" : ""}`, {
         cache: "no-store",
         signal,
       })
@@ -450,42 +452,9 @@ export default function DashboardPage() {
             : "Unable to load dashboard analytics"
         throw new Error(message)
       }
-      setData(json as OverviewResponse)
-      setError(null)
-    } catch (caught) {
-      if (caught instanceof DOMException && caught.name === "AbortError") return
-      const message =
-        typeof caught === "object" && caught !== null && "message" in caught
-          ? String((caught as { message?: unknown }).message ?? "Unable to load dashboard analytics")
-          : "Unable to load dashboard analytics"
-      setError(message)
-    } finally {
-      setLoading(false)
-      setRefreshing(false)
-    }
-  }, [])
-
-  React.useEffect(() => {
-    const controller = new AbortController()
-    void loadOverview(controller.signal)
-    return () => controller.abort()
-  }, [loadOverview])
-
-  React.useEffect(() => {
-    const refreshIfActive = () => {
-      if (document.visibilityState !== "visible") return
-      const controller = new AbortController()
-      void loadOverview(controller.signal, true)
-    }
-    const interval = window.setInterval(refreshIfActive, 5_000)
-    window.addEventListener("focus", refreshIfActive)
-    document.addEventListener("visibilitychange", refreshIfActive)
-    return () => {
-      window.clearInterval(interval)
-      window.removeEventListener("focus", refreshIfActive)
-      document.removeEventListener("visibilitychange", refreshIfActive)
-    }
-  }, [loadOverview])
+      return json as OverviewResponse
+    },
+  })
 
   const chartData = React.useMemo(() => withChartFields(data?.series ?? []), [data?.series])
   const migrationCompletionRate = React.useMemo(() => {
@@ -494,22 +463,8 @@ export default function DashboardPage() {
     return Math.max(0, Math.min(100, (completed / data.metrics.migrations) * 100))
   }, [data])
 
-  if (loading && !data) {
-    return (
-      <div className="space-y-4">
-        <div className="space-y-1.5">
-          <Skeleton className="h-8 w-44" />
-          <Skeleton className="h-4 w-80" />
-        </div>
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          {Array.from({ length: 8 }).map((_, index) => (
-            <Skeleton key={index} className="h-28" />
-          ))}
-        </div>
-        <Skeleton className="h-[280px]" />
-        <Skeleton className="h-[280px]" />
-      </div>
-    )
+  if (!data) {
+    return <DashboardAnalyticsSkeleton />
   }
 
   const metrics = data?.metrics
@@ -517,8 +472,8 @@ export default function DashboardPage() {
   const activeAccountName = data?.activeAccount?.label || data?.activeAccount?.email || "No active account"
 
   return (
-    <div className="space-y-4 md:space-y-5">
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
+    <div className="dashboard-motion-stage space-y-4 md:space-y-5">
+      <div className="dashboard-motion-item grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
           <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground sm:text-sm">
@@ -528,7 +483,7 @@ export default function DashboardPage() {
             {refreshing ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null}
           </div>
         </div>
-        <Button variant="outline" size="icon" className="h-8 w-8 self-start" onClick={() => void loadOverview(undefined, true)} disabled={refreshing}>
+        <Button variant="outline" size="icon" className="h-8 w-8 self-start" onClick={() => void refresh({ background: true, force: true })} disabled={refreshing}>
           <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
         </Button>
       </div>
@@ -556,7 +511,7 @@ export default function DashboardPage() {
 
       {metrics ? (
         <>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="dashboard-motion-item grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <KpiCard title="Active Storage" value={formatBytes(metrics.storageBytes)} detail={`${formatNumber(metrics.buckets)} active account buckets`} icon={HardDrive} />
             <KpiCard title="Active Objects" value={formatCompact(metrics.objects)} detail={`${formatNumber(metrics.objects)} active account objects`} icon={Database} />
             <KpiCard title="Accounts" value={`${metrics.activeAccounts}/${metrics.accounts}`} detail={`${syncHealth?.unsyncedAccounts ?? 0} unsynced, ${syncHealth?.accountSyncErrors ?? 0} errors`} icon={Server} />
@@ -567,7 +522,7 @@ export default function DashboardPage() {
             <KpiCard title="Attention" value={formatNumber(metrics.attentionItems)} detail={`${formatNumber(metrics.failedMigrations)} migration issues`} icon={AlertTriangle} tone={metrics.attentionItems > 0 ? "warning" : "default"} />
           </div>
 
-          <div className="grid gap-3 xl:grid-cols-2">
+          <div className="dashboard-motion-item grid gap-3 xl:grid-cols-2">
             <UsageChart data={chartData} />
             <MigrationChart data={chartData} />
             <div className="xl:col-span-2">
@@ -575,7 +530,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)] xl:items-start">
+          <div className="dashboard-motion-item grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)] xl:items-start">
             <Card className="xl:sticky xl:top-4 xl:self-start">
               <CardHeader className="gap-1 pb-2 md:px-4">
                 <CardTitle className="text-base">Buckets</CardTitle>
@@ -642,13 +597,7 @@ export default function DashboardPage() {
             </div>
           </div>
         </>
-      ) : (
-        <Card>
-          <CardContent className="py-10">
-            <EmptyLine icon={TrendingUp} text="No analytics data available" />
-          </CardContent>
-        </Card>
-      )}
+      ) : null}
     </div>
   )
 }

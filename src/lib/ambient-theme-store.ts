@@ -1,3 +1,4 @@
+import { unstable_cache, revalidateTag } from "next/cache"
 import { ensureDriveSchema } from "@/lib/db"
 import { getSupabaseServerClient } from "@/lib/supabase"
 
@@ -23,6 +24,7 @@ type AmbientThemeSettingsRow = {
 
 const SETTINGS_TABLE = "drive_app_settings"
 const SETTINGS_KEY = "ambient_theme"
+const AMBIENT_THEME_CACHE_TAG = "ambient-theme-settings"
 const MAX_ORBIT_COUNT = 8
 const DEFAULT_THEME_ID = "aurora"
 
@@ -161,7 +163,7 @@ function normalizeSupabaseError(error: { message: string }): Error {
   return new Error(message)
 }
 
-export async function getAmbientThemeSettings(): Promise<AmbientThemeSettings> {
+async function loadAmbientThemeSettings(): Promise<AmbientThemeSettings> {
   await ensureDriveSchema().catch(() => undefined)
 
   const supabase = getSupabaseServerClient()
@@ -178,6 +180,15 @@ export async function getAmbientThemeSettings(): Promise<AmbientThemeSettings> {
   }
 
   return normalizeAmbientThemeSettings((data as AmbientThemeSettingsRow).value)
+}
+
+const getAmbientThemeSettingsCached = unstable_cache(loadAmbientThemeSettings, ["ambient-theme-settings"], {
+  tags: [AMBIENT_THEME_CACHE_TAG],
+  revalidate: 300,
+})
+
+export async function getAmbientThemeSettings(): Promise<AmbientThemeSettings> {
+  return getAmbientThemeSettingsCached()
 }
 
 export async function saveAmbientThemeSettings(
@@ -200,6 +211,8 @@ export async function saveAmbientThemeSettings(
     .single()
 
   if (error) throw normalizeSupabaseError(error)
+
+  revalidateTag(AMBIENT_THEME_CACHE_TAG, "max")
 
   return normalizeAmbientThemeSettings((data as AmbientThemeSettingsRow).value)
 }

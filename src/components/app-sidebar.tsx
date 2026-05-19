@@ -123,7 +123,7 @@ const navSecondary: NavItem[] = [
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { user, logout } = useAuth()
-  const { isMobile } = useSidebar()
+  const { isMobile, openMobile, setOpenMobile } = useSidebar()
   const pathname = usePathname()
   const canManageUsers = user?.role === "admin" || user?.role === "superadmin"
   const avatarSrc = user?.profileImageUrl?.trim() || null
@@ -154,6 +154,19 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   React.useEffect(() => {
     setMounted(true)
   }, [])
+
+  const previousPathnameRef = React.useRef(pathname)
+
+  React.useEffect(() => {
+    if (!isMobile) {
+      previousPathnameRef.current = pathname
+      return
+    }
+    if (previousPathnameRef.current === pathname) return
+    previousPathnameRef.current = pathname
+    if (!openMobile) return
+    setOpenMobile(false)
+  }, [isMobile, openMobile, pathname, setOpenMobile])
 
   const renderUserAvatar = React.useCallback(
     (key: string) => (

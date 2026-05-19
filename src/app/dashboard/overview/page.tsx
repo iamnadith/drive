@@ -35,7 +35,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Skeleton } from "@/components/ui/skeleton"
+import { DashboardOverviewSkeleton } from "@/components/dashboard/loading-skeletons"
+import { useDashboardResource } from "@/hooks/use-dashboard-resource"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useIsMobile } from "@/hooks/use-mobile"
 
@@ -94,6 +95,10 @@ type RecentActivityItem = {
   summary: string
   detail?: string
   outcome: "success" | "failed" | "warning" | "info"
+}
+
+type ActivityResponse = {
+  events: RecentActivityItem[]
 }
 
 type UsageRange = "7d" | "30d" | "90d"
@@ -358,19 +363,17 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
 }
 
 export default function OverviewPage() {
-  const [data, setData] = React.useState<OverviewResponse | null>(null)
-  const [recentActivity, setRecentActivity] = React.useState<RecentActivityItem[]>([])
-  const [loading, setLoading] = React.useState(true)
-  const [refreshing, setRefreshing] = React.useState(false)
-  const [activityLoading, setActivityLoading] = React.useState(true)
-  const [activityError, setActivityError] = React.useState<string | null>(null)
-  const [error, setError] = React.useState<string | null>(null)
-
-  const loadOverview = React.useCallback(async (quiet = false, signal?: AbortSignal) => {
-    if (quiet) setRefreshing(true)
-    else setLoading(true)
-    try {
-      const res = await fetch("/api/dashboard/analytics?range=all", {
+  const {
+    data,
+    error,
+    loading,
+    refreshing,
+    refresh: refreshOverview,
+  } = useDashboardResource<OverviewResponse>({
+    key: "dashboard-overview-analytics",
+    refreshIntervalMs: 20_000,
+    fetcher: async ({ signal, force }) => {
+      const res = await fetch(`/api/dashboard/analytics?range=all${force ? "&refresh=1" : ""}`, {
         cache: "no-store",
         signal,
       })
@@ -380,25 +383,19 @@ export default function OverviewPage() {
           isRecord(json) && typeof json.error === "string" ? json.error : "Unable to load overview"
         throw new Error(message)
       }
-      setData(json as OverviewResponse)
-      setError(null)
-    } catch (caught) {
-      if (caught instanceof DOMException && caught.name === "AbortError") return
-      const message =
-        typeof caught === "object" && caught !== null && "message" in caught
-          ? String((caught as { message?: unknown }).message ?? "Unable to load overview")
-          : "Unable to load overview"
-      setError(message)
-    } finally {
-      setLoading(false)
-      setRefreshing(false)
-    }
-  }, [])
-
-  const loadRecentActivity = React.useCallback(async (quiet = false, signal?: AbortSignal) => {
-    if (quiet) setActivityLoading(true)
-    else setActivityLoading(true)
-    try {
+      return json as OverviewResponse
+    },
+  })
+  const {
+    data: recentActivityData,
+    error: activityError,
+    loading: activityLoading,
+    refreshing: activityRefreshing,
+    refresh: refreshRecentActivity,
+  } = useDashboardResource<RecentActivityItem[]>({
+    key: "dashboard-overview-activity",
+    refreshIntervalMs: 15_000,
+    fetcher: async ({ signal }) => {
       const res = await fetch("/api/activity?limit=4", {
         cache: "no-store",
         signal,
@@ -409,8 +406,8 @@ export default function OverviewPage() {
           isRecord(json) && typeof json.error === "string" ? json.error : "Unable to load recent activity"
         throw new Error(message)
       }
-      const events = isRecord(json) && Array.isArray(json.events) ? json.events : []
-      const validEvents = events.filter((event): event is RecentActivityItem => {
+      const events = isRecord(json) && Array.isArray((json as ActivityResponse).events) ? (json as ActivityResponse).events : []
+      return events.filter((event): event is RecentActivityItem => {
         if (!isRecord(event)) return false
         return (
           typeof event.id === "string" &&
@@ -420,58 +417,15 @@ export default function OverviewPage() {
           typeof event.summary === "string" &&
           typeof event.outcome === "string"
         )
-      })
-      setRecentActivity(validEvents.slice(0, 4))
-      setActivityError(null)
-    } catch (caught) {
-      if (caught instanceof DOMException && caught.name === "AbortError") return
-      const message =
-        typeof caught === "object" && caught !== null && "message" in caught
-          ? String((caught as { message?: unknown }).message ?? "Unable to load recent activity")
-          : "Unable to load recent activity"
-      setActivityError(message)
-    } finally {
-      setActivityLoading(false)
-    }
-  }, [])
+      }).slice(0, 4)
+    },
+  })
 
-  React.useEffect(() => {
-    const controller = new AbortController()
-    void loadOverview(false, controller.signal)
-    void loadRecentActivity(false, controller.signal)
-    return () => controller.abort()
-  }, [loadOverview, loadRecentActivity])
-
-  React.useEffect(() => {
-    const refreshIfActive = () => {
-      if (document.visibilityState === "visible") void loadOverview(true)
-      if (document.visibilityState === "visible") void loadRecentActivity(true)
-    }
-    const interval = window.setInterval(refreshIfActive, 5_000)
-    window.addEventListener("focus", refreshIfActive)
-    document.addEventListener("visibilitychange", refreshIfActive)
-    return () => {
-      window.clearInterval(interval)
-      window.removeEventListener("focus", refreshIfActive)
-      document.removeEventListener("visibilitychange", refreshIfActive)
-    }
-  }, [loadOverview, loadRecentActivity])
+  const recentActivity = recentActivityData ?? []
+  const isRefreshing = refreshing || activityRefreshing
 
   if (loading && !data) {
-    return (
-      <div className="space-y-6">
-        <div className="space-y-2">
-          <Skeleton className="h-8 w-36" />
-          <Skeleton className="h-4 w-80" />
-        </div>
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, index) => (
-            <Skeleton key={index} className="h-32" />
-          ))}
-        </div>
-        <Skeleton className="h-52" />
-      </div>
-    )
+    return <DashboardOverviewSkeleton />
   }
 
   const metrics = data?.metrics
@@ -479,24 +433,30 @@ export default function OverviewPage() {
   const healthy = metrics ? metrics.attentionItems === 0 && !data?.syncHealth.partial : false
 
   return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
-        <div className="min-w-0 mt-1 md:mt-0">
+    <div className="dashboard-motion-stage space-y-6">
+      <div className="dashboard-motion-item mb-[0.7rem] grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-0.5">
+        <div className="-mt-1 min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
+          <div className="mt-px flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground sm:text-sm">
+            <span>Active account: <span className="font-medium text-foreground">{accountName}</span></span>
+            <span className="hidden md:inline">-</span>
+            <span>Last refreshed at {formatRefreshTime(data?.generatedAt)}</span>
+            {isRefreshing ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null}
+          </div>
         </div>
         <div className="flex justify-end gap-2 self-start">
           <Button
             variant="outline"
-            size="sm"
+            size="icon"
+            aria-label="Refresh overview"
             className="border border-border/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
             onClick={() => {
-              void loadOverview(true)
-              void loadRecentActivity(true)
+              void refreshOverview({ background: true, force: true })
+              void refreshRecentActivity({ background: true, force: true })
             }}
-            disabled={refreshing}
+            disabled={isRefreshing}
           >
-            <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-            Refresh
+            <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
           </Button>
           <Button asChild size="sm" className="border border-border/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
             <Link href="/dashboard/analytics">
@@ -504,9 +464,6 @@ export default function OverviewPage() {
             </Link>
           </Button>
         </div>
-        <p className="col-span-2 mt-2 text-sm text-muted-foreground md:col-span-1 md:mt-1">
-          Retained analytics summary with active account <span className="font-medium text-foreground">{accountName}</span>. Last refreshed at {formatRefreshTime(data?.generatedAt)}.
-        </p>
       </div>
 
       {error ? (
@@ -532,7 +489,7 @@ export default function OverviewPage() {
 
       {metrics ? (
         <>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="dashboard-motion-item dashboard-motion-delay-1 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             <SummaryCard
               title="Active Storage"
               value={formatBytes(metrics.storageBytes)}
@@ -560,9 +517,11 @@ export default function OverviewPage() {
             />
           </div>
 
-          <PlatformUsageChart series={data.activeAccountSeries ?? []} />
+          <div className="dashboard-motion-item dashboard-motion-delay-2">
+            <PlatformUsageChart series={data.activeAccountSeries ?? []} />
+          </div>
 
-          <div className="grid gap-4">
+          <div className="dashboard-motion-item dashboard-motion-delay-3 grid gap-4">
             <Card className="overflow-hidden gap-0 py-0">
               <CardHeader className="border-b flex min-h-16 items-center px-4 py-2.5 pb-0 sm:min-h-0 sm:px-5 md:px-4 md:py-2">
                 <div className="flex w-full items-center justify-between gap-3 md:gap-2">

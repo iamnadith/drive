@@ -8,6 +8,7 @@ import { SiteHeader } from "@/components/site-header";
 import { SiteAmbient } from "@/components/site-ambient";
 import { SuperAdminGate } from "@/components/superadmin-gate";
 import { ThemeProvider } from "@/components/theme-provider";
+import { getAmbientThemeSettings } from "@/lib/ambient-theme-store";
 
 const geistSans = Inter({
   variable: "--font-geist-sans",
@@ -24,18 +25,20 @@ export const metadata: Metadata = {
   description: "R2 Migration System & Control Plane",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const ambientThemeSettings = await getAmbientThemeSettings().catch(() => undefined)
+
   return (
     <html lang="en" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         <ThemeProvider>
-          <AmbientThemeProvider>
+          <AmbientThemeProvider initialState={ambientThemeSettings}>
             <div className="site-shell">
               <SiteAmbient />
               <div className="site-content">
