@@ -116,7 +116,7 @@ const navSystem: NavItem[] = [
 const navSecondary: NavItem[] = [
   {
     title: "Settings",
-    url: "/settings",
+    url: "/dashboard/settings",
     icon: Settings,
   },
 ]

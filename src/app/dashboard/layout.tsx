@@ -63,6 +63,10 @@ export default function DashboardLayout({
       return [...base, { label: "Users" }]
     }
 
+    if (pathname.startsWith("/dashboard/settings")) {
+      return [...base, { label: "Settings" }]
+    }
+
     if (pathname.startsWith("/dashboard/migrations")) {
       const parts = pathname.split("/").filter(Boolean)
       const sub = parts[2] ?? ""

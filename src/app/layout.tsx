@@ -2,8 +2,10 @@ import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
+import { AmbientThemeProvider } from "@/components/ambient-theme-provider";
 import { AuthProvider } from "@/components/auth-provider";
 import { SiteHeader } from "@/components/site-header";
+import { SiteAmbient } from "@/components/site-ambient";
 import { SuperAdminGate } from "@/components/superadmin-gate";
 import { ThemeProvider } from "@/components/theme-provider";
 
@@ -32,23 +34,20 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <div className="site-shell">
-          <div aria-hidden="true" className="site-ambient">
-            <div className="site-ambient-orb site-ambient-orb-1" />
-            <div className="site-ambient-orb site-ambient-orb-2" />
-            <div className="site-ambient-orb site-ambient-orb-3" />
-            <div className="site-ambient-orb site-ambient-orb-4" />
-          </div>
-          <div className="site-content">
-            <ThemeProvider>
-              <AuthProvider>
-                <SiteHeader />
-                <SuperAdminGate>{children}</SuperAdminGate>
-              </AuthProvider>
-              <Toaster />
-            </ThemeProvider>
-          </div>
-        </div>
+        <ThemeProvider>
+          <AmbientThemeProvider>
+            <div className="site-shell">
+              <SiteAmbient />
+              <div className="site-content">
+                <AuthProvider>
+                  <SiteHeader />
+                  <SuperAdminGate>{children}</SuperAdminGate>
+                </AuthProvider>
+                <Toaster />
+              </div>
+            </div>
+          </AmbientThemeProvider>
+        </ThemeProvider>
       </body>
     </html>
   );
