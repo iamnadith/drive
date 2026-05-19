@@ -1703,7 +1703,7 @@ export default function AccountsPage() {
 
       <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
         <Card className="gap-0 py-0">
-          <CardHeader className="px-4 py-3 pb-1.5 lg:px-3 lg:py-1 lg:pb-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
             <CardDescription className="text-[13px] leading-4">
               Total Accounts
             </CardDescription>
@@ -1711,14 +1711,14 @@ export default function AccountsPage() {
               {accounts.length}
             </CardTitle>
           </CardHeader>
-          <CardContent className="px-4 pb-3 pt-0 lg:px-3 lg:pb-1">
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3">
             <p className="text-[11px] leading-4 text-muted-foreground">
               Saved accounts
             </p>
           </CardContent>
         </Card>
         <Card className="gap-0 py-0">
-          <CardHeader className="px-4 py-3 pb-1.5 lg:px-3 lg:py-1 lg:pb-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
             <CardDescription className="text-[13px] leading-4">
               Active
             </CardDescription>
@@ -1726,7 +1726,7 @@ export default function AccountsPage() {
               {activeAccount ? 1 : 0}
             </CardTitle>
           </CardHeader>
-          <CardContent className="px-4 pb-3 pt-0 lg:px-3 lg:pb-1">
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3">
             <p className="text-[11px] leading-4 text-muted-foreground">
               {activeAccount
                 ? activeAccount.name
@@ -1735,7 +1735,7 @@ export default function AccountsPage() {
           </CardContent>
         </Card>
         <Card className="gap-0 py-0">
-          <CardHeader className="px-4 py-3 pb-1.5 lg:px-3 lg:py-1 lg:pb-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
             <CardDescription className="text-[13px] leading-4">
               Available
             </CardDescription>
@@ -1743,14 +1743,14 @@ export default function AccountsPage() {
               {availableCount}
             </CardTitle>
           </CardHeader>
-          <CardContent className="px-4 pb-3 pt-0 lg:px-3 lg:pb-1">
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3">
             <p className="text-[11px] leading-4 text-muted-foreground">
               Ready accounts
             </p>
           </CardContent>
         </Card>
         <Card className="gap-0 py-0">
-          <CardHeader className="px-4 py-3 pb-1.5 lg:px-3 lg:py-1 lg:pb-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
             <CardDescription className="text-[13px] leading-4">
               Sync Issues
             </CardDescription>
@@ -1758,7 +1758,7 @@ export default function AccountsPage() {
               {syncErrorCount + pendingSyncCount}
             </CardTitle>
           </CardHeader>
-          <CardContent className="px-4 pb-3 pt-0 lg:px-3 lg:pb-1">
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3">
             <p className="text-[11px] leading-4 text-muted-foreground">
               {syncErrorCount} errors, {pendingSyncCount} pending sync
             </p>
@@ -3049,9 +3049,11 @@ export default function AccountsPage() {
           </DialogContent>
         </Dialog>
       )}
-      <Card className="overflow-hidden !gap-0 !py-0 sm:!py-0 md:!py-0">
-        <div className="overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:thin]">
-          <Table className="min-w-[900px] w-full">
+      <Card className="overflow-hidden gap-0 sm:gap-0 md:gap-0">
+        <Table
+          className="min-w-[900px] w-full"
+          containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full [-ms-overflow-style:none] [scrollbar-width:thin]"
+        >
             <TableHeader>
               {table.getHeaderGroups().map((headerGroup) => (
                   <TableRow key={headerGroup.id} className="h-9 border-b">
@@ -3128,8 +3130,7 @@ export default function AccountsPage() {
                 )}
               </TableBody>
               </Table>
-            </div>
-        <div className="border-t px-3 py-2 text-xs text-muted-foreground">
+        <div className="border-t px-3 py-2 text-xs text-muted-foreground max-sm:-mb-2">
           <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
             <button
               type="button"

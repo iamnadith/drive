@@ -207,11 +207,11 @@ function SummaryCard({
 }) {
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2 lg:px-5 lg:pt-5">
         <CardTitle className="text-sm font-medium">{title}</CardTitle>
         <Icon className={`h-4 w-4 ${warning ? "text-amber-500" : "text-muted-foreground"}`} />
       </CardHeader>
-      <CardContent>
+      <CardContent className="lg:px-5 lg:pb-5">
         <div className="text-2xl font-semibold tracking-tight tabular-nums">{value}</div>
         <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
       </CardContent>

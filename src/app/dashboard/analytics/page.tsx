@@ -419,11 +419,11 @@ function KpiCard({
         : "text-muted-foreground"
   return (
     <Card className="gap-0 py-0">
-      <CardHeader className="flex flex-row items-start justify-between gap-3 px-4 py-3 pb-1.5 lg:px-3 lg:py-1 lg:pb-0">
+      <CardHeader className="flex flex-row items-start justify-between gap-3 px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
         <CardTitle className="text-[13px] font-medium leading-4">{title}</CardTitle>
         <Icon className={`h-4 w-4 shrink-0 ${iconClass}`} />
       </CardHeader>
-      <CardContent className="px-4 pb-3 pt-0 lg:px-3 lg:pb-1">
+      <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3">
         <div className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{value}</div>
         <p className="mt-1 text-[11px] leading-4 text-muted-foreground">{detail}</p>
       </CardContent>
