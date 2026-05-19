@@ -74,7 +74,11 @@ function OverviewMetricCardsSkeleton() {
   return (
     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
       {Array.from({ length: 4 }).map((_, index) => (
-        <Card key={index}>
+        <Card
+          key={index}
+          className="dashboard-motion-item"
+          style={{ ["--dashboard-motion-delay" as string]: `${130 + index * 55}ms` }}
+        >
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <Skeleton className="h-4 w-24" />
             <Skeleton className="h-4 w-4 rounded-md" />
@@ -108,8 +112,11 @@ function OverviewUsageChartSkeleton() {
             {Array.from({ length: 12 }).map((_, index) => (
               <Skeleton
                 key={index}
-                className="w-full rounded-full"
-                style={{ height: `${24 + ((index * 9) % 54)}%` }}
+                className="dashboard-motion-item w-full rounded-full"
+                style={{
+                  ["--dashboard-motion-delay" as string]: `${220 + index * 35}ms`,
+                  height: `${24 + ((index * 9) % 54)}%`,
+                }}
               />
             ))}
           </div>
@@ -134,7 +141,11 @@ function OverviewRecentActivitySkeleton({ rows = 4 }: { rows?: number }) {
       <CardContent className="p-0">
         <ul className="divide-y">
           {Array.from({ length: rows }).map((_, index) => (
-            <li key={index} className="md:py-3 md:first:pt-0 md:last:pb-0">
+            <li
+              key={index}
+              className="dashboard-motion-item md:py-3 md:first:pt-0 md:last:pb-0"
+              style={{ ["--dashboard-motion-delay" as string]: `${260 + index * 55}ms` }}
+            >
               <div className="px-4 py-2.5 md:px-4 md:py-0">
                 <div className="grid gap-2.5 md:grid-cols-[144px_minmax(0,1fr)_auto] md:items-center md:gap-4">
                   <div className="flex items-center justify-between gap-3 md:block md:self-stretch md:border-r md:border-border/60 md:pr-4">
@@ -190,7 +201,11 @@ function AnalyticsMetricCardsSkeleton() {
   return (
     <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
       {Array.from({ length: 8 }).map((_, index) => (
-        <Card key={index} className="gap-0 py-0">
+        <Card
+          key={index}
+          className="dashboard-motion-item gap-0 py-0"
+          style={{ ["--dashboard-motion-delay" as string]: `${130 + index * 50}ms` }}
+        >
           <CardHeader className="flex flex-row items-start justify-between gap-3 px-4 py-3 pb-1.5 lg:px-3 lg:py-1 lg:pb-0">
             <Skeleton className="h-4 w-24" />
             <Skeleton className="h-4 w-4 rounded-md" />
@@ -246,8 +261,11 @@ function ChartCardSkeleton({
             {Array.from({ length: 12 }).map((_, index) => (
               <Skeleton
                 key={index}
-                className="w-full rounded-full"
-                style={{ height: `${28 + ((index * 11) % 50)}%` }}
+                className="dashboard-motion-item w-full rounded-full"
+                style={{
+                  ["--dashboard-motion-delay" as string]: `${240 + index * 35}ms`,
+                  height: `${28 + ((index * 11) % 50)}%`,
+                }}
               />
             ))}
           </div>
@@ -310,7 +328,8 @@ function BucketsListSkeleton({ rows = 7 }: { rows?: number }) {
         {Array.from({ length: rows }).map((_, index) => (
           <div
             key={index}
-            className="rounded-xl border px-3 py-2 md:grid md:grid-cols-[minmax(0,1fr)_auto_auto_auto] md:items-center md:gap-2"
+            className="dashboard-motion-item rounded-xl border px-3 py-2 md:grid md:grid-cols-[minmax(0,1fr)_auto_auto_auto] md:items-center md:gap-2"
+            style={{ ["--dashboard-motion-delay" as string]: `${250 + index * 45}ms` }}
           >
             <div className="grid gap-1.5 md:hidden">
               <div className="min-w-0 space-y-1.5 pr-6">
@@ -357,7 +376,7 @@ function BucketsListSkeleton({ rows = 7 }: { rows?: number }) {
 
 function HealthPanelSkeleton() {
   return (
-    <Card>
+    <Card className="dashboard-motion-item" style={{ ["--dashboard-motion-delay" as string]: "330ms" }}>
       <CardHeader className="gap-1 pb-2 md:px-4">
         <Skeleton className="h-5 w-28" />
         <Skeleton className="h-4 w-72" />
@@ -386,7 +405,7 @@ function HealthPanelSkeleton() {
 
 function AttentionPanelSkeleton() {
   return (
-    <Card>
+    <Card className="dashboard-motion-item" style={{ ["--dashboard-motion-delay" as string]: "390ms" }}>
       <CardHeader className="gap-1 pb-2 md:px-4">
         <Skeleton className="h-5 w-32" />
         <Skeleton className="h-4 w-64" />
@@ -441,26 +460,40 @@ function TableRowsSkeleton({
 
 function DashboardOverviewSkeleton() {
   return (
-    <DashboardPage>
-      <OverviewHeaderSkeleton />
-      <OverviewMetricCardsSkeleton />
-      <OverviewUsageChartSkeleton />
-      <OverviewRecentActivitySkeleton rows={4} />
+    <DashboardPage className="dashboard-motion-stage space-y-6">
+      <div className="dashboard-motion-item">
+        <OverviewHeaderSkeleton />
+      </div>
+      <div className="dashboard-motion-item dashboard-motion-delay-1">
+        <OverviewMetricCardsSkeleton />
+      </div>
+      <div className="dashboard-motion-item dashboard-motion-delay-2">
+        <OverviewUsageChartSkeleton />
+      </div>
+      <div className="dashboard-motion-item dashboard-motion-delay-3">
+        <OverviewRecentActivitySkeleton rows={4} />
+      </div>
     </DashboardPage>
   )
 }
 
 function DashboardAnalyticsSkeleton() {
   return (
-    <DashboardPage>
-      <AnalyticsHeaderSkeleton />
-      <AnalyticsMetricCardsSkeleton />
-      <div className="grid gap-3 xl:grid-cols-2">
+    <DashboardPage className="dashboard-motion-stage space-y-4 md:space-y-5">
+      <div className="dashboard-motion-item">
+        <AnalyticsHeaderSkeleton />
+      </div>
+      <div className="dashboard-motion-item dashboard-motion-delay-1">
+        <AnalyticsMetricCardsSkeleton />
+      </div>
+      <div className="dashboard-motion-item dashboard-motion-delay-2 grid gap-3 xl:grid-cols-2">
         <ChartCardSkeleton chartHeight="h-[252px] sm:h-[272px]" />
         <ChartCardSkeleton chartHeight="h-[240px] sm:h-[260px]" />
       </div>
-      <ChartCardSkeleton chartHeight="h-[240px] sm:h-[260px]" rangeWidth="w-32" />
-      <div className="grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)] xl:items-start">
+      <div className="dashboard-motion-item dashboard-motion-delay-3">
+        <ChartCardSkeleton chartHeight="h-[240px] sm:h-[260px]" rangeWidth="w-32" />
+      </div>
+      <div className="dashboard-motion-item dashboard-motion-delay-4 grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)] xl:items-start">
         <BucketsListSkeleton rows={7} />
         <div className="space-y-3 xl:sticky xl:top-4 xl:self-start">
           <HealthPanelSkeleton />

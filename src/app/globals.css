@@ -500,6 +500,36 @@
     --dashboard-motion-delay: 410ms;
   }
 
+  .dashboard-loading-stage {
+    --dashboard-loading-distance: 8px;
+    --dashboard-loading-duration: 760ms;
+    --dashboard-loading-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .dashboard-loading-item {
+    opacity: 0;
+    transform: translate3d(0, var(--dashboard-loading-distance), 0) scale(0.998);
+    animation: dashboard-loading-enter var(--dashboard-loading-duration) var(--dashboard-loading-ease) forwards;
+    animation-delay: var(--dashboard-loading-delay, 0ms);
+    will-change: transform, opacity;
+  }
+
+  .dashboard-loading-delay-1 {
+    --dashboard-loading-delay: 70ms;
+  }
+
+  .dashboard-loading-delay-2 {
+    --dashboard-loading-delay: 140ms;
+  }
+
+  .dashboard-loading-delay-3 {
+    --dashboard-loading-delay: 210ms;
+  }
+
+  .dashboard-loading-delay-4 {
+    --dashboard-loading-delay: 280ms;
+  }
+
   .sidebar-mobile-overlay {
     background: oklch(0.12 0 0 / 0.18);
     backdrop-filter: blur(3px);
@@ -562,14 +592,14 @@
 }
 
 @theme inline {
-  --animate-shimmer: shimmer 1.6s linear infinite;
+  --animate-shimmer: shimmer 2.25s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 
   @keyframes shimmer {
     0% {
-      background-position: 200% 0;
+      background-position: 180% 0;
     }
     100% {
-      background-position: -200% 0;
+      background-position: -140% 0;
     }
   }
 }
@@ -590,6 +620,22 @@
     opacity: 0;
     transform: translate3d(0, var(--dashboard-motion-distance, 12px), 0) scale(0.996);
     filter: blur(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes dashboard-loading-enter {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, var(--dashboard-loading-distance, 8px), 0) scale(0.998);
+    filter: blur(8px);
+  }
+  55% {
+    opacity: 0.78;
   }
   100% {
     opacity: 1;
