@@ -3049,7 +3049,7 @@ export default function AccountsPage() {
           </DialogContent>
         </Dialog>
       )}
-      <div className="overflow-hidden rounded-xl border bg-card shadow-sm">
+      <Card className="overflow-hidden !gap-0 !py-0 sm:!py-0 md:!py-0">
         <div className="overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:thin]">
           <Table className="min-w-[900px] w-full">
             <TableHeader>
@@ -3189,7 +3189,7 @@ export default function AccountsPage() {
             </button>
           </div>
         </div>
-      </div>
+      </Card>
       <div className="-mt-2 text-center text-xs text-muted-foreground">
         Page {totalRows ? currentPageIndex + 1 : 0} of{" "}
         {totalRows ? totalPages : 0}
