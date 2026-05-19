@@ -302,7 +302,7 @@ function UsageChart({ data }: { data: ReturnType<typeof withChartFields> }) {
   const chartData = React.useMemo(() => filterByRange(data, range), [data, range])
   return (
     <Card className="@container/card gap-0 py-0">
-      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-1 px-4 pt-4.5 pb-2 sm:px-6 md:gap-1.5 md:px-4 md:pt-2.5 md:pb-2">
+      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-1 px-4 pt-4.5 pb-2 sm:px-6 md:gap-1.5 md:px-4 md:pt-5 md:pb-2">
         <CardTitle className="text-base leading-none">Storage and Objects</CardTitle>
         <CardDescription className="text-[11px] leading-3.5 md:text-xs md:leading-4">Active account storage and object totals over time.</CardDescription>
         <RangeAction
@@ -341,7 +341,7 @@ function MigrationChart({ data }: { data: ReturnType<typeof withChartFields> }) 
   const chartData = React.useMemo(() => filterByRange(data, range), [data, range])
   return (
     <Card className="@container/card gap-0 py-0">
-      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-1 px-4 pt-4.5 pb-2 sm:px-6 md:gap-1.5 md:px-4 md:pt-2.5 md:pb-2">
+      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-1 px-4 pt-4.5 pb-2 sm:px-6 md:gap-1.5 md:px-4 md:pt-5 md:pb-2">
         <CardTitle className="text-base leading-none">Migration Activity</CardTitle>
         <CardDescription className="text-[11px] leading-3.5 md:text-xs md:leading-4">Created and completed migrations across the selected period.</CardDescription>
         <RangeAction value={range} onChange={setRange} className="col-start-2 row-start-1 row-span-2 mt-0 self-start justify-self-end" />
@@ -367,7 +367,7 @@ function TransferChart({ data }: { data: ReturnType<typeof withChartFields> }) {
   const chartData = React.useMemo(() => filterByRange(data, range), [data, range])
   return (
     <Card className="@container/card gap-0 py-0">
-      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-1 px-4 pt-4.5 pb-2 sm:px-6 md:gap-1.5 md:px-4 md:pt-2.5 md:pb-2">
+      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-1 px-4 pt-4.5 pb-2 sm:px-6 md:gap-1.5 md:px-4 md:pt-5 md:pb-2">
         <CardTitle className="text-base leading-none">Transfer Health</CardTitle>
         <CardDescription className="text-[11px] leading-3.5 md:text-xs md:leading-4">Transferred objects, failures, and verification issues from migration progress.</CardDescription>
         <RangeAction value={range} onChange={setRange} className="col-start-2 row-start-1 row-span-2 mt-0 self-start justify-self-end" />
@@ -514,7 +514,7 @@ export default function DashboardPage() {
 
       {metrics ? (
         <>
-          <div className="dashboard-motion-item grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="dashboard-motion-item grid grid-cols-2 gap-3 md:grid-cols-2 xl:grid-cols-4">
             <KpiCard title="Active Storage" value={formatBytes(metrics.storageBytes)} detail={`${formatNumber(metrics.buckets)} active account buckets`} icon={HardDrive} />
             <KpiCard title="Active Objects" value={formatCompact(metrics.objects)} detail={`${formatNumber(metrics.objects)} active account objects`} icon={Database} />
             <KpiCard title="Accounts" value={`${metrics.activeAccounts}/${metrics.accounts}`} detail={`${syncHealth?.unsyncedAccounts ?? 0} unsynced, ${syncHealth?.accountSyncErrors ?? 0} errors`} icon={Server} />

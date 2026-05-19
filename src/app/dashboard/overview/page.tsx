@@ -207,13 +207,13 @@ function SummaryCard({
 }) {
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2 lg:px-5 lg:pt-5">
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-0 max-sm:px-3 max-sm:pt-1.5 lg:px-5 lg:pt-5">
         <CardTitle className="text-sm font-medium">{title}</CardTitle>
         <Icon className={`h-4 w-4 ${warning ? "text-amber-500" : "text-muted-foreground"}`} />
       </CardHeader>
-      <CardContent className="lg:px-5 lg:pb-5">
-        <div className="text-2xl font-semibold tracking-tight tabular-nums">{value}</div>
-        <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
+      <CardContent className="max-sm:px-3 max-sm:pb-1.5 lg:px-5 lg:pb-5">
+        <div className="text-2xl font-semibold tracking-tight tabular-nums max-sm:text-[1.25rem]">{value}</div>
+        <p className="mt-0 text-[11px] text-muted-foreground">{detail}</p>
       </CardContent>
     </Card>
   )
@@ -493,7 +493,7 @@ export default function OverviewPage() {
 
       {metrics ? (
         <>
-          <div className="dashboard-motion-item dashboard-motion-delay-1 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <SummaryCard
               title="Active Storage"
               value={formatBytes(metrics.storageBytes)}

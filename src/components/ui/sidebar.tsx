@@ -462,7 +462,7 @@ function SidebarMenu({ className, ...props }: React.ComponentProps<"ul">) {
     <ul
       data-slot="sidebar-menu"
       data-sidebar="menu"
-      className={cn("flex w-full min-w-0 flex-col gap-1", className)}
+      className={cn("flex w-full min-w-0 flex-col gap-1 md:gap-1.5", className)}
       {...props}
     />
   )
@@ -480,7 +480,7 @@ function SidebarMenuItem({ className, ...props }: React.ComponentProps<"li">) {
 }
 
 const sidebarMenuButtonVariants = cva(
-  "peer/menu-button flex w-full items-center gap-2 overflow-hidden rounded-md p-2 text-left text-sm outline-hidden ring-sidebar-ring transition-[width,height,padding,background-color,color] data-[active=false]:hover:bg-black/6 data-[active=false]:hover:text-sidebar-foreground focus-visible:ring-2 data-[active=false]:active:bg-black/10 data-[active=false]:active:text-sidebar-foreground disabled:pointer-events-none disabled:opacity-50 group-has-data-[sidebar=menu-action]/menu-item:pr-8 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-sidebar-primary data-[active=true]:font-medium data-[active=true]:text-sidebar-primary-foreground data-[active=true]:shadow-sm data-[active=true]:hover:bg-sidebar-primary data-[active=true]:hover:text-sidebar-primary-foreground data-[active=true]:active:bg-sidebar-primary data-[active=true]:active:text-sidebar-primary-foreground data-[state=open]:hover:bg-black/6 data-[state=open]:hover:text-sidebar-foreground dark:data-[active=false]:hover:bg-white/10 dark:data-[active=false]:hover:text-sidebar-foreground dark:data-[active=false]:active:bg-white/14 dark:data-[active=false]:active:text-sidebar-foreground dark:data-[active=true]:hover:bg-sidebar-primary dark:data-[active=true]:hover:text-sidebar-primary-foreground dark:data-[active=true]:active:bg-sidebar-primary dark:data-[active=true]:active:text-sidebar-primary-foreground dark:data-[state=open]:hover:bg-white/10 dark:data-[state=open]:hover:text-sidebar-foreground group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0",
+  "peer/menu-button flex w-full items-center gap-2 overflow-hidden rounded-md px-2 py-1.5 text-left text-sm outline-hidden ring-sidebar-ring transition-[width,height,padding,background-color,color] data-[active=false]:hover:bg-black/6 data-[active=false]:hover:text-sidebar-foreground focus-visible:ring-2 data-[active=false]:active:bg-black/10 data-[active=false]:active:text-sidebar-foreground disabled:pointer-events-none disabled:opacity-50 group-has-data-[sidebar=menu-action]/menu-item:pr-8 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-sidebar-primary data-[active=true]:font-medium data-[active=true]:text-sidebar-primary-foreground data-[active=true]:hover:bg-sidebar-primary data-[active=true]:hover:text-sidebar-primary-foreground data-[active=true]:active:bg-sidebar-primary data-[active=true]:active:text-sidebar-primary-foreground data-[state=open]:hover:bg-black/6 data-[state=open]:hover:text-sidebar-foreground dark:data-[active=false]:hover:bg-white/10 dark:data-[active=false]:hover:text-sidebar-foreground dark:data-[active=false]:active:bg-white/14 dark:data-[active=false]:active:text-sidebar-foreground dark:data-[active=true]:hover:bg-sidebar-primary dark:data-[active=true]:hover:text-sidebar-primary-foreground dark:data-[active=true]:active:bg-sidebar-primary dark:data-[active=true]:active:text-sidebar-primary-foreground dark:data-[state=open]:hover:bg-white/10 dark:data-[state=open]:hover:text-sidebar-foreground group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0",
   {
     variants: {
       variant: {
@@ -489,7 +489,7 @@ const sidebarMenuButtonVariants = cva(
           "bg-background shadow-[0_0_0_1px_hsl(var(--sidebar-border))] hover:bg-black/6 hover:text-sidebar-foreground dark:hover:bg-white/10 dark:hover:text-sidebar-foreground",
       },
       size: {
-        default: "h-8 text-sm",
+        default: "h-7.5 text-sm",
         sm: "h-7 text-xs",
         lg: "h-12 text-sm group-data-[collapsible=icon]:p-0!",
       },
