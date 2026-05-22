@@ -37,16 +37,38 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`Request timed out after ${timeoutMs}ms`))
+    }, timeoutMs)
+    promise
+      .then((value) => {
+        clearTimeout(timeout)
+        resolve(value)
+      })
+      .catch((error) => {
+        clearTimeout(timeout)
+        reject(error)
+      })
+  })
+}
+
 async function headUploadedObjectWithRetry(
   config: Parameters<typeof r2HeadObject>[0],
   bucketName: string,
   key: string,
 ) {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const head = await r2HeadObject(config, bucketName, key).catch(() => null)
+  const attempts = 3
+  const headTimeoutMs = 1500
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const head = await withTimeout(
+      r2HeadObject(config, bucketName, key),
+      headTimeoutMs
+    ).catch(() => null)
     if (head) return head
-    if (attempt < 7) {
-      await sleep(250 * (attempt + 1))
+    if (attempt < attempts - 1) {
+      await sleep(150 * (attempt + 1))
     }
   }
   return null
