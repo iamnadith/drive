@@ -320,8 +320,12 @@ export function sanitizeBucketName(name: string) {
   return base || "project"
 }
 
+let projectSchemaReady: Promise<void> | undefined;
+
 export async function ensureProjectSchema() {
   if (!isPostgresConfigured()) return
+
+  projectSchemaReady ??= (async () => {
 
   await queryDb(`create extension if not exists pgcrypto;`)
   await queryDb(`
@@ -560,6 +564,12 @@ export async function ensureProjectSchema() {
   await queryDb(`create index if not exists drive_project_file_links_file_idx on drive_project_file_links (file_id);`)
   await queryDb(`create index if not exists drive_project_file_links_project_idx on drive_project_file_links (project_id, object_key);`)
   await queryDb(`create index if not exists drive_project_file_links_active_idx on drive_project_file_links (mode, revoked_at, expires_at);`)
+  })().catch((error) => {
+    projectSchemaReady = undefined
+    throw error
+  })
+
+  return projectSchemaReady
 }
 
 export async function listProjects(): Promise<Project[]> {

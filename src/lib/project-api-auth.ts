@@ -13,6 +13,9 @@ declare global {
   var __driveProjectActiveAccountCache:
     | { expiresAt: number; account: CloudflareAccount | null }
     | undefined
+  var __driveProjectBucketAssignmentCache:
+    | Map<string, { expiresAt: number; bucketNames: string[] }>
+    | undefined
   var __driveProjectBucketAvailabilityCache:
     | Map<string, { expiresAt: number; ok: boolean }>
     | undefined
@@ -92,6 +95,13 @@ function getBucketCache() {
   return global.__driveProjectBucketAvailabilityCache
 }
 
+function getProjectBucketAssignmentCache() {
+  if (!global.__driveProjectBucketAssignmentCache) {
+    global.__driveProjectBucketAssignmentCache = new Map()
+  }
+  return global.__driveProjectBucketAssignmentCache
+}
+
 function getRateLimitCache() {
   if (!global.__driveProjectRateLimitCache) {
     global.__driveProjectRateLimitCache = new Map()
@@ -108,8 +118,8 @@ function clientIp(request: Request) {
 }
 
 function enforceProjectRateLimit(request: Request, apiKeyId: string, projectId: string) {
-  const parsedLimit = Number(process.env.PROJECT_API_RATE_LIMIT_PER_MINUTE ?? 600)
-  const limit = Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : 600)
+  const parsedLimit = Number(process.env.PROJECT_API_RATE_LIMIT_PER_MINUTE ?? 3000)
+  const limit = Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : 3000)
   const windowMs = 60_000
   const key = `${apiKeyId}:${projectId}:${clientIp(request)}`
   const cache = getRateLimitCache()
@@ -153,8 +163,24 @@ export async function resolveProjectBucketName(
     }
   }
 
-  const assignedBuckets = await listProjectBuckets(project.id)
-  const isAssigned = assignedBuckets.some((bucket) => bucket.bucketName === selectedBucketName)
+  if (selectedBucketName === project.bucketName) {
+    return { bucketName: selectedBucketName }
+  }
+
+  const cache = getProjectBucketAssignmentCache()
+  const cacheKey = project.id
+  const cached = cache.get(cacheKey)
+  const bucketNames = cached && cached.expiresAt > Date.now()
+    ? cached.bucketNames
+    : await listProjectBuckets(project.id).then(assignments => {
+      const nextBucketNames = assignments.map(bucket => bucket.bucketName)
+      cache.set(cacheKey, {
+        bucketNames: nextBucketNames,
+        expiresAt: Date.now() + cacheTtlMs("PROJECT_BUCKET_ASSIGNMENT_CACHE_TTL_SECONDS", 60),
+      })
+      return nextBucketNames
+    })
+  const isAssigned = bucketNames.some((bucketName) => bucketName === selectedBucketName)
   if (!isAssigned) {
     return {
       response: NextResponse.json(
