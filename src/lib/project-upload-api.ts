@@ -37,6 +37,10 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+const HEAD_UPLOAD_RETRY_ATTEMPTS = 10
+const HEAD_UPLOAD_TIMEOUT_MS = 4_000
+const HEAD_UPLOAD_RETRY_MAX_DELAY_MS = 3_000
+
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -59,16 +63,19 @@ async function headUploadedObjectWithRetry(
   bucketName: string,
   key: string,
 ) {
-  const attempts = 3
-  const headTimeoutMs = 1500
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
+  for (let attempt = 0; attempt < HEAD_UPLOAD_RETRY_ATTEMPTS; attempt += 1) {
     const head = await withTimeout(
       r2HeadObject(config, bucketName, key),
-      headTimeoutMs
+      HEAD_UPLOAD_TIMEOUT_MS
     ).catch(() => null)
     if (head) return head
-    if (attempt < attempts - 1) {
-      await sleep(150 * (attempt + 1))
+    if (attempt < HEAD_UPLOAD_RETRY_ATTEMPTS - 1) {
+      await sleep(
+        Math.min(
+          HEAD_UPLOAD_RETRY_MAX_DELAY_MS,
+          300 * (attempt + 1)
+        )
+      )
     }
   }
   return null

@@ -15,6 +15,9 @@ import {
 } from "@/lib/project-operations-store"
 import { r2CopyObject, r2DeleteObject } from "@/lib/r2-s3"
 
+export const runtime = "nodejs"
+export const maxDuration = 300
+
 export async function PATCH(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {
     projectId?: unknown

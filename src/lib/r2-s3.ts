@@ -12,6 +12,7 @@ import {
   DeleteObjectsCommand,
   CreateMultipartUploadCommand,
   UploadPartCommand,
+  UploadPartCopyCommand,
   CompleteMultipartUploadCommand,
   AbortMultipartUploadCommand,
 } from "@aws-sdk/client-s3"
@@ -24,6 +25,12 @@ export interface R2ClientConfig {
   accessKeyId: string
   secretAccessKey: string
 }
+
+const SINGLE_COPY_SIZE_LIMIT_BYTES = 4.5 * 1024 * 1024 * 1024
+const MULTIPART_COPY_MIN_PART_SIZE_BYTES = 64 * 1024 * 1024
+const MULTIPART_COPY_PART_SIZE_ALIGNMENT_BYTES = 8 * 1024 * 1024
+const MULTIPART_COPY_MAX_PARTS = 10_000
+const MULTIPART_COPY_CONCURRENCY = 4
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -71,6 +78,29 @@ async function sendWithRetry<T>(operation: () => Promise<T>, attempts = 4): Prom
     }
   }
   throw lastError
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+function buildEncodedCopySource(bucket: string, key: string) {
+  return `${bucket}/${key}`
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/")
+}
+
+function alignPartSize(size: number) {
+  return Math.ceil(size / MULTIPART_COPY_PART_SIZE_ALIGNMENT_BYTES) *
+    MULTIPART_COPY_PART_SIZE_ALIGNMENT_BYTES
+}
+
+function getMultipartCopyPartSize(totalBytes: number) {
+  const minimumSizeNeeded = Math.ceil(totalBytes / MULTIPART_COPY_MAX_PARTS)
+  return alignPartSize(
+    Math.max(MULTIPART_COPY_MIN_PART_SIZE_BYTES, minimumSizeNeeded)
+  )
 }
 
 export function createR2Client({
@@ -228,21 +258,192 @@ export async function r2CopyObject(
   }
 ) {
   const client = createR2Client(config)
-  const encodedSource = `${bucket}/${sourceKey}`
-    .split("/")
-    .map((part) => encodeURIComponent(part))
-    .join("/")
-  return client.send(
-    new CopyObjectCommand({
-      Bucket: bucket,
-      CopySource: encodedSource,
-      Key: destinationKey,
-      ...(options?.ifMatch ? { CopySourceIfMatch: options.ifMatch } : {}),
-      ...(options?.metadata ? { Metadata: options.metadata } : {}),
-      ...(options?.contentType ? { ContentType: options.contentType } : {}),
-      ...(options?.metadataDirective ? { MetadataDirective: options.metadataDirective } : {}),
-    })
+  const encodedSource = buildEncodedCopySource(bucket, sourceKey)
+  const sourceHead = await sendWithRetry(
+    () => client.send(new HeadObjectCommand({ Bucket: bucket, Key: sourceKey }))
   )
+  const sourceSize = numberValue(sourceHead.ContentLength) ?? 0
+
+  const multipartCopy = async () => {
+    const metadataDirective = options?.metadataDirective ?? "COPY"
+    const upload = await sendWithRetry(() =>
+      client.send(
+        new CreateMultipartUploadCommand({
+          Bucket: bucket,
+          Key: destinationKey,
+          ...(metadataDirective === "REPLACE"
+            ? {
+                ...(options?.metadata ? { Metadata: options.metadata } : {}),
+                ...(options?.contentType ? { ContentType: options.contentType } : {}),
+              }
+            : {
+                ...(sourceHead.Metadata ? { Metadata: sourceHead.Metadata } : {}),
+                ...(options?.contentType || sourceHead.ContentType
+                  ? { ContentType: options?.contentType ?? sourceHead.ContentType }
+                  : {}),
+                ...(sourceHead.CacheControl
+                  ? { CacheControl: sourceHead.CacheControl }
+                  : {}),
+                ...(sourceHead.ContentDisposition
+                  ? { ContentDisposition: sourceHead.ContentDisposition }
+                  : {}),
+                ...(sourceHead.ContentEncoding
+                  ? { ContentEncoding: sourceHead.ContentEncoding }
+                  : {}),
+                ...(sourceHead.ContentLanguage
+                  ? { ContentLanguage: sourceHead.ContentLanguage }
+                  : {}),
+              }),
+        })
+      )
+    )
+    const uploadId = upload.UploadId
+    if (!uploadId) {
+      throw new Error(`Multipart copy did not return an uploadId for ${destinationKey}`)
+    }
+
+    const partSize = getMultipartCopyPartSize(sourceSize)
+    const partCount = Math.max(1, Math.ceil(sourceSize / partSize))
+    const parts = Array.from({ length: partCount }, (_, index) => {
+      const start = index * partSize
+      const end = Math.min(sourceSize - 1, start + partSize - 1)
+      return {
+        partNumber: index + 1,
+        range: `bytes=${start}-${end}`,
+      }
+    })
+    const completedParts: Array<{ partNumber: number; etag: string }> = []
+    let nextPartIndex = 0
+
+    const copyPartWorker = async () => {
+      while (nextPartIndex < parts.length) {
+        const currentPartIndex = nextPartIndex
+        nextPartIndex += 1
+        const currentPart = parts[currentPartIndex]
+        if (!currentPart) {
+          return
+        }
+
+        const copiedPart = await sendWithRetry(() =>
+          client.send(
+            new UploadPartCopyCommand({
+              Bucket: bucket,
+              Key: destinationKey,
+              UploadId: uploadId,
+              PartNumber: currentPart.partNumber,
+              CopySource: encodedSource,
+              CopySourceRange: currentPart.range,
+              ...(options?.ifMatch ? { CopySourceIfMatch: options.ifMatch } : {}),
+            })
+          )
+        )
+        const etag = copiedPart.CopyPartResult?.ETag
+        if (!etag) {
+          throw new Error(
+            `Multipart copy did not return an ETag for part ${currentPart.partNumber}`
+          )
+        }
+        completedParts[currentPartIndex] = {
+          partNumber: currentPart.partNumber,
+          etag,
+        }
+      }
+    }
+
+    try {
+      await Promise.all(
+        Array.from(
+          { length: Math.min(MULTIPART_COPY_CONCURRENCY, parts.length) },
+          () => copyPartWorker()
+        )
+      )
+      await sendWithRetry(() =>
+        client.send(
+          new CompleteMultipartUploadCommand({
+            Bucket: bucket,
+            Key: destinationKey,
+            UploadId: uploadId,
+            MultipartUpload: {
+              Parts: completedParts
+                .map((part) => ({
+                  PartNumber: part.partNumber,
+                  ETag: part.etag,
+                }))
+                .sort((a, b) => (a.PartNumber ?? 0) - (b.PartNumber ?? 0)),
+            },
+          })
+        )
+      )
+    } catch (error) {
+      const copiedHead = await client
+        .send(new HeadObjectCommand({ Bucket: bucket, Key: destinationKey }))
+        .catch(() => null)
+      if (
+        copiedHead &&
+        (numberValue(copiedHead.ContentLength) ?? -1) === sourceSize
+      ) {
+        return copiedHead
+      }
+      await client
+        .send(
+          new AbortMultipartUploadCommand({
+            Bucket: bucket,
+            Key: destinationKey,
+            UploadId: uploadId,
+          })
+        )
+        .catch(() => undefined)
+      throw error
+    }
+
+    const destinationHead = await sendWithRetry(() =>
+      client.send(new HeadObjectCommand({ Bucket: bucket, Key: destinationKey }))
+    )
+    const destinationSize = numberValue(destinationHead.ContentLength) ?? -1
+    if (destinationSize !== sourceSize) {
+      throw new Error(
+        `Size mismatch after multipart copy for ${destinationKey}: source=${sourceSize} destination=${destinationSize}`
+      )
+    }
+    return destinationHead
+  }
+
+  if (sourceSize > SINGLE_COPY_SIZE_LIMIT_BYTES) {
+    return multipartCopy()
+  }
+
+  try {
+    return await sendWithRetry(() =>
+      client.send(
+        new CopyObjectCommand({
+          Bucket: bucket,
+          CopySource: encodedSource,
+          Key: destinationKey,
+          ...(options?.ifMatch ? { CopySourceIfMatch: options.ifMatch } : {}),
+          ...(options?.metadata ? { Metadata: options.metadata } : {}),
+          ...(options?.contentType ? { ContentType: options.contentType } : {}),
+          ...(options?.metadataDirective
+            ? { MetadataDirective: options.metadataDirective }
+            : {}),
+        })
+      )
+    )
+  } catch (error) {
+    const message =
+      typeof error === "object" && error !== null && "message" in error
+        ? String((error as { message?: unknown }).message ?? "").toLowerCase()
+        : String(error ?? "").toLowerCase()
+    if (
+      sourceSize > 0 &&
+      (message.includes("entity too large") ||
+        message.includes("invalidrequest") ||
+        message.includes("copyobject") ||
+        message.includes("multipart"))
+    ) {
+      return multipartCopy()
+    }
+    throw error
+  }
 }
 
 export async function r2UpdateObjectMetadata(
@@ -407,7 +608,10 @@ export async function r2ListAllObjects(
   bucket: string,
   input?: { prefix?: string; maxObjects?: number }
 ): Promise<Array<{ key: string; size: number; lastModified?: string }>> {
-  const maxObjects = Math.max(1, Math.min(200_000, input?.maxObjects ?? 50_000))
+  const maxObjects = Math.max(
+    1,
+    Math.min(200_000, Math.floor(numberValue(input?.maxObjects) ?? 50_000))
+  )
   const objects: Array<{ key: string; size: number; lastModified?: string }> = []
 
   let continuationToken: string | undefined = undefined

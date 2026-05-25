@@ -4,6 +4,9 @@ import { buildProjectStorageObjectUrl } from "@/lib/project-storage-gateway"
 import { getProjectObjectInventoryByFileId, recordProjectApiEvent, syncTrackedBucketObject } from "@/lib/project-operations-store"
 import { r2CopyObject } from "@/lib/r2-s3"
 
+export const runtime = "nodejs"
+export const maxDuration = 300
+
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {
     projectId?: unknown
