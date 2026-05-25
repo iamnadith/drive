@@ -59,7 +59,7 @@ export async function POST(request: Request) {
     objectKey: fromKey,
     request,
     metadata: { toKey, ...(trackedObject?.fileId ? { fileId: trackedObject.fileId } : {}) },
-  })
+  }).catch(() => undefined)
 
   return NextResponse.json({
     ok: true,
