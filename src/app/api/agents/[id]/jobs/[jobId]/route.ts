@@ -105,13 +105,17 @@ export async function POST(
         : undefined
 
     const effectiveStatus = isTerminalRepairStatus(current.status) && !isTerminalRepairStatus(status) ? current.status : status
+    const activeWorkerUpdate = effectiveStatus === "pending" || effectiveStatus === "claimed" || effectiveStatus === "running"
+    const hasStaleOfflineMessage =
+      current.error === "Self-hosted worker is offline. Start the worker and run the job again." ||
+      current.summary === "Self-hosted worker went offline before the job completed"
 
     const updated = await updateRepairJob(jobId, {
       ...(effectiveStatus ? { status: effectiveStatus } : {}),
       ...(mergedProgress ? { progress: mergedProgress } : {}),
       ...(mergedResult ? { result: mergedResult } : {}),
-      ...(summary !== undefined ? { summary } : {}),
-      ...(errorMessage !== undefined ? { error: errorMessage } : {}),
+      ...(summary !== undefined ? { summary } : activeWorkerUpdate && hasStaleOfflineMessage ? { summary: null } : {}),
+      ...(errorMessage !== undefined ? { error: errorMessage } : activeWorkerUpdate && hasStaleOfflineMessage ? { error: null } : {}),
       lastHeartbeatAt: now,
       ...(effectiveStatus === "completed" || effectiveStatus === "failed" || effectiveStatus === "canceled" ? { completedAt: now } : {}),
     })

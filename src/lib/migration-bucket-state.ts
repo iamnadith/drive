@@ -355,6 +355,7 @@ export function getMergedBucketSnapshot(
 
   const slurper = readSlurperResult(progress)
   const repairResult = readRepairResultItemMetrics(repairResultItem)
+  const repairResultStatus = typeof repairResultItem?.status === "string" ? repairResultItem.status : undefined
   const verify = readVerifyState(progress)
   const latestRepairJobActive = isActiveRepairWorkerStatus(latestRepairJobStatus)
   const repairTargetsThisItem = Boolean(options?.repairAppliesToItem || !options?.latestRepairJobExists || !options?.latestRepairItemCount)
@@ -364,7 +365,7 @@ export function getMergedBucketSnapshot(
     !isActiveRepairWorkerStatus(repairState?.status) &&
     !repairResultItem
   const effectiveRepairStatus = getEffectiveRepairStatus({
-    repairWorkerStatus: canceledRepairWithoutResult ? (canceledRepairScanOnly ? undefined : "failed") : repairState?.status,
+    repairWorkerStatus: canceledRepairWithoutResult ? (canceledRepairScanOnly ? undefined : "failed") : repairResultStatus ?? repairState?.status,
     latestRepairJobStatus,
     repairAppliesToItem: repairTargetsThisItem,
     latestRepairJobExists: options?.latestRepairJobExists,

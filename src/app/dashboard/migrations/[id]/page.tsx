@@ -222,8 +222,11 @@ function readRepairTotals(job: RepairJob | null | undefined): {
 }
 
 function readRepairItems(job: RepairJob | null | undefined): Array<Record<string, unknown>> {
-  if (!job || !isRecord(job.result) || !Array.isArray(job.result.items)) return []
-  return job.result.items.filter(isRecord)
+  if (!job) return []
+  if (isRecord(job.result) && Array.isArray(job.result.items)) return job.result.items.filter(isRecord)
+  if (isRecord(job.progress) && Array.isArray(job.progress.itemProgress)) return job.progress.itemProgress.filter(isRecord)
+  if (isRecord(job.result) && Array.isArray(job.result.itemProgress)) return job.result.itemProgress.filter(isRecord)
+  return []
 }
 
 function getEffectiveSourceBytes(

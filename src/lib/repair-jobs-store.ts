@@ -417,7 +417,9 @@ export async function reconcileRepairJobs(input?: { jobId?: string; migrationId?
       if (input?.migrationId && job.migrationId !== input.migrationId) continue
 
       if (agent.provider === "self_hosted" || agent.provider === "local") {
-        const workerOnline = agent.status === "online" && isRecentIso(agent.lastHeartbeatAt, 60_000)
+        const workerOnline =
+          isRecentIso(job.lastHeartbeatAt, 90_000) ||
+          (agent.status === "online" && isRecentIso(agent.lastHeartbeatAt, 60_000))
         if (!workerOnline && isPastRepairJobGraceWindow(job)) {
           const now = new Date().toISOString()
           await updateRepairJob(job.id, {
