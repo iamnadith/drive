@@ -186,6 +186,18 @@ async function api(path, body, options = {}) {
 }
 
 async function heartbeat(extra = {}) {
+  const response = await api(
+    `/api/workers/${encodeURIComponent(AGENT_ID)}/heartbeat`,
+    {
+      token: AGENT_TOKEN,
+      host: os.hostname(),
+      version: "worker-v1",
+      capabilities: ["scan", "verify", "repair", "diagnostics"],
+      metadata: extra,
+    },
+    { timeoutMs: HEARTBEAT_TIMEOUT_MS, retries: HEARTBEAT_RETRIES }
+  )
+
   if (supabase) {
     await withTimeout(
       "supabase worker heartbeat",
@@ -202,17 +214,7 @@ async function heartbeat(extra = {}) {
         .eq("id", AGENT_ID)
     ).catch(() => undefined)
   }
-  return api(
-    `/api/workers/${encodeURIComponent(AGENT_ID)}/heartbeat`,
-    {
-      token: AGENT_TOKEN,
-      host: os.hostname(),
-      version: "worker-v1",
-      capabilities: ["scan", "verify", "repair", "diagnostics"],
-      metadata: extra,
-    },
-    { timeoutMs: HEARTBEAT_TIMEOUT_MS, retries: HEARTBEAT_RETRIES }
-  )
+  return response
 }
 
 async function claimJob() {

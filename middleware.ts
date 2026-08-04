@@ -26,9 +26,9 @@ const PUBLIC_API_PREFIXES = [
 ]
 
 const AGENT_TOKEN_API_PATTERNS = [
-  /^\/api\/agents\/[^/]+\/claim-job$/,
-  /^\/api\/agents\/[^/]+\/heartbeat$/,
-  /^\/api\/agents\/[^/]+\/jobs\/[^/]+$/,
+  /^\/api\/(?:agents|workers)\/[^/]+\/claim-job\/?$/,
+  /^\/api\/(?:agents|workers)\/[^/]+\/heartbeat\/?$/,
+  /^\/api\/(?:agents|workers)\/[^/]+\/jobs\/[^/]+\/?$/,
 ]
 
 function isProtectedInternalApi(pathname: string) {
