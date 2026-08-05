@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils"
 import { Spinner } from "@/components/ui/spinner"
 
 const buttonVariants = cva(
-  "inline-flex max-w-full shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
+  "inline-flex max-w-full shrink-0 select-none caret-transparent items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
   {
     variants: {
       variant: {
@@ -90,8 +90,14 @@ function Button({
       onClick={handleClick}
       disabled={isLoading || disabled}
     >
-      {isLoading ? <Spinner className="size-4" /> : null}
-      {children}
+      {isLoading ? (
+        <>
+          <Spinner className="size-4" />
+          <span className="contents [&>svg]:hidden [&>[role=status]]:hidden">{children}</span>
+        </>
+      ) : (
+        children
+      )}
     </Comp>
   )
 }

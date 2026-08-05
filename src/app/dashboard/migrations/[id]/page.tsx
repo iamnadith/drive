@@ -4,6 +4,7 @@ import * as React from "react"
 import { useParams, useRouter } from "next/navigation"
 import {
   AlertCircle,
+  CalendarDays,
   CheckCircle2,
   CircleX,
   Clock,
@@ -1677,7 +1678,7 @@ export default function MigrationDetailsPage() {
         </div>
         <div className="flex items-center gap-2">
           <Button variant="destructive" onClick={() => setDeleteOpen(true)} disabled={Boolean(busyAction)}>
-            {busyAction === "delete" ? <Spinner className="mr-0" /> : <Trash2 className="h-4 w-4 mr-0" />}
+            <Trash2 className="h-4 w-4 mr-0" />
             Delete
           </Button>
         </div>
@@ -1699,24 +1700,38 @@ export default function MigrationDetailsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid gap-px overflow-hidden rounded-md border bg-border sm:grid-cols-2 lg:grid-cols-4">
-            <div className="bg-background px-3 py-2.5">
-              <div className="text-xs text-muted-foreground">Created</div>
-              <div className="mt-1 text-sm font-medium">{formatDate(migration.createdAt)}</div>
+          <dl className="grid gap-y-4 border-y py-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:border-r lg:first:pl-0">
+              <CalendarDays className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0">
+                <dt className="text-xs font-medium text-muted-foreground">Created</dt>
+                <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatDate(migration.createdAt)}</dd>
+              </div>
             </div>
-            <div className="bg-background px-3 py-2.5">
-              <div className="text-xs text-muted-foreground">Started</div>
-              <div className="mt-1 text-sm font-medium">{formatDate(migration.startedAt)}</div>
+            <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:border-r">
+              <Clock className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0">
+                <dt className="text-xs font-medium text-muted-foreground">Started</dt>
+                <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatDate(migration.startedAt)}</dd>
+              </div>
             </div>
-            <div className="bg-background px-3 py-2.5">
-              <div className="text-xs text-muted-foreground">Completed</div>
-              <div className="mt-1 text-sm font-medium">{formatDate(migration.completedAt)}</div>
+            <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:border-r">
+              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0">
+                <dt className="text-xs font-medium text-muted-foreground">Completed</dt>
+                <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatDate(migration.completedAt)}</dd>
+              </div>
             </div>
-            <div className="bg-background px-3 py-2.5">
-              <div className="text-xs text-muted-foreground">Last saved</div>
-              <div className="mt-1 text-sm font-medium">{formatDate(migration.lastSyncedAt || migration.completedAt || migration.createdAt)}</div>
+            <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:pr-0">
+              <RefreshCw className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0">
+                <dt className="text-xs font-medium text-muted-foreground">Last saved</dt>
+                <dd className="mt-1 truncate text-sm font-medium tabular-nums">
+                  {formatDate(migration.lastSyncedAt || migration.completedAt || migration.createdAt)}
+                </dd>
+              </div>
             </div>
-          </div>
+          </dl>
 
           {missingHistoricalDetails ? (
             <div className="flex gap-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-sm">
@@ -1816,25 +1831,24 @@ export default function MigrationDetailsPage() {
                         void startMigration()
                       }
                     }}
+                    loading={busyAction === "start" || busyAction === "retry_migration"}
                     disabled={Boolean(busyAction) || (effectiveMigrationStatus !== "draft" && effectiveMigrationStatus !== "failed")}
                     variant={effectiveMigrationStatus === "draft" || effectiveMigrationStatus === "failed" ? "default" : "secondary"}
                   >
-                    {busyAction === "start" || busyAction === "retry_migration" ? (
-                      <Spinner className="mr-0" />
-                    ) : (
+                    {busyAction !== "start" && busyAction !== "retry_migration" ? (
                       <Play className="h-4 w-4 mr-0" />
-                    )}
+                    ) : null}
                     {effectiveMigrationStatus === "failed" ? "Retry" : "Start"}
                   </Button>
 
-                  <Button onClick={syncNow} disabled={Boolean(busyAction)} variant="outline">
-                    {busyAction === "sync" ? <Spinner className="mr-0" /> : <RefreshCw className="h-4 w-4 mr-0" />}
+                  <Button onClick={syncNow} loading={busyAction === "sync"} disabled={Boolean(busyAction)} variant="outline">
+                    {busyAction !== "sync" ? <RefreshCw className="h-4 w-4 mr-0" /> : null}
                     Sync now
                   </Button>
 
                   {settingsSyncFailed ? (
-                    <Button onClick={() => void runMigrationAction("settings_sync")} disabled={Boolean(busyAction)} variant="outline">
-                      {busyAction === "settings_sync" ? <Spinner className="mr-0" /> : <ShieldCheck className="h-4 w-4 mr-0" />}
+                    <Button onClick={() => void runMigrationAction("settings_sync")} loading={busyAction === "settings_sync"} disabled={Boolean(busyAction)} variant="outline">
+                      {busyAction !== "settings_sync" ? <ShieldCheck className="h-4 w-4 mr-0" /> : null}
                       Settings sync
                     </Button>
                   ) : null}
@@ -1865,10 +1879,11 @@ export default function MigrationDetailsPage() {
                   {!allBucketsTerminal && anyRunning ? (
                     <Button
                       onClick={() => void runMigrationAction("pause_all")}
+                      loading={busyAction === "pause_all"}
                       disabled={Boolean(busyAction)}
                       variant="outline"
                     >
-                      {busyAction === "pause_all" ? <Spinner className="mr-0" /> : <Pause className="h-4 w-4 mr-0" />}
+                      {busyAction !== "pause_all" ? <Pause className="h-4 w-4 mr-0" /> : null}
                       Pause
                     </Button>
                   ) : null}
@@ -1876,10 +1891,11 @@ export default function MigrationDetailsPage() {
                   {!allBucketsTerminal && anyPaused ? (
                     <Button
                       onClick={() => void runMigrationAction("resume_all")}
+                      loading={busyAction === "resume_all"}
                       disabled={Boolean(busyAction)}
                       variant="outline"
                     >
-                      {busyAction === "resume_all" ? <Spinner className="mr-0" /> : <Play className="h-4 w-4 mr-0" />}
+                      {busyAction !== "resume_all" ? <Play className="h-4 w-4 mr-0" /> : null}
                       Resume
                     </Button>
                   ) : null}
@@ -1887,10 +1903,11 @@ export default function MigrationDetailsPage() {
                   {showCancel ? (
                     <Button
                       onClick={() => void runMigrationAction("cancel_migration")}
+                      loading={busyAction === "cancel_migration"}
                       disabled={Boolean(busyAction)}
                       variant="destructive"
                     >
-                      {busyAction === "cancel_migration" ? <Spinner className="mr-0" /> : <CircleX className="h-4 w-4 mr-0" />}
+                      {busyAction !== "cancel_migration" ? <CircleX className="h-4 w-4 mr-0" /> : null}
                       Cancel
                     </Button>
                   ) : null}
@@ -1898,10 +1915,11 @@ export default function MigrationDetailsPage() {
                   {showMarkCompleted ? (
                     <Button
                       onClick={() => setManualCompleteOpen(true)}
+                      loading={busyAction === "mark_completed"}
                       disabled={Boolean(busyAction)}
                       variant="secondary"
                     >
-                      {busyAction === "mark_completed" ? <Spinner className="mr-0" /> : <CheckCircle2 className="h-4 w-4 mr-0" />}
+                      {busyAction !== "mark_completed" ? <CheckCircle2 className="h-4 w-4 mr-0" /> : null}
                       Mark completed
                     </Button>
                   ) : null}
@@ -1953,10 +1971,11 @@ export default function MigrationDetailsPage() {
                         {!["completed", "failed", "canceled"].includes(job.status) ? (
                           <Button
                             variant="outline"
+                            loading={abortingRepairJobId === job.id}
                             disabled={abortingRepairJobId === job.id}
                             onClick={() => void abortRepairJob(job.id)}
                           >
-                            {abortingRepairJobId === job.id ? <Spinner className="mr-0" /> : <Square className="h-4 w-4 mr-0" />}
+                            {abortingRepairJobId !== job.id ? <Square className="h-4 w-4 mr-0" /> : null}
                             Abort
                           </Button>
                         ) : null}
@@ -2135,6 +2154,7 @@ export default function MigrationDetailsPage() {
                           <Button
                             size="icon-sm"
                             variant="outline"
+                            loading={itemBusy === "verify"}
                             title={verifyStatus === null ? "Run verification" : "Re-run verification"}
                             aria-label="Verify"
                             disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canVerify}
@@ -2142,11 +2162,12 @@ export default function MigrationDetailsPage() {
                               void runItemAction(item.id, "verify").then(() => void syncNow())
                             }}
                           >
-                            {itemBusy === "verify" ? <Spinner /> : <ShieldCheck className="h-4 w-4" />}
+                            {itemBusy !== "verify" ? <ShieldCheck className="h-4 w-4" /> : null}
                           </Button>
                           <Button
                             size="icon-sm"
                             variant="outline"
+                            loading={itemBusy === "logs"}
                             title="View logs"
                             disabled={Boolean(itemBusy)}
                             onClick={() => {
@@ -2157,11 +2178,12 @@ export default function MigrationDetailsPage() {
                               }
                             }}
                           >
-                            {itemBusy === "logs" ? <Spinner /> : <ScrollText className="h-4 w-4" />}
+                            {itemBusy !== "logs" ? <ScrollText className="h-4 w-4" /> : null}
                           </Button>
                           <Button
                             size="icon-sm"
                             variant="outline"
+                            loading={lifecycleBusy}
                             title="Failed Diagnostics"
                             aria-label="Failed Diagnostics"
                             disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canInspectFailures}
@@ -2207,17 +2229,16 @@ export default function MigrationDetailsPage() {
                               }
                             }}
                           >
-                            {lifecycleBusy ? (
-                              <Spinner />
-                            ) : lifecycleAction === "pause" ? (
+                            {!lifecycleBusy && lifecycleAction === "pause" ? (
                               <Square className="h-4 w-4" />
-                            ) : (
+                            ) : !lifecycleBusy ? (
                               <Play className="h-4 w-4" />
-                            )}
+                            ) : null}
                           </Button>
                           <Button
                             size="icon-sm"
                             variant="destructive"
+                            loading={itemBusy === "abort"}
                             title="Abort"
                             aria-label="Abort"
                             disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canAbort}
@@ -2225,7 +2246,7 @@ export default function MigrationDetailsPage() {
                               void runItemAction(item.id, "abort")
                             }}
                           >
-                            {itemBusy === "abort" ? <Spinner /> : <CircleX className="h-4 w-4" />}
+                            {itemBusy !== "abort" ? <CircleX className="h-4 w-4" /> : null}
                           </Button>
                         </div>
                       </TableCell>
@@ -2806,8 +2827,8 @@ export default function MigrationDetailsPage() {
                 </SelectContent>
               </Select>
             </div>
-            <Button className="w-full" disabled={workersLoading || !selectedWorkerId || dispatchingWorkerId === selectedWorkerId} onClick={() => void dispatchMigrationWorker()}>
-              {dispatchingWorkerId === selectedWorkerId ? <Spinner className="mr-0" /> : <Play className="h-4 w-4 mr-0" />}
+            <Button className="w-full" loading={dispatchingWorkerId === selectedWorkerId} disabled={workersLoading || !selectedWorkerId || dispatchingWorkerId === selectedWorkerId} onClick={() => void dispatchMigrationWorker()}>
+              {dispatchingWorkerId !== selectedWorkerId ? <Play className="h-4 w-4 mr-0" /> : null}
               Dispatch worker
             </Button>
           </div>

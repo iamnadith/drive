@@ -112,29 +112,29 @@ export default function DashboardLayout({
         <header className="dashboard-header-glass sticky top-0 z-50 overflow-hidden border-b transition-[background-color,backdrop-filter,border-color]">
           <div className="page-shell relative z-10 flex min-h-14 items-center justify-between gap-2 px-4 sm:h-16 sm:px-6">
             <div className="flex min-w-0 flex-1 items-center gap-2">
-            <SidebarTrigger className="-ml-1" />
-            <Separator orientation="vertical" className="mr-1 h-4 sm:mr-2" />
-            <Breadcrumb className="min-w-0">
-              <BreadcrumbList className="min-w-0 flex-nowrap overflow-hidden">
-                {crumbs.map((c, index) => {
-                  const isLast = index === crumbs.length - 1
-                  return (
-                    <React.Fragment key={`${c.label}-${index}`}>
-                      {index > 0 ? <BreadcrumbSeparator className="hidden md:block" /> : null}
-                      <BreadcrumbItem className={index === 0 ? "hidden md:block" : "min-w-0"}>
-                        {isLast || !c.href ? (
-                          <BreadcrumbPage className="truncate">{c.label}</BreadcrumbPage>
-                        ) : (
-                          <BreadcrumbLink href={c.href} className="truncate">
-                            {c.label}
-                          </BreadcrumbLink>
-                        )}
-                      </BreadcrumbItem>
-                    </React.Fragment>
-                  )
-                })}
-              </BreadcrumbList>
-            </Breadcrumb>
+              <SidebarTrigger className="-ml-1 !grid place-items-center !border-0 !p-0 !shadow-none [&>svg]:!m-0 [&>svg]:!size-4 [&>svg]:place-self-center" />
+              <Separator orientation="vertical" className="mr-1 !h-3 bg-foreground/20 sm:mr-2" />
+              <Breadcrumb className="min-w-0">
+                <BreadcrumbList className="min-w-0 flex-nowrap overflow-hidden">
+                  {crumbs.map((c, index) => {
+                    const isLast = index === crumbs.length - 1
+                    return (
+                      <React.Fragment key={`${c.label}-${index}`}>
+                        {index > 0 ? <BreadcrumbSeparator className="hidden md:block" /> : null}
+                        <BreadcrumbItem className={index === 0 ? "hidden md:block" : "min-w-0"}>
+                          {isLast || !c.href ? (
+                            <BreadcrumbPage className="truncate">{c.label}</BreadcrumbPage>
+                          ) : (
+                            <BreadcrumbLink href={c.href} className="truncate">
+                              {c.label}
+                            </BreadcrumbLink>
+                          )}
+                        </BreadcrumbItem>
+                      </React.Fragment>
+                    )
+                  })}
+                </BreadcrumbList>
+              </Breadcrumb>
             </div>
             <div className="flex shrink-0 items-center gap-1">
               <ThemeToggle

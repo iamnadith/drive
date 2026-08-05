@@ -17,7 +17,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator"
 import { Slider } from "@/components/ui/slider"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 
@@ -713,6 +712,7 @@ export default function MigrationsPage() {
                   size="sm"
                   className="h-9 px-2.5"
                   onClick={createNewMigration}
+                  loading={busyAction === "create"}
                   disabled={
                     busyAction === "create" ||
                     !activeAccount ||
@@ -720,7 +720,6 @@ export default function MigrationsPage() {
                     !targetAccountId
                   }
                 >
-                  {busyAction === "create" ? <Spinner className="mr-0" /> : null}
                   Create migration
                 </Button>
                 <DialogClose asChild>
@@ -961,17 +960,16 @@ export default function MigrationsPage() {
               <div className="flex flex-wrap gap-2">
                 <Button
                   onClick={activeMigration?.status === "failed" ? retryMigration : startMigration}
+                  loading={busyAction === "start" || busyAction === "retry_migration"}
                   disabled={Boolean(busyAction) || (activeMigration?.status !== "draft" && activeMigration?.status !== "failed")}
                 >
-                  {busyAction === "start" || busyAction === "retry_migration" ? (
-                    <Spinner className="mr-0" />
-                  ) : (
+                  {busyAction !== "start" && busyAction !== "retry_migration" ? (
                     <Play className="h-4 w-4 mr-0" />
-                  )}
+                  ) : null}
                   {activeMigration?.status === "failed" ? "Retry" : "Start"}
                 </Button>
-                <Button onClick={syncNow} variant="outline" disabled={Boolean(busyAction)}>
-                  {busyAction === "sync" ? <Spinner className="mr-0" /> : <RefreshCw className="h-4 w-4 mr-0" />}
+                <Button onClick={syncNow} loading={busyAction === "sync"} variant="outline" disabled={Boolean(busyAction)}>
+                  {busyAction !== "sync" ? <RefreshCw className="h-4 w-4 mr-0" /> : null}
                   Sync now
                 </Button>
                 {activeMigration ? (
@@ -985,8 +983,8 @@ export default function MigrationsPage() {
                   </Button>
                 ) : null}
                 {canRunVerifyAll ? (
-                  <Button onClick={runVerifyAll} variant="outline" disabled={Boolean(busyAction)}>
-                    {busyAction === "verify_all" ? <Spinner className="mr-0" /> : <CheckCircle2 className="h-4 w-4 mr-0" />}
+                  <Button onClick={runVerifyAll} loading={busyAction === "verify_all"} variant="outline" disabled={Boolean(busyAction)}>
+                    {busyAction !== "verify_all" ? <CheckCircle2 className="h-4 w-4 mr-0" /> : null}
                     Verify all buckets
                   </Button>
                 ) : null}

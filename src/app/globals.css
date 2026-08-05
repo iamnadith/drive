@@ -396,6 +396,8 @@
 
 @layer utilities {
   .glass-button {
+    border-width: 1px;
+    border-style: solid;
     background:
       linear-gradient(180deg, oklch(1 0 0 / 0.46), oklch(1 0 0 / 0.16)),
       color-mix(in oklch, white 5%, transparent) !important;
