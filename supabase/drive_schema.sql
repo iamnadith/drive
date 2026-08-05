@@ -454,6 +454,65 @@ create table if not exists drive_analytics_active_account_snapshots (
 create index if not exists drive_analytics_active_account_snapshots_day_idx
   on drive_analytics_active_account_snapshots (captured_day desc);
 
+-- Logical object history. A completed scan generation atomically replaces the
+-- current inventory, so migrated copies are not summed across accounts.
+create table if not exists drive_object_sync_runs (
+  id uuid primary key,
+  account_id uuid not null references drive_accounts(id) on delete cascade,
+  status text not null default 'running',
+  error text,
+  started_at timestamptz not null default now(),
+  completed_at timestamptz
+);
+create index if not exists drive_object_sync_runs_active_idx on drive_object_sync_runs (account_id, status, started_at desc);
+
+create table if not exists drive_object_sync_objects (
+  run_id uuid not null references drive_object_sync_runs(id) on delete cascade,
+  bucket_name text not null,
+  key text not null,
+  size bigint not null default 0,
+  etag text,
+  last_modified timestamptz,
+  primary key (run_id, bucket_name, key)
+);
+
+create table if not exists drive_logical_object_inventory (
+  bucket_name text not null,
+  key text not null,
+  account_id uuid not null references drive_accounts(id) on delete cascade,
+  size bigint not null default 0,
+  etag text,
+  last_modified timestamptz,
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  primary key (bucket_name, key)
+);
+
+create table if not exists drive_object_change_events (
+  id uuid primary key default gen_random_uuid(),
+  run_id uuid references drive_object_sync_runs(id) on delete set null,
+  occurred_at timestamptz not null default now(),
+  change_type text not null,
+  bucket_name text not null,
+  key text not null,
+  previous_size bigint,
+  current_size bigint,
+  account_id uuid references drive_accounts(id) on delete set null
+);
+create index if not exists drive_object_change_events_time_idx on drive_object_change_events (occurred_at desc);
+
+create table if not exists drive_logical_storage_snapshots (
+  captured_day date primary key,
+  captured_at timestamptz not null default now(),
+  account_id uuid references drive_accounts(id) on delete set null,
+  buckets integer not null default 0,
+  objects bigint not null default 0,
+  bytes bigint not null default 0,
+  added bigint not null default 0,
+  updated bigint not null default 0,
+  deleted bigint not null default 0
+);
+
 create table if not exists drive_migrations (
   id uuid primary key,
   source_account_id uuid not null references drive_accounts(id) on delete restrict,

@@ -11,7 +11,6 @@ import {
   RefreshCw,
   Server,
   ShieldAlert,
-  TrendingUp,
   Users,
   Wrench,
 } from "lucide-react"
@@ -55,6 +54,7 @@ import { DashboardAnalyticsSkeleton } from "@/components/dashboard/loading-skele
 import { useDashboardResource } from "@/hooks/use-dashboard-resource"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { syncObjectHistory } from "@/lib/sync-object-history-client"
 
 type RangeKey = "7d" | "30d" | "90d"
 
@@ -140,8 +140,8 @@ const usageChartConfig = {
     label: "Storage (GB)",
     color: "var(--primary)",
   },
-  objectsK: {
-    label: "Objects (K)",
+  objects: {
+    label: "Objects",
     color: "var(--primary)",
   },
 } satisfies ChartConfig
@@ -232,7 +232,6 @@ function withChartFields(series: OverviewResponse["series"]) {
   return series.map((point) => ({
     ...point,
     storageGb: Number((point.storageBytes / 1024 / 1024 / 1024).toFixed(2)),
-    objectsK: Number((point.objects / 1000).toFixed(2)),
   }))
 }
 
@@ -304,7 +303,7 @@ function UsageChart({ data }: { data: ReturnType<typeof withChartFields> }) {
     <Card className="@container/card gap-0 py-0">
       <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-1 px-4 pt-4.5 pb-2 sm:px-6 md:gap-1.5 md:px-4 md:pt-5 md:pb-2">
         <CardTitle className="text-base leading-none">Storage and Objects</CardTitle>
-        <CardDescription className="text-[11px] leading-3.5 md:text-xs md:leading-4">Active account storage and object totals over time.</CardDescription>
+        <CardDescription className="text-[11px] leading-3.5 md:text-xs md:leading-4">Logical storage history across account migrations, without counting copied data twice.</CardDescription>
         <RangeAction
           value={range}
           onChange={setRange}
@@ -320,15 +319,17 @@ function UsageChart({ data }: { data: ReturnType<typeof withChartFields> }) {
                 <stop offset="95%" stopColor="var(--color-storageGb)" stopOpacity={0.1} />
               </linearGradient>
               <linearGradient id="fillObjectsAnalytics" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="var(--color-objectsK)" stopOpacity={0.75} />
-                <stop offset="95%" stopColor="var(--color-objectsK)" stopOpacity={0.08} />
+                <stop offset="5%" stopColor="var(--color-objects)" stopOpacity={0.75} />
+                <stop offset="95%" stopColor="var(--color-objects)" stopOpacity={0.08} />
               </linearGradient>
             </defs>
             <CartesianGrid vertical={false} />
             <XAxis dataKey="date" tickLine={false} axisLine={false} height={48} tickMargin={18} minTickGap={32} tickFormatter={(value) => new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric" })} />
+            <YAxis yAxisId="objects" hide domain={["auto", "auto"]} />
+            <YAxis yAxisId="storage" hide orientation="right" domain={["auto", "auto"]} />
             <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
-            <Area dataKey="objectsK" type="natural" fill="url(#fillObjectsAnalytics)" stroke="var(--color-objectsK)" stackId="a" />
-            <Area dataKey="storageGb" type="natural" fill="url(#fillStorageAnalytics)" stroke="var(--color-storageGb)" stackId="a" />
+            <Area yAxisId="objects" dataKey="objects" type="stepAfter" fill="url(#fillObjectsAnalytics)" stroke="var(--color-objects)" />
+            <Area yAxisId="storage" dataKey="storageGb" type="stepAfter" fill="url(#fillStorageAnalytics)" stroke="var(--color-storageGb)" />
           </AreaChart>
         </ChartContainer>
       </CardContent>
@@ -369,7 +370,7 @@ function TransferChart({ data }: { data: ReturnType<typeof withChartFields> }) {
     <Card className="@container/card gap-0 py-0">
       <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-1 px-4 pt-4.5 pb-2 sm:px-6 md:gap-1.5 md:px-4 md:pt-5 md:pb-2">
         <CardTitle className="text-base leading-none">Transfer Health</CardTitle>
-        <CardDescription className="text-[11px] leading-3.5 md:text-xs md:leading-4">Transferred objects, failures, and verification issues from migration progress.</CardDescription>
+        <CardDescription className="text-[11px] leading-3.5 md:text-xs md:leading-4">Cumulative transferred objects, failures, and verification issues retained from migration progress.</CardDescription>
         <RangeAction value={range} onChange={setRange} className="col-start-2 row-start-1 row-span-2 mt-0 self-start justify-self-end" />
       </CardHeader>
       <CardContent className="px-1.5 pt-3 sm:px-4 sm:pt-3 md:px-3">
@@ -435,7 +436,6 @@ export default function DashboardPage() {
   const {
     data,
     error,
-    loading,
     refreshing,
     refresh,
   } = useDashboardResource<OverviewResponse>({
@@ -443,6 +443,7 @@ export default function DashboardPage() {
     refreshIntervalMs: 20_000,
     staleTimeMs: 10_000,
     fetcher: async ({ signal, force }) => {
+      await syncObjectHistory({ force, signal })
       const res = await fetch(`/api/dashboard/analytics?range=all${force ? "&refresh=1" : ""}`, {
         cache: "no-store",
         signal,
@@ -472,15 +473,13 @@ export default function DashboardPage() {
 
   const metrics = data?.metrics
   const syncHealth = data?.syncHealth
-  const activeAccountName = data?.activeAccount?.label || data?.activeAccount?.email || "No active account"
-
   return (
     <div className="dashboard-motion-stage space-y-4 md:space-y-5">
       <div className="dashboard-motion-item grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1">
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
           <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground sm:text-sm">
-            <span>Active account: <span className="font-medium text-foreground">{activeAccountName}</span></span>
+            <span>Logical storage and file history</span>
             <span className="hidden md:inline">-</span>
             <span>Last refreshed at {formatRefreshTime(data?.generatedAt)}</span>
             {refreshing ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null}
@@ -515,8 +514,8 @@ export default function DashboardPage() {
       {metrics ? (
         <>
           <div className="dashboard-motion-item grid grid-cols-2 gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <KpiCard title="Active Storage" value={formatBytes(metrics.storageBytes)} detail={`${formatNumber(metrics.buckets)} active account buckets`} icon={HardDrive} />
-            <KpiCard title="Active Objects" value={formatCompact(metrics.objects)} detail={`${formatNumber(metrics.objects)} active account objects`} icon={Database} />
+            <KpiCard title="Live Storage" value={formatBytes(metrics.storageBytes)} detail={`${formatNumber(metrics.buckets)} current buckets`} icon={HardDrive} />
+            <KpiCard title="Live Objects" value={formatCompact(metrics.objects)} detail={`${formatNumber(metrics.objects)} current objects`} icon={Database} />
             <KpiCard title="Accounts" value={`${metrics.activeAccounts}/${metrics.accounts}`} detail={`${syncHealth?.unsyncedAccounts ?? 0} unsynced, ${syncHealth?.accountSyncErrors ?? 0} errors`} icon={Server} />
             <KpiCard title="Users" value={formatNumber(metrics.activeUsers)} detail={`${formatNumber(metrics.users)} total users`} icon={Users} />
             <KpiCard title="Active Migrations" value={formatNumber(metrics.activeMigrations)} detail={`${formatNumber(metrics.migrations)} total migrations`} icon={Activity} tone={metrics.activeMigrations > 0 ? "success" : "default"} />
@@ -537,7 +536,7 @@ export default function DashboardPage() {
             <Card className="xl:sticky xl:top-4 xl:self-start">
               <CardHeader className="gap-1 pb-2 md:px-4">
                 <CardTitle className="text-base">Buckets</CardTitle>
-                <CardDescription className="text-xs leading-4">All active account buckets with current storage, objects, and sync status.</CardDescription>
+                <CardDescription className="text-xs leading-4">Current live buckets with storage, objects, and sync status.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-1.5 md:px-4">
                 {data.topBuckets.length === 0 ? (
@@ -553,7 +552,6 @@ export default function DashboardPage() {
                       <div className="grid gap-1.5 md:hidden">
                         <div className="min-w-0 pr-6">
                           <div className="truncate text-sm font-medium">{bucket.name}</div>
-                          <div className="truncate text-[11px] leading-4 text-muted-foreground">{bucket.accountLabel}</div>
                         </div>
                         <div className="grid grid-cols-2 gap-1.5 text-sm">
                           <div>
@@ -574,7 +572,6 @@ export default function DashboardPage() {
                       </div>
                       <div className="hidden min-w-0 md:block">
                         <div className="truncate text-sm font-medium">{bucket.name}</div>
-                        <div className="truncate text-[11px] text-muted-foreground">{bucket.accountLabel}</div>
                       </div>
                       <div className="hidden text-sm md:block md:text-right">
                         <div className="font-medium">{formatBytes(bucket.bytes)}</div>

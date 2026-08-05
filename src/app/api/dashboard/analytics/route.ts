@@ -96,6 +96,18 @@ type ActiveAccountSnapshotRow = {
   captured_at: string
 }
 
+type LogicalStorageSnapshotRow = {
+  captured_day: string
+  captured_at: string
+  account_id: string | null
+  buckets: string | number | null
+  objects: string | number | null
+  bytes: string | number | null
+  added: string | number | null
+  updated: string | number | null
+  deleted: string | number | null
+}
+
 function asRange(value: string | null): RangeKey {
   if (value === "7d" || value === "30d" || value === "90d") return value
   return "all"
@@ -338,11 +350,34 @@ async function listActiveAccountSnapshots(): Promise<ActiveAccountSnapshotRow[]>
   await ensureAnalyticsArchiveSchema()
   const { rows } = await queryDb<ActiveAccountSnapshotRow>(`
     select captured_day, account_id, account_label, account_email, buckets, objects, bytes, captured_at
-    from drive_analytics_active_account_snapshots
-    order by captured_day desc, captured_at desc
+    from (
+      select distinct on (captured_day)
+        captured_day::text as captured_day,
+        account_id,
+        account_label,
+        account_email,
+        buckets,
+        objects,
+        bytes,
+        captured_at
+      from drive_analytics_active_account_snapshots
+      order by captured_day desc, captured_at desc
+    ) daily
+    order by captured_day desc
     limit 730
   `)
   return rows.reverse()
+}
+
+async function listLogicalStorageSnapshots(): Promise<LogicalStorageSnapshotRow[]> {
+  if (!isPostgresConfigured()) return []
+  const { rows } = await queryDb<LogicalStorageSnapshotRow>(`
+    select captured_day::text as captured_day, captured_at, account_id, buckets, objects, bytes, added, updated, deleted
+    from drive_logical_storage_snapshots
+    order by captured_day asc
+    limit 730
+  `)
+  return rows
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
@@ -583,6 +618,13 @@ async function buildAnalyticsPayload(range: RangeKey) {
     listActiveAccountSnapshots,
     [] as ActiveAccountSnapshotRow[]
   )
+  const logicalStorageSnapshotRows = await capture(
+    "logical storage snapshots",
+    warnings,
+    listLogicalStorageSnapshots,
+    [] as LogicalStorageSnapshotRow[],
+    { reportWarning: false }
+  )
   const archivedAccountLabelById = new Map(
     archivedBucketStats.map((row) => [
       row.account_id,
@@ -593,6 +635,8 @@ async function buildAnalyticsPayload(range: RangeKey) {
     range === "all"
       ? earliestDate([
           ...activeAnalyticsBucketStats.map((row) => row.updated_at),
+          ...activeAccountSnapshotRows.map((row) => row.captured_day),
+          ...logicalStorageSnapshotRows.map((row) => row.captured_day),
           ...migrations.map((migration) => migration.createdAt),
           ...migrations.map((migration) => migration.completedAt),
           ...itemRowsAsItems.map((item) => item.lastProgressAt || item.updatedAt || item.createdAt),
@@ -610,21 +654,58 @@ async function buildAnalyticsPayload(range: RangeKey) {
     return dateKey(date)
   })
 
-  const series = dayKeys.map((day) => {
-    const dayEnd = new Date(`${day}T23:59:59.999Z`).getTime()
-    const cumulativeBucketRows = activeAnalyticsBucketStats.filter((row) => {
-      const updated = row.updated_at ? Date.parse(row.updated_at) : Number.NaN
-      return !Number.isFinite(updated) || updated <= dayEnd
+  const legacyStorageSeries =
+    activeAccountSnapshotRows.length > 0
+      ? activeAccountSnapshotRows.map((row) => ({
+          date: row.captured_day,
+          accountId: row.account_id,
+          accountLabel: row.account_label || row.account_email || "Unknown account",
+          buckets: toNumber(row.buckets),
+          storageBytes: toNumber(row.bytes),
+          objects: toNumber(row.objects),
+          capturedAt: row.captured_at,
+        }))
+      : activeAccount
+        ? [
+            {
+              date: generatedAt.slice(0, 10),
+              accountId: activeAccount.id,
+              accountLabel: activeAccount.label || activeAccount.email,
+              buckets: new Set(activeAnalyticsBucketStats.map((row) => row.bucket_name)).size,
+              storageBytes: activeAnalyticsBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0),
+              objects: activeAnalyticsBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0),
+              capturedAt: generatedAt,
+            },
+          ]
+        : []
+  const storageSeriesByDay = new Map(legacyStorageSeries.map((point) => [point.date, point]))
+  for (const row of logicalStorageSnapshotRows) {
+    const account = row.account_id ? accountById.get(row.account_id) : null
+    storageSeriesByDay.set(row.captured_day, {
+      date: row.captured_day,
+      accountId: row.account_id ?? "logical-storage",
+      accountLabel: account?.label || account?.email || "Logical storage",
+      buckets: toNumber(row.buckets),
+      storageBytes: toNumber(row.bytes),
+      objects: toNumber(row.objects),
+      capturedAt: row.captured_at,
     })
-    const storageBytes = cumulativeBucketRows.reduce((sum, row) => sum + toNumber(row.bytes), 0)
-    const objects = cumulativeBucketRows.reduce((sum, row) => sum + toNumber(row.objects), 0)
+  }
+  const activeAccountSeries = Array.from(storageSeriesByDay.values()).sort((a, b) => a.date.localeCompare(b.date))
+
+  const series = dayKeys.map((day) => {
+    const dayEnd = Date.parse(`${day}T23:59:59.999Z`)
+    const logicalStoragePoint = [...activeAccountSeries].reverse().find((point) => point.date <= day)
+    const storageBytes = logicalStoragePoint?.storageBytes ?? 0
+    const objects = logicalStoragePoint?.objects ?? 0
     const createdMigrations = migrations.filter((m) => dateKey(m.createdAt) === day).length
     const completedMigrations = migrations.filter((m) => m.completedAt && dateKey(m.completedAt) === day).length
-    const updatedItems = itemRowsAsItems.filter((item) => {
+    const knownItems = itemRowsAsItems.filter((item) => {
       const anchor = item.lastProgressAt || item.updatedAt || item.createdAt
-      return anchor && dateKey(anchor) === day
+      const updatedAt = anchor ? Date.parse(anchor) : Number.NaN
+      return Number.isFinite(updatedAt) && updatedAt <= dayEnd
     })
-    const transfer = updatedItems.reduce(
+    const transfer = knownItems.reduce(
       (sum, item) => {
         const metrics = itemMetrics(item)
         return {
@@ -651,31 +732,18 @@ async function buildAnalyticsPayload(range: RangeKey) {
       activeRepairs,
     }
   })
-
-  const activeAccountSeries =
-    activeAccountSnapshotRows.length > 0
-      ? activeAccountSnapshotRows.map((row) => ({
-          date: String(row.captured_day).slice(0, 10),
-          accountId: row.account_id,
-          accountLabel: row.account_label || row.account_email || "Unknown account",
-          buckets: toNumber(row.buckets),
-          storageBytes: toNumber(row.bytes),
-          objects: toNumber(row.objects),
-          capturedAt: row.captured_at,
-        }))
-      : activeAccount
-        ? [
-            {
-              date: generatedAt.slice(0, 10),
-              accountId: activeAccount.id,
-              accountLabel: activeAccount.label || activeAccount.email,
-              buckets: new Set(activeAnalyticsBucketStats.map((row) => row.bucket_name)).size,
-              storageBytes: activeAnalyticsBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0),
-              objects: activeAnalyticsBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0),
-              capturedAt: generatedAt,
-            },
-          ]
-        : []
+  const dailyStorageSeries = series.map((point) => {
+    const source = [...activeAccountSeries].reverse().find((item) => item.date <= point.date)
+    return {
+      date: point.date,
+      accountId: source?.accountId ?? "logical-storage",
+      accountLabel: source?.accountLabel ?? "Logical storage",
+      buckets: source?.buckets ?? 0,
+      storageBytes: point.storageBytes,
+      objects: point.objects,
+      capturedAt: source?.capturedAt ?? generatedAt,
+    }
+  })
 
   const totalStorageBytes = activeAnalyticsBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0)
   const totalObjects = activeAnalyticsBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0)
@@ -805,7 +873,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
       attentionItems: failedMigrationCount + failedRepairCount + failedBucketStats + failureRecordCount + verifyDiffCount,
     },
     series,
-    activeAccountSeries,
+    activeAccountSeries: dailyStorageSeries,
     breakdowns: {
       migrations: migrationBreakdown,
       accounts: accountBreakdown,

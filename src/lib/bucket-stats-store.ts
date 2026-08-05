@@ -67,6 +67,28 @@ export async function getBucketStatsMap(accountId: string): Promise<Map<string, 
   return map
 }
 
+export async function resetBucketStats(accountId: string, bucketNames: string[]) {
+  const supabase = getSupabaseServerClient()
+  const names = Array.from(new Set(bucketNames.filter(Boolean)))
+  if (names.length === 0) return
+  const { error } = await supabase
+    .from(TABLE)
+    .update({ objects: 0, bytes: 0, continuation_token: null, status: "pending", error: null, updated_at: new Date().toISOString() })
+    .eq("account_id", accountId)
+    .in("bucket_name", names)
+  if (error) throw normalizeSupabaseError(error)
+}
+
+export async function removeMissingBucketStats(accountId: string, bucketNames: string[]) {
+  const supabase = getSupabaseServerClient()
+  const current = await listBucketStats(accountId)
+  const names = new Set(bucketNames)
+  const staleIds = current.filter((row) => !names.has(row.bucketName)).map((row) => row.id)
+  if (staleIds.length === 0) return
+  const { error } = await supabase.from(TABLE).delete().in("id", staleIds)
+  if (error) throw normalizeSupabaseError(error)
+}
+
 export async function ensureBucketStatsRows(accountId: string, bucketNames: string[]) {
   const supabase = getSupabaseServerClient()
   const unique = Array.from(new Set(bucketNames.filter(Boolean)))

@@ -111,6 +111,19 @@ function appendProgressEvent(
   event: ProgressEvent
 ): Record<string, unknown> {
   const existing = Array.isArray(progress.events) ? (progress.events as unknown[]) : []
+  const previous = existing.at(-1)
+  if (previous && typeof previous === "object") {
+    const last = previous as Record<string, unknown>
+    const sameData = JSON.stringify(last.data ?? null) === JSON.stringify(event.data ?? null)
+    if (
+      String(last.stage ?? "") === String(event.stage ?? "") &&
+      String(last.status ?? "") === String(event.status ?? "") &&
+      String(last.message ?? "") === String(event.message ?? "") &&
+      sameData
+    ) {
+      return { ...progress, events: existing }
+    }
+  }
   const next = [...existing, event]
   const capped = next.length > 500 ? next.slice(next.length - 500) : next
   return { ...progress, events: capped }

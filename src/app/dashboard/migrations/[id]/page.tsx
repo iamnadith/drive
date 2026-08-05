@@ -516,6 +516,7 @@ function collectLogLines(items: MigrationItem[]): LogLine[] {
     const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
     const bucket = item.sourceBucket
     const events = Array.isArray(progress.events) ? (progress.events as unknown[]) : []
+    let previousEventSignature = ""
 
     for (const event of events) {
       if (!isRecord(event)) continue
@@ -525,6 +526,9 @@ function collectLogLines(items: MigrationItem[]): LogLine[] {
       const stage = typeof event.stage === "string" ? event.stage : ""
       const status = typeof event.status === "string" ? event.status : String(event.status ?? "")
       const message = typeof event.message === "string" ? event.message : ""
+      const signature = JSON.stringify([stage, status, message])
+      if (signature === previousEventSignature) continue
+      previousEventSignature = signature
       lines.push({ at, atIso, bucket, stage, status, message })
     }
 

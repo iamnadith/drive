@@ -5,9 +5,18 @@ import { r2ListObjectsPage } from "@/lib/r2-s3"
 import {
   ensureBucketStatsRows,
   getBucketStatsMap,
+  removeMissingBucketStats,
+  resetBucketStats,
   updateBucketStats,
   type BucketStatsStatus,
 } from "@/lib/bucket-stats-store"
+import {
+  completeObjectSync,
+  failObjectSync,
+  getRunningObjectSync,
+  stageObjectPage,
+  startObjectSync,
+} from "@/lib/object-history-store"
 import { requireAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
@@ -24,6 +33,11 @@ export async function POST(request: Request) {
     const body: unknown = await request.json().catch(() => ({}))
     const data = isRecord(body) ? body : {}
     const bucketFilter = typeof data.bucket === "string" ? data.bucket : ""
+    const restart = data.restart === true
+    const restartAfterMs =
+      typeof data.restartAfterMs === "number" && Number.isFinite(data.restartAfterMs)
+        ? Math.max(60_000, Math.floor(data.restartAfterMs))
+        : null
     const maxKeysTotal =
       typeof data.maxKeysTotal === "number" && Number.isFinite(data.maxKeysTotal)
         ? Math.max(100, Math.min(50_000, Math.floor(data.maxKeysTotal)))
@@ -48,7 +62,21 @@ export async function POST(request: Request) {
     }
 
     await ensureBucketStatsRows(active.id, bucketNames)
-    const statsMap = await getBucketStatsMap(active.id)
+    await removeMissingBucketStats(active.id, bucketNames)
+    let statsMap = await getBucketStatsMap(active.id)
+
+    let objectSync = bucketFilter ? null : await getRunningObjectSync(active.id)
+    const hasIncompleteStats = bucketNames.some((name) => statsMap.get(name)?.status !== "completed")
+    const newestStatsUpdate = Math.max(
+      0,
+      ...bucketNames.map((name) => Date.parse(statsMap.get(name)?.updatedAt ?? "")).filter(Number.isFinite)
+    )
+    const statsAreStale = restartAfterMs !== null && Date.now() - newestStatsUpdate >= restartAfterMs
+    if (!bucketFilter && !objectSync && (restart || hasIncompleteStats || statsAreStale)) {
+      await resetBucketStats(active.id, bucketFilter ? [bucketFilter] : bucketNames)
+      statsMap = await getBucketStatsMap(active.id)
+      objectSync = await startObjectSync(active.id)
+    }
 
     const scanOrder = bucketFilter
       ? [bucketFilter]
@@ -92,6 +120,7 @@ export async function POST(request: Request) {
           const page = await r2ListObjectsPage(cfg, bucketName, { continuationToken: token, maxKeys })
 
           const contents = Array.isArray(page.Contents) ? page.Contents : []
+          if (objectSync) await stageObjectPage(objectSync.id, bucketName, contents)
           for (const obj of contents) {
             const key = typeof obj?.Key === "string" ? obj.Key : ""
             if (!key) continue
@@ -128,12 +157,17 @@ export async function POST(request: Request) {
             ? String((error as { message?: unknown }).message ?? "Unable to list objects")
             : "Unable to list objects"
         await updateBucketStats(active.id, bucketName, { status: "error", error: message })
+        if (objectSync) await failObjectSync(objectSync.id, message).catch(() => undefined)
         updated.push({ bucket: bucketName, status: "error", objects: row.objects ?? 0, bytes: row.bytes ?? 0, error: message })
         continue
       }
     }
 
-    return NextResponse.json({ ok: true, updated, remainingBudget: remaining })
+    const finalStats = await getBucketStatsMap(active.id)
+    const complete = scanOrder.every((name) => finalStats.get(name)?.status === "completed")
+    if (objectSync && complete) await completeObjectSync(objectSync.id, active.id)
+
+    return NextResponse.json({ ok: true, updated, remainingBudget: remaining, complete, runId: objectSync?.id ?? null })
   } catch (error: unknown) {
     const message =
       typeof error === "object" && error !== null && "message" in error

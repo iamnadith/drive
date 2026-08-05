@@ -15,6 +15,7 @@ import {
   AreaChart,
   CartesianGrid,
   XAxis,
+  YAxis,
 } from "recharts"
 import Link from "next/link"
 
@@ -39,6 +40,7 @@ import { DashboardOverviewSkeleton } from "@/components/dashboard/loading-skelet
 import { useDashboardResource } from "@/hooks/use-dashboard-resource"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { syncObjectHistory } from "@/lib/sync-object-history-client"
 
 type OverviewResponse = {
   generatedAt: string
@@ -108,8 +110,8 @@ const platformUsageChartConfig = {
     label: "Storage (GB)",
     color: "var(--primary)",
   },
-  objectsK: {
-    label: "Objects (K)",
+  objects: {
+    label: "Objects",
     color: "var(--primary)",
   },
 } satisfies ChartConfig
@@ -245,7 +247,6 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
       .map((item) => ({
         ...item,
         storageGb: Number((item.storageBytes / 1024 / 1024 / 1024).toFixed(2)),
-        objectsK: Number((item.objects / 1000).toFixed(2)),
       }))
   }, [series, timeRange])
 
@@ -255,9 +256,9 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
         <CardTitle className="leading-none md:leading-tight">Storage Usage</CardTitle>
         <CardDescription className="-mt-1 leading-none md:mt-0 md:leading-tight">
           <span className="hidden @[540px]/card:block">
-            Storage and objects for current and previous active accounts over time.
+            Logical storage history across migrations, without counting copied data twice.
           </span>
-          <span className="@[540px]/card:hidden">Active account history</span>
+          <span className="@[540px]/card:hidden">Storage and object history</span>
         </CardDescription>
         <CardAction className="col-start-2 row-start-1 mt-0 justify-self-end self-start">
           <ToggleGroup
@@ -298,7 +299,7 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
       <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
         {chartData.length === 0 ? (
           <div className="flex h-[250px] items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground">
-            No active account usage history yet
+            No storage history yet
           </div>
         ) : (
           <ChartContainer config={platformUsageChartConfig} className="aspect-auto h-[250px] w-full">
@@ -309,8 +310,8 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                   <stop offset="95%" stopColor="var(--color-storageGb)" stopOpacity={0.1} />
                 </linearGradient>
                 <linearGradient id="fillObjects" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="var(--color-objectsK)" stopOpacity={0.8} />
-                  <stop offset="95%" stopColor="var(--color-objectsK)" stopOpacity={0.1} />
+                  <stop offset="5%" stopColor="var(--color-objects)" stopOpacity={0.8} />
+                  <stop offset="95%" stopColor="var(--color-objects)" stopOpacity={0.1} />
                 </linearGradient>
               </defs>
               <CartesianGrid vertical={false} />
@@ -328,6 +329,8 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                   })
                 }
               />
+              <YAxis yAxisId="objects" hide domain={["auto", "auto"]} />
+              <YAxis yAxisId="storage" hide orientation="right" domain={["auto", "auto"]} />
               <ChartTooltip
                 cursor={false}
                 content={
@@ -343,18 +346,18 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                 }
               />
               <Area
-                dataKey="objectsK"
-                type="natural"
+                yAxisId="objects"
+                dataKey="objects"
+                type="stepAfter"
                 fill="url(#fillObjects)"
-                stroke="var(--color-objectsK)"
-                stackId="a"
+                stroke="var(--color-objects)"
               />
               <Area
+                yAxisId="storage"
                 dataKey="storageGb"
-                type="natural"
+                type="stepAfter"
                 fill="url(#fillStorage)"
                 stroke="var(--color-storageGb)"
-                stackId="a"
               />
             </AreaChart>
           </ChartContainer>
@@ -376,6 +379,7 @@ export default function OverviewPage() {
     refreshIntervalMs: 20_000,
     staleTimeMs: 10_000,
     fetcher: async ({ signal, force }) => {
+      await syncObjectHistory({ force, signal })
       const res = await fetch(`/api/dashboard/analytics?range=all${force ? "&refresh=1" : ""}`, {
         cache: "no-store",
         signal,
@@ -433,7 +437,6 @@ export default function OverviewPage() {
   }
 
   const metrics = data?.metrics
-  const accountName = data?.activeAccount?.label || data?.activeAccount?.email || "No active account"
   const healthy = metrics ? metrics.attentionItems === 0 && !data?.syncHealth.partial : false
 
   return (
@@ -442,7 +445,7 @@ export default function OverviewPage() {
         <div className="-mt-1 min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
           <div className="mt-px flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground sm:text-sm">
-            <span>Active account: <span className="font-medium text-foreground">{accountName}</span></span>
+            <span>Logical storage and file history</span>
             <span className="hidden md:inline">-</span>
             <span>Last refreshed at {formatRefreshTime(data?.generatedAt)}</span>
             {isRefreshing ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null}
@@ -495,15 +498,15 @@ export default function OverviewPage() {
         <>
           <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <SummaryCard
-              title="Active Storage"
+              title="Live Storage"
               value={formatBytes(metrics.storageBytes)}
-              detail={`${formatNumber(metrics.buckets)} active account buckets`}
+              detail={`${formatNumber(metrics.buckets)} current buckets`}
               icon={HardDrive}
             />
             <SummaryCard
-              title="Active Objects"
+              title="Live Objects"
               value={formatCompact(metrics.objects)}
-              detail={`${formatNumber(metrics.objects)} active account objects`}
+              detail={`${formatNumber(metrics.objects)} current objects`}
               icon={Database}
             />
             <SummaryCard
