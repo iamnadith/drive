@@ -57,6 +57,31 @@ npm start -- \
 
 If your website and worker use the same project, use the same `SUPABASE_URL` and service role key that the main app uses.
 
+## Performance tuning
+
+The worker copies multiple objects at once and uses multipart upload concurrency for larger files.
+
+Optional environment variables:
+
+- `COPY_CONCURRENCY`: number of objects copied in parallel. Default: `8`.
+- `UPLOAD_QUEUE_SIZE`: multipart upload parts per object. Default: `4`.
+- `UPLOAD_PART_SIZE_MB`: multipart part size in MB. Default: `16`.
+- `S3_RETRIES`: retry attempts for R2/S3 operations. Default: `3`.
+
+For faster hosts, start with:
+
+```bash
+COPY_CONCURRENCY=16 UPLOAD_QUEUE_SIZE=4 npm start
+```
+
+PowerShell:
+
+```powershell
+$env:COPY_CONCURRENCY="16"; $env:UPLOAD_QUEUE_SIZE="4"; npm start
+```
+
+If Cloudflare/R2 starts throttling or requests fail, lower `COPY_CONCURRENCY`.
+
 ## Notes
 
 - Identity is based on `agent id + token`, not IP/domain.

@@ -1,7 +1,17 @@
-import { S3Client, GetObjectCommand, ListObjectsV2Command, HeadObjectCommand } from "@aws-sdk/client-s3"
+import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
+  ListObjectsV2Command,
+  S3Client,
+  UploadPartCommand,
+} from "@aws-sdk/client-s3"
 import { Upload } from "@aws-sdk/lib-storage"
 import { createClient as createSupabaseClient } from "@supabase/supabase-js"
 import os from "os"
+import { Transform } from "stream"
 
 function getArg(name, fallback = "") {
   const index = process.argv.indexOf(`--${name}`)
@@ -18,6 +28,18 @@ const MAX_OBJECTS = Math.max(1, Math.min(500_000, Number(getArg("max-objects", "
 const API_TIMEOUT_MS = Math.max(5_000, Number(getArg("api-timeout-ms", "30000")) || 30_000)
 const API_RETRIES = Math.max(1, Math.min(6, Number(getArg("api-retries", "3")) || 3))
 const S3_RETRIES = Math.max(1, Math.min(6, Number(getArg("s3-retries", "3")) || 3))
+const COPY_CONCURRENCY = Math.max(1, Math.min(64, Number(getArg("copy-concurrency", "3")) || 2))
+const UPLOAD_QUEUE_SIZE = Math.max(1, Math.min(16, Number(getArg("upload-queue-size", "4")) || 2))
+const UPLOAD_PART_SIZE = Math.max(
+  5 * 1024 * 1024,
+  Math.min(128 * 1024 * 1024, (Number(getArg("upload-part-size-mb", "16")) || 50) * 1024 * 1024)
+)
+const RANGE_COPY_THRESHOLD_MB = Number(getArg("range-copy-threshold-mb", "0"))
+const RANGE_COPY_THRESHOLD = Math.max(
+  0,
+  Math.min(1024 * 1024 * 1024, (Number.isFinite(RANGE_COPY_THRESHOLD_MB) ? RANGE_COPY_THRESHOLD_MB : 0) * 1024 * 1024)
+)
+const RANGE_COPY_CONCURRENCY = Math.max(1, Math.min(16, Number(getArg("range-copy-concurrency", String(UPLOAD_QUEUE_SIZE))) || UPLOAD_QUEUE_SIZE))
 const HEARTBEAT_TIMEOUT_MS = Math.max(API_TIMEOUT_MS, 60_000)
 const HEARTBEAT_RETRIES = Math.max(API_RETRIES, 5)
 const SUPABASE_TIMEOUT_MS = Math.max(1_000, Number(getArg("supabase-timeout-ms", "5000")) || 5_000)
@@ -129,6 +151,18 @@ async function withRetries(label, fn, retries = 3) {
     }
   }
   throw lastError || new Error(`${label} failed`)
+}
+
+async function runConcurrent(items, concurrency, worker) {
+  let nextIndex = 0
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex
+      nextIndex += 1
+      await worker(items[index], index)
+    }
+  })
+  await Promise.all(workers)
 }
 
 class JobAbortedError extends Error {
@@ -728,12 +762,127 @@ function buildTelemetryProgress(state, current = {}) {
   }
 }
 
+function buildObjectMetadataParams(sourceHead) {
+  return {
+    ...(typeof sourceHead.ContentType === "string" ? { ContentType: sourceHead.ContentType } : {}),
+    ...(typeof sourceHead.CacheControl === "string" ? { CacheControl: sourceHead.CacheControl } : {}),
+    ...(sourceHead.Metadata ? { Metadata: sourceHead.Metadata } : {}),
+  }
+}
+
+function createProgressTransform(onChunk) {
+  return new Transform({
+    transform(chunk, encoding, callback) {
+      if (Buffer.isBuffer(chunk) || typeof chunk.length === "number") onChunk(chunk.length)
+      callback(null, chunk)
+    },
+  })
+}
+
+async function copyObjectWithRangedMultipart(sourceClient, targetClient, sourceBucket, targetBucket, key, sourceHead, options = {}) {
+  const sourceSize = typeof sourceHead.ContentLength === "number" ? sourceHead.ContentLength : 0
+  const createResult = await targetClient.send(
+    new CreateMultipartUploadCommand({
+      Bucket: targetBucket,
+      Key: key,
+      ...buildObjectMetadataParams(sourceHead),
+    })
+  )
+  const uploadId = createResult.UploadId
+  if (!uploadId) throw new Error(`Multipart upload id missing for ${key}`)
+
+  const partCount = Math.ceil(sourceSize / UPLOAD_PART_SIZE)
+  const parts = Array.from({ length: partCount }, (_, index) => {
+    const start = index * UPLOAD_PART_SIZE
+    const end = Math.min(sourceSize - 1, start + UPLOAD_PART_SIZE - 1)
+    return { partNumber: index + 1, start, end, size: end - start + 1 }
+  })
+  const uploadedParts = []
+  const partProgress = new Map()
+  let reportedLoaded = 0
+
+  try {
+    await runConcurrent(parts, RANGE_COPY_CONCURRENCY, async (part) => {
+      const uploaded = await withRetries(
+        `range copy ${sourceBucket}/${key} part ${part.partNumber}`,
+        async () => {
+          const sourceResponse = await sourceClient.send(
+            new GetObjectCommand({
+              Bucket: sourceBucket,
+              Key: key,
+              Range: `bytes=${part.start}-${part.end}`,
+            })
+          )
+          const body = sourceResponse.Body
+          if (!body) throw new Error(`Source object body missing for ${key} part ${part.partNumber}`)
+
+          let partLoaded = 0
+          const uploadBody =
+            typeof options.onProgress === "function" && typeof body.pipe === "function"
+              ? body.pipe(
+                  createProgressTransform((chunkLength) => {
+                    partLoaded += chunkLength
+                    const previous = partProgress.get(part.partNumber) || 0
+                    const next = Math.min(part.size, Math.max(previous, partLoaded))
+                    if (next > previous) {
+                      partProgress.set(part.partNumber, next)
+                      reportedLoaded += next - previous
+                      options.onProgress({ loaded: reportedLoaded, total: sourceSize })
+                    }
+                  })
+                )
+              : body
+
+          try {
+            return await targetClient.send(
+              new UploadPartCommand({
+                Bucket: targetBucket,
+                Key: key,
+                UploadId: uploadId,
+                PartNumber: part.partNumber,
+                Body: uploadBody,
+                ContentLength: part.size,
+              })
+            )
+          } finally {
+            closeBodyStream(body)
+          }
+        },
+        S3_RETRIES
+      )
+
+      if (!uploaded.ETag) throw new Error(`Multipart upload ETag missing for ${key} part ${part.partNumber}`)
+      uploadedParts.push({ PartNumber: part.partNumber, ETag: uploaded.ETag })
+    })
+
+    await targetClient.send(
+      new CompleteMultipartUploadCommand({
+        Bucket: targetBucket,
+        Key: key,
+        UploadId: uploadId,
+        MultipartUpload: {
+          Parts: uploadedParts.sort((a, b) => a.PartNumber - b.PartNumber),
+        },
+      })
+    )
+  } catch (error) {
+    await targetClient
+      .send(new AbortMultipartUploadCommand({ Bucket: targetBucket, Key: key, UploadId: uploadId }))
+      .catch(() => undefined)
+    throw error
+  }
+}
+
 async function copyObject(sourceClient, targetClient, sourceBucket, targetBucket, key, options = {}) {
   await withRetries(
     `copy ${sourceBucket}/${key}`,
     async () => {
-      const sourceResponse = await sourceClient.send(new GetObjectCommand({ Bucket: sourceBucket, Key: key }))
       const sourceHead = await sourceClient.send(new HeadObjectCommand({ Bucket: sourceBucket, Key: key }))
+      const sourceSize = typeof sourceHead.ContentLength === "number" ? sourceHead.ContentLength : 0
+      if (sourceSize >= RANGE_COPY_THRESHOLD) {
+        await copyObjectWithRangedMultipart(sourceClient, targetClient, sourceBucket, targetBucket, key, sourceHead, options)
+      } else {
+        const sourceResponse = await sourceClient.send(new GetObjectCommand({ Bucket: sourceBucket, Key: key }))
       const body = sourceResponse.Body
       if (!body) throw new Error(`Source object body missing for ${key}`)
 
@@ -743,12 +892,10 @@ async function copyObject(sourceClient, targetClient, sourceBucket, targetBucket
           Bucket: targetBucket,
           Key: key,
           Body: body,
-          ...(typeof sourceHead.ContentType === "string" ? { ContentType: sourceHead.ContentType } : {}),
-          ...(typeof sourceHead.CacheControl === "string" ? { CacheControl: sourceHead.CacheControl } : {}),
-          ...(sourceHead.Metadata ? { Metadata: sourceHead.Metadata } : {}),
+          ...buildObjectMetadataParams(sourceHead),
         },
-        queueSize: 1,
-        partSize: 16 * 1024 * 1024,
+        queueSize: UPLOAD_QUEUE_SIZE,
+        partSize: UPLOAD_PART_SIZE,
         leavePartsOnError: false,
       })
       if (typeof options.onProgress === "function") {
@@ -781,6 +928,18 @@ async function copyObject(sourceClient, targetClient, sourceBucket, targetBucket
       } finally {
         closeBodyStream(body)
       }
+      }
+      if (typeof options.onProgress === "function") options.onProgress({ loaded: sourceSize, total: sourceSize })
+      const targetHead = await withRetries(
+        `verify target head ${targetBucket}/${key}`,
+        () => targetClient.send(new HeadObjectCommand({ Bucket: targetBucket, Key: key })),
+        S3_RETRIES
+      )
+      const targetSize = typeof targetHead.ContentLength === "number" ? targetHead.ContentLength : -1
+      if (targetSize !== sourceSize) {
+        throw new Error(`Size mismatch after copy for ${key}: source=${sourceSize} target=${targetSize}`)
+      }
+      return { sourceSize, targetSize }
     },
     S3_RETRIES
   )
@@ -998,7 +1157,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
     if (payload.job.mode !== "verify_only") {
       stage = "repair_copy"
       currentStageStartedAt = new Date().toISOString()
-      for (const object of toRepair) {
+      await runConcurrent(toRepair, COPY_CONCURRENCY, async (object) => {
         const isMismatch = typeof object?.destinationSize === "number"
         const objectSize = typeof object?.size === "number" ? object.size : 0
         const latestTargetSize = await getTargetObjectSize(targetClient, item.targetBucket, object.key)
@@ -1028,7 +1187,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
             totalFiles: toRepair.length,
             summary: `Repairing ${item.sourceBucket}: ${transferred} copied, ${failed} failed, ${skipped} skipped`,
           })
-          continue
+          return
         }
         const startedAt = new Date().toISOString()
         state.currentFile = {
@@ -1147,48 +1306,49 @@ async function processItem(jobId, payload, item, completedResults, state) {
           transferred,
           failed,
           skipped,
-          processedFiles: transferred + failed,
+          processedFiles: transferred + failed + skipped,
           totalFiles: toRepair.length,
           summary: `Repairing ${item.sourceBucket}: ${transferred} copied, ${failed} failed, ${skipped} skipped`,
         })
 
-        const repairSync = await safeUpdateJob(jobId, {
-          status: "running",
-          items: [
-            {
-              itemId: item.id,
-              stage,
-              status: "running",
-              summary: `Repairing ${item.sourceBucket}: ${transferred} copied, ${failed} failed, ${skipped} skipped`,
-              transferred,
-              failed,
-              skipped,
-              details: {
-                initialMissing,
-                initialMismatched,
-                attempted: transferred + failed,
-                remaining: Math.max(0, toRepair.length - transferred - failed),
-              },
+        syncLiveProgress()
+      })
+      const copyPhaseSync = await safeUpdateJob(jobId, {
+        status: "running",
+        items: [
+          {
+            itemId: item.id,
+            stage,
+            status: "running",
+            summary: `Repairing ${item.sourceBucket}: ${transferred} copied, ${failed} failed, ${skipped} skipped`,
+            transferred,
+            failed,
+            skipped,
+            details: {
+              initialMissing,
+              initialMismatched,
+              attempted: transferred + failed + skipped,
+              remaining: Math.max(0, toRepair.length - transferred - failed - skipped),
             },
-          ],
-          progress: {
-            ...buildTelemetryProgress(state, {
-              currentItemId: item.id,
-              stage,
-              currentBucket: item.sourceBucket,
+          },
+        ],
+        progress: {
+          ...buildTelemetryProgress(state, {
+            currentItemId: item.id,
+            stage,
+            currentBucket: item.sourceBucket,
+            transferred,
+            failed,
+            skipped,
+            totals: buildLiveTotals(completedResults, {
               transferred,
               failed,
               skipped,
-              totals: buildLiveTotals(completedResults, {
-                transferred,
-                failed,
-                skipped,
-              }),
             }),
-          },
-        })
-        if (repairSync?.canceled) throw new JobAbortedError()
-      }
+          }),
+        },
+      })
+      if (copyPhaseSync?.canceled) throw new JobAbortedError()
     } else {
       skipped = toRepair.length
       upsertItemProgress(state, {
@@ -1252,7 +1412,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
         finalMismatched,
       })
 
-      for (const object of remainingToRepair) {
+      await runConcurrent(remainingToRepair, COPY_CONCURRENCY, async (object) => {
         const isMismatch = typeof object?.destinationSize === "number"
         const objectSize = typeof object?.size === "number" ? object.size : 0
         const latestTargetSize = await getTargetObjectSize(targetClient, item.targetBucket, object.key)
@@ -1271,7 +1431,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
             bytesTransferred: objectSize,
             bytesTotal: objectSize,
           })
-          continue
+          return
         }
         const startedAt = new Date().toISOString()
         state.currentFile = {
@@ -1366,7 +1526,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
           })
           forceSyncLiveProgress()
         }
-      }
+      })
 
       state.currentFile = null
       finalDestinationObjects = await listAllObjects(targetClient, item.targetBucket, prefix)
@@ -1655,6 +1815,9 @@ async function startHeartbeatLoop() {
 
 async function main() {
   console.log(`Worker starting for agent ${AGENT_ID} at ${SERVER_URL}`)
+  console.log(
+    `Copy tuning: ${COPY_CONCURRENCY} object(s) in parallel, ${UPLOAD_QUEUE_SIZE} upload part(s) per object, ${Math.round(UPLOAD_PART_SIZE / 1024 / 1024)} MB parts`
+  )
   if (!heartbeatLoopStarted) {
     heartbeatLoopStarted = true
     void startHeartbeatLoop()
