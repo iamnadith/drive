@@ -21,6 +21,7 @@ import {
   claimMigrationItemJobCreation,
 } from "@/lib/migrations-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
 
 export const runtime = "nodejs"
 
@@ -182,6 +183,10 @@ export async function POST(
     const migration = await getMigration(id)
     if (!migration) {
       return NextResponse.json({ error: "Migration not found" }, { status: 404 })
+    }
+    const readOnly = getMigrationReadOnlyState(migration)
+    if (readOnly.readOnly) {
+      return NextResponse.json({ error: `Migration history is read-only: ${readOnly.reason}` }, { status: 409 })
     }
 
     const items = await listMigrationItems(id)

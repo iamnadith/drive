@@ -8,6 +8,8 @@ import { getMigration, listMigrationItems, updateMigration, updateMigrationItem 
 import { abortRepairJob, listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 import { createInitialBucketVerifyState } from "@/lib/bucket-verifier"
 import { requireAdmin } from "@/lib/server-auth"
+import { syncMigrationBucketSettings } from "@/lib/migration-settings-sync"
+import { getMigrationReadOnlyState, isPermanentAccountCommunicationFailure } from "@/lib/migration-read-only"
 
 export const runtime = "nodejs"
 
@@ -249,6 +251,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     const migration = await getMigration(id)
     if (!migration) return NextResponse.json({ error: "Migration not found" }, { status: 404 })
+    const readOnly = getMigrationReadOnlyState(migration)
+    if (readOnly.readOnly) {
+      return NextResponse.json({ error: `Migration history is read-only: ${readOnly.reason}` }, { status: 409 })
+    }
 
     const items = await listMigrationItems(id)
     const accounts = await getAllAccounts()
@@ -328,31 +334,125 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       }, { status: 200 })
     }
 
-    if (action === "mark_completed") {
-      if (migration.status === "verifying") {
-        return NextResponse.json(
-          { error: "Cannot mark completed while migration is verifying" },
-          { status: 400 }
-        )
+    if (action === "settings_sync") {
+      await updateMigration(id, {
+        syncStatus: "syncing",
+        syncMessage: "Syncing settings",
+        lastSyncedAt: now,
+      })
+      try {
+        await syncMigrationBucketSettings(id)
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "Settings sync failed"
+        const failedAt = new Date().toISOString()
+        await updateMigration(id, {
+          syncStatus: "error",
+          syncMessage: message,
+          lastSyncedAt: failedAt,
+          options: {
+            ...migration.options,
+            ...(isPermanentAccountCommunicationFailure(message)
+              ? {
+                  historyReadOnlyAt: failedAt,
+                  historyReadOnlyReason: "Cloudflare account communication failed during settings sync",
+                }
+              : {}),
+          },
+        })
+        return NextResponse.json({ error: message }, { status: 400 })
+      }
+      const completedAt = new Date().toISOString()
+      try {
+        await activateAccountForCompletedMigration({ targetAccountId: migration.targetAccountId, completedAt })
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "Failed to activate migrated account"
+        const permanentFailure = isPermanentAccountCommunicationFailure(message)
+        await updateMigration(id, {
+          status: "completed",
+          completedAt,
+          syncStatus: "error",
+          syncMessage: `Settings synced, but target activation failed: ${message}`,
+          lastSyncedAt: completedAt,
+          options: {
+            ...migration.options,
+            targetActivatedAt: undefined,
+            ...(permanentFailure
+              ? {
+                  historyReadOnlyAt: completedAt,
+                  historyReadOnlyReason: "Target account activation is unavailable",
+                }
+              : {}),
+          },
+        })
+        return NextResponse.json({ error: message }, { status: 400 })
       }
       await updateMigration(id, {
         status: "completed",
-        completedAt: now,
+        completedAt,
         syncStatus: "ok",
-        // Keep completed as completed everywhere; no extra message needed.
         syncMessage: "",
+        lastSyncedAt: completedAt,
+        options: { ...migration.options, targetActivatedAt: completedAt },
+      })
+      await recordActivity({
+        actorUserId,
+        action: "migration.settings_synced",
+        entityType: "migration",
+        entityId: id,
+        entityLabel: `Migration ${id}`,
+        summary: "Synchronized settings and completed migration",
+        detail: `Applied settings for ${items.length} bucket(s), activated the target account, and completed the migration.`,
+        before: { migration },
+        after: { bucketCount: items.length, settings: ["publicDevelopmentUrl", "cors"] },
+        undoable: false,
+        undoReason: "Bucket settings are applied directly to Cloudflare.",
+        ...getRequestActivityContext(request),
+      })
+      return NextResponse.json({ ok: true, syncedBuckets: items.length }, { status: 200 })
+    }
+
+    if (action === "mark_completed") {
+      await updateMigration(id, {
+        status: "verifying",
+        completedAt: null,
+        syncStatus: "syncing",
+        syncMessage: "Syncing settings",
         lastSyncedAt: now,
         options: { ...migration.options, manualCompleted: true, targetActivatedAt: undefined },
       })
-      await activateAccountForCompletedMigration({
-        targetAccountId: migration.targetAccountId,
-        completedAt: now,
-      })
+      let settingsSyncWarning = ""
+      try {
+        await syncMigrationBucketSettings(id)
+      } catch (error: unknown) {
+        settingsSyncWarning = error instanceof Error ? error.message : "Settings sync failed"
+      }
+      const completedAt = new Date().toISOString()
+      let activationError = ""
+      try {
+        await activateAccountForCompletedMigration({ targetAccountId: migration.targetAccountId, completedAt })
+      } catch (error: unknown) {
+        activationError = error instanceof Error ? error.message : "Failed to activate migrated account"
+      }
+      const warning = [settingsSyncWarning, activationError ? `Target activation failed: ${activationError}` : ""]
+        .filter(Boolean)
+        .join("; ")
       await updateMigration(id, {
-        syncStatus: "ok",
-        syncMessage: "",
-        lastSyncedAt: now,
-        options: { ...migration.options, manualCompleted: true, targetActivatedAt: now },
+        status: "completed",
+        completedAt,
+        syncStatus: warning ? "error" : "ok",
+        syncMessage: warning,
+        lastSyncedAt: completedAt,
+        options: {
+          ...migration.options,
+          manualCompleted: true,
+          ...(activationError ? { targetActivatedAt: undefined } : { targetActivatedAt: completedAt }),
+          ...(isPermanentAccountCommunicationFailure(`${settingsSyncWarning} ${activationError}`)
+            ? {
+                historyReadOnlyAt: completedAt,
+                historyReadOnlyReason: "Cloudflare account communication failed during settings sync",
+              }
+            : {}),
+        },
       })
       const afterAccounts = await getAllAccounts()
       await recordActivity({
@@ -384,7 +484,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         undoReason: "Completed migrations permanently change the active account. Disabled accounts cannot be restored.",
         ...getRequestActivityContext(request),
       })
-      return NextResponse.json({ ok: true }, { status: 200 })
+      return NextResponse.json({ ok: true, ...(warning ? { warning } : {}) }, { status: 200 })
     }
 
     if (action === "verify_all") {

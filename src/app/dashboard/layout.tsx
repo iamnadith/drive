@@ -51,6 +51,10 @@ export default function DashboardLayout({
       return [...base, { label: "Storage" }]
     }
 
+    if (pathname.startsWith("/dashboard/buckets")) {
+      return [...base, { label: "Buckets" }]
+    }
+
     if (pathname.startsWith("/dashboard/projects")) {
       return [...base, { label: "Projects" }]
     }

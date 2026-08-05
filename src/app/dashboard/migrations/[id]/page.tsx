@@ -54,6 +54,7 @@ import {
   readVerifyState,
 } from "@/lib/migration-bucket-state"
 import { cn } from "@/lib/utils"
+import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
 
 type Account = {
   id: string
@@ -73,10 +74,13 @@ type Migration = {
     pathPrefix?: string | null
     manualCompleted?: boolean
     targetActivatedAt?: string
+    historyReadOnlyAt?: string
+    historyReadOnlyReason?: string
   }
   createdAt: string
   startedAt?: string
   completedAt?: string
+  lastSyncedAt?: string
   syncStatus?: "idle" | "syncing" | "ok" | "error"
   syncMessage?: string
 }
@@ -265,12 +269,17 @@ function formatBytes(value: number | undefined): string {
 
 function statusBadge(
   status: string | undefined,
-  opts?: { hadProgress?: boolean; syncStatus?: string }
+  opts?: { hadProgress?: boolean; syncStatus?: string; syncMessage?: string }
 ) {
   const s = String(status ?? "unknown")
   if (s === "verifying" && opts?.syncStatus === "error") {
-    return <Badge className="bg-red-600">Verification failed</Badge>
+    return <Badge className="bg-red-600">{opts.syncMessage?.toLowerCase().includes("settings sync") ? "Settings sync failed" : "Verification failed"}</Badge>
   }
+  if (s === "verifying" && opts?.syncMessage?.toLowerCase().includes("syncing settings")) {
+    return <Badge className="bg-purple-600">Settings sync</Badge>
+  }
+  if (s === "settings_syncing") return <Badge className="bg-purple-600">Settings sync</Badge>
+  if (s === "settings_failed") return <Badge className="bg-red-600">Settings sync failed</Badge>
   if (s === "completed") return <Badge className="bg-green-600">Completed</Badge>
   if (s === "verifying") return <Badge className="bg-purple-600">Verifying</Badge>
   if (s === "scanning") return <Badge className="bg-sky-600">Scanning</Badge>
@@ -1067,6 +1076,7 @@ export default function MigrationDetailsPage() {
 
   const overviewBadgeStatus = React.useMemo(() => {
     if (migration?.status === "completed" && migration.options?.manualCompleted === true) return "completed"
+    if (migration?.status === "verifying" && migration.syncMessage?.toLowerCase().includes("settings")) return "verifying"
     if (bucketCounts.scanning > 0) return "scanning"
     if (bucketCounts.running > 0) return "running"
     if (bucketCounts.verifying > 0) return "verifying"
@@ -1075,7 +1085,7 @@ export default function MigrationDetailsPage() {
       return "aborted"
     if (bucketCounts.completed === bucketCounts.total && bucketCounts.total > 0) return "completed"
     return migration?.status ?? "draft"
-  }, [bucketCounts, migration?.options?.manualCompleted, migration?.status])
+  }, [bucketCounts, migration?.options?.manualCompleted, migration?.status, migration?.syncMessage])
 
   const effectiveMigrationStatus = React.useMemo(() => {
     if (overviewBadgeStatus === "aborted") return "canceled"
@@ -1152,7 +1162,7 @@ export default function MigrationDetailsPage() {
   }, [loadInitial])
 
   const runMigrationAction = React.useCallback(
-    async (action: "pause_all" | "resume_all" | "cancel_migration" | "mark_completed" | "retry_migration") => {
+    async (action: "pause_all" | "resume_all" | "cancel_migration" | "mark_completed" | "retry_migration" | "settings_sync") => {
       if (!id) return
       if (busyAction) return
       setBusyAction(action)
@@ -1161,7 +1171,7 @@ export default function MigrationDetailsPage() {
         const res = await postJsonWithTimeout({
           url: `/api/migrations/${encodeURIComponent(id)}/action`,
           body: { action },
-          timeoutMs: 12_000,
+          timeoutMs: action === "settings_sync" || action === "mark_completed" ? 120_000 : 12_000,
         })
         const json: unknown = await res.json().catch(() => ({}))
         const errorMessage = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to run action"
@@ -1259,7 +1269,7 @@ export default function MigrationDetailsPage() {
       try {
         await postJsonWithTimeout({
           url: `/api/migrations/${encodeURIComponent(id)}/sync`,
-          body: {},
+          body: { finalizeSettings: true },
           timeoutMs: 10_000,
         }).catch(() => {})
         lastSyncAtRef.current = Date.now()
@@ -1637,6 +1647,9 @@ export default function MigrationDetailsPage() {
     )
   }
 
+  const historyReadOnly = getMigrationReadOnlyState(migration)
+  const missingHistoricalDetails = historyReadOnly.readOnly && items.length === 0 && repairJobs.length === 0
+
   const activeIcon =
     overviewBadgeStatus === "completed" ? (
       <CheckCircle2 className="h-4 w-4 text-green-600" />
@@ -1658,6 +1671,7 @@ export default function MigrationDetailsPage() {
           <h1 className="text-2xl font-semibold flex items-center gap-2">
             {activeIcon}
             <span className="truncate">Migration details</span>
+            {historyReadOnly.readOnly ? <Badge variant="outline">Read only</Badge> : null}
           </h1>
           <p className="text-sm text-muted-foreground font-mono truncate">{migration.id}</p>
         </div>
@@ -1677,7 +1691,7 @@ export default function MigrationDetailsPage() {
         <CardHeader>
           <CardTitle className="flex items-center justify-between gap-3">
             <span>Overview</span>
-            {statusBadge(overviewBadgeStatus, { syncStatus: migration.syncStatus })}
+            {statusBadge(overviewBadgeStatus, { syncStatus: migration.syncStatus, syncMessage: migration.syncMessage })}
           </CardTitle>
           <CardDescription>
             {sourceLabel} - {targetLabel} - {migration.options.overwrite ? "Overwrite on destination" : "No overwrite"} -{" "}
@@ -1685,51 +1699,82 @@ export default function MigrationDetailsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">Progress</span>
-              <span className="font-mono">{overviewProgress.percent.toFixed(1)}%</span>
+          <div className="grid gap-px overflow-hidden rounded-md border bg-border sm:grid-cols-2 lg:grid-cols-4">
+            <div className="bg-background px-3 py-2.5">
+              <div className="text-xs text-muted-foreground">Created</div>
+              <div className="mt-1 text-sm font-medium">{formatDate(migration.createdAt)}</div>
             </div>
-              <ProgressStacked
-                transferredPct={overviewProgress.transferredPct}
-                skippedPct={overviewProgress.skippedPct}
-                failedPct={overviewProgress.copyFailedPct}
-                unaccountedPct={overviewProgress.unaccountedPct}
-              />
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <div className="flex items-center gap-3">
-                {overviewProgress.transferred > 0 ? (
-                  <span>
-                    {formatNumber(overviewProgress.transferred)} transferred ({overviewProgress.transferredPct.toFixed(1)}%)
-                  </span>
-                ) : null}
-                {overviewProgress.skipped > 0 ? (
-                  <span className="text-yellow-500">
-                    {formatNumber(overviewProgress.skipped)} skipped objects ({overviewProgress.skippedPct.toFixed(1)}%)
-                  </span>
-                ) : null}
-                {overviewProgress.copyFailed > 0 ? (
-                  <span className="text-red-500">
-                    {formatNumber(overviewProgress.copyFailed)} copy failed objects ({overviewProgress.copyFailedPct.toFixed(1)}%)
-                  </span>
-                ) : null}
-                {overviewProgress.unaccounted > 0 ? (
-                  <span className="text-muted-foreground">
-                    {formatNumber(overviewProgress.unaccounted)} not reported by Cloudflare counters ({overviewProgress.unaccountedPct.toFixed(1)}%)
-                  </span>
-                ) : null}
-                {overviewProgress.verifyIssues > 0 ? (
-                  <span className="text-red-500">{formatNumber(overviewProgress.verifyIssues)} verification issues</span>
-                ) : null}
-                {overviewProgress.transferred === 0 && overviewProgress.skipped === 0 && overviewProgress.copyFailed === 0 ? (
-                  <span>0 transferred</span>
-                ) : null}
-              </div>
-              <span>
-                {formatNumber(overviewProgress.totalObjects)} total objects - {formatBytes(overviewProgress.totalBytes)} source size
-              </span>
+            <div className="bg-background px-3 py-2.5">
+              <div className="text-xs text-muted-foreground">Started</div>
+              <div className="mt-1 text-sm font-medium">{formatDate(migration.startedAt)}</div>
+            </div>
+            <div className="bg-background px-3 py-2.5">
+              <div className="text-xs text-muted-foreground">Completed</div>
+              <div className="mt-1 text-sm font-medium">{formatDate(migration.completedAt)}</div>
+            </div>
+            <div className="bg-background px-3 py-2.5">
+              <div className="text-xs text-muted-foreground">Last saved</div>
+              <div className="mt-1 text-sm font-medium">{formatDate(migration.lastSyncedAt || migration.completedAt || migration.createdAt)}</div>
             </div>
           </div>
+
+          {missingHistoricalDetails ? (
+            <div className="flex gap-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-sm">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+              <div className="space-y-1">
+                <div className="font-medium text-foreground">Detailed snapshot unavailable</div>
+                <div className="text-muted-foreground">
+                  This migration predates detailed bucket snapshots. Only its migration summary was stored, so bucket names, transfer counters, progress, and logs cannot be recovered from the database.
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground">Progress</span>
+                <span className="font-mono">{overviewProgress.percent.toFixed(1)}%</span>
+              </div>
+                <ProgressStacked
+                  transferredPct={overviewProgress.transferredPct}
+                  skippedPct={overviewProgress.skippedPct}
+                  failedPct={overviewProgress.copyFailedPct}
+                  unaccountedPct={overviewProgress.unaccountedPct}
+                />
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <div className="flex items-center gap-3">
+                  {overviewProgress.transferred > 0 ? (
+                    <span>
+                      {formatNumber(overviewProgress.transferred)} transferred ({overviewProgress.transferredPct.toFixed(1)}%)
+                    </span>
+                  ) : null}
+                  {overviewProgress.skipped > 0 ? (
+                    <span className="text-yellow-500">
+                      {formatNumber(overviewProgress.skipped)} skipped objects ({overviewProgress.skippedPct.toFixed(1)}%)
+                    </span>
+                  ) : null}
+                  {overviewProgress.copyFailed > 0 ? (
+                    <span className="text-red-500">
+                      {formatNumber(overviewProgress.copyFailed)} copy failed objects ({overviewProgress.copyFailedPct.toFixed(1)}%)
+                    </span>
+                  ) : null}
+                  {overviewProgress.unaccounted > 0 ? (
+                    <span className="text-muted-foreground">
+                      {formatNumber(overviewProgress.unaccounted)} not reported by Cloudflare counters ({overviewProgress.unaccountedPct.toFixed(1)}%)
+                    </span>
+                  ) : null}
+                  {overviewProgress.verifyIssues > 0 ? (
+                    <span className="text-red-500">{formatNumber(overviewProgress.verifyIssues)} verification issues</span>
+                  ) : null}
+                  {overviewProgress.transferred === 0 && overviewProgress.skipped === 0 && overviewProgress.copyFailed === 0 ? (
+                    <span>0 transferred</span>
+                  ) : null}
+                </div>
+                <span>
+                  {formatNumber(overviewProgress.totalObjects)} total objects - {formatBytes(overviewProgress.totalBytes)} source size
+                </span>
+              </div>
+            </div>
+          )}
 
           {overviewStatus.message ? (
             <div className="text-sm text-muted-foreground">
@@ -1741,6 +1786,7 @@ export default function MigrationDetailsPage() {
 
           <div className="flex flex-wrap gap-2">
             {(() => {
+              if (historyReadOnly.readOnly) return null
               const allBucketsTerminal =
                 items.length > 0 &&
                 items.every((i) => {
@@ -1750,8 +1796,15 @@ export default function MigrationDetailsPage() {
               const anyRunning = items.some((i) => normalizeStatus(getBucketSnapshot(i).displayStatus) === "running")
               const anyPaused = items.some((i) => Boolean(i.slurperJobId) && String(getItemStatus(i) ?? "").toLowerCase() === "paused")
               const showCancel = !allBucketsTerminal && !["completed", "failed", "canceled"].includes(String(effectiveMigrationStatus))
+              const settingsSyncFailed =
+                (migration.syncStatus === "error" && migration.syncMessage?.toLowerCase().includes("settings sync failed")) ||
+                items.some((item) => {
+                  const progress = isRecord(item.progress) ? item.progress : {}
+                  const settingsSync = isRecord(progress.settingsSync) ? progress.settingsSync : null
+                  return settingsSync?.status === "failed"
+                })
               const showMarkCompleted =
-                allBucketsTerminal && String(effectiveMigrationStatus) !== "completed" && String(effectiveMigrationStatus) !== "verifying"
+                allBucketsTerminal && String(effectiveMigrationStatus) !== "completed" && !settingsSyncFailed
 
               return (
                 <>
@@ -1778,6 +1831,13 @@ export default function MigrationDetailsPage() {
                     {busyAction === "sync" ? <Spinner className="mr-0" /> : <RefreshCw className="h-4 w-4 mr-0" />}
                     Sync now
                   </Button>
+
+                  {settingsSyncFailed ? (
+                    <Button onClick={() => void runMigrationAction("settings_sync")} disabled={Boolean(busyAction)} variant="outline">
+                      {busyAction === "settings_sync" ? <Spinner className="mr-0" /> : <ShieldCheck className="h-4 w-4 mr-0" />}
+                      Settings sync
+                    </Button>
+                  ) : null}
 
                   {failedBuckets.length > 0 ? (
                     <Button
@@ -1935,16 +1995,15 @@ export default function MigrationDetailsPage() {
         </Card>
       ) : null}
 
-
       <Card>
         <CardHeader>
           <CardTitle>Buckets</CardTitle>
-          <CardDescription>One Cloudflare Super Slurper job per bucket (max 3 running at a time).</CardDescription>
+          <CardDescription>Object transfer, verification, and settings sync status for each bucket.</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="max-w-full">
             <div className="rounded-md border">
-              <ScrollArea className="h-[520px] max-h-[60vh]" hideScrollbar>
+              <ScrollArea className="max-h-[min(520px,60vh)]" hideScrollbar>
                 <Table className="table-fixed w-full">
                   <TableHeader>
                     <TableRow>
@@ -1957,16 +2016,28 @@ export default function MigrationDetailsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
+                {items.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="h-20 text-center text-sm text-muted-foreground">
+                      No bucket data stored for this migration.
+                    </TableCell>
+                  </TableRow>
+                ) : null}
                 {items.map((item) => {
                   const slurper = readSlurperResult(item.progress)
                   const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
+                  const settingsSync = isRecord(progress.settingsSync) ? progress.settingsSync : null
                   const repairState = readRepairWorkerState(progress)
                   const repairResultItem = latestRepairItemsById.get(item.id)
                   const snapshot = getBucketSnapshot(item)
                   const sourceScanStatus = typeof progress.sourceScanStatus === "string" ? progress.sourceScanStatus : ""
                   const scanComplete = sourceScanStatus === "completed"
                   const status = String(getItemStatus(item) ?? "").toLowerCase()
-                  const displayStatus = snapshot.displayStatus
+                  const displayStatus = settingsSync?.status === "syncing"
+                    ? "settings_syncing"
+                    : settingsSync?.status === "failed"
+                      ? "settings_failed"
+                      : snapshot.displayStatus
                   const normalizedDisplayStatus = normalizeStatus(displayStatus)
                   const hasKnownEmpty =
                     typeof item.sourceObjects === "number" &&
@@ -2038,6 +2109,7 @@ export default function MigrationDetailsPage() {
                       <TableCell className="text-center">
                         <div className="space-y-1">
                           <div>{statusBadge(displayStatus, { hadProgress })}</div>
+                          {settingsSync?.status === "completed" ? <div className="text-[11px] text-muted-foreground">Settings synced</div> : null}
                         </div>
                       </TableCell>
                       <TableCell className="text-center font-mono text-xs">
@@ -2065,7 +2137,7 @@ export default function MigrationDetailsPage() {
                             variant="outline"
                             title={verifyStatus === null ? "Run verification" : "Re-run verification"}
                             aria-label="Verify"
-                            disabled={Boolean(itemBusy) || !canVerify}
+                            disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canVerify}
                             onClick={() => {
                               void runItemAction(item.id, "verify").then(() => void syncNow())
                             }}
@@ -2092,7 +2164,7 @@ export default function MigrationDetailsPage() {
                             variant="outline"
                             title="Failed Diagnostics"
                             aria-label="Failed Diagnostics"
-                            disabled={Boolean(itemBusy) || !canInspectFailures}
+                            disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canInspectFailures}
                             onClick={() => {
                               void openFailedDiagnosticsForSingle(item.id)
                             }}
@@ -2120,7 +2192,7 @@ export default function MigrationDetailsPage() {
                                     ? "Start"
                                     : "Start/Stop"
                             }
-                            disabled={Boolean(itemBusy) || lifecycleAction === null}
+                            disabled={historyReadOnly.readOnly || Boolean(itemBusy) || lifecycleAction === null}
                             onClick={() => {
                               if (lifecycleAction === "pause") {
                                 void runItemAction(item.id, "pause")
@@ -2148,7 +2220,7 @@ export default function MigrationDetailsPage() {
                             variant="destructive"
                             title="Abort"
                             aria-label="Abort"
-                            disabled={Boolean(itemBusy) || !canAbort}
+                            disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canAbort}
                             onClick={() => {
                               void runItemAction(item.id, "abort")
                             }}
@@ -2168,17 +2240,15 @@ export default function MigrationDetailsPage() {
         </CardContent>
       </Card>
 
-      <Card>
+      {logLines.length > 0 ? (
+        <Card>
         <CardHeader>
           <CardTitle>Migration Logs</CardTitle>
           <CardDescription>Aggregated logs and errors for this migration.</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="rounded-md border bg-muted/20">
-            <ScrollArea ref={migrationLogsRef} className="h-[420px]" hideScrollbar>
-              {logLines.length === 0 ? (
-                <div className="p-3 text-sm text-muted-foreground">No logs yet.</div>
-              ) : (
+            <ScrollArea ref={migrationLogsRef} className="max-h-[420px]" hideScrollbar>
                 <div className="min-w-[900px] p-2 text-xs font-mono">
                   <div className="sticky top-0 z-10 border-b bg-background/80 px-2 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/60">
                     <div
@@ -2288,11 +2358,11 @@ export default function MigrationDetailsPage() {
                     ))}
                   </div>
                 </div>
-              )}
             </ScrollArea>
           </div>
         </CardContent>
-      </Card>
+        </Card>
+      ) : null}
 
       <Dialog open={failedOpen} onOpenChange={setFailedOpen}>
         <DialogContent className="w-[96vw] max-w-[96vw] sm:max-w-[min(96vw,72rem)] h-[88vh] sm:h-[min(88vh,56rem)] overflow-hidden p-0 flex flex-col gap-0">
@@ -2612,7 +2682,7 @@ export default function MigrationDetailsPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-md border bg-muted/20">
-            <ScrollArea ref={bucketLogsRef} className="h-[620px] max-h-[75vh]" hideScrollbar>
+            <ScrollArea ref={bucketLogsRef} className="max-h-[min(620px,75vh)]" hideScrollbar>
               {bucketLogLines.length === 0 ? (
                 <div className="p-3 text-sm text-muted-foreground">No logs yet.</div>
               ) : (

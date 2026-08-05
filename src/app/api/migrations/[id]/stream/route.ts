@@ -60,7 +60,10 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
               send("error", { error: "Migration not found" })
               break
             }
-            const [items, repairJobs] = await Promise.all([listMigrationItems(id), listRepairJobsByMigration(id, 20)])
+            const [items, repairJobs] = await Promise.all([
+              listMigrationItems(id),
+              listRepairJobsByMigration(id, 20).catch(() => []),
+            ])
             send("snapshot", { migration, items, repairJobs, serverTime: new Date().toISOString() })
           } catch (e: unknown) {
             const message =

@@ -6,6 +6,7 @@ import {
   BarChart3,
   Bell,
   Bot,
+  Database,
   Boxes,
   ChevronsUpDown,
   FolderOpen,
@@ -72,6 +73,11 @@ const navOverview: NavItem[] = [
 ]
 
 const navManage: NavItem[] = [
+  {
+    title: "Buckets",
+    url: "/dashboard/buckets",
+    icon: Database,
+  },
   {
     title: "Storage",
     url: "/dashboard/storage",

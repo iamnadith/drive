@@ -1,6 +1,8 @@
 import { getMigration, listMigrationItems, mergeMigrationItemProgressState, updateMigration } from "./migrations-store"
 import { activateAccountForCompletedMigration } from "./accounts-store"
 import { listRepairJobsByMigration, type DriveRepairJob } from "./repair-jobs-store"
+import { syncMigrationBucketSettings } from "./migration-settings-sync"
+import { getMigrationReadOnlyState, isPermanentAccountCommunicationFailure } from "./migration-read-only"
 import {
   getBucketDisplayStatusRank,
   getEffectiveRepairStatus,
@@ -40,10 +42,44 @@ function getLatestRepairJob(jobs: DriveRepairJob[]): DriveRepairJob | null {
   return sorted.find((job) => job.status === "running" || job.status === "claimed" || job.status === "pending") ?? sorted[0] ?? null
 }
 
-export async function syncMigrationLiveState(migrationId: string): Promise<void> {
+export async function syncMigrationLiveState(
+  migrationId: string,
+  options?: { runSettingsSync?: boolean }
+): Promise<void> {
   const migration = await getMigration(migrationId)
   if (!migration) return
-  if (migration.status === "completed" && migration.options?.manualCompleted === true) return
+  if (getMigrationReadOnlyState(migration).readOnly) return
+  if (migration.status === "completed" && migration.options?.targetActivatedAt) return
+
+  const completeWithSettingsWarning = async (warning: string) => {
+    const completedAt = new Date().toISOString()
+    let activationError = ""
+    try {
+      await activateAccountForCompletedMigration({
+        targetAccountId: migration.targetAccountId,
+        completedAt,
+      })
+    } catch (error: unknown) {
+      activationError = error instanceof Error ? error.message : "Failed to activate migrated account"
+    }
+    await updateMigration(migrationId, {
+      status: "completed",
+      syncStatus: "error",
+      syncMessage: activationError ? `${warning}; target activation failed: ${activationError}` : warning,
+      completedAt,
+      lastSyncedAt: completedAt,
+      options: {
+        ...migration.options,
+        ...(activationError ? { targetActivatedAt: undefined } : { targetActivatedAt: completedAt }),
+        ...(isPermanentAccountCommunicationFailure(`${warning} ${activationError}`)
+          ? {
+              historyReadOnlyAt: completedAt,
+              historyReadOnlyReason: "Cloudflare account communication failed during settings sync",
+            }
+          : {}),
+      },
+    }).catch(() => undefined)
+  }
 
   const [items, repairJobs] = await Promise.all([listMigrationItems(migrationId), listRepairJobsByMigration(migrationId, 20)])
   const latestRepairJob = getLatestRepairJob(repairJobs)
@@ -207,6 +243,14 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
   )
 
   const refreshedItems = await listMigrationItems(migrationId)
+  const settingsSyncStates = refreshedItems.map((item) => {
+    const progress = isRecord(item.progress) ? item.progress : {}
+    return isRecord(progress.settingsSync) ? progress.settingsSync : null
+  })
+  const settingsSyncFailures = settingsSyncStates.filter((state) => state?.status === "failed")
+  const settingsSyncRunning = settingsSyncStates.some((state) => state?.status === "syncing")
+  const settingsSyncCompleted =
+    settingsSyncStates.length > 0 && settingsSyncStates.every((state) => state?.status === "completed")
   const liveStatuses = refreshedItems
     .map((item) => {
       const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
@@ -253,37 +297,82 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
       lastSyncedAt: now,
     }).catch(() => undefined)
   } else if (allCompleted) {
+    if (options?.runSettingsSync !== true) {
+      if (settingsSyncRunning || settingsSyncFailures.length > 0 || settingsSyncCompleted) return
+      await updateMigration(migrationId, {
+        status: "verifying",
+        syncStatus: "ok",
+        syncMessage: "Object migration completed; settings sync pending",
+        completedAt: null,
+        lastSyncedAt: now,
+      }).catch(() => undefined)
+      return
+    }
+
+    if (settingsSyncFailures.length > 0) {
+      const firstError = settingsSyncFailures.find((state) => typeof state?.error === "string")?.error
+      await completeWithSettingsWarning(
+        typeof firstError === "string" && firstError
+          ? `Settings sync failed: ${firstError}`
+          : "Settings sync failed for one or more buckets"
+      )
+      return
+    }
+
+    if (settingsSyncRunning) return
+
+    await updateMigration(migrationId, {
+      status: "verifying",
+      syncStatus: "syncing",
+      syncMessage: "Syncing settings",
+      completedAt: null,
+      lastSyncedAt: now,
+      options: { ...migration.options, targetActivatedAt: undefined },
+    })
     try {
+      if (!settingsSyncCompleted) await syncMigrationBucketSettings(migrationId)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Settings sync failed"
+      await completeWithSettingsWarning(message)
+      return
+    }
+
+    try {
+      const completedAt = new Date().toISOString()
+      await activateAccountForCompletedMigration({
+        targetAccountId: migration.targetAccountId,
+        completedAt,
+      })
       await updateMigration(migrationId, {
         status: "completed",
         syncStatus: "ok",
         syncMessage: "",
-        completedAt: now,
-        lastSyncedAt: now,
-        options: { ...migration.options, targetActivatedAt: undefined },
-      })
-      await activateAccountForCompletedMigration({
-        targetAccountId: migration.targetAccountId,
-        completedAt: now,
-      })
-      await updateMigration(migrationId, {
-        syncStatus: "ok",
-        syncMessage: "",
-        completedAt: now,
-        lastSyncedAt: now,
-        options: { ...migration.options, targetActivatedAt: now },
+        completedAt,
+        lastSyncedAt: completedAt,
+        options: { ...migration.options, targetActivatedAt: completedAt },
       })
     } catch (error: unknown) {
       const message =
         typeof error === "object" && error !== null && "message" in error
           ? String((error as { message?: unknown }).message ?? "Failed to activate migrated account")
           : "Failed to activate migrated account"
+      const failedAt = new Date().toISOString()
       await updateMigration(migrationId, {
         status: "completed",
         syncStatus: "error",
-        syncMessage: message,
-        completedAt: now,
-        lastSyncedAt: now,
+        syncMessage: `Settings synced, but target activation failed: ${message}`,
+        completedAt: failedAt,
+        lastSyncedAt: failedAt,
+        options: {
+          ...migration.options,
+          targetActivatedAt: undefined,
+          ...(isPermanentAccountCommunicationFailure(message)
+            ? {
+                historyReadOnlyAt: failedAt,
+                historyReadOnlyReason: "Target account activation is unavailable",
+              }
+            : {}),
+        },
       }).catch(() => undefined)
     }
   } else if (allTerminal && anyAborted && !anyFailed) {

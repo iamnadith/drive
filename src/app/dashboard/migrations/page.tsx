@@ -185,9 +185,10 @@ function formatBytes(value: number | undefined): string {
   return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unitIndex]}`
 }
 
-function statusBadge(status: string | undefined, syncStatus?: string) {
+function statusBadge(status: string | undefined, syncStatus?: string, syncMessage?: string) {
   const s = String(status ?? "unknown")
-  if (s === "verifying" && syncStatus === "error") return <Badge className="bg-red-600">Verification failed</Badge>
+  if (s === "verifying" && syncStatus === "error") return <Badge className="bg-red-600">{syncMessage?.toLowerCase().includes("settings sync") ? "Settings sync failed" : "Verification failed"}</Badge>
+  if (s === "verifying" && syncMessage?.toLowerCase().includes("syncing settings")) return <Badge className="bg-purple-600">Settings sync</Badge>
   if (s === "completed") return <Badge className="bg-green-600">Completed</Badge>
   if (s === "verifying") return <Badge className="bg-purple-600">Verifying</Badge>
   if (s === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
@@ -408,7 +409,7 @@ export default function MigrationsPage() {
       try {
         await postJsonWithTimeout({
           url: `/api/migrations/${encodeURIComponent(activeMigration.id)}/sync`,
-          body: {},
+          body: { finalizeSettings: true },
           timeoutMs: 10_000,
         }).catch(() => {})
       } catch {
@@ -930,7 +931,7 @@ export default function MigrationsPage() {
                     ? "Active migration"
                     : "Latest migration"}
                 </CardTitle>
-                {statusBadge(activeMigration?.status, activeMigration?.syncStatus)}
+                {statusBadge(activeMigration?.status, activeMigration?.syncStatus, activeMigration?.syncMessage)}
               </div>
               <CardDescription>
                 {activeMigration ? (

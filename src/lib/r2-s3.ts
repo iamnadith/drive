@@ -15,6 +15,10 @@ import {
   UploadPartCopyCommand,
   CompleteMultipartUploadCommand,
   AbortMultipartUploadCommand,
+  GetBucketCorsCommand,
+  PutBucketCorsCommand,
+  DeleteBucketCorsCommand,
+  type CORSRule,
 } from "@aws-sdk/client-s3"
 import { Upload } from "@aws-sdk/lib-storage"
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
@@ -195,6 +199,47 @@ export async function r2CreateSignedUploadUrl(
 export async function r2HeadBucket(config: R2ClientConfig, bucket: string) {
   const client = createR2Client(config)
   return client.send(new HeadBucketCommand({ Bucket: bucket }))
+}
+
+export async function r2GetBucketCors(
+  config: R2ClientConfig,
+  bucket: string
+): Promise<CORSRule[]> {
+  const client = createR2Client(config)
+  try {
+    const result = await client.send(new GetBucketCorsCommand({ Bucket: bucket }))
+    return result.CORSRules ?? []
+  } catch (error: unknown) {
+    const status =
+      typeof error === "object" && error !== null && "$metadata" in error
+        ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode
+        : undefined
+    const name =
+      typeof error === "object" && error !== null && "name" in error
+        ? String((error as { name?: unknown }).name ?? "")
+        : ""
+    if (status === 404 || name === "NoSuchCORSConfiguration") return []
+    throw error
+  }
+}
+
+export async function r2PutBucketCors(
+  config: R2ClientConfig,
+  bucket: string,
+  rules: CORSRule[]
+) {
+  const client = createR2Client(config)
+  return client.send(
+    new PutBucketCorsCommand({
+      Bucket: bucket,
+      CORSConfiguration: { CORSRules: rules },
+    })
+  )
+}
+
+export async function r2DeleteBucketCors(config: R2ClientConfig, bucket: string) {
+  const client = createR2Client(config)
+  return client.send(new DeleteBucketCorsCommand({ Bucket: bucket }))
 }
 
 export async function r2ListOneObject(config: R2ClientConfig, bucket: string) {

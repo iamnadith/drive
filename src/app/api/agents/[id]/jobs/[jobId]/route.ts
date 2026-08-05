@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { after, NextResponse } from "next/server"
 import {
   authenticateAgent,
   getAgentGithubToken,
@@ -208,6 +208,11 @@ export async function POST(
     }
 
     await syncMigrationLiveState(job.migrationId).catch(() => undefined)
+    if (effectiveStatus === "completed") {
+      after(async () => {
+        await syncMigrationLiveState(job.migrationId, { runSettingsSync: true }).catch(() => undefined)
+      })
+    }
 
     return NextResponse.json({ ok: true, job: updated })
   } catch (error: unknown) {

@@ -14,6 +14,8 @@ import {
   updateMigration,
   updateMigrationItem,
 } from "@/lib/migrations-store"
+import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
+import { requireAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
 
@@ -42,6 +44,8 @@ export async function POST(
   context: { params: Promise<{ id: string; itemId: string }> }
 ) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
     const { id, itemId } = await context.params
     const body: unknown = await request.json().catch(() => ({}))
     const data = isRecord(body) ? body : {}
@@ -50,6 +54,10 @@ export async function POST(
     const migration = await getMigration(id)
     if (!migration) {
       return NextResponse.json({ error: "Migration not found" }, { status: 404 })
+    }
+    const readOnly = getMigrationReadOnlyState(migration)
+    if (readOnly.readOnly && action !== "logs" && action !== "progress") {
+      return NextResponse.json({ error: `Migration history is read-only: ${readOnly.reason}` }, { status: 409 })
     }
 
     const items = await listMigrationItems(id)

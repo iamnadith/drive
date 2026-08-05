@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { after, NextResponse } from "next/server"
 import { activateAccountForCompletedMigration, getAllAccounts } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import {
@@ -35,6 +35,8 @@ import {
   claimMigrationItemJobCreation,
 } from "@/lib/migrations-store"
 import { syncMigrationLiveState } from "@/lib/migration-live-state"
+import { getMigrationReadOnlyState, isPermanentAccountCommunicationFailure } from "@/lib/migration-read-only"
+import { requireAdmin } from "@/lib/server-auth"
 import { readLiveBucketState, shouldUseLiveBucketState } from "@/lib/migration-bucket-state"
 
 export const runtime = "nodejs"
@@ -344,11 +346,23 @@ async function ensureTargetBucketExists(input: {
   }
 }
 
-export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
+export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
     const { id } = await context.params
+    const requestBody = (await request.json().catch(() => ({}))) as { finalizeSettings?: unknown }
+    const finalizeSettings = requestBody.finalizeSettings === true
     const migration = await getMigration(id)
     if (!migration) return NextResponse.json({ error: "Migration not found" }, { status: 404 })
+    const readOnly = getMigrationReadOnlyState(migration)
+    if (readOnly.readOnly) {
+      return NextResponse.json({
+        migration,
+        items: await listMigrationItems(id),
+        historyReadOnly: readOnly,
+      }, { status: 200 })
+    }
 
     // Terminal migrations should not trigger Cloudflare polling (progress/log fetches) or job creation.
     // But we still reconcile stale terminal states from item-level truth.
@@ -364,7 +378,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
           })
           const afterAccounts = await getAllAccounts()
           await updateMigration(id, {
-            syncStatus: "ok",
+            syncStatus: migration.syncStatus === "error" ? "error" : "ok",
             syncMessage: migration.syncMessage ?? "",
             lastSyncedAt: activatedAt,
             options: { ...migration.options, targetActivatedAt: activatedAt },
@@ -396,7 +410,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
             },
             undoable: false,
             undoReason: "Completed migrations permanently change the active account. Disabled accounts cannot be restored.",
-            ...getRequestActivityContext(_request),
+            ...getRequestActivityContext(request),
           })
         } catch (error: unknown) {
           const message = formatCloudflareError(error, "Failed to activate migrated account")
@@ -1437,16 +1451,32 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     }
 
     await syncMigrationLiveState(id).catch(() => undefined)
+    if (finalizeSettings) {
+      after(async () => {
+        await syncMigrationLiveState(id, { runSettingsSync: true }).catch(() => undefined)
+      })
+    }
     items = await listMigrationItems(id)
     return NextResponse.json({ migration: await getMigration(id), items }, { status: 200 })
   } catch (error: unknown) {
     const message = formatCloudflareError(error, "Unable to sync migration")
     try {
       const { id } = await context.params
+      const migration = await getMigration(id)
+      const failedAt = new Date().toISOString()
       await updateMigration(id, {
         syncStatus: "error",
         syncMessage: message,
-        lastSyncedAt: new Date().toISOString(),
+        lastSyncedAt: failedAt,
+        ...(migration && isPermanentAccountCommunicationFailure(message)
+          ? {
+              options: {
+                ...migration.options,
+                historyReadOnlyAt: failedAt,
+                historyReadOnlyReason: "Cloudflare account communication failed",
+              },
+            }
+          : {}),
       })
     } catch {
       // ignore
