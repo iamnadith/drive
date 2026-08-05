@@ -68,6 +68,16 @@ function isUnexpectedWorkflowInputsError(status: number, text: string): boolean 
   return status === 422 && /unexpected inputs provided/i.test(text)
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isRecentIso(value: string | undefined, maxAgeMs: number): boolean {
+  if (!value) return false
+  const time = Date.parse(value)
+  return Number.isFinite(time) && Date.now() - time <= maxAgeMs
+}
+
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const auth = await requireAdmin()
@@ -105,6 +115,15 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     if (agent.provider !== "github_actions") {
+      if (
+        (agent.provider === "self_hosted" || agent.provider === "local") &&
+        (agent.status !== "online" || !isRecentIso(agent.lastHeartbeatAt, 60_000))
+      ) {
+        return NextResponse.json(
+          { error: "Selected self-hosted worker is offline. Start the worker before dispatching this job." },
+          { status: 409 }
+        )
+      }
       const job = await createRepairJob({
         migrationId,
         mode,
@@ -134,7 +153,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const githubRepoName = agent.githubRepoName
     const githubWorkflowFile = agent.githubWorkflowFile
 
-    const activeWorkerJobs = (await listRepairJobs(100)).filter(
+    const workerJobs = await listRepairJobs(100)
+    const activeWorkerJobs = workerJobs.filter(
       (job) =>
         !["completed", "failed", "canceled"].includes(job.status) &&
         (job.claimedByAgentId === id || job.requestedByAgentId === id)
@@ -150,8 +170,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     const activeWorkerRuns = await listAgentRunsByAgentId(id, 20)
+    const workerJobStatusById = new Map(workerJobs.map((job) => [job.id, job.status]))
     const activeDispatchRuns = activeWorkerRuns.filter(
-      (run) => run.runType === "github_dispatch" && (run.status === "pending" || run.status === "running")
+      (run) =>
+        run.runType === "github_dispatch" &&
+        (run.status === "pending" || run.status === "running") &&
+        (!run.jobReference || !["completed", "failed", "canceled"].includes(workerJobStatusById.get(run.jobReference) ?? ""))
     )
     if (activeDispatchRuns.length > 0) {
       return NextResponse.json(
@@ -175,6 +199,16 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     const serverUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || new URL(request.url).origin).replace(/\/+$/, "")
     const dispatchRequestedAt = new Date().toISOString()
+    const runsBeforeDispatch = await listGitHubWorkflowRuns({
+      token: githubToken,
+      owner: githubRepoOwner,
+      repo: githubRepoName,
+      workflow: githubWorkflowFile,
+      branch: agent.githubRef || "main",
+      event: "workflow_dispatch",
+      perPage: 20,
+    }).catch(() => [])
+    const runIdsBeforeDispatch = new Set(runsBeforeDispatch.map((candidate) => candidate.id))
     let secretSyncError: string | null = null
     try {
       await syncGitHubWorkerSecrets({
@@ -212,6 +246,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         workflowFile: githubWorkflowFile,
         ref: agent.githubRef || "main",
         dispatchRequestedAt,
+        githubRunIdsBeforeDispatch: Array.from(runIdsBeforeDispatch),
       },
     })
 
@@ -292,24 +327,27 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       )
     }
 
-    const recentRuns = await listGitHubWorkflowRuns({
-      token: githubToken,
-      owner: githubRepoOwner,
-      repo: githubRepoName,
-      workflow: githubWorkflowFile,
-      branch: agent.githubRef || "main",
-      event: "workflow_dispatch",
-      perPage: 10,
-    }).catch(() => [])
-
-    const matchedRun =
-      recentRuns.find((candidate) => String(candidate.displayTitle ?? "").includes(job.id)) ??
-      recentRuns.find((candidate) => {
-        const createdAt = Date.parse(candidate.createdAt || "")
-        const requestedAt = Date.parse(dispatchRequestedAt)
-        if (!Number.isFinite(createdAt) || !Number.isFinite(requestedAt)) return false
-        return createdAt >= requestedAt - 60_000
-      }) ?? recentRuns[0]
+    let matchedRun: Awaited<ReturnType<typeof listGitHubWorkflowRuns>>[number] | undefined
+    for (let attempt = 0; attempt < 8 && !matchedRun; attempt += 1) {
+      if (attempt > 0) await sleep(1_000)
+      const recentRuns = await listGitHubWorkflowRuns({
+        token: githubToken,
+        owner: githubRepoOwner,
+        repo: githubRepoName,
+        workflow: githubWorkflowFile,
+        branch: agent.githubRef || "main",
+        event: "workflow_dispatch",
+        perPage: 20,
+      }).catch(() => [])
+      const newRuns = recentRuns.filter((candidate) => !runIdsBeforeDispatch.has(candidate.id))
+      matchedRun =
+        newRuns.find((candidate) => String(candidate.displayTitle ?? "").includes(job.id)) ??
+        newRuns.find((candidate) => {
+          const createdAt = Date.parse(candidate.createdAt || "")
+          const requestedAt = Date.parse(dispatchRequestedAt)
+          return Number.isFinite(createdAt) && Number.isFinite(requestedAt) && createdAt >= requestedAt - 10_000
+        })
+    }
 
     const updatedRun = await updateAgentRun(run.id, {
       status: matchedRun ? (matchedRun.status === "completed" ? "completed" : "running") : "pending",
@@ -325,6 +363,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         workflowFile: githubWorkflowFile,
         ref: agent.githubRef || "main",
         dispatchRequestedAt,
+        githubRunIdsBeforeDispatch: Array.from(runIdsBeforeDispatch),
         usedRuntimeInputs,
         ...(secretSyncError ? { secretSyncWarning: secretSyncError } : {}),
         ...(matchedRun?.htmlUrl ? { htmlUrl: matchedRun.htmlUrl } : {}),
@@ -338,6 +377,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       metadata: {
         ...(agent.metadata ?? {}),
         activeRepairJobId: matchedRun && matchedRun.status !== "completed" ? job.id : null,
+        githubAbortRequestedAt: null,
         githubDispatchRequestedAt: dispatchRequestedAt,
         ...(matchedRun?.id ? { githubRunId: matchedRun.id } : {}),
         ...(matchedRun?.status ? { githubRunStatus: matchedRun.status } : {}),

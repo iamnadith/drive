@@ -183,20 +183,23 @@ function buildGitHubRunDiagnostics(
 
 function matchGithubRunToDispatch(
   runs: Awaited<ReturnType<typeof listGitHubWorkflowRuns>>,
-  dispatchRequestedAt: unknown
+  dispatchRequestedAt: unknown,
+  excludedRunIds: unknown
 ) {
   if (!Array.isArray(runs) || runs.length === 0) return null
 
   const requestedAt =
     typeof dispatchRequestedAt === "string" && dispatchRequestedAt.trim().length > 0 ? Date.parse(dispatchRequestedAt) : Number.NaN
 
-  if (!Number.isFinite(requestedAt)) return runs[0] ?? null
+  if (!Number.isFinite(requestedAt)) return null
+  const excluded = new Set(Array.isArray(excludedRunIds) ? excludedRunIds.filter((value): value is string => typeof value === "string") : [])
 
   return (
     runs.find((candidate) => {
+      if (excluded.has(candidate.id)) return false
       const createdAt = Date.parse(candidate.createdAt || "")
       if (!Number.isFinite(createdAt)) return false
-      return createdAt >= requestedAt - 60_000
+      return createdAt >= requestedAt - 10_000
     }) ?? null
   )
 }
@@ -264,7 +267,11 @@ export async function reconcileRepairJobs(input?: { jobId?: string; migrationId?
           event: "workflow_dispatch",
           perPage: 10,
         }).catch(() => [])
-        githubRun = matchGithubRunToDispatch(runs, (latestRun.payload ?? {}).dispatchRequestedAt)
+        githubRun = matchGithubRunToDispatch(
+          runs,
+          (latestRun.payload ?? {}).dispatchRequestedAt,
+          (latestRun.payload ?? {}).githubRunIdsBeforeDispatch
+        )
       }
 
       if (!githubRun) {
@@ -549,14 +556,17 @@ export async function createRepairJob(input: {
   return mapJobRow(data as DriveRepairJobRow)
 }
 
-export async function claimRepairJob(agentId: string): Promise<DriveRepairJob | null> {
+export async function claimRepairJob(agentId: string, requestedJobId?: string): Promise<DriveRepairJob | null> {
   const supabase = getSupabaseServerClient()
-  const { data: pendingRows, error: listError } = await supabase
+  let pendingQuery = supabase
     .from(REPAIR_JOBS_TABLE)
     .select("*")
     .eq("status", "pending")
+    .or(`requested_by_agent_id.is.null,requested_by_agent_id.eq.${agentId}`)
     .order("created_at", { ascending: true })
     .limit(1)
+  if (requestedJobId) pendingQuery = pendingQuery.eq("id", requestedJobId)
+  const { data: pendingRows, error: listError } = await pendingQuery
   if (listError) throw normalizeSupabaseError(listError)
   const candidate = Array.isArray(pendingRows) ? (pendingRows[0] as DriveRepairJobRow | undefined) : undefined
   if (!candidate) return null

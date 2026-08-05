@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
-import { getAgentById, getAgentGithubToken, getLatestAgentRunByJobReference, listAgentRunsByAgentId, listAgents, updateAgent, updateAgentRun } from "@/lib/agents-store"
+import { getAgentById, getAgentGithubToken, getLatestAgentRunByJobReference, listAgentRunsByAgentId, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import {
   cancelGitHubWorkflowRun,
   forceCancelGitHubWorkflowRun,
   getGitHubWorkflowRun,
-  listGitHubWorkflowRuns,
   GITHUB_TOKEN_COOKIE,
 } from "@/lib/github-oauth"
 import { syncMigrationLiveState } from "@/lib/migration-live-state"
@@ -97,35 +96,6 @@ async function ensureGitHubRunCanceled(input: {
   }
 }
 
-async function resolveGitHubRunIdForAbort(input: {
-  token: string
-  owner: string
-  repo: string
-  workflow?: string
-  branch?: string
-  externalRunId?: string
-}): Promise<string | null> {
-  if (input.externalRunId) return input.externalRunId
-  if (!input.workflow) return null
-
-  const runs = await listGitHubWorkflowRuns({
-    token: input.token,
-    owner: input.owner,
-    repo: input.repo,
-    workflow: input.workflow,
-    branch: input.branch,
-    event: "workflow_dispatch",
-    perPage: 20,
-  }).catch(() => [])
-
-  const active = runs.find((run) => {
-    const status = String(run.status ?? "").toLowerCase()
-    return status === "queued" || status === "in_progress" || status === "waiting" || status === "requested" || status === "pending"
-  })
-
-  return active?.id ?? runs[0]?.id ?? null
-}
-
 async function resolveGitHubRunIdsForAbort(input: {
   agentId: string
   jobId: string
@@ -136,33 +106,16 @@ async function resolveGitHubRunIdsForAbort(input: {
   branch?: string
   linkedRun?: Awaited<ReturnType<typeof getLatestAgentRunByJobReference>> | null
 }): Promise<string[]> {
-  const allWorkers = await listAgents().catch(() => [])
-  const workerWithRun = allWorkers.find((entry) => entry.id === input.agentId) ?? null
   const agentRuns = await listAgentRunsByAgentId(input.agentId, 50).catch(() => [])
 
   const relevantRuns = agentRuns.filter((run) => {
-    if (run.runType !== "github_dispatch") return false
-    if (run.jobReference === input.jobId) return true
-    return run.status === "pending" || run.status === "running"
+    return run.runType === "github_dispatch" && run.jobReference === input.jobId
   })
 
   const runIds = new Set<string>()
   if (input.linkedRun?.externalRunId) runIds.add(input.linkedRun.externalRunId)
-  if (workerWithRun?.latestRun?.externalRunId) runIds.add(workerWithRun.latestRun.externalRunId)
   for (const run of relevantRuns) {
     if (run.externalRunId) runIds.add(run.externalRunId)
-  }
-
-  if (runIds.size === 0) {
-    const fallbackRunId = await resolveGitHubRunIdForAbort({
-      token: input.token,
-      owner: input.owner,
-      repo: input.repo,
-      workflow: input.workflow,
-      branch: input.branch,
-      externalRunId: input.linkedRun?.externalRunId,
-    })
-    if (fallbackRunId) runIds.add(fallbackRunId)
   }
 
   return Array.from(runIds)

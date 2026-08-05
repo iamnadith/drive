@@ -67,6 +67,7 @@ Optional environment variables:
 - `UPLOAD_QUEUE_SIZE`: multipart upload parts per object. Default: `4`.
 - `UPLOAD_PART_SIZE_MB`: multipart part size in MB. Default: `16`.
 - `S3_RETRIES`: retry attempts for R2/S3 operations. Default: `3`.
+- `DRIVE_REPAIR_JOB_ID`: optional exact job binding. GitHub Actions runs are automatically bound using `GITHUB_RUN_ID`.
 
 For faster hosts, start with:
 

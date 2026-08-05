@@ -82,7 +82,8 @@ function getReconciledGithubAgentStatus(runStatus: "running" | "completed" | "fa
 
 function matchGithubRunToDispatch(
   runs: Awaited<ReturnType<typeof listGitHubWorkflowRuns>>,
-  dispatchRequestedAt: unknown
+  dispatchRequestedAt: unknown,
+  excludedRunIds: unknown
 ) {
   if (!Array.isArray(runs) || runs.length === 0) return null
 
@@ -91,13 +92,15 @@ function matchGithubRunToDispatch(
       ? Date.parse(dispatchRequestedAt)
       : Number.NaN
 
-  if (!Number.isFinite(requestedAt)) return runs[0] ?? null
+  if (!Number.isFinite(requestedAt)) return null
+  const excluded = new Set(Array.isArray(excludedRunIds) ? excludedRunIds.filter((value): value is string => typeof value === "string") : [])
 
   return (
     runs.find((candidate) => {
+      if (excluded.has(candidate.id)) return false
       const createdAt = Date.parse(candidate.createdAt || "")
       if (!Number.isFinite(createdAt)) return false
-      return createdAt >= requestedAt - 60_000
+      return createdAt >= requestedAt - 10_000
     }) ?? null
   )
 }
@@ -143,7 +146,11 @@ export async function GET() {
           event: "workflow_dispatch",
           perPage: 10,
         }).catch(() => [])
-        githubRun = matchGithubRunToDispatch(runs, (latestRun.payload ?? {}).dispatchRequestedAt)
+        githubRun = matchGithubRunToDispatch(
+          runs,
+          (latestRun.payload ?? {}).dispatchRequestedAt,
+          (latestRun.payload ?? {}).githubRunIdsBeforeDispatch
+        )
       }
 
       if (!githubRun) {

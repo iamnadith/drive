@@ -3,7 +3,7 @@ import { getAgentById, getAgentGithubToken, getLatestAgentRunByJobReference, upd
 import { activateAccountForCompletedMigration, getAllAccounts } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import { slurperAbortJob, slurperPauseJob, slurperResumeJob } from "@/lib/cloudflare-r2-super-slurper"
-import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflowRun, listGitHubWorkflowRuns } from "@/lib/github-oauth"
+import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflowRun } from "@/lib/github-oauth"
 import { getMigration, listMigrationItems, updateMigration, updateMigrationItem } from "@/lib/migrations-store"
 import { abortRepairJob, listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 import { createInitialBucketVerifyState } from "@/lib/bucket-verifier"
@@ -118,25 +118,7 @@ async function resolveGitHubRunIdForAbort(input: {
   branch?: string
   externalRunId?: string
 }): Promise<string | null> {
-  if (input.externalRunId) return input.externalRunId
-  if (!input.workflow) return null
-
-  const runs = await listGitHubWorkflowRuns({
-    token: input.token,
-    owner: input.owner,
-    repo: input.repo,
-    workflow: input.workflow,
-    branch: input.branch,
-    event: "workflow_dispatch",
-    perPage: 20,
-  }).catch(() => [])
-
-  const active = runs.find((run) => {
-    const status = String(run.status ?? "").toLowerCase()
-    return status === "queued" || status === "in_progress" || status === "waiting" || status === "requested" || status === "pending"
-  })
-
-  return active?.id ?? runs[0]?.id ?? null
+  return input.externalRunId ?? null
 }
 
 async function abortRepairJobsForMigration(migrationId: string): Promise<{

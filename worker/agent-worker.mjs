@@ -22,6 +22,8 @@ function getArg(name, fallback = "") {
 const SERVER_URL = String(getArg("server-url", "")).replace(/\/+$/, "")
 const AGENT_ID = String(getArg("agent-id", ""))
 const AGENT_TOKEN = String(getArg("token", ""))
+const REPAIR_JOB_ID = String(getArg("repair-job-id", process.env.DRIVE_REPAIR_JOB_ID || ""))
+const GITHUB_RUN_ID = String(process.env.GITHUB_RUN_ID || "")
 const POLL_MS = Math.max(5_000, Number(getArg("poll-ms", "15000")) || 15_000)
 const HEARTBEAT_MS = Math.max(10_000, Number(getArg("heartbeat-ms", "20000")) || 20_000)
 const MAX_OBJECTS = Math.max(1, Math.min(500_000, Number(getArg("max-objects", "200000")) || 200_000))
@@ -269,6 +271,8 @@ async function heartbeat(extra = {}) {
 async function claimJob() {
   return api(`/api/workers/${encodeURIComponent(AGENT_ID)}/claim-job`, {
     token: AGENT_TOKEN,
+    ...(REPAIR_JOB_ID ? { jobId: REPAIR_JOB_ID } : {}),
+    ...(GITHUB_RUN_ID ? { githubRunId: GITHUB_RUN_ID } : {}),
   })
 }
 
@@ -1856,7 +1860,7 @@ let heartbeatLoopStarted = false
 async function startHeartbeatLoop() {
   while (true) {
     try {
-      await heartbeat(currentJobId ? { currentJobId } : {})
+      await heartbeat({ currentJobId: currentJobId ?? null })
     } catch (error) {
       console.error("Heartbeat failed:", error instanceof Error ? error.message : String(error))
     }

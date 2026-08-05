@@ -524,7 +524,10 @@ export async function recordAgentHeartbeat(input: {
       last_seen_host: input.host ?? row.last_seen_host,
       last_seen_version: input.version ?? row.last_seen_version,
       capabilities: nextCapabilities,
-      metadata: input.metadata ?? row.metadata ?? {},
+      metadata: {
+        ...(isRecord(row.metadata) ? row.metadata : {}),
+        ...(input.metadata ?? {}),
+      },
       updated_at: now,
       last_error: null,
     })
