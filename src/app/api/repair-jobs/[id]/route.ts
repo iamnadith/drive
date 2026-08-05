@@ -201,6 +201,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const linkedRun = await getLatestAgentRunByJobReference(id).catch(() => null)
     const agentId = job.claimedByAgentId || job.requestedByAgentId
     const agent = agentId ? await getAgentById(agentId).catch(() => null) : null
+    const locallyAbortedJob = await abortRepairJob(id)
+    if (locallyAbortedJob) {
+      await syncMigrationLiveState(locallyAbortedJob.migrationId).catch(() => undefined)
+    }
 
     if (
       agent &&
@@ -214,6 +218,15 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         getGitHubTokenFallback()
 
       if (!githubToken) {
+        if (locallyAbortedJob) {
+          return NextResponse.json({
+            ok: true,
+            abortRequested: true,
+            remoteCancellationPending: true,
+            warning: "Worker job was aborted, but no GitHub token was available to stop the workflow run.",
+            job: locallyAbortedJob,
+          })
+        }
         return NextResponse.json({ error: "No GitHub token available to cancel the workflow run" }, { status: 400 })
       }
 
@@ -229,6 +242,15 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       })
 
       if (runIds.length === 0) {
+        if (locallyAbortedJob) {
+          return NextResponse.json({
+            ok: true,
+            abortRequested: true,
+            remoteCancellationPending: true,
+            warning: "Worker job was aborted, but the GitHub workflow run could not be located.",
+            job: locallyAbortedJob,
+          })
+        }
         return NextResponse.json({ error: "Could not find the GitHub workflow run to cancel" }, { status: 404 })
       }
 
@@ -260,17 +282,19 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           }).catch(() => undefined)
         }
 
-        return NextResponse.json(
-          {
-            error:
+        if (locallyAbortedJob) {
+          return NextResponse.json({
+            ok: true,
+            abortRequested: true,
+            remoteCancellationPending: uncanceled.status === "running",
+            warning:
               uncanceled.status === "running"
-                ? "GitHub accepted the abort request, but the workflow run is still running. Try again in a few seconds."
-                : uncanceled.status === "failed"
-                  ? "GitHub workflow ended as failed instead of canceled."
-                  : "GitHub workflow completed before it could be canceled.",
-          },
-          { status: 409 }
-        )
+                ? "Worker job was aborted; GitHub cancellation is still pending."
+                : `Worker job was aborted; GitHub workflow ended as ${uncanceled.status}.`,
+            job: locallyAbortedJob,
+          })
+        }
+        return NextResponse.json({ error: "GitHub workflow cancellation was not confirmed." }, { status: 409 })
       }
 
       const now = new Date().toISOString()
@@ -329,7 +353,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         })
       }
 
-      const updatedJob = await abortRepairJob(id)
+      const updatedJob = locallyAbortedJob ?? (await abortRepairJob(id))
       await syncMigrationLiveState(updatedJob.migrationId).catch(() => undefined)
       const refreshedRun = await getLatestAgentRunByJobReference(id).catch(() => null)
       return NextResponse.json({
@@ -341,7 +365,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     if (agent) {
       await updateAgent(agent.id, {
-        status: "offline",
+        status: agent.provider === "self_hosted" || agent.provider === "local" ? "online" : "offline",
         lastError: null,
         metadata: {
           ...(agent.metadata ?? {}),
@@ -351,7 +375,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       }).catch(() => undefined)
     }
 
-    const updatedJob = await abortRepairJob(id)
+    const updatedJob = locallyAbortedJob ?? (await abortRepairJob(id))
     await syncMigrationLiveState(updatedJob.migrationId).catch(() => undefined)
     const refreshedRun = await getLatestAgentRunByJobReference(id).catch(() => null)
     return NextResponse.json({ ok: true, job: { ...updatedJob, linkedRun: refreshedRun } })
@@ -369,7 +393,11 @@ export async function DELETE(_request: Request, context: { params: Promise<{ id:
     const job = await getRepairJob(id)
     if (!job) return NextResponse.json({ error: "Repair job not found" }, { status: 404 })
 
+    if (job.status === "pending" || job.status === "claimed" || job.status === "running") {
+      await abortRepairJob(id)
+    }
     await deleteRepairJob(id)
+    await syncMigrationLiveState(job.migrationId).catch(() => undefined)
     return NextResponse.json({ ok: true })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to delete repair job") }, { status: 400 })

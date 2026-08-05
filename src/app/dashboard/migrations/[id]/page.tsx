@@ -1004,23 +1004,16 @@ export default function MigrationDetailsPage() {
       totalObjects > 0 ? Math.max(0, totalObjects - Math.min(totalObjects, resolvedTransferred + resolvedSkipped)) : 0
     const resolvedCopyFailed = totalObjects > 0 ? Math.min(copyFailed, remainingAfterTransferSkip) : copyFailed
     const done = resolvedTransferred + resolvedSkipped + resolvedCopyFailed
-    const allBucketsTerminal =
-      items.length > 0 &&
-      items.every((item) => {
-        const status = getBucketSnapshot(item).displayStatus
-        return isCompletedStatus(status) || isAbortedStatus(status) || isFailedLikeStatus(status) || normalizeStatus(status) === "no_files"
-      })
     const allBucketsCompleted =
       items.length > 0 &&
       items.every((item) => isCompletedStatus(getBucketSnapshot(item).displayStatus))
     const residualUnaccounted = totalObjects > 0 ? Math.max(0, totalObjects - Math.min(totalObjects, done)) : rawUnaccounted
     const unaccounted = totalObjects > 0 ? Math.min(rawUnaccounted, residualUnaccounted) : rawUnaccounted
-    const effectiveDone = done + (allBucketsTerminal ? unaccounted : 0)
     const percent =
-      allBucketsCompleted
+      allBucketsCompleted || (migration?.status === "completed" && migration.options?.manualCompleted === true)
         ? 100
         : totalObjects > 0
-          ? Math.max(0, Math.min(100, (effectiveDone / totalObjects) * 100))
+          ? Math.max(0, Math.min(100, (done / totalObjects) * 100))
           : 0
     const transferredPct = totalObjects > 0 ? Math.max(0, Math.min(100, (resolvedTransferred / totalObjects) * 100)) : 0
     const skippedPct = totalObjects > 0 ? Math.max(0, Math.min(100, (resolvedSkipped / totalObjects) * 100)) : 0
@@ -1040,7 +1033,7 @@ export default function MigrationDetailsPage() {
       unaccountedPct,
       totalBytes,
     }
-  }, [getBucketSnapshot, items, latestRepairItemsById])
+  }, [getBucketSnapshot, items, latestRepairItemsById, migration?.options?.manualCompleted, migration?.status])
 
   const overviewProgress = totals
   const hasActiveSuperSlurper = React.useMemo(
@@ -1082,7 +1075,7 @@ export default function MigrationDetailsPage() {
       return "aborted"
     if (bucketCounts.completed === bucketCounts.total && bucketCounts.total > 0) return "completed"
     return migration?.status ?? "draft"
-  }, [bucketCounts, migration?.status])
+  }, [bucketCounts, migration?.options?.manualCompleted, migration?.status])
 
   const effectiveMigrationStatus = React.useMemo(() => {
     if (overviewBadgeStatus === "aborted") return "canceled"
@@ -1236,8 +1229,8 @@ export default function MigrationDetailsPage() {
         setTimeout(connect, delay)
       }
 
-      es.addEventListener("snapshot", onSnapshot as any)
-      es.addEventListener("error", onError as any)
+      es.addEventListener("snapshot", onSnapshot as EventListener)
+      es.addEventListener("error", onError as EventListener)
     }
 
     connect()

@@ -34,10 +34,10 @@ const UPLOAD_PART_SIZE = Math.max(
   5 * 1024 * 1024,
   Math.min(128 * 1024 * 1024, (Number(getArg("upload-part-size-mb", "16")) || 50) * 1024 * 1024)
 )
-const RANGE_COPY_THRESHOLD_MB = Number(getArg("range-copy-threshold-mb", "0"))
+const RANGE_COPY_THRESHOLD_MB = Number(getArg("range-copy-threshold-mb", "64"))
 const RANGE_COPY_THRESHOLD = Math.max(
   0,
-  Math.min(1024 * 1024 * 1024, (Number.isFinite(RANGE_COPY_THRESHOLD_MB) ? RANGE_COPY_THRESHOLD_MB : 0) * 1024 * 1024)
+  Math.min(1024 * 1024 * 1024, (Number.isFinite(RANGE_COPY_THRESHOLD_MB) ? RANGE_COPY_THRESHOLD_MB : 64) * 1024 * 1024)
 )
 const RANGE_COPY_CONCURRENCY = Math.max(1, Math.min(16, Number(getArg("range-copy-concurrency", String(UPLOAD_QUEUE_SIZE))) || UPLOAD_QUEUE_SIZE))
 const HEARTBEAT_TIMEOUT_MS = Math.max(API_TIMEOUT_MS, 60_000)
@@ -54,6 +54,7 @@ const supabase =
     : null
 const migrationItemProgressCache = new Map()
 const repairJobProgressCache = new Map()
+const jobAbortControllers = new Map()
 
 if (!SERVER_URL || !AGENT_ID || !AGENT_TOKEN) {
   console.error("Missing required configuration. Use --server-url, --agent-id, and --token.")
@@ -146,6 +147,7 @@ async function withRetries(label, fn, retries = 3) {
       return await fn(attempt)
     } catch (error) {
       lastError = error
+      if (error instanceof JobAbortedError) throw error
       if (attempt >= retries || !isRetryableError(error)) throw error
       await sleep(Math.min(5000, 400 * 2 ** (attempt - 1)))
     }
@@ -170,6 +172,19 @@ class JobAbortedError extends Error {
     super(message)
     this.name = "JobAbortedError"
   }
+}
+
+function markJobAborted(jobId) {
+  const controller = jobAbortControllers.get(jobId)
+  if (controller && !controller.signal.aborted) controller.abort()
+}
+
+function getJobAbortSignal(jobId) {
+  return jobAbortControllers.get(jobId)?.signal
+}
+
+function throwIfJobAborted(jobId) {
+  if (getJobAbortSignal(jobId)?.aborted) throw new JobAbortedError()
 }
 
 function createClient(config) {
@@ -257,7 +272,7 @@ async function claimJob() {
   })
 }
 
-async function updateMigrationItemLocal(migrationId, itemUpdate) {
+async function updateMigrationItemLocal(migrationId, repairJobId, itemUpdate) {
   if (!supabase || !migrationId || !itemUpdate || typeof itemUpdate !== "object") return
 
   const itemId = typeof itemUpdate.itemId === "string" ? itemUpdate.itemId : ""
@@ -291,6 +306,28 @@ async function updateMigrationItemLocal(migrationId, itemUpdate) {
   const currentProgress = isRecord(currentRow?.progress) ? currentRow.progress : {}
   const repair = isRecord(currentProgress.repairWorker) ? currentProgress.repairWorker : {}
   const live = isRecord(currentProgress.live) ? currentProgress.live : {}
+  const slurper = [
+    currentProgress.slurperCumulative,
+    currentProgress.slurperNormalized,
+    isRecord(currentProgress.slurper) ? currentProgress.slurper.result : null,
+  ].find(isRecord)
+  const slurperTransferred = typeof slurper?.transferredObjects === "number" ? slurper.transferredObjects : 0
+  const slurperSkipped = typeof slurper?.skippedObjects === "number" ? slurper.skippedObjects : 0
+  const sameRepairJob = repair.jobId === repairJobId
+  const baselineTransferred = sameRepairJob
+    ? typeof repair.baselineTransferred === "number"
+      ? repair.baselineTransferred
+      : 0
+    : typeof repair.cumulativeTransferred === "number"
+      ? repair.cumulativeTransferred
+      : Math.max(0, typeof live.transferredObjects === "number" ? live.transferredObjects - slurperTransferred : 0)
+  const baselineSkipped = sameRepairJob
+    ? typeof repair.baselineSkipped === "number"
+      ? repair.baselineSkipped
+      : 0
+    : typeof repair.cumulativeSkipped === "number"
+      ? repair.cumulativeSkipped
+      : Math.max(0, typeof live.skippedObjects === "number" ? live.skippedObjects - slurperSkipped : 0)
   const sourceObjectCount =
     typeof details.sourceObjectCount === "number"
       ? details.sourceObjectCount
@@ -312,9 +349,18 @@ async function updateMigrationItemLocal(migrationId, itemUpdate) {
             : stage.includes("verify")
               ? "verifying"
               : "running"
+  const currentTransferred = typeof transferred === "number" ? transferred : sameRepairJob && typeof repair.transferred === "number" ? repair.transferred : 0
+  const currentSkipped = typeof skipped === "number" ? skipped : sameRepairJob && typeof repair.skipped === "number" ? repair.skipped : 0
+  const cumulativeTransferred = baselineTransferred + currentTransferred
+  const cumulativeSkipped = Math.max(baselineSkipped, currentSkipped)
 
   const nextRepair = {
     ...repair,
+    jobId: repairJobId,
+    baselineTransferred,
+    baselineSkipped,
+    cumulativeTransferred,
+    cumulativeSkipped,
     stage,
     status,
     updatedAt: now,
@@ -334,14 +380,10 @@ async function updateMigrationItemLocal(migrationId, itemUpdate) {
       updatedAt: now,
       status: liveStatus,
       transferredObjects:
-        liveStatus === "completed" && sourceObjectCount > 0
-          ? Math.max(typeof transferred === "number" ? transferred : 0, Math.max(0, sourceObjectCount - (typeof skipped === "number" ? skipped : 0)))
-          : typeof transferred === "number"
-            ? transferred
-            : typeof live.transferredObjects === "number"
-              ? live.transferredObjects
-              : 0,
-      skippedObjects: typeof skipped === "number" ? skipped : typeof live.skippedObjects === "number" ? live.skippedObjects : 0,
+        sourceObjectCount > 0
+          ? Math.min(sourceObjectCount, slurperTransferred + cumulativeTransferred)
+          : slurperTransferred + cumulativeTransferred,
+      skippedObjects: Math.max(slurperSkipped, cumulativeSkipped),
       failedObjects:
         liveStatus === "completed"
           ? 0
@@ -360,6 +402,7 @@ async function updateMigrationItemLocal(migrationId, itemUpdate) {
       totalObjects: sourceObjectCount,
       workerStage: stage || null,
       workerStatus: status || null,
+      repairJobId,
     },
     repairWorkerStatus: status,
     ...(summary ? { syncMessage: summary } : {}),
@@ -454,6 +497,7 @@ async function updateMigrationLocal(migrationId, body) {
 
 async function updateJob(jobId, body, options = {}) {
   const allowOffline = options?.allowOffline === true
+  let persistLocally = null
   if (supabase) {
     const status = typeof body.status === "string" ? body.status : undefined
     const progress = body.progress && typeof body.progress === "object" ? body.progress : undefined
@@ -461,7 +505,7 @@ async function updateJob(jobId, body, options = {}) {
     const summary = typeof body.summary === "string" ? body.summary : undefined
     const error = typeof body.error === "string" ? body.error : undefined
     const now = new Date().toISOString()
-    const localPersistence = (async () => {
+    persistLocally = async () => {
       let currentRow = repairJobProgressCache.get(jobId) || null
       if (!currentRow) {
         const selectResult = await withTimeout(
@@ -500,7 +544,7 @@ async function updateJob(jobId, body, options = {}) {
 
       if (currentMigrationId && Array.isArray(body.items)) {
         for (const itemUpdate of body.items) {
-          await updateMigrationItemLocal(currentMigrationId, itemUpdate).catch(() => undefined)
+          await updateMigrationItemLocal(currentMigrationId, jobId, itemUpdate).catch(() => undefined)
         }
       }
 
@@ -512,9 +556,7 @@ async function updateJob(jobId, body, options = {}) {
         progress: mergedProgress || currentProgress,
         result: mergedResult || currentResult,
       })
-    })()
-
-    void localPersistence.catch(() => undefined)
+    }
   }
   let response
   try {
@@ -524,6 +566,7 @@ async function updateJob(jobId, body, options = {}) {
     })
   } catch (error) {
     if (allowOffline && !(error instanceof JobAbortedError) && isRetryableError(error)) {
+      if (persistLocally) await persistLocally().catch(() => undefined)
       return { offline: true, error: error instanceof Error ? error.message : String(error) }
     }
     throw error
@@ -542,7 +585,10 @@ async function safeUpdateJob(jobId, body) {
     }
     return response
   } catch (error) {
-    if (error instanceof JobAbortedError) return { canceled: true }
+    if (error instanceof JobAbortedError) {
+      markJobAborted(jobId)
+      return { canceled: true }
+    }
     console.error(`Job sync failed for ${jobId}:`, error instanceof Error ? error.message : String(error))
     return { offline: true, error: error instanceof Error ? error.message : String(error) }
   }
@@ -786,7 +832,8 @@ async function copyObjectWithRangedMultipart(sourceClient, targetClient, sourceB
       Bucket: targetBucket,
       Key: key,
       ...buildObjectMetadataParams(sourceHead),
-    })
+    }),
+    options.abortSignal ? { abortSignal: options.abortSignal } : undefined
   )
   const uploadId = createResult.UploadId
   if (!uploadId) throw new Error(`Multipart upload id missing for ${key}`)
@@ -806,12 +853,14 @@ async function copyObjectWithRangedMultipart(sourceClient, targetClient, sourceB
       const uploaded = await withRetries(
         `range copy ${sourceBucket}/${key} part ${part.partNumber}`,
         async () => {
+          if (options.abortSignal?.aborted) throw new JobAbortedError()
           const sourceResponse = await sourceClient.send(
             new GetObjectCommand({
               Bucket: sourceBucket,
               Key: key,
               Range: `bytes=${part.start}-${part.end}`,
-            })
+            }),
+            options.abortSignal ? { abortSignal: options.abortSignal } : undefined
           )
           const body = sourceResponse.Body
           if (!body) throw new Error(`Source object body missing for ${key} part ${part.partNumber}`)
@@ -842,7 +891,8 @@ async function copyObjectWithRangedMultipart(sourceClient, targetClient, sourceB
                 PartNumber: part.partNumber,
                 Body: uploadBody,
                 ContentLength: part.size,
-              })
+              }),
+              options.abortSignal ? { abortSignal: options.abortSignal } : undefined
             )
           } finally {
             closeBodyStream(body)
@@ -863,7 +913,8 @@ async function copyObjectWithRangedMultipart(sourceClient, targetClient, sourceB
         MultipartUpload: {
           Parts: uploadedParts.sort((a, b) => a.PartNumber - b.PartNumber),
         },
-      })
+      }),
+      options.abortSignal ? { abortSignal: options.abortSignal } : undefined
     )
   } catch (error) {
     await targetClient
@@ -877,12 +928,14 @@ async function copyObject(sourceClient, targetClient, sourceBucket, targetBucket
   await withRetries(
     `copy ${sourceBucket}/${key}`,
     async () => {
-      const sourceHead = await sourceClient.send(new HeadObjectCommand({ Bucket: sourceBucket, Key: key }))
+      if (options.abortSignal?.aborted) throw new JobAbortedError()
+      const requestOptions = options.abortSignal ? { abortSignal: options.abortSignal } : undefined
+      const sourceHead = await sourceClient.send(new HeadObjectCommand({ Bucket: sourceBucket, Key: key }), requestOptions)
       const sourceSize = typeof sourceHead.ContentLength === "number" ? sourceHead.ContentLength : 0
-      if (sourceSize >= RANGE_COPY_THRESHOLD) {
+      if (sourceSize > 0 && sourceSize >= RANGE_COPY_THRESHOLD) {
         await copyObjectWithRangedMultipart(sourceClient, targetClient, sourceBucket, targetBucket, key, sourceHead, options)
       } else {
-        const sourceResponse = await sourceClient.send(new GetObjectCommand({ Bucket: sourceBucket, Key: key }))
+        const sourceResponse = await sourceClient.send(new GetObjectCommand({ Bucket: sourceBucket, Key: key }), requestOptions)
       const body = sourceResponse.Body
       if (!body) throw new Error(`Source object body missing for ${key}`)
 
@@ -913,7 +966,10 @@ async function copyObject(sourceClient, targetClient, sourceBucket, targetBucket
       }
 
       try {
+        const abortUpload = () => void upload.abort().catch(() => undefined)
+        options.abortSignal?.addEventListener("abort", abortUpload, { once: true })
         await upload.done()
+        options.abortSignal?.removeEventListener("abort", abortUpload)
         const targetHead = await withRetries(
           `verify target head ${targetBucket}/${key}`,
           () => targetClient.send(new HeadObjectCommand({ Bucket: targetBucket, Key: key })),
@@ -1158,6 +1214,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
       stage = "repair_copy"
       currentStageStartedAt = new Date().toISOString()
       await runConcurrent(toRepair, COPY_CONCURRENCY, async (object) => {
+        throwIfJobAborted(jobId)
         const isMismatch = typeof object?.destinationSize === "number"
         const objectSize = typeof object?.size === "number" ? object.size : 0
         const latestTargetSize = await getTargetObjectSize(targetClient, item.targetBucket, object.key)
@@ -1224,6 +1281,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
         let lastProgressAt = 0
         try {
           await copyObject(sourceClient, targetClient, item.sourceBucket, item.targetBucket, object.key, {
+            abortSignal: getJobAbortSignal(jobId),
             onProgress: ({ loaded, total }) => {
               const now = Date.now()
               if (now - lastProgressAt < 800 && loaded < total) return
@@ -1271,6 +1329,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
           })
           forceSyncLiveProgress()
         } catch (error) {
+          if (getJobAbortSignal(jobId)?.aborted) throw new JobAbortedError()
           failed += 1
           upsertFileEvent(state, {
             itemId: item.id,
@@ -1413,6 +1472,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
       })
 
       await runConcurrent(remainingToRepair, COPY_CONCURRENCY, async (object) => {
+        throwIfJobAborted(jobId)
         const isMismatch = typeof object?.destinationSize === "number"
         const objectSize = typeof object?.size === "number" ? object.size : 0
         const latestTargetSize = await getTargetObjectSize(targetClient, item.targetBucket, object.key)
@@ -1461,6 +1521,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
 
         try {
           await copyObject(sourceClient, targetClient, item.sourceBucket, item.targetBucket, object.key, {
+            abortSignal: getJobAbortSignal(jobId),
             onProgress: ({ loaded, total }) => {
               state.currentFile = {
                 itemId: item.id,
@@ -1505,6 +1566,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
           })
           forceSyncLiveProgress()
         } catch (error) {
+          if (getJobAbortSignal(jobId)?.aborted) throw new JobAbortedError()
           failed += 1
           if (failureSamples.length < 25) {
             failureSamples.push({
@@ -1835,6 +1897,7 @@ async function main() {
       currentMigrationId = claimed.payload?.migration?.id || null
       migrationItemProgressCache.clear()
       repairJobProgressCache.clear()
+      jobAbortControllers.set(claimed.job.id, new AbortController())
       console.log(`Claimed job ${claimed.job.id} for migration ${claimed.payload?.migration?.id || "-"}`)
       await runJob(claimed.job, claimed.payload)
       console.log(`Finished job ${claimed.job.id}`)
@@ -1842,6 +1905,7 @@ async function main() {
       currentMigrationId = null
       migrationItemProgressCache.clear()
       repairJobProgressCache.clear()
+      jobAbortControllers.delete(claimed.job.id)
       if (EXIT_AFTER_JOB) {
         console.log(`Exit-after-job enabled; stopping worker after job ${claimed.job.id}`)
         return
@@ -1866,6 +1930,7 @@ async function main() {
       currentMigrationId = null
       migrationItemProgressCache.clear()
       repairJobProgressCache.clear()
+      if (failedJobId) jobAbortControllers.delete(failedJobId)
       if (EXIT_AFTER_JOB && failedJobId) {
         console.log(`Exit-after-job enabled; stopping worker after terminal job ${failedJobId}`)
         return

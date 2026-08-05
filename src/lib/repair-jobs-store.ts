@@ -4,8 +4,6 @@ import {
   listAgents,
   updateAgent,
   updateAgentRun,
-  type DriveAgent,
-  type DriveAgentRun,
 } from "./agents-store"
 import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflowRun, listGitHubWorkflowRunJobs, listGitHubWorkflowRuns } from "./github-oauth"
 import { getSupabaseServerClient } from "./supabase"
@@ -596,7 +594,7 @@ export async function deleteRepairJob(id: string): Promise<void> {
 export async function abortRepairJob(id: string): Promise<DriveRepairJob> {
   const existing = await getRepairJob(id)
   if (!existing) throw new Error("Repair job not found")
-  if (existing.status === "completed" || existing.status === "failed" || existing.status === "canceled") {
+  if (existing.status === "completed" || existing.status === "failed") {
     return existing
   }
 
@@ -608,6 +606,29 @@ export async function abortRepairJob(id: string): Promise<DriveRepairJob> {
     completedAt: now,
     lastHeartbeatAt: now,
   })
+
+  const items = await listMigrationItems(existing.migrationId)
+  await Promise.all(
+    items.map(async (item) => {
+      const progress = isRecord(item.progress) ? item.progress : {}
+      const repair = isRecord(progress.repairWorker) ? progress.repairWorker : null
+      const live = isRecord(progress.live) ? progress.live : null
+      const repairJobId = typeof repair?.jobId === "string" ? repair.jobId : null
+      const liveRepairJobId = typeof live?.repairJobId === "string" ? live.repairJobId : null
+      const repairStatus = typeof repair?.status === "string" ? repair.status : ""
+      if (!["pending", "claimed", "running"].includes(repairStatus)) return
+      if (repairJobId && repairJobId !== id && liveRepairJobId !== id) return
+
+      await applyRepairJobItemUpdate({
+        migrationId: existing.migrationId,
+        itemId: item.id,
+        repairJobId: id,
+        stage: typeof repair?.stage === "string" ? repair.stage : "repair_aborted",
+        status: "canceled",
+        summary: "Worker job aborted by user",
+      })
+    })
+  )
 
   await updateMigration(existing.migrationId, {
     syncStatus: "ok",
@@ -704,6 +725,7 @@ export async function buildRepairJobExecutionPayload(job: DriveRepairJob): Promi
 export async function applyRepairJobItemUpdate(input: {
   migrationId: string
   itemId: string
+  repairJobId: string
   stage: string
   status: string
   summary?: string
@@ -718,6 +740,29 @@ export async function applyRepairJobItemUpdate(input: {
   const current = item.progress && typeof item.progress === "object" ? (item.progress as Record<string, unknown>) : {}
   const repair = isRecord(current.repairWorker) ? (current.repairWorker as Record<string, unknown>) : {}
   const live = isRecord(current.live) ? (current.live as Record<string, unknown>) : {}
+  const slurper = [current.slurperCumulative, current.slurperNormalized, isRecord(current.slurper) ? current.slurper.result : null]
+    .find(isRecord)
+  const slurperTransferred = typeof slurper?.transferredObjects === "number" ? slurper.transferredObjects : 0
+  const slurperSkipped = typeof slurper?.skippedObjects === "number" ? slurper.skippedObjects : 0
+  const sameRepairJob = repair.jobId === input.repairJobId
+  const inferredPriorWorkerTransferred = Math.max(
+    0,
+    typeof live.transferredObjects === "number" ? live.transferredObjects - slurperTransferred : 0
+  )
+  const baselineTransferred = sameRepairJob
+    ? typeof repair.baselineTransferred === "number"
+      ? repair.baselineTransferred
+      : 0
+    : typeof repair.cumulativeTransferred === "number"
+      ? repair.cumulativeTransferred
+      : inferredPriorWorkerTransferred
+  const baselineSkipped = sameRepairJob
+    ? typeof repair.baselineSkipped === "number"
+      ? repair.baselineSkipped
+      : 0
+    : typeof repair.cumulativeSkipped === "number"
+      ? repair.cumulativeSkipped
+      : Math.max(0, typeof live.skippedObjects === "number" ? live.skippedObjects - slurperSkipped : 0)
   const details = input.details && typeof input.details === "object" ? input.details : {}
   const stage = String(input.stage || "")
   const sourceObjectCount =
@@ -734,9 +779,11 @@ export async function applyRepairJobItemUpdate(input: {
       : typeof item.sourceBytes === "number"
         ? item.sourceBytes
         : 0
-  const transferred = typeof input.transferred === "number" ? input.transferred : typeof repair.transferred === "number" ? Number(repair.transferred) : 0
-  const failed = typeof input.failed === "number" ? input.failed : typeof repair.failed === "number" ? Number(repair.failed) : 0
-  const skipped = typeof input.skipped === "number" ? input.skipped : typeof repair.skipped === "number" ? Number(repair.skipped) : 0
+  const transferred = typeof input.transferred === "number" ? input.transferred : sameRepairJob && typeof repair.transferred === "number" ? Number(repair.transferred) : 0
+  const failed = typeof input.failed === "number" ? input.failed : sameRepairJob && typeof repair.failed === "number" ? Number(repair.failed) : 0
+  const skipped = typeof input.skipped === "number" ? input.skipped : sameRepairJob && typeof repair.skipped === "number" ? Number(repair.skipped) : 0
+  const cumulativeTransferred = baselineTransferred + transferred
+  const cumulativeSkipped = Math.max(baselineSkipped, skipped)
   const finalMissing = typeof details.finalMissing === "number" ? details.finalMissing : 0
   const finalMismatched = typeof details.finalMismatched === "number" ? details.finalMismatched : 0
   const liveStatus =
@@ -756,6 +803,11 @@ export async function applyRepairJobItemUpdate(input: {
 
   const nextRepair = {
     ...repair,
+    jobId: input.repairJobId,
+    baselineTransferred,
+    baselineSkipped,
+    cumulativeTransferred,
+    cumulativeSkipped,
     stage,
     status: input.status,
     updatedAt: now,
@@ -774,14 +826,18 @@ export async function applyRepairJobItemUpdate(input: {
       ...live,
       updatedAt: now,
       status: liveStatus,
-      transferredObjects: liveStatus === "completed" && sourceObjectCount > 0 ? Math.max(transferred, Math.max(0, sourceObjectCount - skipped)) : transferred,
-      skippedObjects: skipped,
+      transferredObjects:
+        sourceObjectCount > 0
+          ? Math.min(sourceObjectCount, slurperTransferred + cumulativeTransferred)
+          : slurperTransferred + cumulativeTransferred,
+      skippedObjects: Math.max(slurperSkipped, cumulativeSkipped),
       failedObjects: liveStatus === "completed" ? 0 : Math.max(failed, finalMissing + finalMismatched),
       unaccountedObjects: liveStatus === "completed" ? 0 : typeof live.unaccountedObjects === "number" ? live.unaccountedObjects : 0,
       verifyIssues: liveStatus === "completed" ? 0 : finalMissing + finalMismatched,
       totalObjects: sourceObjectCount,
       workerStage: stage || null,
       workerStatus: input.status || null,
+      repairJobId: input.repairJobId,
     },
     ...(input.status ? { repairWorkerStatus: input.status } : {}),
     ...(input.summary ? { syncMessage: input.summary } : {}),

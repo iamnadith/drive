@@ -144,11 +144,13 @@ async function abortRepairJobsForMigration(migrationId: string): Promise<{
   blockedJobs: Array<{ jobId: string; reason: string }>
 }> {
   const repairJobs = await listRepairJobsByMigration(migrationId, 50).catch(() => [])
-  const activeJobs = repairJobs.filter((job) => !["completed", "failed"].includes(String(job.status)))
+  const activeJobs = repairJobs.filter((job) => ["pending", "claimed", "running"].includes(String(job.status)))
   const blockedJobs: Array<{ jobId: string; reason: string }> = []
   let abortedJobs = 0
 
   for (const job of activeJobs) {
+    await abortRepairJob(job.id).catch(() => undefined)
+    abortedJobs += 1
     const linkedRun = await getLatestAgentRunByJobReference(job.id).catch(() => null)
     const agentId = job.claimedByAgentId || job.requestedByAgentId
     const agent = agentId ? await getAgentById(agentId).catch(() => null) : null
@@ -247,8 +249,6 @@ async function abortRepairJobsForMigration(migrationId: string): Promise<{
       }).catch(() => undefined)
     }
 
-    await abortRepairJob(job.id).catch(() => undefined)
-    abortedJobs += 1
   }
 
   return { abortedJobs, blockedJobs }
@@ -308,20 +308,6 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     if (action === "cancel_migration") {
       const cancelRepairResult = await abortRepairJobsForMigration(id)
-      if (cancelRepairResult.blockedJobs.length > 0) {
-        const first = cancelRepairResult.blockedJobs[0]
-        return NextResponse.json(
-          {
-            error:
-              cancelRepairResult.blockedJobs.length === 1
-                ? `Worker job ${first.jobId} is still running: ${first.reason}`
-                : `${cancelRepairResult.blockedJobs.length} worker job(s) are still running; first issue: ${first.reason}`,
-            abortedRepairJobs: cancelRepairResult.abortedJobs,
-            blockedRepairJobs: cancelRepairResult.blockedJobs,
-          },
-          { status: 409 }
-        )
-      }
       const candidates = items.filter(
         (i) => Boolean(i.slurperJobId) && !["completed", "aborted", "failed", "copy_completed", "copy_failed"].includes(normalizeStatus(i.slurperStatus))
       )
@@ -352,7 +338,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         lastSyncedAt: now,
         options: { ...migration.options, manualCompleted: false, targetActivatedAt: undefined },
       })
-      return NextResponse.json({ ok: true, abortedRepairJobs: cancelRepairResult.abortedJobs, abortedSlurperJobs: candidates.length }, { status: 200 })
+      return NextResponse.json({
+        ok: true,
+        abortedRepairJobs: cancelRepairResult.abortedJobs,
+        abortedSlurperJobs: candidates.length,
+        remoteCancellationWarnings: cancelRepairResult.blockedJobs,
+      }, { status: 200 })
     }
 
     if (action === "mark_completed") {

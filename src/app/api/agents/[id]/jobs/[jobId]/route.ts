@@ -71,6 +71,7 @@ export async function POST(
         await applyRepairJobItemUpdate({
           migrationId: job.migrationId,
           itemId,
+          repairJobId: jobId,
           stage,
           status: itemStatus,
           summary: typeof item.summary === "string" ? item.summary : undefined,
@@ -209,7 +210,10 @@ export async function POST(
     await syncMigrationLiveState(job.migrationId).catch(() => undefined)
 
     return NextResponse.json({ ok: true, job: updated })
-  } catch (error: any) {
-    return NextResponse.json({ error: error?.message ?? "Unable to update repair job" }, { status: 400 })
+  } catch (error: unknown) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Unable to update repair job" },
+      { status: 400 }
+    )
   }
 }

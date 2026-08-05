@@ -68,11 +68,8 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
         latestRepairJobStatus === "canceled" &&
         !repairResultItem &&
         isActiveRepairWorkerStatus(repairState?.status)
-      const canceledRepairScanOnly =
-        canceledRepairWithoutResult &&
-        normalizeStatus(repairState?.stage).includes("scan")
       const effectiveRepairStatus = getEffectiveRepairStatus({
-        repairWorkerStatus: canceledRepairWithoutResult ? (canceledRepairScanOnly ? undefined : "failed") : repairState?.status,
+        repairWorkerStatus: canceledRepairWithoutResult ? "canceled" : repairState?.status,
         latestRepairJobStatus: latestRepairJob?.status,
         repairAppliesToItem: latestRepairItemIds.has(item.id),
         latestRepairJobExists: Boolean(latestRepairJob),
@@ -98,16 +95,14 @@ export async function syncMigrationLiveState(migrationId: string): Promise<void>
               ? slurper.objects
               : 0
       const workerTransferred = Math.max(
+        typeof repairState?.cumulativeTransferred === "number" ? repairState.cumulativeTransferred : 0,
         typeof repairState?.transferred === "number" ? repairState.transferred : 0,
         repairResultItem && typeof repairResultItem.transferred === "number" ? repairResultItem.transferred : 0
       )
       const workerSkipped = Math.max(
+        typeof repairState?.cumulativeSkipped === "number" ? repairState.cumulativeSkipped : 0,
         typeof repairState?.skipped === "number" ? repairState.skipped : 0,
         repairResultItem && typeof repairResultItem.skipped === "number" ? repairResultItem.skipped : 0
-      )
-      const workerFailed = Math.max(
-        typeof repairState?.failed === "number" ? repairState.failed : 0,
-        repairResultItem && typeof repairResultItem.failed === "number" ? repairResultItem.failed : 0
       )
       const finalMissing =
         (repairResultItem && typeof repairResultItem.finalMissing === "number" ? repairResultItem.finalMissing : 0) +

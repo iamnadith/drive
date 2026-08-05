@@ -122,11 +122,15 @@ export function readRepairWorkerState(progress: Record<string, unknown>) {
   const repair = progress.repairWorker as Record<string, unknown>
   return {
     stage: typeof repair.stage === "string" ? repair.stage : undefined,
+    jobId: typeof repair.jobId === "string" ? repair.jobId : undefined,
     status: typeof repair.status === "string" ? repair.status : undefined,
     summary: typeof repair.summary === "string" ? repair.summary : undefined,
     transferred: typeof repair.transferred === "number" ? repair.transferred : 0,
     failed: typeof repair.failed === "number" ? repair.failed : 0,
     skipped: typeof repair.skipped === "number" ? repair.skipped : 0,
+    cumulativeTransferred:
+      typeof repair.cumulativeTransferred === "number" ? repair.cumulativeTransferred : undefined,
+    cumulativeSkipped: typeof repair.cumulativeSkipped === "number" ? repair.cumulativeSkipped : undefined,
     updatedAt: typeof repair.updatedAt === "string" ? repair.updatedAt : undefined,
     details: isRecord(repair.details) ? repair.details : null,
   }
@@ -223,7 +227,7 @@ export function getEffectiveRepairStatus(input: {
   const latestJobActive = isActiveRepairWorkerStatus(latestJobStatus)
 
   if (isTerminalRepairJobStatus(latestJobStatus) && isActiveRepairWorkerStatus(workerStatus) && jobTargetsThisItem) {
-    return latestJobStatus === "canceled" ? "failed" : latestJobStatus
+    return latestJobStatus
   }
 
   if (latestJobActive && jobTargetsThisItem && !isActiveRepairWorkerStatus(workerStatus)) {
@@ -332,17 +336,12 @@ export function getMergedBucketSnapshot(
     latestRepairJobStatus === "canceled" &&
     !repairResultItem &&
     isActiveRepairWorkerStatus(repairState?.status)
-  const canceledRepairScanOnly =
-    canceledRepairWithoutResult &&
-    normalizeStatus(repairState?.stage).includes("scan")
   if (live && shouldUseLiveBucketState(item, live, { latestRepairJobId: options?.latestRepairJobId ?? null })) {
     const stableLive = live
     return normalizeBucketSnapshot({
       displayStatus:
         canceledRepairWithoutResult
-          ? canceledRepairScanOnly
-            ? getItemStatus(item)
-            : "failed"
+          ? "aborted"
           : stableLive.status ?? getItemDisplayStatus(item, repairResultItem, stableLive.workerStatus ?? undefined),
       total: stableLive.totalObjects,
       transferred: stableLive.transferredObjects,
@@ -365,7 +364,7 @@ export function getMergedBucketSnapshot(
     !isActiveRepairWorkerStatus(repairState?.status) &&
     !repairResultItem
   const effectiveRepairStatus = getEffectiveRepairStatus({
-    repairWorkerStatus: canceledRepairWithoutResult ? (canceledRepairScanOnly ? undefined : "failed") : repairResultStatus ?? repairState?.status,
+    repairWorkerStatus: canceledRepairWithoutResult ? "canceled" : repairResultStatus ?? repairState?.status,
     latestRepairJobStatus,
     repairAppliesToItem: repairTargetsThisItem,
     latestRepairJobExists: options?.latestRepairJobExists,
@@ -410,8 +409,16 @@ export function getMergedBucketSnapshot(
       : repairState?.details && typeof repairState.details.initialMismatched === "number"
         ? Number(repairState.details.initialMismatched)
         : 0
-  const workerTransferred = Math.max(typeof repairState?.transferred === "number" ? repairState.transferred : 0, repairResult.transferred)
-  const workerSkipped = Math.max(typeof repairState?.skipped === "number" ? repairState.skipped : 0, repairResult.skipped)
+  const workerTransferred = Math.max(
+    typeof repairState?.cumulativeTransferred === "number" ? repairState.cumulativeTransferred : 0,
+    typeof repairState?.transferred === "number" ? repairState.transferred : 0,
+    repairResult.transferred
+  )
+  const workerSkipped = Math.max(
+    typeof repairState?.cumulativeSkipped === "number" ? repairState.cumulativeSkipped : 0,
+    typeof repairState?.skipped === "number" ? repairState.skipped : 0,
+    repairResult.skipped
+  )
   const finalMissing =
     repairResult.finalMissing ||
     (repairState?.details && typeof repairState.details.finalMissing === "number" ? Number(repairState.details.finalMissing) : 0)
