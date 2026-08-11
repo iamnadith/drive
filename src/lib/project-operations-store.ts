@@ -585,6 +585,21 @@ export async function assertProjectObjectWritable(
   throw new Error("Object is locked")
 }
 
+export async function clearProjectObjectLock(input: {
+  projectId: string
+  bucketName: string
+  key: string
+}) {
+  await ensureProjectOperationsSchema()
+  await queryDb(
+    `
+      delete from drive_project_object_locks
+      where project_id = $1 and bucket_name = $2 and object_key = $3;
+    `,
+    [input.projectId, input.bucketName, input.key]
+  )
+}
+
 export async function searchProjectInventory(input: {
   projectId: string
   bucketName: string

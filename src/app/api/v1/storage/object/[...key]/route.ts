@@ -1,7 +1,7 @@
 import { after, NextResponse } from "next/server"
 import { authorizeProjectRequest, getActiveProjectBucketR2Config, projectBucketFromRequest, projectIdFromUrl } from "@/lib/project-api-auth"
 import { buildProjectStorageObjectUrl } from "@/lib/project-storage-gateway"
-import { assertProjectObjectWritable, markTrackedBucketObjectDeleted, recordProjectApiEvent } from "@/lib/project-operations-store"
+import { assertProjectObjectWritable, clearProjectObjectLock, markTrackedBucketObjectDeleted, recordProjectApiEvent } from "@/lib/project-operations-store"
 import { r2DeleteObject, r2HeadObject, r2PutObject } from "@/lib/r2-s3"
 
 const SYSTEM_DERIVATIVE_KEY_REGEX = /-(poster|preview|stream|subtitles(?:\.[a-z0-9_-]+)?)\.[a-z0-9]{1,8}$/i
@@ -125,7 +125,9 @@ export async function DELETE(
   const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, bucketName)
   if ("response" in r2) return r2.response
 
-  if (!shouldBypassWriteLockForKey(key)) {
+  const forceDelete = request.headers.get("x-drive-force-delete")?.toLowerCase() === "true"
+
+  if (!forceDelete && !shouldBypassWriteLockForKey(key)) {
     try {
       await assertProjectObjectWritable(
         authorized.auth.project.id,
@@ -138,7 +140,16 @@ export async function DELETE(
     }
   }
 
-  await r2DeleteObject(r2.config, r2.bucketName, key)
+  await Promise.all([
+    r2DeleteObject(r2.config, r2.bucketName, key),
+    ...(forceDelete
+      ? [clearProjectObjectLock({
+          projectId: authorized.auth.project.id,
+          bucketName: r2.bucketName,
+          key,
+        })]
+      : []),
+  ])
   after(async () => {
     await Promise.allSettled([
       markTrackedBucketObjectDeleted({
@@ -152,6 +163,7 @@ export async function DELETE(
         action: "storage.object.delete",
         objectKey: key,
         request,
+        metadata: { forceDelete },
       }),
     ])
   })
