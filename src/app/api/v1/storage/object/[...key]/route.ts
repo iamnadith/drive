@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { after, NextResponse } from "next/server"
 import { authorizeProjectRequest, getActiveProjectBucketR2Config, projectBucketFromRequest, projectIdFromUrl } from "@/lib/project-api-auth"
 import { buildProjectStorageObjectUrl } from "@/lib/project-storage-gateway"
 import { assertProjectObjectWritable, markTrackedBucketObjectDeleted, recordProjectApiEvent } from "@/lib/project-operations-store"
@@ -139,18 +139,21 @@ export async function DELETE(
   }
 
   await r2DeleteObject(r2.config, r2.bucketName, key)
-  await markTrackedBucketObjectDeleted({
-    projectId: authorized.auth.project.id,
-    bucketName: r2.bucketName,
-    key,
-  }).catch(() => undefined)
-
-  await recordProjectApiEvent({
-    project: authorized.auth.project,
-    apiKeyId: authorized.auth.apiKey.id,
-    action: "storage.object.delete",
-    objectKey: key,
-    request,
+  after(async () => {
+    await Promise.allSettled([
+      markTrackedBucketObjectDeleted({
+        projectId: authorized.auth.project.id,
+        bucketName: r2.bucketName,
+        key,
+      }),
+      recordProjectApiEvent({
+        project: authorized.auth.project,
+        apiKeyId: authorized.auth.apiKey.id,
+        action: "storage.object.delete",
+        objectKey: key,
+        request,
+      }),
+    ])
   })
 
   return NextResponse.json({ ok: true, key, bucketName: r2.bucketName })
