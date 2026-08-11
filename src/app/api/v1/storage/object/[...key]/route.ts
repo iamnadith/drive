@@ -140,18 +140,16 @@ export async function DELETE(
     }
   }
 
-  await Promise.all([
-    r2DeleteObject(r2.config, r2.bucketName, key),
-    ...(forceDelete
-      ? [clearProjectObjectLock({
-          projectId: authorized.auth.project.id,
-          bucketName: r2.bucketName,
-          key,
-        })]
-      : []),
-  ])
+  await r2DeleteObject(r2.config, r2.bucketName, key)
   after(async () => {
     await Promise.allSettled([
+      ...(forceDelete
+        ? [clearProjectObjectLock({
+            projectId: authorized.auth.project.id,
+            bucketName: r2.bucketName,
+            key,
+          })]
+        : []),
       markTrackedBucketObjectDeleted({
         projectId: authorized.auth.project.id,
         bucketName: r2.bucketName,
