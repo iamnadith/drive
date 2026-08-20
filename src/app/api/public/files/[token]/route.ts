@@ -3,6 +3,7 @@ import { getActiveProjectBucketR2Config } from "@/lib/project-api-auth"
 import { getProjectObjectInventoryByFileId } from "@/lib/project-operations-store"
 import { getProjectFileLinkByToken } from "@/lib/projects-store"
 import { r2CreateSignedDownloadUrl } from "@/lib/r2-s3"
+import { rejectDisallowedBucketDeliveryOrigin } from "@/lib/bucket-delivery-origin-guard"
 
 export async function GET(
   request: Request,
@@ -24,6 +25,8 @@ export async function GET(
     bucketName
   )
   if ("response" in r2) return r2.response
+  const originRejection = await rejectDisallowedBucketDeliveryOrigin(request, r2.bucketName)
+  if (originRejection) return originRejection
 
   const url = new URL(request.url)
   const signedUrl = await r2CreateSignedDownloadUrl(

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { getAllAccounts } from "@/lib/accounts-store"
 import { getBucketDeliverySettings } from "@/lib/bucket-delivery-settings-store"
+import { getEffectiveBucketMediaOrigins } from "@/lib/bucket-delivery-settings-service"
 import { authorizeProjectRequest } from "@/lib/project-api-auth"
 import { listProjectsUsingBucket } from "@/lib/projects-store"
 import { r2CreateSignedDownloadUrl, r2CreateSignedHeadUrl } from "@/lib/r2-s3"
@@ -8,6 +9,7 @@ import {
   createStorageDeliveryHeaders,
   createStorageDeliveryOptionsResponse,
   createStorageDeliveryRedirect,
+  isStorageDeliveryOriginAllowed,
 } from "@/lib/storage-delivery.cjs"
 
 export const dynamic = "force-dynamic"
@@ -31,7 +33,18 @@ async function redirectToStorageObject(
     return NextResponse.json({ error: "Active Cloudflare account is missing R2 credentials" }, { status: 400 })
   }
   const settings = await getBucketDeliverySettings(active.id, bucket)
-  const configuredOrigins = settings.mediaAllowedOrigins?.join(",")
+  const configuredOrigins = (await getEffectiveBucketMediaOrigins(bucket, settings)).effectiveMediaAllowedOrigins.join(",")
+  const origin = request.headers.get("origin")
+  if (!isStorageDeliveryOriginAllowed(origin, configuredOrigins)) {
+    const response = NextResponse.json(
+      { error: "Request origin is not allowed for this bucket" },
+      { status: 403 }
+    )
+    createStorageDeliveryHeaders(origin, configuredOrigins).forEach((value, name) => {
+      response.headers.set(name, value)
+    })
+    return response
+  }
   if (!settings.publicAccessEnabled) {
     const assignedProjects = await listProjectsUsingBucket(bucket)
     if (assignedProjects.length !== 1) {
@@ -93,8 +106,14 @@ export async function OPTIONS(
   const accounts = await getAllAccounts()
   const active = accounts.find((account) => account.status === "active")
   const settings = active ? await getBucketDeliverySettings(active.id, bucket) : null
+  const configuredOrigins = settings
+    ? (await getEffectiveBucketMediaOrigins(bucket, settings)).effectiveMediaAllowedOrigins.join(",")
+    : undefined
+  if (!isStorageDeliveryOriginAllowed(request.headers.get("origin"), configuredOrigins)) {
+    return NextResponse.json({ error: "Request origin is not allowed for this bucket" }, { status: 403 })
+  }
   return createStorageDeliveryOptionsResponse(
     request.headers.get("origin"),
-    settings?.mediaAllowedOrigins?.join(",")
+    configuredOrigins
   )
 }

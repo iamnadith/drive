@@ -509,6 +509,13 @@ export async function ensureDriveSchema(): Promise<void> {
         );
       `)
       await queryDb(`
+        create table if not exists drive_project_delivery_settings (
+          project_id uuid primary key references drive_projects(id) on delete cascade,
+          media_allowed_origins text[],
+          updated_at timestamptz not null default now()
+        );
+      `)
+      await queryDb(`
         insert into drive_project_bucket_assignments (project_id, bucket_name, is_primary)
         select p.id, p.bucket_name, true
         from drive_projects p

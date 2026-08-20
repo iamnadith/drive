@@ -23,6 +23,14 @@ function allowedStorageCorsOrigins(value = process.env[STORAGE_CORS_ENV]) {
   return origins.includes("*") ? ["*"] : origins
 }
 
+function isStorageDeliveryOriginAllowed(origin, configuredOrigins) {
+  if (origin === null || origin === undefined || origin.trim() === "") return true
+  const normalizedOrigin = normalizeOrigin(origin)
+  if (!normalizedOrigin) return false
+  const allowedOrigins = allowedStorageCorsOrigins(configuredOrigins)
+  return allowedOrigins.includes("*") || allowedOrigins.includes(normalizedOrigin)
+}
+
 function createStorageDeliveryHeaders(origin, configuredOrigins) {
   const headers = new Headers({
     "Cache-Control": STORAGE_REDIRECT_CACHE_CONTROL,
@@ -67,6 +75,7 @@ module.exports = {
   STORAGE_CORS_ENV,
   STORAGE_REDIRECT_CACHE_CONTROL,
   isSystemDerivativeKey,
+  isStorageDeliveryOriginAllowed,
   allowedStorageCorsOrigins,
   createStorageDeliveryHeaders,
   createStorageDeliveryOptionsResponse,

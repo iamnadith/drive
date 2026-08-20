@@ -253,6 +253,16 @@ create table if not exists drive_bucket_delivery_settings (
   primary key (account_id, bucket_name)
 );
 
+create table if not exists drive_project_delivery_settings (
+  project_id uuid primary key references drive_projects(id) on delete cascade,
+  media_allowed_origins text[],
+  updated_at timestamptz not null default now()
+);
+
+-- Existing bucket delivery origins remain bucket-manual. Their historical
+-- editor does not identify which values were intended to be project-wide, so
+-- automatically copying them here could broaden access to sibling buckets.
+
 create table if not exists drive_project_api_keys (
   id uuid primary key default gen_random_uuid(),
   name text not null,

@@ -698,6 +698,34 @@ export async function getProjectBucketAssignment(
   return rows[0] ? mapProjectBucketAssignment(rows[0]) : null
 }
 
+export async function getAssignedProjectIdForBucket(bucketName: string): Promise<string | null> {
+  await ensureProjectSchema()
+  if (!isPostgresConfigured()) return null
+  const { rows } = await queryDb<{ project_id: string }>(
+    `select project_id from drive_project_bucket_assignments where bucket_name = $1 limit 1`,
+    [bucketName]
+  )
+  return rows[0]?.project_id ?? null
+}
+
+export async function listAssignedProjectsForBuckets(bucketNames: string[]) {
+  await ensureProjectSchema()
+  const names = Array.from(new Set(bucketNames.filter(Boolean)))
+  const projects = new Map<string, Project>()
+  if (!isPostgresConfigured() || names.length === 0) return projects
+  const { rows } = await queryDb<ProjectRow & { assigned_bucket_name: string }>(
+    `
+      select p.*, a.bucket_name as assigned_bucket_name
+      from drive_project_bucket_assignments a
+      join drive_projects p on p.id = a.project_id
+      where a.bucket_name = any($1::text[]);
+    `,
+    [names]
+  )
+  for (const row of rows) projects.set(row.assigned_bucket_name, mapProject(row))
+  return projects
+}
+
 async function syncProjectPrimaryBucket(projectId: string) {
   const { rows } = await queryDb<{ bucket_name: string | null }>(
     `

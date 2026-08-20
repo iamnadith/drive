@@ -2,10 +2,7 @@ import { NextResponse } from "next/server"
 
 import { getActiveAccount } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
-import {
-  listBucketDeliverySettings,
-} from "@/lib/bucket-delivery-settings-store"
-import { updateAndSyncBucketDeliverySettings } from "@/lib/bucket-delivery-settings-service"
+import { syncEffectiveBucketDeliveryCors } from "@/lib/bucket-delivery-settings-service"
 import { r2CreateBucketViaApi, r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
 import { resolveProjectBucketCandidate } from "@/lib/project-bucket-name"
 import {
@@ -16,6 +13,7 @@ import {
   removeProjectBucket,
   setProjectPrimaryBucket,
 } from "@/lib/projects-store"
+import { hasProjectBucketDeliveryPolicyMutation } from "@/lib/project-media-origins.cjs"
 import { r2CreateBucket } from "@/lib/r2-s3"
 import { requireAdmin } from "@/lib/server-auth"
 
@@ -90,21 +88,7 @@ async function createBucket(bucketName: string) {
 }
 
 async function serializeProjectBuckets(projectIdentifier: string) {
-  const buckets = await listProjectBuckets(projectIdentifier)
-  const active = await getActiveAccount()
-  if (!active) return buckets
-  const deliverySettings = await listBucketDeliverySettings(
-    active.id,
-    buckets.map((bucket) => bucket.bucketName)
-  )
-  return buckets.map((bucket) => {
-    const settings = deliverySettings.get(bucket.bucketName)
-    return {
-      ...bucket,
-      mediaAllowedOrigins: settings?.mediaAllowedOrigins ?? null,
-      deliveryPublicAccessEnabled: settings?.publicAccessEnabled ?? true,
-    }
-  })
+  return listProjectBuckets(projectIdentifier)
 }
 
 export async function GET(
@@ -165,6 +149,16 @@ export async function POST(
       bucketName,
       makePrimary: body.makePrimary === true,
     })
+    const active = await getActiveAccount()
+    try {
+      if (active) await syncEffectiveBucketDeliveryCors({ account: active, bucketName })
+    } catch (error) {
+      await removeProjectBucket(project.id, bucketName).catch(() => undefined)
+      if (active) {
+        await syncEffectiveBucketDeliveryCors({ account: active, bucketName }).catch(() => undefined)
+      }
+      throw error
+    }
     const buckets = await serializeProjectBuckets(project.id)
 
     await recordActivity({
@@ -204,8 +198,12 @@ export async function PATCH(
 
     const body = (await request.json().catch(() => ({}))) as {
       bucketName?: unknown
-      mediaAllowedOrigins?: unknown
-      deliveryPublicAccessEnabled?: unknown
+    }
+    if (hasProjectBucketDeliveryPolicyMutation(body)) {
+      return NextResponse.json(
+        { error: "Project bucket assignments cannot change delivery settings" },
+        { status: 400 }
+      )
     }
     const bucketName =
       typeof body.bucketName === "string"
@@ -218,59 +216,20 @@ export async function PATCH(
       return NextResponse.json({ error: "Bucket name is required" }, { status: 400 })
     }
 
-    const isDeliverySettingsUpdate =
-      "mediaAllowedOrigins" in body || typeof body.deliveryPublicAccessEnabled === "boolean"
-    if (!isDeliverySettingsUpdate) {
-      await setProjectPrimaryBucket(project.id, bucketName)
-
-      await recordActivity({
-        actorUserId: auth.user.id,
-        action: "project.bucket.primary_changed",
-        entityType: "project",
-        entityId: project.projectId,
-        entityLabel: project.name,
-        summary: `Set ${bucketName} as the primary bucket for ${project.name}`,
-        metadata: { bucketName },
-        ...getRequestActivityContext(request),
-      })
-
-      return NextResponse.json({ buckets: await serializeProjectBuckets(project.id) })
-    }
-
-    const assignment = await getProjectBucketAssignment(project.id, bucketName)
-    if (!assignment) {
-      return NextResponse.json({ error: "Bucket is not assigned to this project" }, { status: 404 })
-    }
-    const active = await getActiveAccount()
-    if (!active) {
-      return NextResponse.json({ error: "No active Cloudflare account is configured" }, { status: 409 })
-    }
-    const settings = await updateAndSyncBucketDeliverySettings({
-      account: active,
-      bucketName,
-      ...(typeof body.deliveryPublicAccessEnabled === "boolean"
-        ? { publicAccessEnabled: body.deliveryPublicAccessEnabled }
-        : {}),
-      ...("mediaAllowedOrigins" in body ? { mediaAllowedOrigins: body.mediaAllowedOrigins } : {}),
-    })
-    const buckets = await serializeProjectBuckets(project.id)
+    await setProjectPrimaryBucket(project.id, bucketName)
 
     await recordActivity({
       actorUserId: auth.user.id,
-      action: "project.bucket.delivery_settings_updated",
+      action: "project.bucket.primary_changed",
       entityType: "project",
       entityId: project.projectId,
       entityLabel: project.name,
-      summary: `Updated delivery settings for ${bucketName} in ${project.name}`,
-      metadata: {
-        bucketName,
-        mediaAllowedOrigins: settings.mediaAllowedOrigins,
-        publicAccessEnabled: settings.publicAccessEnabled,
-      },
+      summary: `Set ${bucketName} as the primary bucket for ${project.name}`,
+      metadata: { bucketName },
       ...getRequestActivityContext(request),
     })
 
-    return NextResponse.json({ buckets })
+    return NextResponse.json({ buckets: await serializeProjectBuckets(project.id) })
   } catch (error: unknown) {
     return NextResponse.json(
       { error: errorMessage(error, "Unable to update primary bucket") },
@@ -303,7 +262,25 @@ export async function DELETE(
       return NextResponse.json({ error: "Bucket name is required" }, { status: 400 })
     }
 
+    const previous = await getProjectBucketAssignment(project.id, bucketName)
+    if (!previous) {
+      return NextResponse.json({ error: "Bucket is not assigned to this project" }, { status: 404 })
+    }
     await removeProjectBucket(project.id, bucketName)
+    const active = await getActiveAccount()
+    try {
+      if (active) await syncEffectiveBucketDeliveryCors({ account: active, bucketName })
+    } catch (error) {
+      await assignProjectBucket({
+        projectIdentifier: project.id,
+        bucketName,
+        makePrimary: previous.isPrimary,
+      }).catch(() => undefined)
+      if (active) {
+        await syncEffectiveBucketDeliveryCors({ account: active, bucketName }).catch(() => undefined)
+      }
+      throw error
+    }
     const buckets = await serializeProjectBuckets(project.id)
 
     await recordActivity({

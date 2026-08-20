@@ -40,14 +40,34 @@ function normalizeMediaAllowedOrigins(value) {
     throw new Error("mediaAllowedOrigins must be an array of URL origins")
   }
   if (value.length > MAX_MEDIA_ALLOWED_ORIGINS) {
-    throw new Error(`A bucket can have at most ${MAX_MEDIA_ALLOWED_ORIGINS} media allowed origins`)
+    throw new Error(`A delivery policy can have at most ${MAX_MEDIA_ALLOWED_ORIGINS} media allowed origins`)
   }
   const normalized = [...new Set(value.map(normalizeMediaAllowedOrigin))]
   return normalized.includes("*") ? ["*"] : normalized
+}
+
+function mergeMediaAllowedOrigins(inherited, manual) {
+  const combined = [
+    ...(Array.isArray(inherited) ? inherited : []),
+    ...(Array.isArray(manual) ? manual : []),
+  ]
+  if (combined.includes("*")) return ["*"]
+  return [...new Set(combined.filter((origin) => typeof origin === "string"))]
+}
+
+function hasProjectBucketDeliveryPolicyMutation(value) {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      (Object.prototype.hasOwnProperty.call(value, "mediaAllowedOrigins") ||
+        Object.prototype.hasOwnProperty.call(value, "deliveryPublicAccessEnabled"))
+  )
 }
 
 module.exports = {
   MAX_MEDIA_ALLOWED_ORIGINS,
   normalizeMediaAllowedOrigin,
   normalizeMediaAllowedOrigins,
+  mergeMediaAllowedOrigins,
+  hasProjectBucketDeliveryPolicyMutation,
 }

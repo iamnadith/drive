@@ -10,6 +10,7 @@ import {
   recordProjectApiEvent,
 } from "@/lib/project-operations-store"
 import { r2CreateSignedDownloadUrl } from "@/lib/r2-s3"
+import { rejectDisallowedBucketDeliveryOrigin } from "@/lib/bucket-delivery-origin-guard"
 
 export async function GET(request: Request) {
   const url = new URL(request.url)
@@ -31,6 +32,8 @@ export async function GET(request: Request) {
   const resolvedBucketName = object?.bucketName ?? requestedBucketName
   const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, resolvedBucketName)
   if ("response" in r2) return r2.response
+  const originRejection = await rejectDisallowedBucketDeliveryOrigin(request, r2.bucketName)
+  if (originRejection) return originRejection
 
   const expiresInSeconds = Math.max(
     30,

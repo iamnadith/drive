@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
 import { getActiveAccount } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+import { getProjectDeliverySettings, updateProjectDeliverySettings } from "@/lib/project-delivery-settings-store"
+import { syncProjectDeliveryCors } from "@/lib/bucket-delivery-settings-service"
 import {
   deleteProjectRecord,
   getProjectByIdentifier,
@@ -8,6 +10,9 @@ import {
   updateProjectRecord,
 } from "@/lib/projects-store"
 import { r2DeleteBucketAndContents } from "@/lib/r2-s3"
+import { getBucketDeliverySettings } from "@/lib/bucket-delivery-settings-store"
+import { syncBucketDeliveryCorsRule } from "@/lib/r2-bucket-settings"
+import { allowedStorageCorsOrigins } from "@/lib/storage-delivery.cjs"
 import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
@@ -29,7 +34,8 @@ export async function GET(
     const { id } = await context.params
     const project = await getProjectByIdentifier(id)
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 })
-    return NextResponse.json({ project })
+    const deliverySettings = await getProjectDeliverySettings(project.id)
+    return NextResponse.json({ project, deliverySettings })
   } catch (error: unknown) {
     return NextResponse.json(
       { error: errorMessage(error, "Unable to load project") },
@@ -50,12 +56,61 @@ export async function PATCH(
     const body = (await request.json().catch(() => ({}))) as {
       name?: unknown
       status?: unknown
+      mediaAllowedOrigins?: unknown
     }
     const status =
       body.status === "active" || body.status === "disabled" ? body.status : undefined
     const name = typeof body.name === "string" ? body.name : undefined
     const before = await getProjectByIdentifier(id)
     if (!before) return NextResponse.json({ error: "Project not found" }, { status: 404 })
+
+    const hasDeliveryPolicyUpdate = Object.prototype.hasOwnProperty.call(body, "mediaAllowedOrigins")
+    if (hasDeliveryPolicyUpdate) {
+      const assignedBuckets = await listProjectBuckets(before.id)
+      const active = assignedBuckets.length > 0 ? await getActiveAccount() : null
+      if (assignedBuckets.length > 0 && !active) {
+        return NextResponse.json({ error: "No active Cloudflare account is configured" }, { status: 409 })
+      }
+      const beforeDelivery = await getProjectDeliverySettings(before.id)
+      const project = await updateProjectRecord(id, { name, status })
+      let deliverySettings
+      try {
+        deliverySettings = await updateProjectDeliverySettings({
+          projectId: project.id,
+          mediaAllowedOrigins: body.mediaAllowedOrigins,
+        })
+        if (active) {
+          await syncProjectDeliveryCors({ account: active, projectIdentifier: project.id })
+        }
+      } catch (error) {
+        await updateProjectDeliverySettings({
+          projectId: before.id,
+          mediaAllowedOrigins: beforeDelivery.mediaAllowedOrigins,
+        }).catch(() => undefined)
+        if (active) {
+          await syncProjectDeliveryCors({ account: active, projectIdentifier: before.id }).catch(() => undefined)
+        }
+        await updateProjectRecord(before.id, {
+          name: before.name,
+          status: before.status,
+        }).catch(() => undefined)
+        throw error
+      }
+
+      await recordActivity({
+        actorUserId: auth.user.id,
+        action: "project.delivery_policy_updated",
+        entityType: "project",
+        entityId: project.projectId,
+        entityLabel: project.name,
+        summary: `Updated media delivery origins for ${project.name}`,
+        before: { project: before, deliverySettings: beforeDelivery },
+        after: { project, deliverySettings },
+        ...getRequestActivityContext(request),
+      })
+
+      return NextResponse.json({ project, deliverySettings })
+    }
 
     const project = await updateProjectRecord(id, { name, status })
 
@@ -95,8 +150,8 @@ export async function DELETE(
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 })
     const assignedBuckets = await listProjectBuckets(project.id)
 
+    const active = assignedBuckets.length > 0 ? await getActiveAccount() : null
     if (deleteBucket) {
-      const active = await getActiveAccount()
       if (
         !active?.cloudflareAccountId ||
         !active.r2AccessKeyId ||
@@ -117,9 +172,43 @@ export async function DELETE(
           bucket.bucketName
         )
       }
+    } else if (assignedBuckets.length > 0) {
+      if (!active) {
+        return NextResponse.json(
+          { error: "No active Cloudflare account is configured" },
+          { status: 409 }
+        )
+      }
+      try {
+        for (const bucket of assignedBuckets) {
+          const settings = await getBucketDeliverySettings(active.id, bucket.bucketName)
+          await syncBucketDeliveryCorsRule(
+            active,
+            bucket.bucketName,
+            (settings.mediaAllowedOrigins ?? allowedStorageCorsOrigins())
+              .filter((origin): origin is string => typeof origin === "string")
+          )
+        }
+      } catch (error) {
+        await syncProjectDeliveryCors({
+          account: active,
+          projectIdentifier: project.id,
+        }).catch(() => undefined)
+        throw error
+      }
     }
 
-    await deleteProjectRecord(project.id)
+    try {
+      await deleteProjectRecord(project.id)
+    } catch (error) {
+      if (!deleteBucket && active) {
+        await syncProjectDeliveryCors({
+          account: active,
+          projectIdentifier: project.id,
+        }).catch(() => undefined)
+      }
+      throw error
+    }
 
     await recordActivity({
       actorUserId: auth.user.id,

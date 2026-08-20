@@ -7,9 +7,18 @@ const {
   allowedStorageCorsOrigins,
   createStorageDeliveryOptionsResponse,
   createStorageDeliveryRedirect,
+  isStorageDeliveryOriginAllowed,
   createStorageDeliveryHeaders,
   isSystemDerivativeKey,
 } = require("../src/lib/storage-delivery.cjs")
+
+test("configured origins gate delivery even when another credential is valid", () => {
+  assert.equal(isStorageDeliveryOriginAllowed("https://panel.example.com", "https://panel.example.com"), true)
+  assert.equal(isStorageDeliveryOriginAllowed("https://evil.example.com", "https://panel.example.com"), false)
+  assert.equal(isStorageDeliveryOriginAllowed("https://anything.example.com", "*"), true)
+  assert.equal(isStorageDeliveryOriginAllowed(null, "https://panel.example.com"), true)
+  assert.equal(isStorageDeliveryOriginAllowed("null", "https://panel.example.com"), false)
+})
 
 test("only canonical processor derivatives bypass original-object locks", () => {
   for (const key of [

@@ -6,13 +6,31 @@ import { ensureBucketStatsRows, getBucketStatsMap } from "@/lib/bucket-stats-sto
 import { r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
 import { readBucketSettings } from "@/lib/r2-bucket-settings"
 import { requireAdmin } from "@/lib/server-auth"
+import { mergeMediaAllowedOrigins } from "@/lib/project-media-origins.cjs"
+import { listAssignedProjectsForBuckets, type Project } from "@/lib/projects-store"
+import { listProjectDeliverySettings, type ProjectDeliverySettings } from "@/lib/project-delivery-settings-store"
+import { allowedStorageCorsOrigins } from "@/lib/storage-delivery.cjs"
 
-function serializeDeliverySettings(settings: BucketDeliverySettings) {
+function serializeDeliverySettings(
+  settings: BucketDeliverySettings,
+  project: Project | null,
+  projectSettings: ProjectDeliverySettings | null
+) {
+  const inherited = projectSettings?.mediaAllowedOrigins ?? null
+  const manual = settings.mediaAllowedOrigins
+  const effective = inherited === null && manual === null
+    ? allowedStorageCorsOrigins().filter((origin): origin is string => typeof origin === "string")
+    : mergeMediaAllowedOrigins(inherited, manual)
   return {
     accountId: settings.accountId,
     bucketName: settings.bucketName,
     deliveryPublicAccessEnabled: settings.publicAccessEnabled,
-    mediaAllowedOrigins: settings.mediaAllowedOrigins,
+    manualMediaAllowedOrigins: settings.mediaAllowedOrigins,
+    inheritedMediaAllowedOrigins: inherited,
+    effectiveMediaAllowedOrigins: effective,
+    inheritedProject: project
+      ? { id: project.id, projectId: project.projectId, name: project.name }
+      : null,
     createdAt: settings.createdAt,
     updatedAt: settings.updatedAt,
   }
@@ -35,7 +53,13 @@ export async function GET() {
 
     const listed = await r2ListBuckets({ accountId: account.cloudflareAccountId, apiToken: account.apiToken })
     const names = listed.map((bucket) => bucket.name)
-    const deliverySettings = await listBucketDeliverySettings(account.id, names)
+    const [deliverySettings, assignedProjects] = await Promise.all([
+      listBucketDeliverySettings(account.id, names),
+      listAssignedProjectsForBuckets(names),
+    ])
+    const projectSettings = await listProjectDeliverySettings(
+      Array.from(assignedProjects.values(), (project) => project.id)
+    )
     let stats = new Map<string, { objects: number; bytes: number; status: string; error?: string }>()
     try {
       await ensureBucketStatsRows(account.id, names)
@@ -64,14 +88,22 @@ export async function GET() {
           return {
             ...base,
             settings: await readBucketSettings(account, bucket.name),
-            deliverySettings: serializeDeliverySettings(deliverySettings.get(bucket.name)!),
+            deliverySettings: serializeDeliverySettings(
+              deliverySettings.get(bucket.name)!,
+              assignedProjects.get(bucket.name) ?? null,
+              projectSettings.get(assignedProjects.get(bucket.name)?.id ?? "") ?? null
+            ),
             settingsError: null,
           }
         } catch (error: unknown) {
           return {
             ...base,
             settings: null,
-            deliverySettings: serializeDeliverySettings(deliverySettings.get(bucket.name)!),
+            deliverySettings: serializeDeliverySettings(
+              deliverySettings.get(bucket.name)!,
+              assignedProjects.get(bucket.name) ?? null,
+              projectSettings.get(assignedProjects.get(bucket.name)?.id ?? "") ?? null
+            ),
             settingsError: errorMessage(error, "Unable to load bucket settings"),
           }
         }

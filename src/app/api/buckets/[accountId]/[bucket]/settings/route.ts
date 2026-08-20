@@ -4,7 +4,10 @@ import { getAllAccounts } from "@/lib/accounts-store"
 import {
   getBucketDeliverySettings,
 } from "@/lib/bucket-delivery-settings-store"
-import { updateAndSyncBucketDeliverySettings } from "@/lib/bucket-delivery-settings-service"
+import {
+  getEffectiveBucketMediaOrigins,
+  updateAndSyncBucketDeliverySettings,
+} from "@/lib/bucket-delivery-settings-service"
 import {
   deleteBucketCors,
   putBucketCors,
@@ -13,17 +16,27 @@ import {
 } from "@/lib/r2-bucket-settings"
 import { requireAdmin } from "@/lib/server-auth"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+import { getProjectByIdentifier } from "@/lib/projects-store"
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
 }
 
-function serializeDeliverySettings(settings: Awaited<ReturnType<typeof getBucketDeliverySettings>>) {
+async function serializeDeliverySettings(settings: Awaited<ReturnType<typeof getBucketDeliverySettings>>) {
+  const effective = await getEffectiveBucketMediaOrigins(settings.bucketName, settings)
+  const project = effective.projectId
+    ? await getProjectByIdentifier(effective.projectId)
+    : null
   return {
     accountId: settings.accountId,
     bucketName: settings.bucketName,
     deliveryPublicAccessEnabled: settings.publicAccessEnabled,
-    mediaAllowedOrigins: settings.mediaAllowedOrigins,
+    manualMediaAllowedOrigins: settings.mediaAllowedOrigins,
+    inheritedMediaAllowedOrigins: effective.inheritedMediaAllowedOrigins,
+    effectiveMediaAllowedOrigins: effective.effectiveMediaAllowedOrigins,
+    inheritedProject: project
+      ? { id: project.id, projectId: project.projectId, name: project.name }
+      : null,
     createdAt: settings.createdAt,
     updatedAt: settings.updatedAt,
   }
@@ -49,7 +62,7 @@ export async function GET(
       readBucketSettings(account, bucket),
       getBucketDeliverySettings(account.id, bucket),
     ])
-    return NextResponse.json({ settings, deliverySettings: serializeDeliverySettings(deliverySettings) })
+    return NextResponse.json({ settings, deliverySettings: await serializeDeliverySettings(deliverySettings) })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to load bucket settings") }, { status: 400 })
   }
@@ -74,7 +87,7 @@ export async function PATCH(
     }
     if ("corsRules" in body) await putBucketCors(account, bucket, body.corsRules)
     const hasDeliverySettingsChange =
-      typeof body.deliveryPublicAccessEnabled === "boolean" || "mediaAllowedOrigins" in body
+      typeof body.deliveryPublicAccessEnabled === "boolean" || "manualMediaAllowedOrigins" in body
     if (hasDeliverySettingsChange) {
       await updateAndSyncBucketDeliverySettings({
         account,
@@ -82,7 +95,7 @@ export async function PATCH(
         ...(typeof body.deliveryPublicAccessEnabled === "boolean"
           ? { publicAccessEnabled: body.deliveryPublicAccessEnabled }
           : {}),
-        ...("mediaAllowedOrigins" in body ? { mediaAllowedOrigins: body.mediaAllowedOrigins } : {}),
+        ...("manualMediaAllowedOrigins" in body ? { mediaAllowedOrigins: body.manualMediaAllowedOrigins } : {}),
       })
     }
     if (
@@ -110,7 +123,7 @@ export async function PATCH(
       undoReason: "Cloudflare bucket settings changes are applied immediately.",
       ...getRequestActivityContext(request),
     })
-    return NextResponse.json({ settings, deliverySettings: serializeDeliverySettings(deliverySettings) })
+    return NextResponse.json({ settings, deliverySettings: await serializeDeliverySettings(deliverySettings) })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to update bucket settings") }, { status: 400 })
   }

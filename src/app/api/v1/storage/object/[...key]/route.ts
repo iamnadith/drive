@@ -4,6 +4,7 @@ import { buildProjectStorageObjectUrl } from "@/lib/project-storage-gateway"
 import { assertProjectObjectWritable, clearProjectObjectLock, markTrackedBucketObjectDeleted, recordProjectApiEvent } from "@/lib/project-operations-store"
 import { r2DeleteObject, r2HeadObject, r2PutObject } from "@/lib/r2-s3"
 import { isSystemDerivativeKey } from "@/lib/storage-delivery.cjs"
+import { rejectDisallowedBucketDeliveryOrigin } from "@/lib/bucket-delivery-origin-guard"
 
 function keyFromParams(parts: string[]) {
   return parts.map((part) => decodeURIComponent(part)).join("/").trim().replace(/^\/+/, "")
@@ -33,6 +34,8 @@ export async function HEAD(
   if ("response" in r2) {
     return new Response(null, { status: r2.response?.status ?? 409 })
   }
+  const originRejection = await rejectDisallowedBucketDeliveryOrigin(request, r2.bucketName)
+  if (originRejection) return new Response(null, { status: originRejection.status })
 
   const head = await r2HeadObject(r2.config, r2.bucketName, key).catch(() => null)
   if (!head) {

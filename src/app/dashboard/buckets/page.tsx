@@ -52,7 +52,10 @@ type BucketSettings = {
 type BucketDeliverySettings = {
   // Drive delivery authorization; intentionally separate from publicAccess.
   deliveryPublicAccessEnabled: boolean
-  mediaAllowedOrigins: string[] | null
+  manualMediaAllowedOrigins: string[] | null
+  inheritedMediaAllowedOrigins: string[] | null
+  inheritedProject: { id: string; projectId: string; name: string } | null
+  effectiveMediaAllowedOrigins: string[]
 }
 
 type BucketRecord = {
@@ -130,6 +133,31 @@ function normalizeMediaOrigin(value: string) {
   } catch {
     return { error: "Enter a valid URL origin, including http:// or https://" }
   }
+}
+
+type InheritedOrigin = { origin: string; projectId?: string; projectName?: string }
+
+function inheritedOrigins(settings: BucketDeliverySettings | null | undefined): InheritedOrigin[] {
+  const records = settings?.inheritedMediaAllowedOrigins ?? []
+  const project = settings?.inheritedProject
+  return Array.isArray(records)
+    ? records.filter((origin): origin is string => typeof origin === "string").map((origin) => ({
+        origin,
+        projectId: project?.projectId ?? project?.id,
+        projectName: project?.name,
+      }))
+    : []
+}
+
+function manualOrigins(settings: BucketDeliverySettings | null | undefined) {
+  const origins = settings?.manualMediaAllowedOrigins ?? []
+  return Array.isArray(origins) ? origins.filter((origin): origin is string => typeof origin === "string") : []
+}
+
+function effectiveOrigins(settings: BucketDeliverySettings | null | undefined, manual: string[]) {
+  const explicit = settings?.effectiveMediaAllowedOrigins
+  if (Array.isArray(explicit)) return explicit.filter((origin): origin is string => typeof origin === "string")
+  return Array.from(new Set([...inheritedOrigins(settings).map((record) => record.origin), ...manual]))
 }
 
 function settingsUrl(bucket: BucketRecord) {
@@ -288,7 +316,7 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
   const [dangerResult, setDangerResult] = React.useState<string | null>(null)
   React.useEffect(() => {
     setPolicy(bucket?.settings?.corsRules[0] ? { ...bucket.settings.corsRules[0] } : null)
-    setDeliveryOrigins(bucket?.deliverySettings?.mediaAllowedOrigins ?? [])
+    setDeliveryOrigins(manualOrigins(bucket?.deliverySettings))
     setDeliveryOriginInput("")
     setDeliveryOriginError(null)
   }, [bucket])
@@ -348,11 +376,10 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
     setSavingDelivery(true)
     try {
       const updated = await patch({
-        deliveryPublicAccessEnabled: bucket.deliverySettings?.deliveryPublicAccessEnabled === true,
-        mediaAllowedOrigins: deliveryOrigins,
+        manualMediaAllowedOrigins: deliveryOrigins,
       })
-      toast.success("Drive public access and media origins saved")
-      setDeliveryOrigins(updated.deliverySettings?.mediaAllowedOrigins ?? deliveryOrigins)
+      toast.success("Bucket media origins saved")
+      setDeliveryOrigins(manualOrigins(updated.deliverySettings))
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to save Drive delivery settings")
     } finally {
@@ -366,7 +393,6 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
     try {
       await patch({
         deliveryPublicAccessEnabled: enabled,
-        mediaAllowedOrigins: deliveryOrigins,
       })
       toast.success(`Drive public access ${enabled ? "enabled" : "disabled"}`)
     } catch (error: unknown) {
@@ -417,6 +443,8 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
   }
 
   const publicUrl = bucket?.settings?.publicAccess.enabled && bucket.settings.publicAccess.domain ? `https://${bucket.settings.publicAccess.domain}` : null
+  const inherited = inheritedOrigins(bucket?.deliverySettings)
+  const effective = effectiveOrigins(bucket?.deliverySettings, deliveryOrigins)
   return (
     <Dialog open={Boolean(bucket)} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
@@ -444,11 +472,25 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
                 aria-label="Toggle Drive public access"
               />
             </div>
-            <div className="space-y-2">
-              <Label>Drive media allowed origins</Label>
+            <div className="space-y-4">
+              <div>
+                <Label>Drive media origins</Label>
               <p className="text-xs text-muted-foreground">
-                These origins are synchronized to Drive delivery and the bucket&apos;s R2 CORS rule. Any origin (*) affects CORS only and does not bypass private API authorization.
+                Project settings provide inherited origins. Bucket manual origins can be edited here; the effective union is synchronized to Drive delivery and the bucket&apos;s R2 CORS rule. Any origin (*) affects CORS only and does not bypass private API authorization.
               </p>
+              </div>
+              <div className="space-y-2 rounded-md border border-dashed p-3">
+                <div className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">Inherited from project settings</div>
+                {inherited.length > 0 ? inherited.map((record) => (
+                  <div key={`${record.projectId ?? record.projectName ?? "project"}:${record.origin}`} className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/30 px-2 py-1.5 text-xs">
+                    <span className="font-mono break-all">{record.origin}</span>
+                    <Badge variant="outline">{record.projectName ?? record.projectId ?? "Project policy"}</Badge>
+                  </div>
+                )) : <p className="text-xs text-muted-foreground">No project-inherited origins reported.</p>}
+                <p className="text-xs text-muted-foreground">Inherited records are read-only here and can only be changed in Project Settings.</p>
+              </div>
+              <div className="space-y-2 rounded-md border p-3">
+                <div className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">Bucket manual origins</div>
               <div className="flex flex-col gap-2 sm:flex-row">
                 <Input
                   value={deliveryOriginInput}
@@ -493,9 +535,17 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
                   </div>
                 )) : <p className="text-xs text-muted-foreground">No Drive media origins configured.</p>}
               </div>
+              </div>
+              <div className="space-y-2 rounded-md border border-primary/20 bg-primary/5 p-3">
+                <div className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">Effective origins</div>
+                <div className="flex flex-wrap gap-2">
+                  {effective.length > 0 ? effective.map((origin) => <Badge key={origin} variant="secondary" className="font-mono">{origin}</Badge>) : <p className="text-xs text-muted-foreground">No effective browser origins configured.</p>}
+                </div>
+                <p className="text-xs text-muted-foreground">Effective origins are the union of inherited project policy and bucket manual origins.</p>
+              </div>
               <div className="flex justify-end">
                 <Button type="button" onClick={() => void saveDeliverySettings()} loading={savingDelivery}>
-                  <Check /> Save Drive delivery
+                  <Check /> Save bucket origins
                 </Button>
               </div>
             </div>

@@ -6,11 +6,25 @@ import {
   type BucketDeliverySettings,
   updateBucketDeliverySettings,
 } from "./bucket-delivery-settings-store"
+import { getProjectDeliverySettings } from "./project-delivery-settings-store"
+import { getAssignedProjectIdForBucket, listProjectBuckets } from "./projects-store"
+import { mergeMediaAllowedOrigins } from "./project-media-origins.cjs"
 import { syncBucketDeliveryCorsRule } from "./r2-bucket-settings"
 
-function effectiveMediaOrigins(settings: BucketDeliverySettings) {
-  return (settings.mediaAllowedOrigins ?? allowedStorageCorsOrigins())
-    .filter((origin): origin is string => typeof origin === "string")
+export async function getEffectiveBucketMediaOrigins(bucketName: string, settings: BucketDeliverySettings) {
+  const projectId = await getAssignedProjectIdForBucket(bucketName)
+  const inherited = projectId ? (await getProjectDeliverySettings(projectId)).mediaAllowedOrigins : null
+  const manual = settings.mediaAllowedOrigins
+  const effective = mergeMediaAllowedOrigins(inherited, manual)
+  const effectiveMediaAllowedOrigins: string[] = inherited === null && manual === null
+    ? allowedStorageCorsOrigins().filter((origin): origin is string => typeof origin === "string")
+    : effective
+  return {
+    projectId,
+    inheritedMediaAllowedOrigins: inherited,
+    manualMediaAllowedOrigins: manual,
+    effectiveMediaAllowedOrigins,
+  }
 }
 
 async function restoreBucketDeliverySettings(
@@ -52,12 +66,46 @@ export async function updateAndSyncBucketDeliverySettings(input: {
 
   if (input.mediaAllowedOrigins === undefined) return settings
   try {
-    await syncBucketDeliveryCorsRule(input.account, input.bucketName, effectiveMediaOrigins(settings))
+    const effective = await getEffectiveBucketMediaOrigins(input.bucketName, settings)
+    await syncBucketDeliveryCorsRule(input.account, input.bucketName, effective.effectiveMediaAllowedOrigins)
     return settings
   } catch (error) {
     await restoreBucketDeliverySettings(before, existed).catch((rollbackError) => {
       console.error("Unable to roll back bucket delivery settings after CORS sync failure:", rollbackError)
     })
+    const restored = await getBucketDeliverySettings(input.account.id, input.bucketName).catch(() => before)
+    const restoredEffective = await getEffectiveBucketMediaOrigins(input.bucketName, restored).catch(() => null)
+    if (restoredEffective) {
+      await syncBucketDeliveryCorsRule(
+        input.account,
+        input.bucketName,
+        restoredEffective.effectiveMediaAllowedOrigins
+      ).catch((rollbackError) => {
+        console.error("Unable to restore bucket CORS after delivery settings rollback:", rollbackError)
+      })
+    }
     throw error
   }
+}
+
+export async function syncEffectiveBucketDeliveryCors(input: {
+  account: CloudflareAccount
+  bucketName: string
+}) {
+  const settings = await getBucketDeliverySettings(input.account.id, input.bucketName)
+  const effective = await getEffectiveBucketMediaOrigins(input.bucketName, settings)
+  await syncBucketDeliveryCorsRule(input.account, input.bucketName, effective.effectiveMediaAllowedOrigins)
+  return { settings, ...effective }
+}
+
+export async function syncProjectDeliveryCors(input: {
+  account: CloudflareAccount
+  projectIdentifier: string
+}) {
+  const buckets = await listProjectBuckets(input.projectIdentifier)
+  const results = []
+  for (const bucket of buckets) {
+    results.push(await syncEffectiveBucketDeliveryCors({ account: input.account, bucketName: bucket.bucketName }))
+  }
+  return results
 }

@@ -12,6 +12,7 @@ import {
 } from "@/lib/project-operations-store"
 import { createProjectFileLink } from "@/lib/projects-store"
 import { r2CreateSignedDownloadUrl } from "@/lib/r2-s3"
+import { rejectDisallowedBucketDeliveryOrigin } from "@/lib/bucket-delivery-origin-guard"
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {
@@ -48,6 +49,8 @@ export async function POST(request: Request) {
   const resolvedBucketName = directObject?.bucketName ?? bucketName
   const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, resolvedBucketName)
   if ("response" in r2) return r2.response
+  const originRejection = await rejectDisallowedBucketDeliveryOrigin(request, r2.bucketName)
+  if (originRejection) return originRejection
   const trackedObject =
     directObject ??
     (resolvedKey
