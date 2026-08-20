@@ -220,6 +220,39 @@ create unique index if not exists drive_projects_project_id_key on drive_project
 create unique index if not exists drive_projects_bucket_name_key on drive_projects (bucket_name);
 create index if not exists drive_projects_status_idx on drive_projects (status);
 
+-- A bucket belongs to at most one project.
+create table if not exists drive_project_bucket_assignments (
+  project_id uuid not null references drive_projects(id) on delete cascade,
+  bucket_name text not null,
+  is_primary boolean not null default false,
+  created_at timestamptz not null default now(),
+  primary key (project_id, bucket_name)
+);
+
+alter table if exists public.drive_project_bucket_assignments
+  drop column if exists media_allowed_origins;
+alter table if exists public.drive_project_bucket_assignments
+  drop column if exists public_access_enabled;
+
+create unique index if not exists drive_project_bucket_assignments_bucket_key
+  on drive_project_bucket_assignments (bucket_name);
+create unique index if not exists drive_project_bucket_assignments_primary_idx
+  on drive_project_bucket_assignments (project_id) where is_primary = true;
+
+-- Drive delivery authorization is intentionally independent of Cloudflare's
+-- public development URL. Existing buckets default to Drive delivery enabled.
+-- NULL media_allowed_origins retains the legacy deployment-level allowlist;
+-- an empty array explicitly denies cross-origin media reads.
+create table if not exists drive_bucket_delivery_settings (
+  account_id uuid not null references drive_accounts(id) on delete cascade,
+  bucket_name text not null,
+  public_access_enabled boolean not null default true,
+  media_allowed_origins text[],
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (account_id, bucket_name)
+);
+
 create table if not exists drive_project_api_keys (
   id uuid primary key default gen_random_uuid(),
   name text not null,

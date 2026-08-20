@@ -49,3 +49,19 @@ Migration creation options (POST `/api/migrations`):
 - `verifyStrictDestination` (boolean, default `false`)
 - `verifyMode` (`"keys-and-size"` | `"sha256-small"`, default `"keys-and-size"`)
 - `verifyHashMaxBytes` (number, bytes; used when `verifyMode="sha256-small"`)
+
+## Media delivery CORS
+
+The stable object endpoint (`/storage/{bucket}/{key}`) redirects each `GET` and `HEAD` request to a freshly signed R2 URL and marks that redirect `no-store`. This keeps manifests and segments on stable Drive URLs while avoiding Drive proxying media bytes.
+
+For legacy/unconfigured bucket assignments, set `DRIVE_MEDIA_ALLOWED_ORIGINS` on the Drive deployment to a comma-separated list of exact panel origins, for example:
+
+```text
+DRIVE_MEDIA_ALLOWED_ORIGINS=https://panel.example.com,https://staging.panel.example.com
+```
+
+Set the legacy value to `*` when any browser origin should be allowed.
+
+Each active-account/bucket pair can instead persist Drive delivery settings through either the project-buckets or global bucket-settings API. Drive public access is deliberately separate from Cloudflare's Public development URL and defaults to enabled for compatibility. When Drive public access is disabled, `GET` and `HEAD` on the stable endpoint require a project API key for the one project assigned to that bucket; a CORS origin never grants object access.
+
+`mediaAllowedOrigins: null` uses the legacy deployment value, `[]` denies cross-origin browser reads, and `["*"]` selects **Any origin**. Any-origin CORS is useful for intentionally public media, but private buckets still require project API authorization. Saving origins automatically merges and verifies the dedicated `drive-media-delivery` rule in R2 while preserving unrelated CORS rules; no manual R2 CORS update is required.

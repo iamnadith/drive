@@ -473,6 +473,8 @@ export async function ensureProjectSchema() {
       primary key (project_id, bucket_name)
     );
   `)
+  await queryDb(`alter table public.drive_project_bucket_assignments drop column if exists media_allowed_origins;`)
+  await queryDb(`alter table public.drive_project_bucket_assignments drop column if exists public_access_enabled;`)
   await queryDb(`create unique index if not exists drive_project_bucket_assignments_bucket_key on drive_project_bucket_assignments (bucket_name);`)
   await queryDb(`create unique index if not exists drive_project_bucket_assignments_primary_idx on drive_project_bucket_assignments (project_id) where is_primary = true;`)
   await queryDb(`
@@ -677,6 +679,25 @@ export async function listProjectBuckets(projectIdentifier: string) {
   return rows.map(mapProjectBucketAssignment)
 }
 
+export async function getProjectBucketAssignment(
+  projectIdentifier: string,
+  bucketName: string
+): Promise<ProjectBucketAssignment | null> {
+  await ensureProjectSchema()
+  const project = await getProjectByIdentifier(projectIdentifier)
+  if (!project) throw new Error("Project not found")
+  const { rows } = await queryDb<ProjectBucketAssignmentRow>(
+    `
+      select bucket_name, is_primary, created_at
+      from drive_project_bucket_assignments
+      where project_id = $1 and bucket_name = $2
+      limit 1;
+    `,
+    [project.id, bucketName]
+  )
+  return rows[0] ? mapProjectBucketAssignment(rows[0]) : null
+}
+
 async function syncProjectPrimaryBucket(projectId: string) {
   const { rows } = await queryDb<{ bucket_name: string | null }>(
     `
@@ -796,6 +817,15 @@ export async function removeProjectBucket(projectIdentifier: string, bucketName:
 
   await syncProjectPrimaryBucket(project.id)
   return listProjectBuckets(project.id)
+}
+
+export async function listProjectsUsingBucket(bucketName: string) {
+  await ensureProjectSchema()
+  const { rows } = await queryDb<ProjectRow>(
+    `select p.* from drive_projects p join drive_project_bucket_assignments a on a.project_id = p.id where a.bucket_name = $1`,
+    [bucketName]
+  )
+  return rows.map(mapProject)
 }
 
 export async function listProjectApiKeys(projectIdentifier: string) {

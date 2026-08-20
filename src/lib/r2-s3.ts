@@ -3,6 +3,8 @@ import {
   CreateBucketCommand,
   DeleteBucketCommand,
   ListObjectsV2Command,
+  ListMultipartUploadsCommand,
+  ListObjectVersionsCommand,
   HeadBucketCommand,
   HeadObjectCommand,
   GetObjectCommand,
@@ -533,6 +535,17 @@ export async function r2DeleteObjects(config: R2ClientConfig, bucket: string, ke
   }
 }
 
+export async function r2DeleteObjectVersions(config: R2ClientConfig, bucket: string, versions: Array<{ key: string; versionId?: string }>) {
+  const client = createR2Client(config)
+  const unique = Array.from(new Map(versions.filter((item) => item.key).map((item) => [`${item.key}:${item.versionId ?? ""}`, item])).values())
+  for (let i = 0; i < unique.length; i += 1000) {
+    await client.send(new DeleteObjectsCommand({
+      Bucket: bucket,
+      Delete: { Objects: unique.slice(i, i + 1000).map((item) => ({ Key: item.key, ...(item.versionId ? { VersionId: item.versionId } : {}) })), Quiet: true },
+    }))
+  }
+}
+
 export async function r2DeleteBucketAndContents(config: R2ClientConfig, bucket: string) {
   const objects = await r2ListAllObjects(config, bucket, { maxObjects: 200_000 })
   if (objects.length > 0) {
@@ -543,6 +556,76 @@ export async function r2DeleteBucketAndContents(config: R2ClientConfig, bucket: 
     )
   }
   await r2DeleteBucket(config, bucket)
+}
+
+export type R2MultipartUpload = { key: string; uploadId: string; initiated?: string }
+
+export async function r2ListAllMultipartUploads(config: R2ClientConfig, bucket: string, maxUploads = 200_000): Promise<R2MultipartUpload[]> {
+  const client = createR2Client(config)
+  const uploads: R2MultipartUpload[] = []
+  let keyMarker: string | undefined
+  let uploadIdMarker: string | undefined
+  while (uploads.length < maxUploads) {
+    const page = await client.send(new ListMultipartUploadsCommand({
+      Bucket: bucket,
+      ...(keyMarker ? { KeyMarker: keyMarker } : {}),
+      ...(uploadIdMarker ? { UploadIdMarker: uploadIdMarker } : {}),
+      MaxUploads: Math.min(1000, maxUploads - uploads.length),
+    }))
+    for (const upload of page.Uploads ?? []) {
+      if (upload.Key && upload.UploadId) uploads.push({ key: upload.Key, uploadId: upload.UploadId, initiated: upload.Initiated?.toISOString() })
+    }
+    if (!page.IsTruncated || !page.NextKeyMarker || !page.NextUploadIdMarker) break
+    keyMarker = page.NextKeyMarker
+    uploadIdMarker = page.NextUploadIdMarker
+  }
+  return uploads
+}
+
+export async function r2AbortAllMultipartUploads(config: R2ClientConfig, bucket: string) {
+  const uploads = await r2ListAllMultipartUploads(config, bucket)
+  for (const upload of uploads) await r2AbortMultipartUpload(config, bucket, upload.key, upload.uploadId)
+  return { discovered: uploads.length, aborted: uploads.length }
+}
+
+export async function r2ListAllObjectVersions(config: R2ClientConfig, bucket: string, maxObjects = 200_000) {
+  const client = createR2Client(config)
+  const versions: Array<{ key: string; versionId?: string }> = []
+  let keyMarker: string | undefined
+  let versionIdMarker: string | undefined
+  while (versions.length < maxObjects) {
+    const page = await client.send(new ListObjectVersionsCommand({
+      Bucket: bucket,
+      MaxKeys: Math.min(1000, maxObjects - versions.length),
+      ...(keyMarker ? { KeyMarker: keyMarker } : {}),
+      ...(versionIdMarker ? { VersionIdMarker: versionIdMarker } : {}),
+    }))
+    for (const item of [...(page.Versions ?? []), ...(page.DeleteMarkers ?? [])]) if (item.Key) versions.push({ key: item.Key, versionId: item.VersionId })
+    if (!page.IsTruncated || !page.NextKeyMarker) break
+    keyMarker = page.NextKeyMarker
+    versionIdMarker = page.NextVersionIdMarker
+  }
+  return versions
+}
+
+export async function r2DeleteAllBucketContents(config: R2ClientConfig, bucket: string) {
+  let objectsCount = 0
+  let versionsCount = 0
+  let multipartCount = 0
+  while (true) {
+    const objects = await r2ListAllObjects(config, bucket, { maxObjects: 1000 })
+    let versions: Array<{ key: string; versionId?: string }> = []
+    try { versions = await r2ListAllObjectVersions(config, bucket, 1000) } catch { /* R2 may not expose version listing. */ }
+    const multipart = await r2ListAllMultipartUploads(config, bucket, 1000)
+    if (!objects.length && !versions.length && !multipart.length) break
+    await r2DeleteObjects(config, bucket, objects.map((item) => item.key))
+    await r2DeleteObjectVersions(config, bucket, versions)
+    for (const upload of multipart) await r2AbortMultipartUpload(config, bucket, upload.key, upload.uploadId)
+    objectsCount += objects.length
+    versionsCount += versions.length
+    multipartCount += multipart.length
+  }
+  return { objects: objectsCount, versions: versionsCount, multipart: multipartCount }
 }
 
 export async function r2CreateSignedDownloadUrl(
@@ -571,6 +654,25 @@ export async function r2CreateSignedDownloadUrl(
   })
 
   return getSignedUrl(client, command, { expiresIn: expiresInSeconds })
+}
+
+export async function r2CreateSignedHeadUrl(
+  config: R2ClientConfig,
+  bucket: string,
+  key: string,
+  input?: { expiresInSeconds?: number }
+) {
+  const client = createR2Client(config)
+  const expiresInSeconds =
+    typeof input?.expiresInSeconds === "number" && Number.isFinite(input.expiresInSeconds)
+      ? Math.max(30, Math.min(3600, Math.floor(input.expiresInSeconds)))
+      : 300
+
+  return getSignedUrl(
+    client,
+    new HeadObjectCommand({ Bucket: bucket, Key: key }),
+    { expiresIn: expiresInSeconds }
+  )
 }
 
 export async function r2CreateMultipartUpload(

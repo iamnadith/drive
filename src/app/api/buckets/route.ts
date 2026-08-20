@@ -1,10 +1,22 @@
 import { NextResponse } from "next/server"
 
 import { getAllAccounts } from "@/lib/accounts-store"
+import { listBucketDeliverySettings, type BucketDeliverySettings } from "@/lib/bucket-delivery-settings-store"
 import { ensureBucketStatsRows, getBucketStatsMap } from "@/lib/bucket-stats-store"
 import { r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
 import { readBucketSettings } from "@/lib/r2-bucket-settings"
 import { requireAdmin } from "@/lib/server-auth"
+
+function serializeDeliverySettings(settings: BucketDeliverySettings) {
+  return {
+    accountId: settings.accountId,
+    bucketName: settings.bucketName,
+    deliveryPublicAccessEnabled: settings.publicAccessEnabled,
+    mediaAllowedOrigins: settings.mediaAllowedOrigins,
+    createdAt: settings.createdAt,
+    updatedAt: settings.updatedAt,
+  }
+}
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
@@ -23,6 +35,7 @@ export async function GET() {
 
     const listed = await r2ListBuckets({ accountId: account.cloudflareAccountId, apiToken: account.apiToken })
     const names = listed.map((bucket) => bucket.name)
+    const deliverySettings = await listBucketDeliverySettings(account.id, names)
     let stats = new Map<string, { objects: number; bytes: number; status: string; error?: string }>()
     try {
       await ensureBucketStatsRows(account.id, names)
@@ -48,9 +61,19 @@ export async function GET() {
           statsStatus: cached?.status ?? "pending",
         }
         try {
-          return { ...base, settings: await readBucketSettings(account, bucket.name), settingsError: null }
+          return {
+            ...base,
+            settings: await readBucketSettings(account, bucket.name),
+            deliverySettings: serializeDeliverySettings(deliverySettings.get(bucket.name)!),
+            settingsError: null,
+          }
         } catch (error: unknown) {
-          return { ...base, settings: null, settingsError: errorMessage(error, "Unable to load bucket settings") }
+          return {
+            ...base,
+            settings: null,
+            deliverySettings: serializeDeliverySettings(deliverySettings.get(bucket.name)!),
+            settingsError: errorMessage(error, "Unable to load bucket settings"),
+          }
         }
       })
     )).sort((a, b) => a.name.localeCompare(b.name))

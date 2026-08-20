@@ -3,15 +3,14 @@ import { authorizeProjectRequest, getActiveProjectBucketR2Config, projectBucketF
 import { buildProjectStorageObjectUrl } from "@/lib/project-storage-gateway"
 import { assertProjectObjectWritable, clearProjectObjectLock, markTrackedBucketObjectDeleted, recordProjectApiEvent } from "@/lib/project-operations-store"
 import { r2DeleteObject, r2HeadObject, r2PutObject } from "@/lib/r2-s3"
-
-const SYSTEM_DERIVATIVE_KEY_REGEX = /-(poster|preview|stream|subtitles(?:\.[a-z0-9_-]+)?)\.[a-z0-9]{1,8}$/i
+import { isSystemDerivativeKey } from "@/lib/storage-delivery.cjs"
 
 function keyFromParams(parts: string[]) {
   return parts.map((part) => decodeURIComponent(part)).join("/").trim().replace(/^\/+/, "")
 }
 
 function shouldBypassWriteLockForKey(key: string) {
-  return SYSTEM_DERIVATIVE_KEY_REGEX.test(key)
+  return isSystemDerivativeKey(key)
 }
 
 export async function HEAD(

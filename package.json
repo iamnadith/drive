@@ -10,6 +10,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "node --test test/*.test.cjs",
+    "test:bucket-danger": "node --test test/bucket-danger-actions.test.cjs",
+    "test:project-media-origins": "node --test test/project-media-origins.test.cjs",
+    "test:storage-delivery": "node --test test/storage-delivery.test.cjs",
     "worker:run": "node worker/agent-worker.mjs"
   },
   "dependencies": {

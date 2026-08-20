@@ -2,6 +2,10 @@ import { NextResponse } from "next/server"
 
 import { getAllAccounts } from "@/lib/accounts-store"
 import {
+  getBucketDeliverySettings,
+} from "@/lib/bucket-delivery-settings-store"
+import { updateAndSyncBucketDeliverySettings } from "@/lib/bucket-delivery-settings-service"
+import {
   deleteBucketCors,
   putBucketCors,
   readBucketSettings,
@@ -12,6 +16,17 @@ import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
+}
+
+function serializeDeliverySettings(settings: Awaited<ReturnType<typeof getBucketDeliverySettings>>) {
+  return {
+    accountId: settings.accountId,
+    bucketName: settings.bucketName,
+    deliveryPublicAccessEnabled: settings.publicAccessEnabled,
+    mediaAllowedOrigins: settings.mediaAllowedOrigins,
+    createdAt: settings.createdAt,
+    updatedAt: settings.updatedAt,
+  }
 }
 
 async function getContext(context: { params: Promise<{ accountId: string; bucket: string }> }) {
@@ -30,7 +45,11 @@ export async function GET(
     if (!auth.ok) return auth.response
     const { account, bucket } = await getContext(context)
     if (!account) return NextResponse.json({ error: "Account not found" }, { status: 404 })
-    return NextResponse.json({ settings: await readBucketSettings(account, bucket) })
+    const [settings, deliverySettings] = await Promise.all([
+      readBucketSettings(account, bucket),
+      getBucketDeliverySettings(account.id, bucket),
+    ])
+    return NextResponse.json({ settings, deliverySettings: serializeDeliverySettings(deliverySettings) })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to load bucket settings") }, { status: 400 })
   }
@@ -46,18 +65,37 @@ export async function PATCH(
     const { account, bucket } = await getContext(context)
     if (!account) return NextResponse.json({ error: "Account not found" }, { status: 404 })
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
-    if (Array.isArray(body.corsRules) && body.corsRules.length > 1) {
-      return NextResponse.json({ error: "A bucket can have only one CORS policy" }, { status: 400 })
-    }
-    const before = await readBucketSettings(account, bucket)
+    const [before, beforeDeliverySettings] = await Promise.all([
+      readBucketSettings(account, bucket),
+      getBucketDeliverySettings(account.id, bucket),
+    ])
     if (typeof body.publicAccessEnabled === "boolean") {
       await setManagedPublicDomain(account, bucket, body.publicAccessEnabled)
     }
     if ("corsRules" in body) await putBucketCors(account, bucket, body.corsRules)
-    if (!("corsRules" in body) && typeof body.publicAccessEnabled !== "boolean") {
+    const hasDeliverySettingsChange =
+      typeof body.deliveryPublicAccessEnabled === "boolean" || "mediaAllowedOrigins" in body
+    if (hasDeliverySettingsChange) {
+      await updateAndSyncBucketDeliverySettings({
+        account,
+        bucketName: bucket,
+        ...(typeof body.deliveryPublicAccessEnabled === "boolean"
+          ? { publicAccessEnabled: body.deliveryPublicAccessEnabled }
+          : {}),
+        ...("mediaAllowedOrigins" in body ? { mediaAllowedOrigins: body.mediaAllowedOrigins } : {}),
+      })
+    }
+    if (
+      !("corsRules" in body) &&
+      typeof body.publicAccessEnabled !== "boolean" &&
+      !hasDeliverySettingsChange
+    ) {
       return NextResponse.json({ error: "No settings change was provided" }, { status: 400 })
     }
-    const settings = await readBucketSettings(account, bucket)
+    const [settings, deliverySettings] = await Promise.all([
+      readBucketSettings(account, bucket),
+      getBucketDeliverySettings(account.id, bucket),
+    ])
     await recordActivity({
       actorUserId: auth.user.id,
       action: "bucket.settings_updated",
@@ -65,14 +103,14 @@ export async function PATCH(
       entityId: `${account.id}:${bucket}`,
       entityLabel: bucket,
       summary: `Updated settings for ${bucket}`,
-      detail: "Changed the public development URL or CORS configuration.",
-      before,
-      after: settings,
+      detail: "Changed Cloudflare bucket settings or Drive delivery authorization.",
+      before: { settings: before, deliverySettings: beforeDeliverySettings },
+      after: { settings, deliverySettings },
       undoable: false,
       undoReason: "Cloudflare bucket settings changes are applied immediately.",
       ...getRequestActivityContext(request),
     })
-    return NextResponse.json({ settings })
+    return NextResponse.json({ settings, deliverySettings: serializeDeliverySettings(deliverySettings) })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to update bucket settings") }, { status: 400 })
   }

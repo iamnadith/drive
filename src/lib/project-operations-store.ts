@@ -585,6 +585,15 @@ export async function assertProjectObjectWritable(
   throw new Error("Object is locked")
 }
 
+export async function assertProjectBucketHasNoActiveLocks(projectId: string, bucketName: string) {
+  await ensureProjectOperationsSchema()
+  const { rows } = await queryDb<{ count: string }>(
+    `select count(*)::text as count from drive_project_object_locks where project_id = $1 and bucket_name = $2 and (expires_at is null or expires_at > now())`,
+    [projectId, bucketName]
+  )
+  if (Number(rows[0]?.count ?? 0) > 0) throw new Error(`Bucket ${bucketName} contains locked objects; clear or release locks first`)
+}
+
 export async function clearProjectObjectLock(input: {
   projectId: string
   bucketName: string

@@ -29,6 +29,22 @@ export type BucketSettings = {
   corsRules: BucketCorsRule[]
 }
 
+export const MANAGED_MEDIA_CORS_RULE_ID = "drive-media-delivery"
+// S3/R2 handles browser preflight automatically; OPTIONS is not a valid
+// PutBucketCors AllowedMethod.
+const MANAGED_MEDIA_CORS_METHODS = ["GET", "HEAD"]
+const MANAGED_MEDIA_CORS_HEADERS = [
+  "Range",
+  "If-None-Match",
+  "If-Modified-Since",
+  "Content-Type",
+  "Authorization",
+  "X-Drive-API-Key",
+  "X-Drive-Project",
+  "X-Drive-Bucket",
+]
+const MANAGED_MEDIA_CORS_EXPOSED_HEADERS = ["Accept-Ranges", "Content-Length", "Content-Range", "Content-Type", "ETag", "Last-Modified"]
+
 type CloudflareEnvelope<T> = {
   result?: T
 }
@@ -79,6 +95,22 @@ function toAwsCorsRules(rules: BucketCorsRule[]): CORSRule[] {
 
 function fromAwsCorsRules(rules: CORSRule[]): BucketCorsRule[] {
   return normalizeCorsRules(rules)
+}
+
+export function mergeManagedMediaCorsRule(rules: BucketCorsRule[], origins: string[]) {
+  const genericRules = rules.filter((rule) => rule.id !== MANAGED_MEDIA_CORS_RULE_ID)
+  if (origins.length === 0) return genericRules
+  return [
+    ...genericRules,
+    {
+      id: MANAGED_MEDIA_CORS_RULE_ID,
+      allowedOrigins: origins,
+      allowedMethods: MANAGED_MEDIA_CORS_METHODS,
+      allowedHeaders: MANAGED_MEDIA_CORS_HEADERS,
+      exposeHeaders: MANAGED_MEDIA_CORS_EXPOSED_HEADERS,
+      maxAgeSeconds: 86400,
+    },
+  ]
 }
 
 function corsRulesEqual(left: BucketCorsRule[], right: BucketCorsRule[]): boolean {
@@ -152,34 +184,56 @@ export async function getBucketCors(account: CloudflareAccount, bucket: string):
   return fromAwsCorsRules(await r2GetBucketCors(accountR2Config(account), bucket))
 }
 
-export async function putBucketCors(
-  account: CloudflareAccount,
-  bucket: string,
-  value: unknown
-): Promise<BucketCorsRule[]> {
-  const rules = normalizeCorsRules(value)
+async function writeBucketCors(account: CloudflareAccount, bucket: string, rules: BucketCorsRule[]) {
   if (rules.length === 0) {
-    await deleteBucketCors(account, bucket)
-    return []
+    try {
+      await r2DeleteBucketCors(accountR2Config(account), bucket)
+    } catch (error: unknown) {
+      const status =
+        typeof error === "object" && error !== null && "$metadata" in error
+          ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode
+          : undefined
+      if (status !== 404) throw error
+    }
+  } else {
+    await r2PutBucketCors(accountR2Config(account), bucket, toAwsCorsRules(rules))
   }
-  await r2PutBucketCors(accountR2Config(account), bucket, toAwsCorsRules(rules))
   const verified = await getBucketCors(account, bucket)
   if (!corsRulesEqual(verified, rules)) throw new Error("CORS changes could not be verified")
   return verified
 }
 
+export async function syncBucketDeliveryCorsRule(
+  account: CloudflareAccount,
+  bucket: string,
+  origins: string[]
+) {
+  const current = await getBucketCors(account, bucket)
+  return writeBucketCors(account, bucket, mergeManagedMediaCorsRule(current, origins))
+}
+
+export async function putBucketCors(
+  account: CloudflareAccount,
+  bucket: string,
+  value: unknown
+): Promise<BucketCorsRule[]> {
+  const requested = normalizeCorsRules(value)
+  const current = await getBucketCors(account, bucket)
+  const managed = current.filter((rule) => rule.id === MANAGED_MEDIA_CORS_RULE_ID)
+  return writeBucketCors(
+    account,
+    bucket,
+    [...requested.filter((rule) => rule.id !== MANAGED_MEDIA_CORS_RULE_ID), ...managed]
+  )
+}
+
 export async function deleteBucketCors(account: CloudflareAccount, bucket: string): Promise<void> {
-  try {
-    await r2DeleteBucketCors(accountR2Config(account), bucket)
-  } catch (error: unknown) {
-    const status =
-      typeof error === "object" && error !== null && "$metadata" in error
-        ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode
-        : undefined
-    if (status !== 404) throw error
-  }
-  const verified = await getBucketCors(account, bucket)
-  if (verified.length !== 0) throw new Error("CORS removal could not be verified")
+  const current = await getBucketCors(account, bucket)
+  await writeBucketCors(
+    account,
+    bucket,
+    current.filter((rule) => rule.id === MANAGED_MEDIA_CORS_RULE_ID)
+  )
 }
 
 export async function readBucketSettings(account: CloudflareAccount, bucket: string): Promise<BucketSettings> {
