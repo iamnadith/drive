@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { after, NextResponse } from "next/server"
 import {
   authorizeProjectRequest,
   getActiveProjectBucketR2Config,
@@ -51,14 +51,18 @@ export async function GET(request: Request) {
           : undefined,
     }
   )
-  await recordProjectApiEvent({
-    project: authorized.auth.project,
-    apiKeyId: authorized.auth.apiKey.id,
-    action: "file.download.presign",
-    objectKey: resolvedKey,
-    request,
-    metadata: fileId ? { fileId } : undefined,
-  })
+  // This audit write is not part of authorizing or signing the object. Queue it
+  // after the response so storage/database latency cannot delay video startup.
+  after(() =>
+    recordProjectApiEvent({
+      project: authorized.auth.project,
+      apiKeyId: authorized.auth.apiKey.id,
+      action: "file.download.presign",
+      objectKey: resolvedKey,
+      request,
+      metadata: fileId ? { fileId } : undefined,
+    })
+  )
 
   if (url.searchParams.get("redirect") === "1") {
     return NextResponse.redirect(signedUrl, 302)
