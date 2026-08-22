@@ -21,6 +21,11 @@ import {
   PutBucketCorsCommand,
   DeleteBucketCorsCommand,
   type CORSRule,
+  type CreateMultipartUploadCommandOutput,
+  type HeadBucketCommandOutput,
+  type HeadObjectCommandOutput,
+  type ListObjectsV2CommandOutput,
+  type UploadPartCopyCommandOutput,
 } from "@aws-sdk/client-s3"
 import { Upload } from "@aws-sdk/lib-storage"
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
@@ -257,7 +262,7 @@ export async function r2CreateSignedUploadUrl(
 
 export async function r2HeadBucket(config: R2ClientConfig, bucket: string) {
   const client = createR2Client(config)
-  return client.send(new HeadBucketCommand({ Bucket: bucket }))
+  return client.send(new HeadBucketCommand({ Bucket: bucket })) as Promise<HeadBucketCommandOutput>
 }
 
 export async function r2GetBucketCors(
@@ -310,9 +315,9 @@ export async function r2ListObjectsPage(
   config: R2ClientConfig,
   bucket: string,
   input: { continuationToken?: string; prefix?: string; maxKeys?: number; startAfter?: string }
-) {
+): Promise<ListObjectsV2CommandOutput> {
   const client = createR2Client(config)
-  return sendWithRetry(() =>
+  return sendWithRetry<ListObjectsV2CommandOutput>(() =>
     client.send(
       new ListObjectsV2Command({
         Bucket: bucket,
@@ -329,9 +334,9 @@ export async function r2ListObjectsPageWithDelimiter(
   config: R2ClientConfig,
   bucket: string,
   input: { continuationToken?: string; prefix?: string; maxKeys?: number; delimiter?: string }
-) {
+): Promise<ListObjectsV2CommandOutput> {
   const client = createR2Client(config)
-  return sendWithRetry(() =>
+  return sendWithRetry<ListObjectsV2CommandOutput>(() =>
     client.send(
       new ListObjectsV2Command({
         Bucket: bucket,
@@ -344,9 +349,9 @@ export async function r2ListObjectsPageWithDelimiter(
   )
 }
 
-export async function r2HeadObject(config: R2ClientConfig, bucket: string, key: string) {
+export async function r2HeadObject(config: R2ClientConfig, bucket: string, key: string): Promise<HeadObjectCommandOutput> {
   const client = createR2Client(config)
-  return client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
+  return client.send(new HeadObjectCommand({ Bucket: bucket, Key: key })) as Promise<HeadObjectCommandOutput>
 }
 
 export async function r2CopyObject(
@@ -363,7 +368,7 @@ export async function r2CopyObject(
 ) {
   const client = createR2Client(config)
   const encodedSource = buildEncodedCopySource(bucket, sourceKey)
-  const sourceHead = await sendWithRetry(
+  const sourceHead = await sendWithRetry<HeadObjectCommandOutput>(
     () => client.send(new HeadObjectCommand({ Bucket: bucket, Key: sourceKey }))
   )
   const sourceSize = numberValue(sourceHead.ContentLength) ?? 0
@@ -385,7 +390,7 @@ export async function r2CopyObject(
 
   const multipartCopy = async () => {
     const metadataDirective = options?.metadataDirective ?? "COPY"
-    const upload = await sendWithRetry(() =>
+    const upload = await sendWithRetry<CreateMultipartUploadCommandOutput>(() =>
       client.send(
         new CreateMultipartUploadCommand({
           Bucket: bucket,
@@ -443,7 +448,7 @@ export async function r2CopyObject(
           return
         }
 
-        const copiedPart = await sendWithRetry(() =>
+        const copiedPart = await sendWithRetry<UploadPartCopyCommandOutput>(() =>
           client.send(
             new UploadPartCopyCommand({
               Bucket: bucket,
@@ -515,7 +520,7 @@ export async function r2CopyObject(
       throw error
     }
 
-    const destinationHead = await sendWithRetry(() =>
+    const destinationHead = await sendWithRetry<HeadObjectCommandOutput>(() =>
       client.send(new HeadObjectCommand({ Bucket: bucket, Key: destinationKey }))
     )
     const destinationSize = numberValue(destinationHead.ContentLength) ?? -1
