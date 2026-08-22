@@ -26,6 +26,10 @@ import { Upload } from "@aws-sdk/lib-storage"
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
 import type { Readable } from "stream"
 
+declare global {
+  var __driveR2ClientCache: Map<string, S3Client> | undefined
+}
+
 export interface R2ClientConfig {
   accountId: string
   accessKeyId: string
@@ -153,14 +157,28 @@ export function createR2Client({
   accessKeyId,
   secretAccessKey,
 }: R2ClientConfig) {
-  return new S3Client({
+  // S3Client keeps its HTTP connection pool alive. Reusing it avoids a new
+  // TLS/agent setup for every authenticated HEAD during registration scans.
+  const cache = global.__driveR2ClientCache ??= new Map()
+  const cacheKey = `${accountId}:${accessKeyId}:${secretAccessKey}`
+  const cached = cache.get(cacheKey)
+  if (cached) return cached
+  const client = new S3Client({
     region: "auto",
     endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId,
-      secretAccessKey,
-    },
+    credentials: { accessKeyId, secretAccessKey },
   })
+  cache.set(cacheKey, client)
+  // Account credentials can be rotated. Keep the cache bounded so old
+  // clients do not accumulate in a long-lived Next.js process.
+  while (cache.size > 8) {
+    const oldest = cache.keys().next().value
+    if (typeof oldest !== "string") break
+    const oldClient = cache.get(oldest)
+    cache.delete(oldest)
+    void oldClient?.destroy()
+  }
+  return client
 }
 
 export async function r2CreateBucket(config: R2ClientConfig, bucket: string) {
@@ -349,6 +367,21 @@ export async function r2CopyObject(
     () => client.send(new HeadObjectCommand({ Bucket: bucket, Key: sourceKey }))
   )
   const sourceSize = numberValue(sourceHead.ContentLength) ?? 0
+
+  // Registration retries are intentionally idempotent. If a prior request
+  // completed the copy but the response was lost, return the existing exact
+  // object instead of starting another copy or multipart upload.
+  if (sourceKey !== destinationKey) {
+    const existingHead = await client
+      .send(new HeadObjectCommand({ Bucket: bucket, Key: destinationKey }))
+      .catch(() => null)
+    if (
+      existingHead &&
+      numberValue(existingHead.ContentLength) === sourceSize
+    ) {
+      return existingHead
+    }
+  }
 
   const multipartCopy = async () => {
     const metadataDirective = options?.metadataDirective ?? "COPY"

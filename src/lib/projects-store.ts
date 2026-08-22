@@ -5,6 +5,9 @@ declare global {
   var __driveProjectAuthCache:
     | Map<string, { expiresAt: number; value: ValidatedProjectApiKey }>
     | undefined
+  var __driveProjectAuthInflight:
+    | Map<string, Promise<ValidatedProjectApiKey | null>>
+    | undefined
   var __driveProjectLastUsedQueue: Map<string, number> | undefined
   var __driveProjectLastUsedTimer: ReturnType<typeof setTimeout> | undefined
 }
@@ -253,6 +256,13 @@ function getAuthCache() {
     global.__driveProjectAuthCache = new Map()
   }
   return global.__driveProjectAuthCache
+}
+
+function getAuthInflight() {
+  if (!global.__driveProjectAuthInflight) {
+    global.__driveProjectAuthInflight = new Map()
+  }
+  return global.__driveProjectAuthInflight
 }
 
 function getLastUsedQueue() {
@@ -1080,18 +1090,33 @@ export async function validateProjectApiKey(secret: string) {
     return cached.value
   }
 
-  const loaded = await loadProjectApiKeyFromDb(keyHash)
-  if (!loaded) {
-    cache.delete(keyHash)
-    return null
-  }
+  // A burst of HEAD probes (for example, a registration readiness scan) can
+  // otherwise open one database lookup per request before the first result is
+  // cached. Share the cold lookup so all requests await the same query.
+  const inflight = getAuthInflight()
+  const pending = inflight.get(keyHash)
+  if (pending) return pending
 
-  cache.set(keyHash, {
-    expiresAt: Date.now() + getAuthCacheTtlMs(),
-    value: loaded,
-  })
-  scheduleLastUsedFlush(loaded.apiKey.id)
-  return loaded
+  const lookup = (async () => {
+    const loaded = await loadProjectApiKeyFromDb(keyHash)
+    if (!loaded) {
+      cache.delete(keyHash)
+      return null
+    }
+
+    cache.set(keyHash, {
+      expiresAt: Date.now() + getAuthCacheTtlMs(),
+      value: loaded,
+    })
+    scheduleLastUsedFlush(loaded.apiKey.id)
+    return loaded
+  })()
+  inflight.set(keyHash, lookup)
+  try {
+    return await lookup
+  } finally {
+    if (inflight.get(keyHash) === lookup) inflight.delete(keyHash)
+  }
 }
 
 export async function authorizeProjectApiKey(

@@ -13,11 +13,15 @@ declare global {
   var __driveProjectActiveAccountCache:
     | { expiresAt: number; account: CloudflareAccount | null }
     | undefined
+  var __driveProjectActiveAccountInflight: Promise<CloudflareAccount | null> | undefined
   var __driveProjectBucketAssignmentCache:
     | Map<string, { expiresAt: number; bucketNames: string[] }>
     | undefined
   var __driveProjectBucketAvailabilityCache:
     | Map<string, { expiresAt: number; ok: boolean }>
+    | undefined
+  var __driveProjectBucketAvailabilityInflight:
+    | Map<string, Promise<boolean>>
     | undefined
   var __driveProjectRateLimitCache:
     | Map<string, { windowStartedAt: number; count: number }>
@@ -80,12 +84,24 @@ function cacheTtlMs(envName: string, fallbackSeconds: number) {
 async function getCachedActiveAccount() {
   const cached = global.__driveProjectActiveAccountCache
   if (cached && cached.expiresAt > Date.now()) return cached.account
-  const account = await getActiveAccount()
-  global.__driveProjectActiveAccountCache = {
-    account,
-    expiresAt: Date.now() + cacheTtlMs("PROJECT_ACTIVE_ACCOUNT_CACHE_TTL_SECONDS", 30),
+  const pending = global.__driveProjectActiveAccountInflight
+  if (pending) return pending
+  const lookup = (async () => {
+    const account = await getActiveAccount()
+    global.__driveProjectActiveAccountCache = {
+      account,
+      expiresAt: Date.now() + cacheTtlMs("PROJECT_ACTIVE_ACCOUNT_CACHE_TTL_SECONDS", 30),
+    }
+    return account
+  })()
+  global.__driveProjectActiveAccountInflight = lookup
+  try {
+    return await lookup
+  } finally {
+    if (global.__driveProjectActiveAccountInflight === lookup) {
+      global.__driveProjectActiveAccountInflight = undefined
+    }
   }
-  return account
 }
 
 function getBucketCache() {
@@ -93,6 +109,13 @@ function getBucketCache() {
     global.__driveProjectBucketAvailabilityCache = new Map()
   }
   return global.__driveProjectBucketAvailabilityCache
+}
+
+function getBucketAvailabilityInflight() {
+  if (!global.__driveProjectBucketAvailabilityInflight) {
+    global.__driveProjectBucketAvailabilityInflight = new Map()
+  }
+  return global.__driveProjectBucketAvailabilityInflight
 }
 
 function getProjectBucketAssignmentCache() {
@@ -228,17 +251,29 @@ export async function getActiveProjectBucketR2Config(
   const bucketCacheKey = `${active.id}:${active.cloudflareAccountId}:${selectedBucketName}`
   const cached = bucketCache.get(bucketCacheKey)
   if (!cached || cached.expiresAt <= Date.now()) {
+    const inflight = getBucketAvailabilityInflight()
+    const pending = inflight.get(bucketCacheKey)
+    const probe = pending ?? (async () => {
+      try {
+        await r2HeadBucket(config, selectedBucketName)
+        bucketCache.set(bucketCacheKey, {
+          ok: true,
+          expiresAt: Date.now() + cacheTtlMs("PROJECT_BUCKET_CACHE_TTL_SECONDS", 120),
+        })
+        return true
+      } catch {
+        bucketCache.set(bucketCacheKey, {
+          ok: false,
+          expiresAt: Date.now() + cacheTtlMs("PROJECT_BUCKET_NEGATIVE_CACHE_TTL_SECONDS", 30),
+        })
+        return false
+      }
+    })()
+    if (!pending) inflight.set(bucketCacheKey, probe)
     try {
-      await r2HeadBucket(config, selectedBucketName)
-      bucketCache.set(bucketCacheKey, {
-        ok: true,
-        expiresAt: Date.now() + cacheTtlMs("PROJECT_BUCKET_CACHE_TTL_SECONDS", 120),
-      })
-    } catch {
-      bucketCache.set(bucketCacheKey, {
-        ok: false,
-        expiresAt: Date.now() + cacheTtlMs("PROJECT_BUCKET_NEGATIVE_CACHE_TTL_SECONDS", 30),
-      })
+      await probe
+    } finally {
+      if (inflight.get(bucketCacheKey) === probe) inflight.delete(bucketCacheKey)
     }
   }
 
