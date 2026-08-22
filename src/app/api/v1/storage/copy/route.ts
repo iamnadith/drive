@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { after, NextResponse } from "next/server"
 import { authorizeProjectRequest, getActiveProjectBucketR2Config, projectBucketFromRequest } from "@/lib/project-api-auth"
 import { buildProjectStorageObjectUrl } from "@/lib/project-storage-gateway"
 import { getProjectObjectInventoryByFileId, recordProjectApiEvent, syncTrackedBucketObject } from "@/lib/project-operations-store"
@@ -46,28 +46,35 @@ export async function POST(request: Request) {
       { status: notReady ? 503 : 502 },
     )
   }
-  const trackedObject = await syncTrackedBucketObject({
-    config: r2.config,
-    projectId: authorized.auth.project.id,
-    bucketName: r2.bucketName,
-    key: toKey,
-  }).catch(() => undefined)
+  // The caller needs the verified copy immediately. Inventory reconciliation
+  // and audit logging are bookkeeping and can involve a second database
+  // round-trip; doing them before the response made valid copies exceed the
+  // worker's 15-second request deadline. Keep those side effects durable but
+  // outside the copy critical path.
+  after(async () => {
+    const trackedObject = await syncTrackedBucketObject({
+      config: r2.config,
+      projectId: authorized.auth.project.id,
+      bucketName: r2.bucketName,
+      key: toKey,
+    }).catch(() => undefined)
 
-  await recordProjectApiEvent({
-    project: authorized.auth.project,
-    apiKeyId: authorized.auth.apiKey.id,
-    action: "storage.object.copy",
-    objectKey: fromKey,
-    request,
-    metadata: { toKey, ...(trackedObject?.fileId ? { fileId: trackedObject.fileId } : {}) },
-  }).catch(() => undefined)
+    await recordProjectApiEvent({
+      project: authorized.auth.project,
+      apiKeyId: authorized.auth.apiKey.id,
+      action: "storage.object.copy",
+      objectKey: fromKey,
+      request,
+      metadata: { toKey, ...(trackedObject?.fileId ? { fileId: trackedObject.fileId } : {}) },
+    }).catch(() => undefined)
+  })
 
   return NextResponse.json({
     ok: true,
     fromKey,
     toKey,
     bucketName: r2.bucketName,
-    fileId: trackedObject?.fileId ?? null,
+    fileId: null,
     url: buildProjectStorageObjectUrl(request, r2.bucketName, toKey),
     copyResult: copied ? true : true,
   })
