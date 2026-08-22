@@ -368,24 +368,26 @@ export async function r2CopyObject(
 ) {
   const client = createR2Client(config)
   const encodedSource = buildEncodedCopySource(bucket, sourceKey)
-  const sourceHead = await sendWithRetry<HeadObjectCommandOutput>(
-    () => client.send(new HeadObjectCommand({ Bucket: bucket, Key: sourceKey }))
-  )
+  // These reads are independent. Running them together is important for
+  // registration retries: two cold R2 HEADs in series can exceed the worker's
+  // request deadline even when the destination already matches exactly.
+  const [sourceHead, existingHead] = await Promise.all([
+    sendWithRetry<HeadObjectCommandOutput>(
+      () => client.send(new HeadObjectCommand({ Bucket: bucket, Key: sourceKey }))
+    ),
+    sourceKey === destinationKey
+      ? Promise.resolve<HeadObjectCommandOutput | null>(null)
+      : client
+        .send(new HeadObjectCommand({ Bucket: bucket, Key: destinationKey }))
+        .catch(() => null),
+  ])
   const sourceSize = numberValue(sourceHead.ContentLength) ?? 0
 
   // Registration retries are intentionally idempotent. If a prior request
   // completed the copy but the response was lost, return the existing exact
   // object instead of starting another copy or multipart upload.
-  if (sourceKey !== destinationKey) {
-    const existingHead = await client
-      .send(new HeadObjectCommand({ Bucket: bucket, Key: destinationKey }))
-      .catch(() => null)
-    if (
-      existingHead &&
-      numberValue(existingHead.ContentLength) === sourceSize
-    ) {
-      return existingHead
-    }
+  if (existingHead && numberValue(existingHead.ContentLength) === sourceSize) {
+    return existingHead
   }
 
   const multipartCopy = async () => {
