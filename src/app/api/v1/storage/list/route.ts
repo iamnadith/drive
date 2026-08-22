@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { authorizeProjectRequest, getActiveProjectBucketR2Config, projectBucketFromRequest, projectIdFromUrl } from "@/lib/project-api-auth"
 import { buildProjectStorageObjectUrl } from "@/lib/project-storage-gateway"
-import { r2ListAllObjects } from "@/lib/r2-s3"
+import { r2ListAllObjects, r2ListObjectsPage } from "@/lib/r2-s3"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -19,8 +19,40 @@ export async function GET(request: Request) {
     ? Math.max(1, Math.min(200_000, Math.floor(requestedLimit)))
     : 1_000
 
+  const prefix = url.searchParams.get("prefix") ?? undefined
+  const continuationToken = url.searchParams.get("continuationToken") ?? undefined
+
+  // A continuation token makes inventory consumers resumable. The legacy
+  // response (without a token) keeps its bounded all-object behavior so
+  // existing dashboard callers retain their current semantics.
+  if (url.searchParams.get("paged") === "1") {
+    const page = await r2ListObjectsPage(r2.config, r2.bucketName, {
+      continuationToken,
+      prefix,
+      maxKeys: Math.min(maxObjects, 1_000),
+    })
+    const contents = Array.isArray(page.Contents) ? page.Contents : []
+    const nextContinuationToken = typeof page.NextContinuationToken === "string"
+      ? page.NextContinuationToken
+      : undefined
+    return NextResponse.json({
+      bucketName: r2.bucketName,
+      objects: contents.flatMap((item) => {
+        if (typeof item?.Key !== "string" || !item.Key) return []
+        return [{
+          key: item.Key,
+          url: buildProjectStorageObjectUrl(request, r2.bucketName, item.Key),
+          fileName: item.Key,
+          size: typeof item.Size === "number" ? item.Size : 0,
+          uploadedAt: item.LastModified?.toISOString() ?? null,
+        }]
+      }),
+      nextContinuationToken: nextContinuationToken ?? null,
+    })
+  }
+
   const objects = await r2ListAllObjects(r2.config, r2.bucketName, {
-    prefix: url.searchParams.get("prefix") ?? undefined,
+    prefix,
     maxObjects,
   })
 
