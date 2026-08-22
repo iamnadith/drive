@@ -109,6 +109,45 @@ function getMultipartCopyPartSize(totalBytes: number) {
   )
 }
 
+const COPY_VISIBILITY_ATTEMPTS = 8
+const COPY_VISIBILITY_DELAY_MS = 500
+
+async function waitForCopiedObject(
+  client: S3Client,
+  bucket: string,
+  key: string,
+  expectedSize: number,
+) {
+  let lastError: unknown
+  let lastSize: number | undefined
+
+  for (let attempt = 0; attempt < COPY_VISIBILITY_ATTEMPTS; attempt += 1) {
+    try {
+      const head = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
+      lastSize = numberValue(head.ContentLength)
+      if (lastSize === expectedSize) return head
+      lastError = new Error(
+        `Copied object size mismatch for ${key}: expected=${expectedSize} actual=${lastSize ?? "unknown"}`
+      )
+    } catch (error) {
+      lastError = error
+    }
+
+    if (attempt < COPY_VISIBILITY_ATTEMPTS - 1) {
+      await sleep(COPY_VISIBILITY_DELAY_MS)
+    }
+  }
+
+  if (lastSize !== undefined) {
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(
+          `Copied object size mismatch for ${key}: expected=${expectedSize} actual=${lastSize}`
+        )
+  }
+  throw new Error(`Copied object is not readable after copy: ${key}`)
+}
+
 export function createR2Client({
   accountId,
   accessKeyId,
@@ -460,7 +499,7 @@ export async function r2CopyObject(
   }
 
   try {
-    return await sendWithRetry(() =>
+    await sendWithRetry(() =>
       client.send(
         new CopyObjectCommand({
           Bucket: bucket,
@@ -475,6 +514,10 @@ export async function r2CopyObject(
         })
       )
     )
+    // CopyObject can acknowledge before a subsequent HEAD observes the
+    // destination. Do not report success until the copied object is readable
+    // and has the same size as the source.
+    return await waitForCopiedObject(client, bucket, destinationKey, sourceSize)
   } catch (error) {
     const message =
       typeof error === "object" && error !== null && "message" in error

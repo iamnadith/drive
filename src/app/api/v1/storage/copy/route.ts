@@ -31,7 +31,21 @@ export async function POST(request: Request) {
   const r2 = await getActiveProjectBucketR2Config(authorized.auth.project, object?.bucketName ?? bucketName)
   if ("response" in r2) return r2.response
 
-  const copied = await r2CopyObject(r2.config, r2.bucketName, fromKey, toKey)
+  let copied: Awaited<ReturnType<typeof r2CopyObject>>
+  try {
+    copied = await r2CopyObject(r2.config, r2.bucketName, fromKey, toKey)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "Storage copy failed")
+    const notReady = message.startsWith("Copied object is not readable after copy:")
+    return NextResponse.json(
+      {
+        error: message,
+        code: notReady ? "COPY_NOT_READY" : "COPY_FAILED",
+        retryable: notReady,
+      },
+      { status: notReady ? 503 : 502 },
+    )
+  }
   const trackedObject = await syncTrackedBucketObject({
     config: r2.config,
     projectId: authorized.auth.project.id,
