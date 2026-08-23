@@ -315,6 +315,44 @@ export async function recordProjectApiEvent(input: {
   }
 }
 
+/**
+ * Return recently completed object keys for a project.  R2's native list API
+ * is ordered by key, not upload time, so a resumable key cursor can take a
+ * long time to reach a newly uploaded object.  Upload/put routes already
+ * record these events; keeping this query bounded gives consumers a cheap
+ * recent window without walking the whole bucket.
+ */
+export async function getRecentProjectObjectKeys(input: {
+  projectId: string
+  limit: number
+}) {
+  await ensureProjectOperationsSchema()
+  const limit = Math.max(1, Math.min(100, Math.floor(input.limit)))
+  const { rows } = await queryDb<{ object_key: string; occurred_at: string }>(
+    `
+      select e.object_key, max(e.occurred_at) as occurred_at
+      from drive_project_api_events e
+      where e.project_id = $1
+        and e.object_key is not null
+        and e.outcome = 'success'
+        and e.action = any($2::text[])
+      group by e.object_key
+      order by max(e.occurred_at) desc, e.object_key desc
+      limit $3;
+    `,
+    [
+      input.projectId,
+      [
+        "storage.object.put",
+        "file.upload.complete",
+        "file.multipart.complete",
+      ],
+      limit,
+    ]
+  )
+  return rows
+}
+
 export async function upsertProjectObjectInventory(input: {
   projectId: string
   bucketName: string
