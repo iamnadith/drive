@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { after, NextResponse } from "next/server"
 import {
   authorizeProjectRequest,
   getActiveProjectBucketR2Config,
@@ -40,13 +40,13 @@ export async function GET(request: Request) {
       delimiter: "/",
     }
   )
-  await recordProjectApiEvent({
+  after(() => recordProjectApiEvent({
     project: authorized.auth.project,
     apiKeyId: authorized.auth.apiKey.id,
     action: "file.list",
     request,
     metadata: { prefix: url.searchParams.get("prefix") ?? "" },
-  })
+  }))
 
   const objects = (page.Contents ?? [])
     .map((item) => ({

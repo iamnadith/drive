@@ -11,6 +11,10 @@ import {
   type R2ClientConfig,
 } from "./r2-s3"
 
+declare global {
+  var __driveProjectOperationsSchema: Promise<void> | undefined
+}
+
 export type ProjectOperationType =
   | "recursive_delete"
   | "batch_delete"
@@ -141,8 +145,10 @@ async function findProjectIdsForTrackedBucket(bucketName: string) {
   return rows.map((row) => row.project_id)
 }
 
-export async function ensureProjectOperationsSchema() {
-  await queryDb(`create extension if not exists pgcrypto;`)
+export function ensureProjectOperationsSchema(): Promise<void> {
+  if (!global.__driveProjectOperationsSchema) {
+    global.__driveProjectOperationsSchema = (async () => {
+      await queryDb(`create extension if not exists pgcrypto;`)
   await queryDb(`
     create table if not exists drive_project_operation_jobs (
       id uuid primary key default gen_random_uuid(),
@@ -187,6 +193,11 @@ export async function ensureProjectOperationsSchema() {
   await queryDb(`create index if not exists drive_project_api_events_project_time_idx on drive_project_api_events (project_id, occurred_at desc);`)
   await queryDb(`create index if not exists drive_project_api_events_key_time_idx on drive_project_api_events (api_key_id, occurred_at desc);`)
   await queryDb(`create index if not exists drive_project_api_events_action_time_idx on drive_project_api_events (action, occurred_at desc);`)
+  await queryDb(`
+    create index if not exists drive_project_api_events_recent_objects_idx
+      on drive_project_api_events (project_id, action, occurred_at desc, object_key)
+      where outcome = 'success' and object_key is not null;
+  `)
 
   await queryDb(`
     create table if not exists drive_project_object_inventory (
@@ -253,18 +264,24 @@ export async function ensureProjectOperationsSchema() {
   await queryDb(`alter table public.drive_project_object_locks drop constraint if exists drive_project_object_locks_pkey;`)
   await queryDb(`alter table public.drive_project_object_locks add constraint drive_project_object_locks_pkey primary key (project_id, bucket_name, object_key);`)
 
-  await queryDb(`
-    create table if not exists drive_project_webhooks (
-      id uuid primary key default gen_random_uuid(),
-      project_id uuid not null references drive_projects(id) on delete cascade,
-      target_url text not null,
-      events jsonb not null default '[]'::jsonb,
-      secret text,
-      status text not null default 'active',
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now()
-    );
-  `)
+      await queryDb(`
+        create table if not exists drive_project_webhooks (
+          id uuid primary key default gen_random_uuid(),
+          project_id uuid not null references drive_projects(id) on delete cascade,
+          target_url text not null,
+          events jsonb not null default '[]'::jsonb,
+          secret text,
+          status text not null default 'active',
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+      `)
+    })().catch((error) => {
+      global.__driveProjectOperationsSchema = undefined
+      throw error
+    })
+  }
+  return global.__driveProjectOperationsSchema
 }
 
 export function getRequestApiContext(request: Request) {
@@ -402,6 +419,56 @@ export async function upsertProjectObjectInventory(input: {
   return mapInventoryRow(rows[0])
 }
 
+/**
+ * Index an R2 list page in one statement. Inventory scans are resumable at an
+ * R2 page boundary, so there is no need to pay for one round trip per object.
+ */
+export async function upsertProjectObjectInventoryBatch(input: {
+  projectId: string
+  bucketName: string
+  objects: Array<{
+    key: string
+    size?: number
+    etag?: string
+    lastModified?: string
+  }>
+}) {
+  const unique = new Map<string, (typeof input.objects)[number]>()
+  for (const object of input.objects) {
+    const key = object.key.trim()
+    if (key) unique.set(key, { ...object, key })
+  }
+  const objects = [...unique.values()]
+  if (!objects.length) return
+
+  await ensureProjectOperationsSchema()
+  await queryDb(
+    `
+      insert into drive_project_object_inventory
+        (project_id, bucket_name, object_key, file_id, size, etag, metadata, last_modified, deleted_at)
+      select $1, $2, rows.object_key, encode(gen_random_bytes(12), 'hex'), rows.size,
+             rows.etag, '{}'::jsonb, rows.last_modified, null
+      from unnest(
+        $3::text[], $4::bigint[], $5::text[], $6::timestamptz[]
+      ) as rows(object_key, size, etag, last_modified)
+      on conflict (project_id, bucket_name, object_key) do update set
+        size = excluded.size,
+        etag = excluded.etag,
+        last_modified = excluded.last_modified,
+        deleted_at = null,
+        updated_at = now();
+    `,
+    [
+      input.projectId,
+      input.bucketName,
+      objects.map((object) => object.key),
+      objects.map((object) => object.size ?? 0),
+      objects.map((object) => object.etag ?? null),
+      objects.map((object) => object.lastModified ?? null),
+    ]
+  )
+}
+
 export async function getProjectObjectInventoryByKey(projectId: string, bucketName: string, key: string) {
   await ensureProjectOperationsSchema()
   const { rows } = await queryDb<InventoryRow>(
@@ -460,6 +527,32 @@ export async function markProjectObjectDeleted(projectId: string, bucketName: st
       on conflict (project_id, bucket_name, object_key) do update set deleted_at = now(), updated_at = now();
     `,
     [projectId, bucketName, key]
+  )
+}
+
+/**
+ * Mark a set of objects deleted with one database statement.  Delete jobs can
+ * contain up to a full R2 page (1,000 keys); issuing one INSERT/UPDATE per key
+ * creates a burst of pooled connections and was the largest avoidable CPU
+ * spike in the Drive delete paths.
+ */
+export async function markProjectObjectsDeleted(
+  projectId: string,
+  bucketName: string,
+  keys: string[]
+) {
+  const uniqueKeys = [...new Set(keys.map((key) => key.trim()).filter(Boolean))]
+  if (!uniqueKeys.length) return
+  await ensureProjectOperationsSchema()
+  await queryDb(
+    `
+      insert into drive_project_object_inventory (project_id, bucket_name, object_key, deleted_at)
+      select $1, $2, object_key, now()
+      from unnest($3::text[]) as keys(object_key)
+      on conflict (project_id, bucket_name, object_key)
+      do update set deleted_at = now(), updated_at = now();
+    `,
+    [projectId, bucketName, uniqueKeys]
   )
 }
 
@@ -581,6 +674,21 @@ export async function markTrackedBucketObjectDeleted(input: {
   await Promise.all(
     projectIds.map((projectId) =>
       markProjectObjectDeleted(projectId, input.bucketName, input.key).catch(() => undefined)
+    )
+  )
+}
+
+export async function markTrackedBucketObjectsDeleted(input: {
+  bucketName: string
+  keys: string[]
+  projectId?: string
+}) {
+  const uniqueKeys = [...new Set(input.keys.map((key) => key.trim()).filter(Boolean))]
+  if (!uniqueKeys.length) return
+  const projectIds = input.projectId ? [input.projectId] : await findProjectIdsForTrackedBucket(input.bucketName)
+  await Promise.all(
+    projectIds.map((projectId) =>
+      markProjectObjectsDeleted(projectId, input.bucketName, uniqueKeys).catch(() => undefined)
     )
   )
 }
@@ -1001,7 +1109,7 @@ async function processRecursiveDelete(
     if (keys.length) {
       await r2DeleteObjects(config, bucketName, keys)
       deleted += keys.length
-        await Promise.all(keys.map((key) => markTrackedBucketObjectDeleted({ projectId: project.id, bucketName, key })))
+      await markTrackedBucketObjectsDeleted({ projectId: project.id, bucketName, keys })
     }
     continuationToken = page.NextContinuationToken
     pages += 1
@@ -1026,7 +1134,7 @@ async function processBatchDelete(
 ) {
   const keys = asArray(job.payload.keys).map(String).filter(Boolean)
   await r2DeleteObjects(config, bucketName, keys)
-  await Promise.all(keys.map((key) => markTrackedBucketObjectDeleted({ projectId: project.id, bucketName, key })))
+  await markTrackedBucketObjectsDeleted({ projectId: project.id, bucketName, keys })
   return setJobState(job.id, {
     status: "completed",
     progress: { bucketName, processed: keys.length },
@@ -1139,19 +1247,20 @@ async function processInventoryScan(
       maxKeys: 1000,
     })
     const objects = page.Contents ?? []
-    for (const object of objects) {
-      const key = object.Key
-      if (!key) continue
-      await upsertProjectObjectInventory({
-        projectId: project.id,
-        bucketName,
-        key,
+    const inventoryObjects = objects
+      .filter((object) => Boolean(object.Key))
+      .map((object) => ({
+        key: object.Key as string,
         size: object.Size ?? 0,
         etag: object.ETag,
         lastModified: object.LastModified?.toISOString(),
-      })
-      indexed += 1
-    }
+      }))
+    await upsertProjectObjectInventoryBatch({
+      projectId: project.id,
+      bucketName,
+      objects: inventoryObjects,
+    })
+    indexed += inventoryObjects.length
     continuationToken = page.NextContinuationToken
     pages += 1
     await setJobState(job.id, {

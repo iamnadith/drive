@@ -12,6 +12,69 @@ import { r2HeadObject } from "@/lib/r2-s3"
 export const runtime = "nodejs"
 export const maxDuration = 60
 
+type RecentHead = {
+  size: number
+  lastModified: string | null
+}
+
+type RecentHeadCacheEntry = {
+  expiresAt: number
+  head: RecentHead | null
+}
+
+// Recent is polled by the worker and by the panel at the same time.  Reusing
+// a short-lived HEAD result avoids duplicate R2 requests without changing the
+// freshness or ordering of the response.  The map is deliberately bounded so
+// a long-lived Node process cannot grow with the number of uploaded objects.
+const RECENT_HEAD_CACHE_TTL_MS = 15_000
+const RECENT_HEAD_MISS_TTL_MS = 3_000
+const RECENT_HEAD_CACHE_MAX = 2_048
+const recentHeadCache = new Map<string, RecentHeadCacheEntry>()
+const recentHeadInflight = new Map<string, Promise<RecentHead | null>>()
+
+function recentHeadCacheKey(accountId: string, bucketName: string, key: string) {
+  return `${accountId}:${bucketName}:${key}`
+}
+
+async function getRecentHead(
+  accountId: string,
+  config: Parameters<typeof r2HeadObject>[0],
+  bucketName: string,
+  key: string
+) {
+  const cacheKey = recentHeadCacheKey(accountId, bucketName, key)
+  const now = Date.now()
+  const cached = recentHeadCache.get(cacheKey)
+  if (cached && cached.expiresAt > now) return cached.head
+  if (cached) recentHeadCache.delete(cacheKey)
+
+  const active = recentHeadInflight.get(cacheKey)
+  if (active) return active
+
+  const request = r2HeadObject(config, bucketName, key)
+    .then((head) => ({
+      size: typeof head.ContentLength === "number" ? head.ContentLength : 0,
+      lastModified: head.LastModified?.toISOString() ?? null,
+    }))
+    .catch(() => null)
+    .then((head) => {
+      if (recentHeadCache.size >= RECENT_HEAD_CACHE_MAX) {
+        const oldest = recentHeadCache.keys().next().value
+        if (oldest) recentHeadCache.delete(oldest)
+      }
+      recentHeadCache.set(cacheKey, {
+        expiresAt: Date.now() + (head ? RECENT_HEAD_CACHE_TTL_MS : RECENT_HEAD_MISS_TTL_MS),
+        head,
+      })
+      return head
+    })
+    .finally(() => {
+      recentHeadInflight.delete(cacheKey)
+    })
+  recentHeadInflight.set(cacheKey, request)
+  return request
+}
+
 /**
  * Return a small, upload-time ordered window for worker consumers.  R2's
  * ListObjectsV2 endpoint is key ordered, which is correct for a resumable
@@ -53,14 +116,14 @@ export async function GET(request: Request) {
       const verified = await Promise.all(batch.map(async (row) => {
         const key = row.object_key?.trim()
         if (!key) return null
-        const head = await r2HeadObject(r2.config, r2.bucketName, key).catch(() => null)
+        const head = await getRecentHead(r2.config.accountId, r2.config, r2.bucketName, key)
         if (!head) return null
         return {
           key,
           url: buildProjectStorageObjectUrl(request, r2.bucketName, key),
           fileName: key,
-          size: typeof head.ContentLength === "number" ? head.ContentLength : 0,
-          uploadedAt: head.LastModified?.toISOString() ?? row.occurred_at ?? null,
+          size: head.size,
+          uploadedAt: head.lastModified ?? row.occurred_at ?? null,
         }
       }))
       for (const object of verified) {

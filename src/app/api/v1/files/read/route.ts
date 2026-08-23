@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { after, NextResponse } from "next/server"
 import {
   authorizeProjectRequest,
   getActiveProjectBucketR2Config,
@@ -41,7 +41,7 @@ export async function GET(request: Request) {
     resolvedKey,
     { expiresInSeconds: 300 }
   )
-  await recordProjectApiEvent({
+  after(() => recordProjectApiEvent({
     project: authorized.auth.project,
     apiKeyId: authorized.auth.apiKey.id,
     action: "file.read.redirect",
@@ -49,6 +49,6 @@ export async function GET(request: Request) {
     status: 302,
     request,
     metadata: fileId ? { fileId } : undefined,
-  })
+  }))
   return NextResponse.redirect(signedUrl, 302)
 }

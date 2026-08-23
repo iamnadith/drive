@@ -165,8 +165,12 @@ function searchText(input: RecordActivityInput & { actorName?: string; actorEmai
     .join(" ")
 }
 
-export async function ensureActivitySchema() {
-  await queryDb(`create extension if not exists pgcrypto;`)
+let activitySchemaReady: Promise<void> | undefined
+
+export function ensureActivitySchema(): Promise<void> {
+  if (!activitySchemaReady) {
+    activitySchemaReady = (async () => {
+      await queryDb(`create extension if not exists pgcrypto;`)
   await queryDb(`
     create table if not exists ${TABLE} (
       id uuid primary key default gen_random_uuid(),
@@ -203,10 +207,16 @@ export async function ensureActivitySchema() {
   await queryDb(`create index if not exists drive_activity_events_entity_time_idx on ${TABLE} (entity_type, entity_id, occurred_at desc, id desc);`)
   await queryDb(`create index if not exists drive_activity_events_outcome_time_idx on ${TABLE} (outcome, occurred_at desc, id desc);`)
   await queryDb(`create index if not exists drive_activity_events_undo_time_idx on ${TABLE} (undoable, undo_status, occurred_at desc, id desc);`)
-  await queryDb(`create index if not exists drive_activity_events_search_trgm_idx on ${TABLE} using gin (search_text gin_trgm_ops);`).catch(async () => {
-    await queryDb(`create extension if not exists pg_trgm;`)
-    await queryDb(`create index if not exists drive_activity_events_search_trgm_idx on ${TABLE} using gin (search_text gin_trgm_ops);`)
-  })
+      await queryDb(`create index if not exists drive_activity_events_search_trgm_idx on ${TABLE} using gin (search_text gin_trgm_ops);`).catch(async () => {
+        await queryDb(`create extension if not exists pg_trgm;`)
+        await queryDb(`create index if not exists drive_activity_events_search_trgm_idx on ${TABLE} using gin (search_text gin_trgm_ops);`)
+      })
+    })().catch((error) => {
+      activitySchemaReady = undefined
+      throw error
+    })
+  }
+  return activitySchemaReady
 }
 
 export function getRequestActivityContext(request: Request) {

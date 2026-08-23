@@ -10,6 +10,7 @@ declare global {
     | undefined
   var __driveProjectLastUsedQueue: Map<string, number> | undefined
   var __driveProjectLastUsedTimer: ReturnType<typeof setTimeout> | undefined
+  var __driveProjectLastUsedFlushInflight: Promise<void> | undefined
 }
 
 export const PROJECT_PERMISSION_KEYS = [
@@ -285,21 +286,50 @@ function scheduleLastUsedFlush(apiKeyId: string) {
 }
 
 export async function flushProjectApiKeyLastUsed() {
+  if (global.__driveProjectLastUsedFlushInflight) {
+    return global.__driveProjectLastUsedFlushInflight
+  }
+
   const queue = getLastUsedQueue()
   const ids = Array.from(queue.keys())
   queue.clear()
   if (ids.length === 0) return
-  await ensureProjectSchema()
-  await queryDb(
-    `
-      update drive_project_api_keys
-      set last_used_at = now()
-      where id = any($1::uuid[]);
-    `,
-    [ids]
-  ).catch((error) => {
-    console.error("Unable to flush project API key last_used_at:", error)
-  })
+
+  const flush = (async () => {
+    try {
+      await ensureProjectSchema()
+      await queryDb(
+        `
+          update drive_project_api_keys
+          set last_used_at = now()
+          where id = any($1::uuid[]);
+        `,
+        [ids]
+      )
+    } catch (error) {
+      // Keep the bookkeeping best-effort without losing the queued IDs. A
+      // transient database timeout must not make every hot API request log an
+      // avoidable error or create overlapping retry storms.
+      const retryQueue = getLastUsedQueue()
+      for (const id of ids) retryQueue.set(id, Date.now())
+      console.warn("Unable to flush project API key last_used_at; retrying later:", error)
+      if (!global.__driveProjectLastUsedTimer) {
+        global.__driveProjectLastUsedTimer = setTimeout(() => {
+          global.__driveProjectLastUsedTimer = undefined
+          void flushProjectApiKeyLastUsed()
+        }, 30_000)
+        global.__driveProjectLastUsedTimer.unref?.()
+      }
+    }
+  })()
+  global.__driveProjectLastUsedFlushInflight = flush
+  try {
+    await flush
+  } finally {
+    if (global.__driveProjectLastUsedFlushInflight === flush) {
+      global.__driveProjectLastUsedFlushInflight = undefined
+    }
+  }
 }
 
 export function clearProjectAuthCache() {

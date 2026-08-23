@@ -318,7 +318,6 @@ export async function DELETE(
       keys.push(prefix)
       await r2DeleteObjects(config, name, keys)
       await markTrackedBucketPrefixDeleted({ bucketName: name, prefix }).catch(() => undefined)
-      await Promise.all(keys.map((item) => markTrackedBucketObjectDeleted({ bucketName: name, key: item }).catch(() => undefined)))
       return NextResponse.json({ ok: true, deleted: keys.length })
     }
 

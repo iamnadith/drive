@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { after, NextResponse } from "next/server"
 
 import {
   authorizeProjectRequest,
@@ -60,14 +60,14 @@ export async function POST(request: Request) {
     const upload = await r2CreateMultipartUpload(r2.config, r2.bucketName, key, {
       contentType: stringValue(body.contentType) || undefined,
     })
-    await recordProjectApiEvent({
+    after(() => recordProjectApiEvent({
       project: authorized.auth.project,
       apiKeyId: authorized.auth.apiKey.id,
       action: "file.multipart.create",
       objectKey: key,
       request,
       metadata: { bucketName: r2.bucketName },
-    })
+    }))
     return NextResponse.json({
       ok: true,
       action,
@@ -109,14 +109,14 @@ export async function POST(request: Request) {
 
   if (action === "abort") {
     await r2AbortMultipartUpload(r2.config, r2.bucketName, key, uploadId)
-    await recordProjectApiEvent({
+    after(() => recordProjectApiEvent({
       project: authorized.auth.project,
       apiKeyId: authorized.auth.apiKey.id,
       action: "file.multipart.abort",
       objectKey: key,
       request,
       metadata: { bucketName: r2.bucketName },
-    })
+    }))
     return NextResponse.json({ ok: true, action, key, bucketName: r2.bucketName, uploadId })
   }
 
