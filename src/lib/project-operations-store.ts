@@ -326,31 +326,38 @@ export async function getRecentProjectObjectKeys(input: {
   projectId: string
   limit: number
 }) {
-  await ensureProjectOperationsSchema()
   const limit = Math.max(1, Math.min(100, Math.floor(input.limit)))
-  const { rows } = await queryDb<{ object_key: string; occurred_at: string }>(
-    `
-      select e.object_key, max(e.occurred_at) as occurred_at
-      from drive_project_api_events e
-      where e.project_id = $1
-        and e.object_key is not null
-        and e.outcome = 'success'
-        and e.action = any($2::text[])
-      group by e.object_key
-      order by max(e.occurred_at) desc, e.object_key desc
-      limit $3;
-    `,
-    [
-      input.projectId,
+  try {
+    const { rows } = await queryDb<{ object_key: string; occurred_at: string }>(
+      `
+        select e.object_key, max(e.occurred_at) as occurred_at
+        from drive_project_api_events e
+        where e.project_id = $1
+          and e.object_key is not null
+          and e.outcome = 'success'
+          and e.action = any($2::text[])
+        group by e.object_key
+        order by max(e.occurred_at) desc, e.object_key desc
+        limit $3;
+      `,
       [
-        "storage.object.put",
-        "file.upload.complete",
-        "file.multipart.complete",
-      ],
-      limit,
-    ]
-  )
-  return rows
+        input.projectId,
+        [
+          "storage.object.put",
+          "file.upload.complete",
+          "file.multipart.complete",
+        ],
+        limit,
+      ]
+    )
+    return rows
+  } catch (error) {
+    // This is an optional acceleration path.  A project created before the
+    // event table existed (or a transient database read failure) must fall
+    // back to the worker's durable R2 cursor instead of failing discovery.
+    console.warn("Unable to read recent project object events:", error)
+    return []
+  }
 }
 
 export async function upsertProjectObjectInventory(input: {
