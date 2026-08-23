@@ -132,5 +132,5 @@ export async function GET(request: Request) {
       size: item.size,
       uploadedAt: item.lastModified ?? null,
     })),
-  })
+  }, { headers: { "Cache-Control": "private, max-age=1, stale-while-revalidate=1" } })
 }
