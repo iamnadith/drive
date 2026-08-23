@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { after, NextResponse } from "next/server"
 
 import {
   authorizeProjectRequest,
@@ -37,9 +37,14 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-const HEAD_UPLOAD_RETRY_ATTEMPTS = 10
-const HEAD_UPLOAD_TIMEOUT_MS = 4_000
-const HEAD_UPLOAD_RETRY_MAX_DELAY_MS = 3_000
+// R2 is read-after-write consistent, but a direct upload can still reach the
+// finalize endpoint before the edge observes the object. Keep a short retry
+// window for that race; never hold a Vercel request for the old 50+ second
+// worst case. The existing 202/pending response remains the retry contract.
+const HEAD_UPLOAD_RETRY_ATTEMPTS = 4
+const HEAD_UPLOAD_RETRY_DEADLINE_MS = 8_000
+const HEAD_UPLOAD_TIMEOUT_MS = 2_000
+const HEAD_UPLOAD_RETRY_MAX_DELAY_MS = 1_000
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -63,17 +68,22 @@ async function headUploadedObjectWithRetry(
   bucketName: string,
   key: string,
 ) {
+  const deadline = Date.now() + HEAD_UPLOAD_RETRY_DEADLINE_MS
   for (let attempt = 0; attempt < HEAD_UPLOAD_RETRY_ATTEMPTS; attempt += 1) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) break
     const head = await withTimeout(
       r2HeadObject(config, bucketName, key),
-      HEAD_UPLOAD_TIMEOUT_MS
+      Math.min(HEAD_UPLOAD_TIMEOUT_MS, remaining)
     ).catch(() => null)
     if (head) return head
-    if (attempt < HEAD_UPLOAD_RETRY_ATTEMPTS - 1) {
+    const delayRemaining = deadline - Date.now()
+    if (attempt < HEAD_UPLOAD_RETRY_ATTEMPTS - 1 && delayRemaining > 0) {
       await sleep(
         Math.min(
           HEAD_UPLOAD_RETRY_MAX_DELAY_MS,
-          300 * (attempt + 1)
+          250 * (attempt + 1),
+          delayRemaining
         )
       )
     }
@@ -136,14 +146,14 @@ export async function startProjectUpload(
       contentType: typeof body.contentType === "string" ? body.contentType : undefined,
       metadata,
     })
-    await recordProjectApiEvent({
+    after(() => recordProjectApiEvent({
       project: resolved.authorized.auth.project,
       apiKeyId: resolved.authorized.auth.apiKey.id,
       action: "file.multipart.create",
       objectKey: key,
       request,
       metadata: { bucketName: resolved.r2.bucketName },
-    })
+    }))
     return NextResponse.json({
       uploadType: "multipart",
       key,
@@ -163,14 +173,14 @@ export async function startProjectUpload(
     ifMatch: typeof body.ifMatch === "string" ? body.ifMatch : undefined,
     ifNoneMatch: typeof body.ifNoneMatch === "string" ? body.ifNoneMatch : undefined,
   })
-  await recordProjectApiEvent({
+  after(() => recordProjectApiEvent({
     project: resolved.authorized.auth.project,
     apiKeyId: resolved.authorized.auth.apiKey.id,
     action: "file.upload.presign",
     objectKey: key,
     request,
     metadata: { bucketName: resolved.r2.bucketName },
-  })
+  }))
 
   return NextResponse.json({
     uploadType: "single",
