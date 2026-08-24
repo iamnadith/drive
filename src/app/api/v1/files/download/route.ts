@@ -39,6 +39,11 @@ export async function GET(request: Request) {
     30,
     Math.min(3600, Number(url.searchParams.get("expiresInSeconds") ?? 900))
   )
+  const requestedDownloadName = url.searchParams.get("downloadName")
+    ?.replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/[\\/]/g, "-")
+    .trim()
+    .slice(0, 220)
   const signedUrl = await r2CreateSignedDownloadUrl(
     r2.config,
     r2.bucketName,
@@ -47,7 +52,7 @@ export async function GET(request: Request) {
       expiresInSeconds,
       filename:
         url.searchParams.get("download") === "1"
-          ? resolvedKey.split("/").pop() ?? resolvedKey
+          ? requestedDownloadName || resolvedKey.split("/").pop() || resolvedKey
           : undefined,
     }
   )
