@@ -45,6 +45,8 @@ export default function DashboardSettingsPage() {
   const [orchestratorEnabled, setOrchestratorEnabled] = React.useState(false)
   const [orchestratorSecretConfigured, setOrchestratorSecretConfigured] = React.useState(false)
   const [orchestratorPagesPerRun, setOrchestratorPagesPerRun] = React.useState(5)
+  const [orchestratorUpdatedAt, setOrchestratorUpdatedAt] = React.useState("")
+  const [orchestratorLoaded, setOrchestratorLoaded] = React.useState(false)
   const [orchestratorState, setOrchestratorState] = React.useState<Record<string, unknown> | null>(null)
   const [orchestratorConnection, setOrchestratorConnection] = React.useState<"unknown" | "connected" | "failed">("unknown")
   const [orchestratorBusy, setOrchestratorBusy] = React.useState(false)
@@ -53,7 +55,7 @@ export default function DashboardSettingsPage() {
   const loadOrchestratorSettings = React.useCallback(async () => {
     const response = await fetch("/api/settings/backend-orchestrator", { cache: "no-store" })
     const payload = await response.json().catch(() => ({})) as {
-      settings?: { enabled?: boolean; orchestratorUrl?: string; secretConfigured?: boolean; pagesPerRun?: number }
+      settings?: { enabled?: boolean; orchestratorUrl?: string; secretConfigured?: boolean; pagesPerRun?: number; updatedAt?: string }
       state?: Record<string, unknown> | null
       error?: string
     }
@@ -64,15 +66,20 @@ export default function DashboardSettingsPage() {
     setSavedOrchestratorUrl(savedUrl)
     setOrchestratorSecretConfigured(payload.settings?.secretConfigured === true)
     setOrchestratorPagesPerRun(payload.settings?.pagesPerRun ?? 5)
+    setOrchestratorUpdatedAt(payload.settings?.updatedAt ?? "")
     const persistedState = payload.state ?? null
     setOrchestratorState(persistedState)
     if (persistedState?.last_error) setOrchestratorConnection("failed")
     else if (["idle", "running"].includes(String(persistedState?.status ?? ""))) setOrchestratorConnection("connected")
     else setOrchestratorConnection("unknown")
+    setOrchestratorLoaded(true)
   }, [])
 
   React.useEffect(() => {
-    void loadOrchestratorSettings().catch((error) => setOrchestratorMessage(error instanceof Error ? error.message : String(error)))
+    void loadOrchestratorSettings().catch((error) => {
+      setOrchestratorLoaded(true)
+      setOrchestratorMessage(error instanceof Error ? error.message : String(error))
+    })
   }, [loadOrchestratorSettings])
 
   const saveOrchestratorSettings = async () => {
@@ -209,33 +216,34 @@ export default function DashboardSettingsPage() {
           </CardDescription>
           <CardAction>
             <Badge variant={orchestratorEnabled ? "default" : "secondary"}>
-              {orchestratorEnabled ? "Enabled" : "Disabled"}
+              {!orchestratorLoaded ? "Loading..." : orchestratorEnabled ? "Enabled" : "Disabled"}
             </Badge>
           </CardAction>
         </CardHeader>
         <CardContent className="grid gap-4 lg:grid-cols-2">
           <div className="space-y-2">
             <Label htmlFor="orchestrator-url">Backend Orchestrator URL</Label>
-            <Input id="orchestrator-url" value={orchestratorUrl} onChange={(event) => setOrchestratorUrl(event.target.value)} placeholder="https://backend-orchestrator.example.workers.dev" />
+            <Input id="orchestrator-url" value={orchestratorUrl} disabled={!orchestratorLoaded} onChange={(event) => setOrchestratorUrl(event.target.value)} placeholder="https://backend-orchestrator.example.workers.dev" />
           </div>
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
               <Label htmlFor="orchestrator-secret">Shared secret</Label>
               <Badge variant={orchestratorSecretConfigured ? "outline" : "destructive"}>
-                {orchestratorSecretConfigured ? "Secret saved" : "Secret required"}
+                {!orchestratorLoaded ? "Loading..." : orchestratorSecretConfigured ? "Secret saved" : "Secret required"}
               </Badge>
             </div>
-            <Input id="orchestrator-secret" type="password" value={orchestratorSecret} onChange={(event) => setOrchestratorSecret(event.target.value)} placeholder={orchestratorSecretConfigured ? "Saved securely - enter only to replace" : "At least 24 characters"} />
+            <Input id="orchestrator-secret" type="password" value={orchestratorSecret} disabled={!orchestratorLoaded} onChange={(event) => setOrchestratorSecret(event.target.value)} placeholder={orchestratorSecretConfigured ? "Saved securely - enter only to replace" : "At least 24 characters"} />
             <p className="text-xs text-muted-foreground">
               For security, a saved secret is never displayed again. A blank field keeps the stored secret.
             </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="orchestrator-pages">R2 pages per invocation</Label>
-            <Input id="orchestrator-pages" type="number" min={1} max={20} value={orchestratorPagesPerRun} onChange={(event) => setOrchestratorPagesPerRun(Math.max(1, Math.min(20, Number(event.target.value) || 1)))} />
+            <Input id="orchestrator-pages" type="number" min={1} max={20} value={orchestratorPagesPerRun} disabled={!orchestratorLoaded} onChange={(event) => setOrchestratorPagesPerRun(Math.max(1, Math.min(20, Number(event.target.value) || 1)))} />
           </div>
           <div className="rounded-2xl border p-4 text-sm">
-            <p>Connection: {orchestratorConnection === "connected" ? "Connected" : orchestratorConnection === "failed" ? "Failed" : "Not tested"}</p>
+            <p>Connection: {!orchestratorLoaded ? "Loading saved settings..." : orchestratorConnection === "connected" ? "Connected" : orchestratorConnection === "failed" ? "Failed" : "Not tested"}</p>
+            <p className="text-muted-foreground">Last saved: {orchestratorUpdatedAt ? new Date(orchestratorUpdatedAt).toLocaleString() : "Never"}</p>
             <p className="text-muted-foreground">Runtime: {String(orchestratorState?.status ?? "No runtime state")}</p>
             <p className="text-muted-foreground">Last completed: {String(orchestratorState?.last_completed_at ?? "Never")}</p>
             <p className="text-muted-foreground">Last error: {String(orchestratorState?.last_error ?? "None")}</p>
@@ -243,16 +251,16 @@ export default function DashboardSettingsPage() {
           {orchestratorMessage ? <p className="text-sm lg:col-span-2">{orchestratorMessage}</p> : null}
         </CardContent>
         <CardFooter className="flex flex-wrap gap-2">
-          <Button onClick={saveOrchestratorSettings} disabled={orchestratorBusy}>Save connection</Button>
-          <Button variant="outline" onClick={testOrchestratorConnection} disabled={orchestratorBusy || orchestratorConnectionDirty || !orchestratorUrl || !orchestratorSecretConfigured}>Test connection</Button>
+          <Button onClick={saveOrchestratorSettings} disabled={orchestratorBusy || !orchestratorLoaded}>Save connection</Button>
+          <Button variant="outline" onClick={testOrchestratorConnection} disabled={orchestratorBusy || !orchestratorLoaded || orchestratorConnectionDirty || !orchestratorUrl || !orchestratorSecretConfigured}>Test connection</Button>
           <Button
             variant={orchestratorEnabled ? "destructive" : "secondary"}
             onClick={() => void setOrchestratorActive(!orchestratorEnabled)}
-            disabled={orchestratorBusy || (!orchestratorEnabled && orchestratorConnection !== "connected")}
+            disabled={orchestratorBusy || !orchestratorLoaded || (!orchestratorEnabled && orchestratorConnection !== "connected")}
           >
             {orchestratorEnabled ? "Disable" : "Enable"}
           </Button>
-          <Button variant="outline" onClick={runOrchestratorNow} disabled={orchestratorBusy || !orchestratorEnabled}>Run now</Button>
+          <Button variant="outline" onClick={runOrchestratorNow} disabled={orchestratorBusy || !orchestratorLoaded || !orchestratorEnabled}>Run now</Button>
         </CardFooter>
       </Card>
 

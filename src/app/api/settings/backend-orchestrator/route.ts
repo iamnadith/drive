@@ -38,7 +38,10 @@ export async function GET() {
   const auth = await requireAdmin()
   if (!auth.ok) return auth.response
   const settings = await getBackendOrchestratorSettings()
-  return NextResponse.json({ settings: publicBackendOrchestratorSettings(settings), state: await state() })
+  return NextResponse.json(
+    { settings: publicBackendOrchestratorSettings(settings), state: await state() },
+    { headers: { "Cache-Control": "no-store, max-age=0" } }
+  )
 }
 
 export async function PUT(request: Request) {
