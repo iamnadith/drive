@@ -507,6 +507,17 @@ create table if not exists drive_maintenance_state (
   last_result jsonb not null default '{}'::jsonb
 );
 
+create table if not exists drive_backend_orchestrator_state (
+  id boolean primary key default true check (id),
+  status text not null default 'idle',
+  orchestrator_url text,
+  last_started_at timestamptz,
+  last_completed_at timestamptz,
+  last_error text,
+  last_result jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
 -- Daily history of whichever account was active when analytics were refreshed.
 -- This lets overview charts span current and previous active accounts without
 -- summing every stored account at the same time.
@@ -743,6 +754,10 @@ create table if not exists drive_agents (
 create index if not exists drive_agents_status_idx on drive_agents (status);
 create index if not exists drive_agents_provider_idx on drive_agents (provider);
 create index if not exists drive_agents_category_idx on drive_agents (category);
+
+update drive_agents
+set github_workflow_file = '.github/workflows/migration-worker.yml', updated_at = now()
+where github_workflow_file = '.github/workflows/agent-worker.yml';
 
 create table if not exists drive_agent_runs (
   id uuid primary key,

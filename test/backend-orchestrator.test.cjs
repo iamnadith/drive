@@ -1,0 +1,50 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
+const assert = require("node:assert/strict")
+const fs = require("node:fs")
+const path = require("node:path")
+const test = require("node:test")
+
+const root = path.resolve(__dirname, "..")
+
+function read(relativePath) {
+  return fs.readFileSync(path.join(root, relativePath), "utf8")
+}
+
+test("backend orchestrator uses the authenticated panel configuration handshake", () => {
+  const orchestrator = read("workers/backend-orchestrator/src/index.ts")
+  const configRoute = read("src/app/api/internal/backend-orchestrator/config/route.ts")
+  const settings = read("src/lib/backend-orchestrator-settings-store.ts")
+
+  assert.match(orchestrator, /PANEL_URL: string/)
+  assert.match(orchestrator, /PANEL_SHARED_SECRET: string/)
+  assert.match(orchestrator, /\/api\/internal\/backend-orchestrator\/config/)
+  assert.match(configRoute, /authenticateBackendOrchestrator/)
+  assert.match(configRoute, /POSTGRES_URL_NON_POOLING/)
+  assert.match(settings, /secretConfigured:/)
+  assert.doesNotMatch(settings, /sharedSecret: settings\.sharedSecret/)
+})
+
+test("backend orchestrator scans bounded resumable pages and preserves change-only totals", () => {
+  const orchestrator = read("workers/backend-orchestrator/src/index.ts")
+
+  assert.match(orchestrator, /while \(pages < pagesPerRun\)/)
+  assert.match(orchestrator, /ContinuationToken: token/)
+  assert.match(orchestrator, /last_key=\$4/)
+  assert.match(orchestrator, /latest\.objects is distinct from \$3/)
+  assert.match(orchestrator, /latest\.bytes is distinct from \$4/)
+  assert.match(orchestrator, /objects: 0, bytes: 0, deleted: true/)
+  assert.match(orchestrator, /No account is due for synchronization/)
+})
+
+test("worker packages and GitHub workflow use their permanent names", () => {
+  const rootPackage = read("package.json")
+  const migrationPackage = read("workers/migration-worker/package.json")
+  const workflow = read(".github/workflows/migration-worker.yml")
+  const wrangler = read("workers/backend-orchestrator/wrangler.jsonc")
+
+  assert.match(rootPackage, /migration-worker:run/)
+  assert.match(migrationPackage, /drive-migration-worker/)
+  assert.match(workflow, /name: Migration Worker/)
+  assert.match(workflow, /working-directory: workers\/migration-worker/)
+  assert.match(wrangler, /"name": "backend-orchestrator"/)
+})

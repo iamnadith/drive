@@ -50,6 +50,11 @@ Migration creation options (POST `/api/migrations`):
 - `verifyMode` (`"keys-and-size"` | `"sha256-small"`, default `"keys-and-size"`)
 - `verifyHashMaxBytes` (number, bytes; used when `verifyMode="sha256-small"`)
 
+## Worker packages
+
+- `workers/backend-orchestrator`: Cloudflare-deployed scheduler for resumable account and bucket statistics, retention, and panel reconciliation. Its `.env.example` contains the required variables and Git build commands.
+- `workers/migration-worker`: Node.js migration, verification, and repair processor used by `.github/workflows/migration-worker.yml`.
+
 ## Media delivery CORS
 
 The stable object endpoint (`/storage/{bucket}/{key}`) redirects each `GET` and `HEAD` request to a freshly signed R2 URL and marks that redirect `no-store`. This keeps manifests and segments on stable Drive URLs while avoiding Drive proxying media bytes.

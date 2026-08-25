@@ -952,7 +952,7 @@ export default function WorkersPage() {
                             {workflow.name} ({workflow.path})
                           </SelectItem>
                         ))}
-                        <SelectItem value=".github/workflows/agent-worker.yml">agent-worker.yml</SelectItem>
+                        <SelectItem value=".github/workflows/migration-worker.yml">migration-worker.yml</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>

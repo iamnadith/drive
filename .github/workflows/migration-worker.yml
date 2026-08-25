@@ -1,6 +1,6 @@
-name: Agent Worker
+name: Migration Worker
 run-name: >-
-  Agent Worker / ${{
+  Migration Worker / ${{
     inputs.repair_job_id ||
     github.event.client_payload.repair_job_id ||
     github.run_id
@@ -25,15 +25,15 @@ on:
         description: Agent registration token
         required: false
   repository_dispatch:
-    types: [drive-agent-worker]
+    types: [drive-migration-worker]
 
 jobs:
-  run-worker:
+  run-migration-worker:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     defaults:
       run:
-        working-directory: worker
+        working-directory: workers/migration-worker
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,12 +43,12 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: worker/package-lock.json
+          cache-dependency-path: workers/migration-worker/package-lock.json
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Run agent worker
+      - name: Run migration worker
         env:
           SERVER_URL: ${{ inputs.server_url || github.event.client_payload.server_url || secrets.DRIVE_SERVER_URL || secrets.SERVER_URL || vars.DRIVE_SERVER_URL || vars.SERVER_URL }}
           AGENT_ID: ${{ inputs.agent_id || github.event.client_payload.agent_id || secrets.DRIVE_AGENT_ID || secrets.AGENT_ID || vars.DRIVE_AGENT_ID || vars.AGENT_ID }}

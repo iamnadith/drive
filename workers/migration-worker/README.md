@@ -1,12 +1,12 @@
-# Drive Agent Worker
+# Drive Migration Worker
 
 Standalone worker package for recovery, repair, and verification jobs.
 
 ## Files
 
-- `agent-worker.mjs`: worker runtime
+- `migration-worker.mjs`: worker runtime
 - `package.json`: Node package manifest
-- `../.github/workflows/agent-worker.yml`: GitHub Actions runner
+- `.github/workflows/migration-worker.yml`: GitHub Actions runner
 
 ## Required server-side support
 
@@ -42,7 +42,7 @@ npm start
 
 ## GitHub Actions configuration
 
-The root workflow at `.github/workflows/agent-worker.yml` accepts runtime values from the Drive panel and also detects repository secrets or repository variables.
+The root workflow at `.github/workflows/migration-worker.yml` accepts runtime values from the Drive panel and also detects repository secrets or repository variables.
 
 Recommended repository secrets:
 

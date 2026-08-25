@@ -1,5 +1,5 @@
 {
-  "name": "drive-agent-worker",
+  "name": "drive-migration-worker",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,7 +7,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node agent-worker.mjs"
+    "start": "node migration-worker.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.948.0",

@@ -755,6 +755,18 @@ export async function ensureDriveSchema(): Promise<void> {
           last_result jsonb not null default '{}'::jsonb
         );
       `)
+      await queryDb(`
+        create table if not exists drive_backend_orchestrator_state (
+          id boolean primary key default true check (id),
+          status text not null default 'idle',
+          orchestrator_url text,
+          last_started_at timestamptz,
+          last_completed_at timestamptz,
+          last_error text,
+          last_result jsonb not null default '{}'::jsonb,
+          updated_at timestamptz not null default now()
+        );
+      `)
 
       await queryDb(`
         create table if not exists drive_migrations (
@@ -883,6 +895,11 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(`create index if not exists drive_agents_status_idx on drive_agents (status);`)
       await queryDb(`create index if not exists drive_agents_provider_idx on drive_agents (provider);`)
       await queryDb(`create index if not exists drive_agents_category_idx on drive_agents (category);`)
+      await queryDb(`
+        update drive_agents
+        set github_workflow_file = '.github/workflows/migration-worker.yml', updated_at = now()
+        where github_workflow_file = '.github/workflows/agent-worker.yml';
+      `)
 
       await queryDb(`
         create table if not exists drive_agent_runs (

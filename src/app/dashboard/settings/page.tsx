@@ -24,6 +24,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
 
 export default function DashboardSettingsPage() {
@@ -39,6 +40,75 @@ export default function DashboardSettingsPage() {
   const [selectedThemeId, setSelectedThemeId] = React.useState(activeThemeId)
   const [paletteMode, setPaletteMode] = React.useState<AmbientPaletteMode>("light")
   const [newThemeName, setNewThemeName] = React.useState("")
+  const [orchestratorUrl, setOrchestratorUrl] = React.useState("")
+  const [orchestratorSecret, setOrchestratorSecret] = React.useState("")
+  const [orchestratorEnabled, setOrchestratorEnabled] = React.useState(false)
+  const [orchestratorSecretConfigured, setOrchestratorSecretConfigured] = React.useState(false)
+  const [orchestratorPagesPerRun, setOrchestratorPagesPerRun] = React.useState(5)
+  const [orchestratorState, setOrchestratorState] = React.useState<Record<string, unknown> | null>(null)
+  const [orchestratorBusy, setOrchestratorBusy] = React.useState(false)
+  const [orchestratorMessage, setOrchestratorMessage] = React.useState("")
+
+  const loadOrchestratorSettings = React.useCallback(async () => {
+    const response = await fetch("/api/settings/backend-orchestrator", { cache: "no-store" })
+    const payload = await response.json().catch(() => ({})) as {
+      settings?: { enabled?: boolean; orchestratorUrl?: string; secretConfigured?: boolean; pagesPerRun?: number }
+      state?: Record<string, unknown> | null
+      error?: string
+    }
+    if (!response.ok) throw new Error(payload.error || "Unable to load Backend Orchestrator settings")
+    setOrchestratorEnabled(payload.settings?.enabled === true)
+    setOrchestratorUrl(payload.settings?.orchestratorUrl ?? "")
+    setOrchestratorSecretConfigured(payload.settings?.secretConfigured === true)
+    setOrchestratorPagesPerRun(payload.settings?.pagesPerRun ?? 5)
+    setOrchestratorState(payload.state ?? null)
+  }, [])
+
+  React.useEffect(() => {
+    void loadOrchestratorSettings().catch((error) => setOrchestratorMessage(error instanceof Error ? error.message : String(error)))
+  }, [loadOrchestratorSettings])
+
+  const saveOrchestratorSettings = async () => {
+    setOrchestratorBusy(true)
+    setOrchestratorMessage("")
+    try {
+      const response = await fetch("/api/settings/backend-orchestrator", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: orchestratorEnabled,
+          orchestratorUrl,
+          sharedSecret: orchestratorSecret,
+          pagesPerRun: orchestratorPagesPerRun,
+        }),
+      })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || "Unable to save Backend Orchestrator settings")
+      setOrchestratorSecret("")
+      await loadOrchestratorSettings()
+      setOrchestratorMessage("Backend Orchestrator settings saved.")
+    } catch (error) {
+      setOrchestratorMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setOrchestratorBusy(false)
+    }
+  }
+
+  const runOrchestratorNow = async () => {
+    setOrchestratorBusy(true)
+    setOrchestratorMessage("")
+    try {
+      const response = await fetch("/api/settings/backend-orchestrator", { method: "POST" })
+      const payload = await response.json().catch(() => ({})) as { error?: string; result?: unknown }
+      if (!response.ok) throw new Error(payload.error || "Backend Orchestrator run failed")
+      await loadOrchestratorSettings()
+      setOrchestratorMessage("Backend Orchestrator cycle completed successfully.")
+    } catch (error) {
+      setOrchestratorMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setOrchestratorBusy(false)
+    }
+  }
 
   React.useEffect(() => {
     if (!themes.some((theme) => theme.id === selectedThemeId)) {
@@ -72,6 +142,45 @@ export default function DashboardSettingsPage() {
           </Button>
         }
       />
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Backend Orchestrator</CardTitle>
+          <CardDescription>
+            Configure the deployed Backend Orchestrator URL and the same shared secret used by its PANEL_SHARED_SECRET build secret.
+          </CardDescription>
+          <CardAction>
+            <div className="flex items-center gap-2">
+              <Label htmlFor="orchestrator-enabled">Enabled</Label>
+              <Switch id="orchestrator-enabled" checked={orchestratorEnabled} onCheckedChange={setOrchestratorEnabled} />
+            </div>
+          </CardAction>
+        </CardHeader>
+        <CardContent className="grid gap-4 lg:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="orchestrator-url">Backend Orchestrator URL</Label>
+            <Input id="orchestrator-url" value={orchestratorUrl} onChange={(event) => setOrchestratorUrl(event.target.value)} placeholder="https://backend-orchestrator.example.workers.dev" />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="orchestrator-secret">Shared secret</Label>
+            <Input id="orchestrator-secret" type="password" value={orchestratorSecret} onChange={(event) => setOrchestratorSecret(event.target.value)} placeholder={orchestratorSecretConfigured ? "Configured - leave blank to keep it" : "At least 24 characters"} />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="orchestrator-pages">R2 pages per invocation</Label>
+            <Input id="orchestrator-pages" type="number" min={1} max={20} value={orchestratorPagesPerRun} onChange={(event) => setOrchestratorPagesPerRun(Math.max(1, Math.min(20, Number(event.target.value) || 1)))} />
+          </div>
+          <div className="rounded-2xl border p-4 text-sm">
+            <p>Status: {String(orchestratorState?.status ?? "Not connected")}</p>
+            <p className="text-muted-foreground">Last completed: {String(orchestratorState?.last_completed_at ?? "Never")}</p>
+            <p className="text-muted-foreground">Last error: {String(orchestratorState?.last_error ?? "None")}</p>
+          </div>
+          {orchestratorMessage ? <p className="text-sm lg:col-span-2">{orchestratorMessage}</p> : null}
+        </CardContent>
+        <CardFooter className="flex gap-2">
+          <Button onClick={saveOrchestratorSettings} disabled={orchestratorBusy}>Save Backend Orchestrator</Button>
+          <Button variant="outline" onClick={runOrchestratorNow} disabled={orchestratorBusy || !orchestratorEnabled}>Run now</Button>
+        </CardFooter>
+      </Card>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]">
         <Card className="h-full">

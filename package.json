@@ -14,7 +14,8 @@
     "test:bucket-danger": "node --test test/bucket-danger-actions.test.cjs",
     "test:project-media-origins": "node --test test/project-media-origins.test.cjs",
     "test:storage-delivery": "node --test test/storage-delivery.test.cjs",
-    "worker:run": "node worker/agent-worker.mjs"
+    "migration-worker:run": "node workers/migration-worker/migration-worker.mjs",
+    "backend-orchestrator:check": "npm --prefix workers/backend-orchestrator run check"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.948.0",
