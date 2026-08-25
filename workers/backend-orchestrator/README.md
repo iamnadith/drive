@@ -17,7 +17,9 @@ Add these build variables/secrets:
 - `PANEL_URL`: canonical Drive panel URL, for example `https://drive.example.com`
 - `PANEL_SHARED_SECRET`: a random secret containing at least 24 characters
 
-For local deployment, copy `.env.example` to `.env`, fill the values, and run `npm run deploy`. The `.env` file is ignored by Git.
+The connected Cloudflare Worker project must be named `backend-orchestrator`. If Cloudflare says it expected another name such as `drive`, create or reconnect the build to the `backend-orchestrator` Worker before deploying; otherwise Cloudflare will override the configured name.
+
+For local deployment, copy `.env.example` to `.env`, fill the two required values, and run `npm run deploy:local`. The `.env` file is ignored by Git. Cloudflare authentication for a local Wrangler session is handled separately by `wrangler login`; it is not a Backend Orchestrator runtime variable.
 
 In Drive -> Settings -> Backend Orchestrator, enter the deployed URL and the same secret, then enable it and press **Run now**.
 
