@@ -6,7 +6,7 @@ Standalone worker package for recovery, repair, and verification jobs.
 
 - `agent-worker.mjs`: worker runtime
 - `package.json`: Node package manifest
-- `.github/workflows/agent-worker.yml`: GitHub Actions runner
+- `../.github/workflows/agent-worker.yml`: GitHub Actions runner
 
 ## Required server-side support
 
@@ -25,15 +25,36 @@ npm install
 npm start -- --server-url https://your-app.example.com --agent-id YOUR_AGENT_ID --token YOUR_TOKEN
 ```
 
-## GitHub Actions secrets
+The same values can be supplied as environment variables instead of command-line arguments:
 
-Set these repository secrets:
+```bash
+SERVER_URL=https://your-app.example.com AGENT_ID=YOUR_AGENT_ID TOKEN=YOUR_TOKEN npm start
+```
+
+PowerShell:
+
+```powershell
+$env:SERVER_URL="https://your-app.example.com"
+$env:AGENT_ID="YOUR_AGENT_ID"
+$env:TOKEN="YOUR_TOKEN"
+npm start
+```
+
+## GitHub Actions configuration
+
+The root workflow at `.github/workflows/agent-worker.yml` accepts runtime values from the Drive panel and also detects repository secrets or repository variables.
+
+Recommended repository secrets:
 
 - `DRIVE_SERVER_URL`
 - `DRIVE_AGENT_ID`
 - `DRIVE_AGENT_TOKEN`
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
+
+The shorter names are also accepted: `SERVER_URL`, `AGENT_ID`, `AGENT_TOKEN`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY`. Non-secret tuning values can be added as repository variables, such as `COPY_CONCURRENCY`, `UPLOAD_QUEUE_SIZE`, and `UPLOAD_PART_SIZE_MB`.
+
+When the panel dispatches a GitHub worker, it passes the server URL, agent id, and registration token as workflow inputs and synchronizes the `DRIVE_*` values as repository secrets.
 
 ## Optional direct Supabase connection
 

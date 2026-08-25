@@ -30,11 +30,11 @@ const MAX_OBJECTS = Math.max(1, Math.min(500_000, Number(getArg("max-objects", "
 const API_TIMEOUT_MS = Math.max(5_000, Number(getArg("api-timeout-ms", "30000")) || 30_000)
 const API_RETRIES = Math.max(1, Math.min(6, Number(getArg("api-retries", "3")) || 3))
 const S3_RETRIES = Math.max(1, Math.min(6, Number(getArg("s3-retries", "3")) || 3))
-const COPY_CONCURRENCY = Math.max(1, Math.min(64, Number(getArg("copy-concurrency", "3")) || 2))
-const UPLOAD_QUEUE_SIZE = Math.max(1, Math.min(16, Number(getArg("upload-queue-size", "4")) || 2))
+const COPY_CONCURRENCY = Math.max(1, Math.min(64, Number(getArg("copy-concurrency", "8")) || 8))
+const UPLOAD_QUEUE_SIZE = Math.max(1, Math.min(16, Number(getArg("upload-queue-size", "4")) || 4))
 const UPLOAD_PART_SIZE = Math.max(
   5 * 1024 * 1024,
-  Math.min(128 * 1024 * 1024, (Number(getArg("upload-part-size-mb", "16")) || 50) * 1024 * 1024)
+  Math.min(128 * 1024 * 1024, (Number(getArg("upload-part-size-mb", "16")) || 16) * 1024 * 1024)
 )
 const RANGE_COPY_THRESHOLD_MB = Number(getArg("range-copy-threshold-mb", "64"))
 const RANGE_COPY_THRESHOLD = Math.max(
