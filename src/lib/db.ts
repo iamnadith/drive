@@ -730,6 +730,33 @@ export async function ensureDriveSchema(): Promise<void> {
       )
 
       await queryDb(`
+        create table if not exists drive_bucket_stat_history (
+          id bigint generated always as identity primary key,
+          account_id uuid not null,
+          account_label text,
+          account_email text,
+          bucket_name text not null,
+          previous_objects bigint,
+          objects bigint not null default 0,
+          object_delta bigint not null default 0,
+          previous_bytes bigint,
+          bytes bigint not null default 0,
+          byte_delta bigint not null default 0,
+          change_type text not null,
+          changed_at timestamptz not null default now()
+        );
+      `)
+      await queryDb(`create index if not exists drive_bucket_stat_history_bucket_time_idx on drive_bucket_stat_history (account_id, bucket_name, changed_at desc);`)
+      await queryDb(`create index if not exists drive_bucket_stat_history_time_idx on drive_bucket_stat_history (changed_at desc);`)
+      await queryDb(`
+        create table if not exists drive_maintenance_state (
+          task_name text primary key,
+          last_run_at timestamptz not null default now(),
+          last_result jsonb not null default '{}'::jsonb
+        );
+      `)
+
+      await queryDb(`
         create table if not exists drive_migrations (
           id uuid primary key,
           source_account_id uuid not null references drive_accounts(id) on delete restrict,
@@ -742,9 +769,19 @@ export async function ensureDriveSchema(): Promise<void> {
           last_synced_at timestamptz,
           sync_status text default 'idle',
           sync_message text,
+          summary_item_count integer not null default 0,
+          summary_objects bigint not null default 0,
+          summary_bytes bigint not null default 0,
+          worker_summary jsonb not null default '{}'::jsonb,
+          details_compacted_at timestamptz,
           updated_at timestamptz not null default now()
         );
       `)
+      await queryDb(`alter table if exists drive_migrations add column if not exists summary_item_count integer not null default 0;`)
+      await queryDb(`alter table if exists drive_migrations add column if not exists summary_objects bigint not null default 0;`)
+      await queryDb(`alter table if exists drive_migrations add column if not exists summary_bytes bigint not null default 0;`)
+      await queryDb(`alter table if exists drive_migrations add column if not exists worker_summary jsonb not null default '{}'::jsonb;`)
+      await queryDb(`alter table if exists drive_migrations add column if not exists details_compacted_at timestamptz;`)
 
       await queryDb(
         `create index if not exists drive_migrations_created_at_idx on drive_migrations (created_at desc);`

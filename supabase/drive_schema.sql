@@ -479,6 +479,34 @@ create table if not exists drive_analytics_bucket_snapshots (
 create index if not exists drive_analytics_bucket_snapshots_captured_idx
   on drive_analytics_bucket_snapshots (captured_at desc);
 
+-- Permanent, change-only bucket totals. Scan pages remain temporary; this
+-- table records only created/changed/deleted totals for each account/bucket.
+create table if not exists drive_bucket_stat_history (
+  id bigint generated always as identity primary key,
+  account_id uuid not null,
+  account_label text,
+  account_email text,
+  bucket_name text not null,
+  previous_objects bigint,
+  objects bigint not null default 0,
+  object_delta bigint not null default 0,
+  previous_bytes bigint,
+  bytes bigint not null default 0,
+  byte_delta bigint not null default 0,
+  change_type text not null,
+  changed_at timestamptz not null default now()
+);
+create index if not exists drive_bucket_stat_history_bucket_time_idx
+  on drive_bucket_stat_history (account_id, bucket_name, changed_at desc);
+create index if not exists drive_bucket_stat_history_time_idx
+  on drive_bucket_stat_history (changed_at desc);
+
+create table if not exists drive_maintenance_state (
+  task_name text primary key,
+  last_run_at timestamptz not null default now(),
+  last_result jsonb not null default '{}'::jsonb
+);
+
 -- Daily history of whichever account was active when analytics were refreshed.
 -- This lets overview charts span current and previous active accounts without
 -- summing every stored account at the same time.
@@ -569,8 +597,19 @@ create table if not exists drive_migrations (
   last_synced_at timestamptz,
   sync_status text default 'idle',
   sync_message text,
+  summary_item_count integer not null default 0,
+  summary_objects bigint not null default 0,
+  summary_bytes bigint not null default 0,
+  worker_summary jsonb not null default '{}'::jsonb,
+  details_compacted_at timestamptz,
   updated_at timestamptz not null default now()
 );
+
+alter table if exists public.drive_migrations add column if not exists summary_item_count integer not null default 0;
+alter table if exists public.drive_migrations add column if not exists summary_objects bigint not null default 0;
+alter table if exists public.drive_migrations add column if not exists summary_bytes bigint not null default 0;
+alter table if exists public.drive_migrations add column if not exists worker_summary jsonb not null default '{}'::jsonb;
+alter table if exists public.drive_migrations add column if not exists details_compacted_at timestamptz;
 
 create index if not exists drive_migrations_created_at_idx on drive_migrations (created_at desc);
 create index if not exists drive_migrations_status_idx on drive_migrations (status);

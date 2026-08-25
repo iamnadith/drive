@@ -1,5 +1,6 @@
 import crypto from "crypto"
 import { queryDb } from "./db"
+import { scheduleDatabaseMaintenance } from "./database-maintenance"
 import { getActiveProjectBucketR2Config } from "./project-api-auth"
 import { getProjectByIdentifier, hashProjectSecret, type Project } from "./projects-store"
 import {
@@ -327,6 +328,7 @@ export async function recordProjectApiEvent(input: {
         input.metadata ? JSON.stringify(input.metadata) : null,
       ]
     )
+    scheduleDatabaseMaintenance()
   } catch (error) {
     console.error("Unable to record project API event:", error)
   }

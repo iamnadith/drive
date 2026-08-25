@@ -84,6 +84,11 @@ type Migration = {
   lastSyncedAt?: string
   syncStatus?: "idle" | "syncing" | "ok" | "error"
   syncMessage?: string
+  summaryItemCount: number
+  summaryObjects: number
+  summaryBytes: number
+  workerSummary: { workerRuns?: unknown[]; repairJobs?: unknown[] }
+  detailsCompactedAt?: string
 }
 
 type MigrationItem = {
@@ -2042,7 +2047,9 @@ export default function MigrationDetailsPage() {
                 {items.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={6} className="h-20 text-center text-sm text-muted-foreground">
-                      No bucket data stored for this migration.
+                      {migration.detailsCompactedAt
+                        ? `Detailed records were compacted. Summary retained: ${migration.summaryObjects.toLocaleString()} objects, ${formatBytes(migration.summaryBytes)}, ${migration.workerSummary?.workerRuns?.length ?? 0} worker runs, and ${migration.workerSummary?.repairJobs?.length ?? 0} repair jobs.`
+                        : "No bucket data stored for this migration."}
                     </TableCell>
                   </TableRow>
                 ) : null}

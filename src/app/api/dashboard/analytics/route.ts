@@ -292,7 +292,12 @@ async function archiveBucketStats(accounts: CloudflareAccount[], rows: BucketSta
         bytes = excluded.bytes,
         status = excluded.status,
         source_updated_at = excluded.source_updated_at,
-        captured_at = now();
+        captured_at = now()
+      where drive_analytics_bucket_snapshots.account_label is distinct from excluded.account_label
+         or drive_analytics_bucket_snapshots.account_email is distinct from excluded.account_email
+         or drive_analytics_bucket_snapshots.objects is distinct from excluded.objects
+         or drive_analytics_bucket_snapshots.bytes is distinct from excluded.bytes
+         or drive_analytics_bucket_snapshots.status is distinct from excluded.status;
     `,
     values
   )
@@ -321,9 +326,23 @@ async function captureActiveAccountSnapshot(input: {
   const bytes = input.rows.reduce((sum, row) => sum + toNumber(row.bytes), 0)
   await queryDb(
     `
+      with latest as (
+        select buckets, objects, bytes
+        from drive_analytics_active_account_snapshots
+        where account_id = $2
+        order by captured_at desc
+        limit 1
+      )
       insert into drive_analytics_active_account_snapshots
         (captured_day, account_id, account_label, account_email, buckets, objects, bytes, captured_at)
-      values ($1, $2, $3, $4, $5, $6, $7, $8)
+      select $1, $2, $3, $4, $5, $6, $7, $8
+      where not exists (select 1 from latest)
+         or exists (
+           select 1 from latest
+           where latest.buckets is distinct from $5
+              or latest.objects is distinct from $6
+              or latest.bytes is distinct from $7
+         )
       on conflict (captured_day, account_id) do update set
         account_label = excluded.account_label,
         account_email = excluded.account_email,

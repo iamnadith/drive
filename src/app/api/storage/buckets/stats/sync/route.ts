@@ -18,6 +18,7 @@ import {
   startObjectSync,
 } from "@/lib/object-history-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { scheduleDatabaseMaintenance } from "@/lib/database-maintenance"
 
 export const runtime = "nodejs"
 
@@ -165,7 +166,10 @@ export async function POST(request: Request) {
 
     const finalStats = await getBucketStatsMap(active.id)
     const complete = scanOrder.every((name) => finalStats.get(name)?.status === "completed")
-    if (objectSync && complete) await completeObjectSync(objectSync.id, active.id)
+    if (objectSync && complete) {
+      await completeObjectSync(objectSync.id, active.id)
+      scheduleDatabaseMaintenance()
+    }
 
     return NextResponse.json({ ok: true, updated, remainingBudget: remaining, complete, runId: objectSync?.id ?? null })
   } catch (error: unknown) {

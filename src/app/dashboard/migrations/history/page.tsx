@@ -38,6 +38,18 @@ type Migration = {
   completedAt?: string
   syncStatus?: "idle" | "syncing" | "ok" | "error"
   syncMessage?: string
+  summaryItemCount: number
+  summaryObjects: number
+  summaryBytes: number
+  workerSummary: { workerRuns?: unknown[]; repairJobs?: unknown[] }
+  detailsCompactedAt?: string
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B"
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"]
+  const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)))
+  return `${(value / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -169,7 +181,10 @@ export default function MigrationsHistoryPage() {
                     <TableHead className="w-[160px]">Source</TableHead>
                     <TableHead className="w-[160px]">Target</TableHead>
                     <TableHead className="w-[180px]">Created</TableHead>
-                      <TableHead>Message</TableHead>
+                    <TableHead className="w-[130px]">Objects</TableHead>
+                    <TableHead className="w-[130px]">Storage</TableHead>
+                    <TableHead className="w-[100px]">Workers</TableHead>
+                    <TableHead>Message</TableHead>
                     <TableHead className="w-[220px] text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -203,6 +218,9 @@ export default function MigrationsHistoryPage() {
                           {accountLabelById.get(m.targetAccountId) ?? m.targetAccountId}
                         </TableCell>
                         <TableCell className="text-sm">{new Date(m.createdAt).toLocaleString()}</TableCell>
+                        <TableCell className="text-sm">{m.summaryObjects.toLocaleString()}</TableCell>
+                        <TableCell className="text-sm">{formatBytes(m.summaryBytes)}</TableCell>
+                        <TableCell className="text-sm">{m.workerSummary?.workerRuns?.length ?? 0}</TableCell>
                         <TableCell className="text-sm text-muted-foreground truncate">{m.syncMessage ?? ""}</TableCell>
                         <TableCell className="text-right">
                           <div className="flex justify-end gap-2">

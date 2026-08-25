@@ -1,5 +1,6 @@
 import crypto from "crypto"
 import { getSupabaseServerClient } from "./supabase"
+import { queryDb } from "./db"
 
 export type BucketStatsStatus = "pending" | "running" | "completed" | "error"
 
@@ -28,6 +29,99 @@ type DriveBucketStatsRow = {
 }
 
 const TABLE = "drive_bucket_stats"
+
+async function ensureBucketStatHistorySchema() {
+  await queryDb(`
+    create table if not exists drive_bucket_stat_history (
+      id bigint generated always as identity primary key,
+      account_id uuid not null,
+      account_label text,
+      account_email text,
+      bucket_name text not null,
+      previous_objects bigint,
+      objects bigint not null default 0,
+      object_delta bigint not null default 0,
+      previous_bytes bigint,
+      bytes bigint not null default 0,
+      byte_delta bigint not null default 0,
+      change_type text not null,
+      changed_at timestamptz not null default now()
+    )
+  `)
+  await queryDb(`create index if not exists drive_bucket_stat_history_bucket_time_idx on drive_bucket_stat_history (account_id, bucket_name, changed_at desc)`)
+  await queryDb(`create index if not exists drive_bucket_stat_history_time_idx on drive_bucket_stat_history (changed_at desc)`)
+}
+
+async function recordBucketStatChange(input: {
+  accountId: string
+  bucketName: string
+  objects: number
+  bytes: number
+  deleted?: boolean
+}) {
+  await ensureBucketStatHistorySchema()
+  await queryDb(
+    `
+      with latest as (
+        select objects, bytes, change_type
+        from drive_bucket_stat_history
+        where account_id = $1 and bucket_name = $2
+        order by changed_at desc, id desc
+        limit 1
+      ), account as (
+        select label, email from drive_accounts where id = $1
+      ), inserted as (
+        insert into drive_bucket_stat_history (
+          account_id, account_label, account_email, bucket_name,
+          previous_objects, objects, object_delta,
+          previous_bytes, bytes, byte_delta, change_type
+        )
+        select
+          $1, account.label, account.email, $2,
+          latest.objects, $3,
+          $3 - coalesce(latest.objects, 0),
+          latest.bytes, $4,
+          $4 - coalesce(latest.bytes, 0),
+          case
+            when $5::boolean then 'deleted'
+            when latest.objects is null then 'created'
+            else 'changed'
+          end
+        from account
+        left join latest on true
+        where latest.objects is null
+           or latest.objects is distinct from $3
+           or latest.bytes is distinct from $4
+           or ($5::boolean and latest.change_type <> 'deleted')
+        returning account_id, account_label, account_email, bucket_name, objects, bytes, change_type, changed_at
+      )
+      insert into drive_analytics_bucket_snapshots (
+        account_id, account_label, account_email, bucket_name,
+        objects, bytes, status, source_updated_at, captured_at
+      )
+      select account_id, account_label, account_email, bucket_name,
+             objects, bytes,
+             case when change_type = 'deleted' then 'deleted' else 'completed' end,
+             changed_at, changed_at
+      from inserted
+      on conflict (account_id, bucket_name) do update set
+        account_label = excluded.account_label,
+        account_email = excluded.account_email,
+        objects = excluded.objects,
+        bytes = excluded.bytes,
+        status = excluded.status,
+        source_updated_at = excluded.source_updated_at,
+        captured_at = excluded.captured_at
+    `,
+    [
+      input.accountId,
+      input.bucketName,
+      Math.max(0, Math.floor(input.objects)),
+      Math.max(0, Math.floor(input.bytes)),
+      input.deleted === true,
+    ]
+  )
+}
 
 function normalizeSupabaseError(error: { message: string }): Error {
   const message = String(error?.message ?? "Supabase error")
@@ -85,6 +179,16 @@ export async function removeMissingBucketStats(accountId: string, bucketNames: s
   const names = new Set(bucketNames)
   const staleIds = current.filter((row) => !names.has(row.bucketName)).map((row) => row.id)
   if (staleIds.length === 0) return
+  const staleRows = current.filter((row) => staleIds.includes(row.id))
+  for (const row of staleRows) {
+    await recordBucketStatChange({
+      accountId,
+      bucketName: row.bucketName,
+      objects: row.objects,
+      bytes: row.bytes,
+      deleted: true,
+    })
+  }
   const { error } = await supabase.from(TABLE).delete().in("id", staleIds)
   if (error) throw normalizeSupabaseError(error)
 }
@@ -138,5 +242,14 @@ export async function updateBucketStats(
     .single()
 
   if (error) throw normalizeSupabaseError(error)
-  return mapRow(data as DriveBucketStatsRow)
+  const mapped = mapRow(data as DriveBucketStatsRow)
+  if (mapped.status === "completed") {
+    await recordBucketStatChange({
+      accountId,
+      bucketName,
+      objects: mapped.objects,
+      bytes: mapped.bytes,
+    })
+  }
+  return mapped
 }

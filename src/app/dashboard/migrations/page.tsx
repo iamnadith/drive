@@ -51,6 +51,11 @@ type Migration = {
   completedAt?: string
   syncStatus?: "idle" | "syncing" | "ok" | "error"
   syncMessage?: string
+  summaryItemCount: number
+  summaryObjects: number
+  summaryBytes: number
+  workerSummary: Record<string, unknown>
+  detailsCompactedAt?: string
 }
 
 type MigrationItem = {
@@ -427,6 +432,16 @@ export default function MigrationsPage() {
   }, [activeMigration?.id, activeMigration?.status, activeMigration?.syncStatus])
 
   const totals = React.useMemo(() => {
+    if (activeItems.length === 0 && activeMigration?.detailsCompactedAt) {
+      const totalObjects = activeMigration.summaryObjects ?? 0
+      return {
+        totalObjects,
+        transferred: activeMigration.status === "completed" ? totalObjects : 0,
+        skipped: 0,
+        completed: activeMigration.status === "completed" ? totalObjects : 0,
+        percent: activeMigration.status === "completed" ? 100 : 0,
+      }
+    }
     let totalObjects = 0
     let transferred = 0
     let skipped = 0
@@ -461,7 +476,7 @@ export default function MigrationsPage() {
         ? Math.max(0, Math.min(100, (completed / totalObjects) * 100))
         : 0
     return { totalObjects, transferred, skipped, completed, percent }
-  }, [activeItems, activeMigration?.status])
+  }, [activeItems, activeMigration])
 
   const filteredBuckets = React.useMemo(() => {
     const query = bucketQuery.trim().toLowerCase()

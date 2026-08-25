@@ -1,5 +1,6 @@
 import crypto from "crypto"
 import { getSupabaseServerClient } from "./supabase"
+import { compactPreviousMigrationDetails } from "./database-maintenance"
 
 export type MigrationStatus = "draft" | "running" | "verifying" | "completed" | "failed" | "canceled"
 export type MigrationSyncStatus = "idle" | "syncing" | "ok" | "error"
@@ -44,6 +45,11 @@ export interface DriveMigration {
   syncStatus?: MigrationSyncStatus
   syncMessage?: string
   updatedAt?: string
+  summaryItemCount: number
+  summaryObjects: number
+  summaryBytes: number
+  workerSummary: Record<string, unknown>
+  detailsCompactedAt?: string
 }
 
 export interface DriveMigrationItem {
@@ -76,6 +82,11 @@ type DriveMigrationRow = {
   sync_status: MigrationSyncStatus | null
   sync_message: string | null
   updated_at: string | null
+  summary_item_count: number | null
+  summary_objects: number | null
+  summary_bytes: number | null
+  worker_summary: Record<string, unknown> | null
+  details_compacted_at: string | null
 }
 
 type DriveMigrationItemRow = {
@@ -182,6 +193,11 @@ function mapMigrationRow(row: DriveMigrationRow): DriveMigration {
     syncStatus: row.sync_status ?? undefined,
     syncMessage: row.sync_message ?? undefined,
     updatedAt: row.updated_at ?? undefined,
+    summaryItemCount: row.summary_item_count ?? 0,
+    summaryObjects: row.summary_objects ?? 0,
+    summaryBytes: row.summary_bytes ?? 0,
+    workerSummary: row.worker_summary ?? {},
+    detailsCompactedAt: row.details_compacted_at ?? undefined,
   }
 }
 
@@ -385,7 +401,13 @@ export async function updateMigration(
     .single()
 
   if (error) throw normalizeSupabaseError(error)
-  return mapMigrationRow(data as DriveMigrationRow)
+  const migration = mapMigrationRow(data as DriveMigrationRow)
+  if (updates.status === "completed") {
+    await compactPreviousMigrationDetails(id).catch((cleanupError) => {
+      console.error("Unable to compact previous migration details:", cleanupError)
+    })
+  }
+  return migration
 }
 
 export async function claimMigrationSyncLock(input: {
