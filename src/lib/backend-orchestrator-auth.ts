@@ -17,7 +17,7 @@ export async function authenticateBackendOrchestrator(request: Request) {
   const settings = await getBackendOrchestratorSettings()
   const token = tokenFromRequest(request)
   return {
-    ok: settings.enabled && settings.sharedSecret.length >= 24 && safeEqual(token, settings.sharedSecret),
+    ok: settings.sharedSecret.length >= 24 && safeEqual(token, settings.sharedSecret),
     settings,
   }
 }

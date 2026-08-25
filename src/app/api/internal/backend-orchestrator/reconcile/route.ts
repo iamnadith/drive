@@ -11,6 +11,7 @@ export const dynamic = "force-dynamic"
 export async function POST(request: Request) {
   const auth = await authenticateBackendOrchestrator(request)
   if (!auth.ok) return NextResponse.json({ error: "Invalid Backend Orchestrator secret" }, { status: 401 })
+  if (!auth.settings.enabled) return NextResponse.json({ error: "Backend Orchestrator is disabled" }, { status: 403 })
 
   const migrations = (await listMigrations(100))
     .filter((migration) => ["running", "verifying"].includes(migration.status) || migration.syncStatus === "syncing")

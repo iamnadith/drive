@@ -4,6 +4,12 @@ import { Client } from "pg"
 type Env = {
   PANEL_URL: string
   PANEL_SHARED_SECRET: string
+  POSTGRES_URL: string
+  SYNC_INTERVAL_MINUTES: string
+  PAGES_PER_RUN: string
+  API_EVENTS_RETENTION_DAYS: string
+  OBJECT_CHANGES_RETENTION_DAYS: string
+  SCAN_DETAILS_RETENTION_DAYS: string
 }
 
 type RuntimeConfig = {
@@ -48,14 +54,24 @@ function authorized(request: Request, env: Env) {
   return header.startsWith("Bearer ") && header.slice(7).trim() === env.PANEL_SHARED_SECRET.trim()
 }
 
-async function fetchRuntimeConfig(env: Env): Promise<RuntimeConfig> {
-  const response = await fetch(panelUrl(env, "/api/internal/backend-orchestrator/config"), {
-    headers: { Authorization: `Bearer ${env.PANEL_SHARED_SECRET}` },
-  })
-  const payload = await response.json().catch(() => ({})) as RuntimeConfig & { error?: string }
-  if (!response.ok) throw new Error(payload.error || `Panel configuration failed (${response.status})`)
-  if (!payload.postgresUrl) throw new Error("Panel returned no PostgreSQL URL")
-  return payload
+function boundedInteger(value: string, fallback: number, minimum: number, maximum: number) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, Math.floor(parsed))) : fallback
+}
+
+function runtimeConfig(env: Env): RuntimeConfig {
+  if (!env.POSTGRES_URL?.trim()) throw new Error("POSTGRES_URL was not injected during deployment")
+  return {
+    version: 2,
+    postgresUrl: env.POSTGRES_URL.trim(),
+    syncIntervalMinutes: boundedInteger(env.SYNC_INTERVAL_MINUTES, 5, 1, 60),
+    pagesPerRun: boundedInteger(env.PAGES_PER_RUN, 5, 1, 20),
+    retention: {
+      apiEventsDays: boundedInteger(env.API_EVENTS_RETENTION_DAYS, 7, 1, 365),
+      objectChangesDays: boundedInteger(env.OBJECT_CHANGES_RETENTION_DAYS, 7, 1, 365),
+      scanDetailsDays: boundedInteger(env.SCAN_DETAILS_RETENTION_DAYS, 7, 1, 365),
+    },
+  }
 }
 
 function dbClient(connectionString: string) {
@@ -377,7 +393,7 @@ async function reconcilePanel(env: Env) {
 }
 
 async function runCycle(env: Env, orchestratorUrl?: string) {
-  const config = await fetchRuntimeConfig(env)
+  const config = runtimeConfig(env)
   const db = dbClient(config.postgresUrl)
   await db.connect()
   let locked = false
@@ -409,7 +425,7 @@ export default {
     if (url.pathname === "/health") {
       let db: Client | null = null
       try {
-        const config = await fetchRuntimeConfig(env)
+        const config = runtimeConfig(env)
         db = dbClient(config.postgresUrl)
         await db.connect()
         await db.query("select 1")
@@ -427,7 +443,7 @@ export default {
     if (url.pathname === "/status" && request.method === "GET") {
       let db: Client | null = null
       try {
-        const config = await fetchRuntimeConfig(env)
+        const config = runtimeConfig(env)
         db = dbClient(config.postgresUrl)
         await db.connect()
         await ensureSchema(db)

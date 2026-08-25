@@ -21,7 +21,7 @@ export async function GET(request: Request) {
 
   return NextResponse.json(
     {
-      version: 1,
+      version: 2,
       postgresUrl,
       syncIntervalMinutes: auth.settings.syncIntervalMinutes,
       pagesPerRun: auth.settings.pagesPerRun,

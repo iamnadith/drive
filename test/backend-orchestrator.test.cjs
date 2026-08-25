@@ -12,12 +12,19 @@ function read(relativePath) {
 
 test("backend orchestrator uses the authenticated panel configuration handshake", () => {
   const orchestrator = read("workers/backend-orchestrator/src/index.ts")
+  const deploy = read("workers/backend-orchestrator/scripts/deploy.mjs")
   const configRoute = read("src/app/api/internal/backend-orchestrator/config/route.ts")
   const settings = read("src/lib/backend-orchestrator-settings-store.ts")
 
   assert.match(orchestrator, /PANEL_URL: string/)
   assert.match(orchestrator, /PANEL_SHARED_SECRET: string/)
-  assert.match(orchestrator, /\/api\/internal\/backend-orchestrator\/config/)
+  assert.match(orchestrator, /POSTGRES_URL: string/)
+  assert.match(orchestrator, /POSTGRES_URL was not injected during deployment/)
+  assert.doesNotMatch(orchestrator, /\/api\/internal\/backend-orchestrator\/config/)
+  assert.match(deploy, /\/api\/internal\/backend-orchestrator\/config/)
+  assert.match(deploy, /POSTGRES_URL: config\.postgresUrl\.trim\(\)/)
+  assert.match(deploy, /"wrangler", "deploy", "--secrets-file"/)
+  assert.doesNotMatch(deploy, /process\.env\.POSTGRES/)
   assert.match(configRoute, /authenticateBackendOrchestrator/)
   assert.match(configRoute, /POSTGRES_URL_NON_POOLING/)
   assert.match(settings, /secretConfigured:/)
@@ -47,4 +54,5 @@ test("worker packages and GitHub workflow use their permanent names", () => {
   assert.match(workflow, /name: Migration Worker/)
   assert.match(workflow, /working-directory: workers\/migration-worker/)
   assert.match(wrangler, /"name": "backend-orchestrator"/)
+  assert.match(wrangler, /"crons": \["\* \* \* \* \*"\]/)
 })
