@@ -24,7 +24,6 @@ export async function GET(request: Request) {
       version: 2,
       postgresUrl,
       syncIntervalMinutes: auth.settings.syncIntervalMinutes,
-      pagesPerRun: auth.settings.pagesPerRun,
       retention: { apiEventsDays: 7, objectChangesDays: 7, scanDetailsDays: 7 },
     },
     { headers: { "Cache-Control": "no-store, max-age=0" } }

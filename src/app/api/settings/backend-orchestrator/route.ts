@@ -52,14 +52,12 @@ export async function PUT(request: Request) {
       orchestratorUrl?: unknown
       sharedSecret?: unknown
       syncIntervalMinutes?: unknown
-      pagesPerRun?: unknown
     }
     const saved = await saveBackendOrchestratorSettings({
       enabled: false,
       orchestratorUrl: body.orchestratorUrl,
       sharedSecret: body.sharedSecret,
       syncIntervalMinutes: body.syncIntervalMinutes,
-      pagesPerRun: body.pagesPerRun,
     })
     return NextResponse.json({ settings: publicBackendOrchestratorSettings(saved), state: await state() })
   } catch (error) {

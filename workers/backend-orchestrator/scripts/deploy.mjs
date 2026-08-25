@@ -29,7 +29,6 @@ const deployedBindings = {
   PANEL_SHARED_SECRET: sharedSecret,
   POSTGRES_URL: config.postgresUrl.trim(),
   SYNC_INTERVAL_MINUTES: String(config.syncIntervalMinutes ?? 1),
-  PAGES_PER_RUN: String(config.pagesPerRun ?? 5),
   API_EVENTS_RETENTION_DAYS: String(config.retention?.apiEventsDays ?? 7),
   OBJECT_CHANGES_RETENTION_DAYS: String(config.retention?.objectChangesDays ?? 7),
   SCAN_DETAILS_RETENTION_DAYS: String(config.retention?.scanDetailsDays ?? 7),

@@ -1,4 +1,3 @@
-import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3"
 import { Client } from "pg"
 
 type Env = {
@@ -6,7 +5,6 @@ type Env = {
   PANEL_SHARED_SECRET: string
   POSTGRES_URL: string
   SYNC_INTERVAL_MINUTES: string
-  PAGES_PER_RUN: string
   API_EVENTS_RETENTION_DAYS: string
   OBJECT_CHANGES_RETENTION_DAYS: string
   SCAN_DETAILS_RETENTION_DAYS: string
@@ -16,7 +14,6 @@ type RuntimeConfig = {
   version: number
   postgresUrl: string
   syncIntervalMinutes: number
-  pagesPerRun: number
   retention: { apiEventsDays: number; objectChangesDays: number; scanDetailsDays: number }
 }
 
@@ -25,21 +22,13 @@ type AccountRow = {
   label: string
   email: string
   api_token: string
-  r2_access_key_id: string
-  r2_secret_access_key: string
   cloudflare_account_id: string | null
   status: string
   last_synced_at: string | null
 }
 
-type ScanRow = {
-  id: string
-  account_id: string
-  bucket_name: string
-  last_key: string | null
-  objects: string | number
-  bytes: string | number
-}
+type BucketInfo = { name: string; jurisdiction: string }
+type BucketMetric = { bucket: string; objects: number; bytes: number; observedAt: string }
 
 function json(value: unknown, status = 200) {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store" } })
@@ -65,7 +54,6 @@ function runtimeConfig(env: Env): RuntimeConfig {
     version: 2,
     postgresUrl: env.POSTGRES_URL.trim(),
     syncIntervalMinutes: boundedInteger(env.SYNC_INTERVAL_MINUTES, 1, 1, 60),
-    pagesPerRun: boundedInteger(env.PAGES_PER_RUN, 5, 1, 20),
     retention: {
       apiEventsDays: boundedInteger(env.API_EVENTS_RETENTION_DAYS, 7, 1, 365),
       objectChangesDays: boundedInteger(env.OBJECT_CHANGES_RETENTION_DAYS, 7, 1, 365),
@@ -178,7 +166,76 @@ async function listBuckets(account: AccountRow) {
   if (!response.ok) throw new Error(payload.errors?.[0]?.message || `R2 bucket listing failed (${response.status})`)
   const result = payload.result
   const values = Array.isArray(result) ? result : result && typeof result === "object" && Array.isArray((result as { buckets?: unknown }).buckets) ? (result as { buckets: unknown[] }).buckets : []
-  return values.map((value) => String((value as { name?: unknown })?.name ?? "")).filter(Boolean)
+  return values
+    .map((value): BucketInfo => ({
+      name: String((value as { name?: unknown })?.name ?? ""),
+      jurisdiction: String((value as { jurisdiction?: unknown })?.jurisdiction ?? "default"),
+    }))
+    .filter((value) => value.name.length > 0)
+}
+
+async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Promise<BucketMetric[]> {
+  if (!account.cloudflare_account_id) throw new Error(`Account ${account.label} has no Cloudflare account ID`)
+  const query = `
+    query R2Storage($accountTag: string!, $startDate: Time!, $endDate: Time!) {
+      viewer {
+        accounts(filter: { accountTag: $accountTag }) {
+          r2StorageAdaptiveGroups(
+            limit: 10000
+            filter: { datetime_geq: $startDate, datetime_leq: $endDate }
+            orderBy: [datetime_DESC]
+          ) {
+            max { objectCount payloadSize }
+            dimensions { bucketName datetime }
+          }
+        }
+      }
+    }
+  `
+  const response = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${account.api_token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query,
+      variables: {
+        accountTag: account.cloudflare_account_id,
+        startDate: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+        endDate: new Date().toISOString(),
+      },
+    }),
+  })
+  const payload = await response.json().catch(() => ({})) as {
+    data?: { viewer?: { accounts?: Array<{ r2StorageAdaptiveGroups?: Array<{
+      dimensions?: { bucketName?: string; datetime?: string }
+      max?: { objectCount?: number; payloadSize?: number }
+    }> }> } }
+    errors?: Array<{ message?: string }>
+  }
+  if (!response.ok || payload.errors?.length) {
+    throw new Error(payload.errors?.[0]?.message || `R2 analytics query failed (${response.status})`)
+  }
+  const groups = payload.data?.viewer?.accounts?.[0]?.r2StorageAdaptiveGroups ?? []
+  const latestByAnalyticsName = new Map<string, BucketMetric>()
+  for (const group of groups) {
+    const bucket = group.dimensions?.bucketName
+    const observedAt = group.dimensions?.datetime
+    const objectCount = group.max?.objectCount
+    const payloadSize = group.max?.payloadSize
+    if (!bucket || !observedAt || latestByAnalyticsName.has(bucket)) continue
+    if (typeof objectCount !== "number" || !Number.isFinite(objectCount)) continue
+    if (typeof payloadSize !== "number" || !Number.isFinite(payloadSize)) continue
+    latestByAnalyticsName.set(bucket, {
+      bucket,
+      objects: Math.max(0, Math.trunc(objectCount)),
+      bytes: Math.max(0, Math.trunc(payloadSize)),
+      observedAt,
+    })
+  }
+  return buckets.flatMap((bucket) => {
+    const analyticsName = bucket.jurisdiction === "default" ? bucket.name : `${bucket.jurisdiction}_${bucket.name}`
+    const metric = latestByAnalyticsName.get(analyticsName)
+    return metric ? [{ ...metric, bucket: bucket.name }] : []
+  })
 }
 
 async function recordBucketHistory(db: Client, input: { accountId: string; bucket: string; objects: number; bytes: number; deleted: boolean }) {
@@ -236,134 +293,104 @@ async function reconcileBuckets(db: Client, account: AccountRow, bucketNames: st
   }
 }
 
-async function selectAccountAndScan(db: Client, syncIntervalMinutes: number) {
-  const running = await db.query<ScanRow & { account_label: string; account_email: string; api_token: string; r2_access_key_id: string; r2_secret_access_key: string; cloudflare_account_id: string | null; account_status: string; last_synced_at: string | null }>(`
-    select s.id,s.account_id,s.bucket_name,s.last_key,s.objects,s.bytes,
-           a.label account_label,a.email account_email,a.api_token,a.r2_access_key_id,a.r2_secret_access_key,
-           a.cloudflare_account_id,a.status account_status,a.last_synced_at
-    from drive_bucket_scans s join drive_accounts a on a.id=s.account_id
-    where s.kind='orchestrator' and s.status='running'
-    order by s.updated_at asc limit 1
-  `)
-  if (running.rows[0]) {
-    const row = running.rows[0]
-    return {
-      account: {
-        id: row.account_id, label: row.account_label, email: row.account_email, api_token: row.api_token,
-        r2_access_key_id: row.r2_access_key_id, r2_secret_access_key: row.r2_secret_access_key,
-        cloudflare_account_id: row.cloudflare_account_id, status: row.account_status, last_synced_at: row.last_synced_at,
-      },
-      scan: { id: row.id, account_id: row.account_id, bucket_name: row.bucket_name, last_key: row.last_key, objects: row.objects, bytes: row.bytes },
-    }
-  }
+async function selectNextAccount(db: Client, syncIntervalMinutes: number) {
   const account = await db.query<AccountRow>(`
-    select id,label,email,api_token,r2_access_key_id,r2_secret_access_key,cloudflare_account_id,status,last_synced_at
+    select id,label,email,api_token,cloudflare_account_id,status,last_synced_at
     from drive_accounts
-    where api_token<>'' and r2_access_key_id<>'' and r2_secret_access_key<>''
+    where api_token<>''
       and (last_synced_at is null or last_synced_at < now() - ($1::text || ' minutes')::interval)
     order by last_synced_at asc nulls first, created_at asc limit 1
   `, [syncIntervalMinutes])
-  return { account: account.rows[0] ?? null, scan: null as ScanRow | null }
+  return account.rows[0] ?? null
 }
 
-async function createNextScan(db: Client, accountId: string, bucketNames: string[]) {
-  if (bucketNames.length === 0) return null
-  const next = await db.query<{ bucket_name: string }>(
-    `select bucket_name from drive_bucket_stats where account_id=$1 and bucket_name=any($2::text[])
-     order by updated_at asc nulls first, bucket_name asc limit 1`,
-    [accountId, bucketNames]
+async function applyBucketMetrics(db: Client, account: AccountRow, metrics: BucketMetric[]) {
+  if (metrics.length === 0) return
+  await db.query(
+    `
+      with input as (
+        select bucket, objects, bytes
+        from jsonb_to_recordset($2::jsonb) as value(bucket text, objects bigint, bytes bigint)
+      ), updated_stats as (
+        update drive_bucket_stats stats set
+          objects=input.objects, bytes=input.bytes, continuation_token=null,
+          status='completed', error=null, updated_at=now()
+        from input where stats.account_id=$1 and stats.bucket_name=input.bucket
+        returning stats.bucket_name
+      ), latest as (
+        select input.*,
+               history.objects previous_objects,
+               history.bytes previous_bytes
+        from input
+        left join lateral (
+          select objects, bytes from drive_bucket_stat_history
+          where account_id=$1 and bucket_name=input.bucket
+          order by changed_at desc, id desc limit 1
+        ) history on true
+      ), inserted as (
+        insert into drive_bucket_stat_history (
+          account_id, account_label, account_email, bucket_name,
+          previous_objects, objects, object_delta, previous_bytes, bytes, byte_delta, change_type
+        )
+        select $1, $3, $4, bucket,
+               previous_objects, objects, objects-coalesce(previous_objects,0),
+               previous_bytes, bytes, bytes-coalesce(previous_bytes,0),
+               case when previous_objects is null then 'created' else 'changed' end
+        from latest
+        where previous_objects is null or previous_objects is distinct from objects or previous_bytes is distinct from bytes
+        returning account_id, account_label, account_email, bucket_name, objects, bytes, changed_at
+      )
+      insert into drive_analytics_bucket_snapshots
+        (account_id,account_label,account_email,bucket_name,objects,bytes,status,source_updated_at,captured_at)
+      select account_id,account_label,account_email,bucket_name,objects,bytes,'completed',changed_at,changed_at
+      from inserted
+      on conflict(account_id,bucket_name) do update set
+        account_label=excluded.account_label, account_email=excluded.account_email,
+        objects=excluded.objects, bytes=excluded.bytes, status=excluded.status,
+        source_updated_at=excluded.source_updated_at, captured_at=excluded.captured_at
+    `,
+    [account.id, JSON.stringify(metrics), account.label, account.email]
   )
-  const bucket = next.rows[0]?.bucket_name
-  if (!bucket) return null
-  const inserted = await db.query<ScanRow>(
-    `insert into drive_bucket_scans (id,account_id,bucket_name,kind,status,objects,bytes,started_at,updated_at)
-     values (gen_random_uuid(),$1,$2,'orchestrator','running',0,0,now(),now()) returning id,account_id,bucket_name,last_key,objects,bytes`,
-    [accountId, bucket]
-  )
-  return inserted.rows[0]
-}
-
-async function completeScan(db: Client, account: AccountRow, scan: ScanRow, objects: number, bytes: number) {
-  await db.query("begin")
-  try {
-    await recordBucketHistory(db, { accountId: account.id, bucket: scan.bucket_name, objects, bytes, deleted: false })
-    await db.query(
-      `update drive_bucket_stats set objects=$3,bytes=$4,continuation_token=null,status='completed',error=null,updated_at=now()
-       where account_id=$1 and bucket_name=$2`,
-      [account.id, scan.bucket_name, objects, bytes]
-    )
-    await db.query(`update drive_bucket_scans set status='completed',objects=$2,bytes=$3,last_key=null,completed_at=now(),updated_at=now() where id=$1`, [scan.id, objects, bytes])
-    await db.query(`
-      update drive_accounts a set
-        total_buckets=(select count(*) from drive_bucket_stats s where s.account_id=a.id),
-        total_objects=(select coalesce(sum(objects),0) from drive_bucket_stats s where s.account_id=a.id),
-        total_bytes=(select coalesce(sum(bytes),0) from drive_bucket_stats s where s.account_id=a.id),
-        sync_status='ok',sync_message='Backend Orchestrator sync completed',last_synced_at=now(),updated_at=now()
-      where a.id=$1
-    `, [account.id])
-    await db.query("commit")
-  } catch (error) {
-    await db.query("rollback")
-    throw error
-  }
-}
-
-async function scanPages(db: Client, account: AccountRow, scan: ScanRow, pagesPerRun: number) {
-  if (!account.cloudflare_account_id) throw new Error("Cloudflare account ID is missing")
-  const s3 = new S3Client({
-    region: "auto",
-    endpoint: `https://${account.cloudflare_account_id}.r2.cloudflarestorage.com`,
-    credentials: { accessKeyId: account.r2_access_key_id, secretAccessKey: account.r2_secret_access_key },
-  })
-  let token = scan.last_key ?? undefined
-  let objects = Number(scan.objects) || 0
-  let bytes = Number(scan.bytes) || 0
-  let pages = 0
-  while (pages < pagesPerRun) {
-    const page = await s3.send(new ListObjectsV2Command({ Bucket: scan.bucket_name, ContinuationToken: token, MaxKeys: 1000 }))
-    for (const object of page.Contents ?? []) {
-      if (!object.Key) continue
-      objects += 1
-      bytes += Number(object.Size ?? 0)
-    }
-    pages += 1
-    token = page.NextContinuationToken
-    await db.query(`update drive_bucket_scans set objects=$2,bytes=$3,last_key=$4,updated_at=now() where id=$1`, [scan.id, objects, bytes, token ?? null])
-    if (!token) {
-      await completeScan(db, account, scan, objects, bytes)
-      return { bucket: scan.bucket_name, status: "completed", objects, bytes, pages }
-    }
-  }
-  return { bucket: scan.bucket_name, status: "running", objects, bytes, pages }
 }
 
 async function syncNextAccount(db: Client, config: RuntimeConfig) {
-  const selected = await selectAccountAndScan(db, config.syncIntervalMinutes)
-  if (!selected.account) return { status: "idle", message: "No account is due for synchronization" }
-  const account = selected.account
+  const account = await selectNextAccount(db, config.syncIntervalMinutes)
+  if (!account) return { status: "idle", message: "No account is due for synchronization" }
   try {
     if (!account.cloudflare_account_id) {
       const resolved = await resolveCloudflareAccount(account)
       account.cloudflare_account_id = resolved.id
       await db.query(`update drive_accounts set cloudflare_account_id=$2,cloudflare_account_name=$3,updated_at=now() where id=$1`, [account.id, resolved.id, resolved.name])
     }
-    await db.query(`update drive_accounts set sync_status='syncing',sync_message='Backend Orchestrator scan running',updated_at=now() where id=$1`, [account.id])
+    await db.query(`update drive_accounts set sync_status='syncing',sync_message='Backend Orchestrator metrics sync running',updated_at=now() where id=$1`, [account.id])
     const buckets = await listBuckets(account)
-    await reconcileBuckets(db, account, buckets)
-    let scan = selected.scan
-    if (scan && !buckets.includes(scan.bucket_name)) {
-      await db.query(`update drive_bucket_scans set status='failed',error='Bucket deleted during scan',completed_at=now(),updated_at=now() where id=$1`, [scan.id])
-      scan = null
-    }
-    scan = scan ?? await createNextScan(db, account.id, buckets)
-    if (!scan) {
+    const bucketNames = buckets.map((bucket) => bucket.name)
+    await reconcileBuckets(db, account, bucketNames)
+    if (buckets.length === 0) {
       await db.query(`update drive_accounts set total_buckets=0,total_objects=0,total_bytes=0,sync_status='ok',sync_message='No R2 buckets',last_synced_at=now(),updated_at=now() where id=$1`, [account.id])
       return { account: account.label, status: "completed", buckets: 0 }
     }
-    return { account: account.label, ...(await scanPages(db, account, scan, config.pagesPerRun)) }
+    const metrics = await getBucketMetrics(account, buckets)
+    await applyBucketMetrics(db, account, metrics)
+    await db.query(`
+      update drive_accounts a set
+        total_buckets=(select count(*) from drive_bucket_stats s where s.account_id=a.id),
+        total_objects=(select coalesce(sum(objects),0) from drive_bucket_stats s where s.account_id=a.id),
+        total_bytes=(select coalesce(sum(bytes),0) from drive_bucket_stats s where s.account_id=a.id),
+        sync_status='ok',sync_message=$2,last_synced_at=now(),updated_at=now()
+      where a.id=$1
+    `, [account.id, `R2 metrics synced for ${metrics.length} of ${buckets.length} buckets`])
+    return {
+      account: account.label,
+      status: "completed",
+      buckets: buckets.length,
+      metrics: metrics.length,
+      missingMetrics: buckets.length - metrics.length,
+      latestObservedAt: metrics.reduce<string | null>((latest, metric) => !latest || metric.observedAt > latest ? metric.observedAt : latest, null),
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    await db.query(`update drive_accounts set sync_status='error',sync_message=$2,updated_at=now() where id=$1`, [account.id, message]).catch(() => undefined)
+    await db.query(`update drive_accounts set sync_status='error',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1`, [account.id, message]).catch(() => undefined)
     throw error
   }
 }
@@ -388,6 +415,7 @@ async function reconcilePanel(env: Env) {
     method: "POST",
     headers: { Authorization: `Bearer ${env.PANEL_SHARED_SECRET}` },
   })
+  if (response.status === 403) return { ok: false, disabled: true }
   if (!response.ok) throw new Error(`Panel reconciliation failed (${response.status})`)
   return response.json()
 }
@@ -398,14 +426,20 @@ async function runCycle(env: Env, orchestratorUrl?: string) {
   await db.connect()
   let locked = false
   try {
-    await ensureSchema(db)
     const lock = await db.query<{ locked: boolean }>(`select pg_try_advisory_lock(hashtext('drive-backend-orchestrator')) locked`)
     locked = lock.rows[0]?.locked === true
     if (!locked) return { ok: true, skipped: "Another Backend Orchestrator cycle is active" }
+    const panel = await reconcilePanel(env)
+    if (panel && typeof panel === "object" && "disabled" in panel && panel.disabled === true) {
+      return { ok: true, skipped: "Backend Orchestrator is disabled in the panel" }
+    }
     await setState(db, { status: "running", orchestratorUrl })
+    await db.query(`
+      update drive_bucket_scans set status='failed',error='Superseded by R2 analytics metrics sync',completed_at=now(),updated_at=now()
+      where kind='orchestrator' and status='running'
+    `)
     const sync = await syncNextAccount(db, config)
     const maintenance = await runRetention(db, config)
-    const panel = await reconcilePanel(env).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
     const result = { sync, maintenance, panel }
     await setState(db, { status: "idle", result, completed: true })
     return { ok: true, result }

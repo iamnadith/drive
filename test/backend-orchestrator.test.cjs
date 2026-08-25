@@ -38,16 +38,24 @@ test("backend orchestrator uses the authenticated panel configuration handshake"
   assert.match(settingsPage, /Test connection/)
 })
 
-test("backend orchestrator scans bounded resumable pages and preserves change-only totals", () => {
+test("backend orchestrator uses account analytics without per-object scans and preserves change-only totals", () => {
   const orchestrator = read("workers/backend-orchestrator/src/index.ts")
+  const deploy = read("workers/backend-orchestrator/scripts/deploy.mjs")
+  const settingsPage = read("src/app/dashboard/settings/page.tsx")
 
-  assert.match(orchestrator, /while \(pages < pagesPerRun\)/)
-  assert.match(orchestrator, /ContinuationToken: token/)
-  assert.match(orchestrator, /last_key=\$4/)
+  assert.match(orchestrator, /r2StorageAdaptiveGroups/)
+  assert.match(orchestrator, /objectCount payloadSize/)
+  assert.match(orchestrator, /jsonb_to_recordset/)
+  assert.doesNotMatch(orchestrator, /ListObjectsV2Command|S3Client|ContinuationToken/)
+  assert.doesNotMatch(orchestrator, /PAGES_PER_RUN|pagesPerRun/)
+  assert.doesNotMatch(deploy, /PAGES_PER_RUN|pagesPerRun/)
+  assert.doesNotMatch(settingsPage, /R2 pages per invocation|orchestratorPagesPerRun/)
   assert.match(orchestrator, /latest\.objects is distinct from \$3/)
   assert.match(orchestrator, /latest\.bytes is distinct from \$4/)
   assert.match(orchestrator, /objects: 0, bytes: 0, deleted: true/)
   assert.match(orchestrator, /No account is due for synchronization/)
+  assert.match(orchestrator, /Backend Orchestrator is disabled in the panel/)
+  assert.ok(orchestrator.indexOf("const panel = await reconcilePanel(env)") < orchestrator.indexOf("const sync = await syncNextAccount"))
 })
 
 test("worker packages and GitHub workflow use their permanent names", () => {

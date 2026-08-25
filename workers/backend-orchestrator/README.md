@@ -1,6 +1,6 @@
 # Drive Backend Orchestrator
 
-The Backend Orchestrator continuously synchronizes every configured Cloudflare account and R2 bucket using bounded, resumable pages. It also triggers panel-side migration/repair reconciliation and retention maintenance.
+The Backend Orchestrator continuously synchronizes every configured Cloudflare account and R2 bucket from Cloudflare's account analytics. It also triggers panel-side migration/repair reconciliation and retention maintenance.
 
 ## Cloudflare Git deployment
 
@@ -25,7 +25,7 @@ For local deployment, copy `.env.example` to `.env`, fill the two required value
 
 In Drive -> Settings -> Backend Orchestrator, enter the deployed URL and the same secret, then enable it and press **Run now**.
 
-No PostgreSQL URL, Cloudflare account credentials, KV, D1, Queue, or Hyperdrive binding is configured in Cloudflare. The Backend Orchestrator authenticates to the panel, fetches the current PostgreSQL URL at runtime, and reads account credentials directly from PostgreSQL.
+No PostgreSQL URL, Cloudflare account credentials, KV, D1, Queue, or Hyperdrive binding needs to be entered manually in Cloudflare. The deployment script authenticates to the panel and injects the PostgreSQL URL as an encrypted Worker secret. Runtime cycles read account credentials directly from PostgreSQL.
 
 ## Endpoints
 
@@ -33,4 +33,4 @@ No PostgreSQL URL, Cloudflare account credentials, KV, D1, Queue, or Hyperdrive 
 - `GET /status`: authenticated detailed state
 - `POST /run`: authenticated immediate cycle
 
-The Backend Orchestrator cron runs every minute. Each cycle processes a bounded number of R2 list pages, stores its cursor in PostgreSQL, and resumes on the next invocation.
+The Backend Orchestrator cron runs every minute. It does not enumerate objects: Cloudflare's `r2StorageAdaptiveGroups` analytics dataset returns each bucket's object count and payload bytes regardless of whether the bucket contains ten objects or millions. The Worker writes bucket/account totals in batches and appends permanent history only when a count or byte value changes. Cloudflare notes that analytics can lag behind the latest R2 mutation, so a change is recorded when it appears in the metrics feed. Configured account API tokens must include permission to read account analytics.

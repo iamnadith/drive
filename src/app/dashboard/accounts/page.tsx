@@ -1588,8 +1588,9 @@ export default function AccountsPage() {
                               <li>Open Cloudflare dashboard and log in.</li>
                               <li>Go to Profile ? API Tokens.</li>
                               <li>
-                                Create a token with R2 Storage read/write access
-                                so this panel can manage buckets and objects.
+                                Create a token with R2 Storage read/write and
+                                Account Analytics read access so the panel can
+                                manage R2 and sync bucket totals without listing objects.
                               </li>
                               <li>Copy the token once and paste it here.</li>
                             </ol>

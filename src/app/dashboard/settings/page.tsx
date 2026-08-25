@@ -44,7 +44,6 @@ export default function DashboardSettingsPage() {
   const [orchestratorSecret, setOrchestratorSecret] = React.useState("")
   const [orchestratorEnabled, setOrchestratorEnabled] = React.useState(false)
   const [orchestratorSecretConfigured, setOrchestratorSecretConfigured] = React.useState(false)
-  const [orchestratorPagesPerRun, setOrchestratorPagesPerRun] = React.useState(5)
   const [orchestratorUpdatedAt, setOrchestratorUpdatedAt] = React.useState("")
   const [orchestratorLoaded, setOrchestratorLoaded] = React.useState(false)
   const [orchestratorState, setOrchestratorState] = React.useState<Record<string, unknown> | null>(null)
@@ -55,7 +54,7 @@ export default function DashboardSettingsPage() {
   const loadOrchestratorSettings = React.useCallback(async () => {
     const response = await fetch("/api/settings/backend-orchestrator", { cache: "no-store" })
     const payload = await response.json().catch(() => ({})) as {
-      settings?: { enabled?: boolean; orchestratorUrl?: string; secretConfigured?: boolean; pagesPerRun?: number; updatedAt?: string }
+      settings?: { enabled?: boolean; orchestratorUrl?: string; secretConfigured?: boolean; updatedAt?: string }
       state?: Record<string, unknown> | null
       error?: string
     }
@@ -65,7 +64,6 @@ export default function DashboardSettingsPage() {
     setOrchestratorUrl(savedUrl)
     setSavedOrchestratorUrl(savedUrl)
     setOrchestratorSecretConfigured(payload.settings?.secretConfigured === true)
-    setOrchestratorPagesPerRun(payload.settings?.pagesPerRun ?? 5)
     setOrchestratorUpdatedAt(payload.settings?.updatedAt ?? "")
     const persistedState = payload.state ?? null
     setOrchestratorState(persistedState)
@@ -92,7 +90,6 @@ export default function DashboardSettingsPage() {
         body: JSON.stringify({
           orchestratorUrl,
           sharedSecret: orchestratorSecret,
-          pagesPerRun: orchestratorPagesPerRun,
         }),
       })
       const payload = await response.json().catch(() => ({})) as { error?: string }
@@ -212,7 +209,7 @@ export default function DashboardSettingsPage() {
         <CardHeader>
           <CardTitle>Backend Orchestrator</CardTitle>
           <CardDescription>
-            Save the deployed URL and shared secret, verify the authenticated database connection, then enable processing.
+            Save the deployed URL and shared secret, verify the authenticated database connection, then enable metrics processing. Account API tokens need Account Analytics read access.
           </CardDescription>
           <CardAction>
             <Badge variant={orchestratorEnabled ? "default" : "secondary"}>
@@ -237,11 +234,7 @@ export default function DashboardSettingsPage() {
               For security, a saved secret is never displayed again. A blank field keeps the stored secret.
             </p>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="orchestrator-pages">R2 pages per invocation</Label>
-            <Input id="orchestrator-pages" type="number" min={1} max={20} value={orchestratorPagesPerRun} disabled={!orchestratorLoaded} onChange={(event) => setOrchestratorPagesPerRun(Math.max(1, Math.min(20, Number(event.target.value) || 1)))} />
-          </div>
-          <div className="rounded-2xl border p-4 text-sm">
+          <div className="rounded-2xl border p-4 text-sm lg:col-span-2">
             <p>Connection: {!orchestratorLoaded ? "Loading saved settings..." : orchestratorConnection === "connected" ? "Connected" : orchestratorConnection === "failed" ? "Failed" : "Not tested"}</p>
             <p className="text-muted-foreground">Last saved: {orchestratorUpdatedAt ? new Date(orchestratorUpdatedAt).toLocaleString() : "Never"}</p>
             <p className="text-muted-foreground">Runtime: {String(orchestratorState?.status ?? "No runtime state")}</p>

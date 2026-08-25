@@ -7,7 +7,6 @@ export type BackendOrchestratorSettings = {
   orchestratorUrl: string
   sharedSecret: string
   syncIntervalMinutes: number
-  pagesPerRun: number
   updatedAt?: string
 }
 
@@ -21,7 +20,6 @@ const DEFAULTS: BackendOrchestratorSettings = {
   orchestratorUrl: "",
   sharedSecret: "",
   syncIntervalMinutes: 1,
-  pagesPerRun: 5,
 }
 
 function normalizeUrl(value: unknown): string {
@@ -41,10 +39,6 @@ function normalize(value: unknown, updatedAt?: string | null): BackendOrchestrat
     orchestratorUrl: normalizeUrl(row.orchestratorUrl),
     sharedSecret,
     syncIntervalMinutes: 1,
-    pagesPerRun:
-      typeof row.pagesPerRun === "number" && Number.isFinite(row.pagesPerRun)
-        ? Math.max(1, Math.min(20, Math.floor(row.pagesPerRun)))
-        : DEFAULTS.pagesPerRun,
     updatedAt: updatedAt ?? undefined,
   }
 }
@@ -63,7 +57,6 @@ export async function saveBackendOrchestratorSettings(input: {
   orchestratorUrl?: unknown
   sharedSecret?: unknown
   syncIntervalMinutes?: unknown
-  pagesPerRun?: unknown
 }): Promise<BackendOrchestratorSettings> {
   const current = await getBackendOrchestratorSettings()
   const next = normalize({
@@ -75,7 +68,6 @@ export async function saveBackendOrchestratorSettings(input: {
         : current.sharedSecret,
     syncIntervalMinutes:
       typeof input.syncIntervalMinutes === "number" ? input.syncIntervalMinutes : current.syncIntervalMinutes,
-    pagesPerRun: typeof input.pagesPerRun === "number" ? input.pagesPerRun : current.pagesPerRun,
   })
   if (next.enabled && (!next.orchestratorUrl || next.sharedSecret.length < 24)) {
     throw new Error("Enabled Backend Orchestrator requires its URL and a shared secret of at least 24 characters")
@@ -98,7 +90,6 @@ export function publicBackendOrchestratorSettings(settings: BackendOrchestratorS
     orchestratorUrl: settings.orchestratorUrl,
     secretConfigured: settings.sharedSecret.length >= 24,
     syncIntervalMinutes: settings.syncIntervalMinutes,
-    pagesPerRun: settings.pagesPerRun,
     updatedAt: settings.updatedAt,
   }
 }
