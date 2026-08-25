@@ -64,7 +64,7 @@ function runtimeConfig(env: Env): RuntimeConfig {
   return {
     version: 2,
     postgresUrl: env.POSTGRES_URL.trim(),
-    syncIntervalMinutes: boundedInteger(env.SYNC_INTERVAL_MINUTES, 5, 1, 60),
+    syncIntervalMinutes: boundedInteger(env.SYNC_INTERVAL_MINUTES, 1, 1, 60),
     pagesPerRun: boundedInteger(env.PAGES_PER_RUN, 5, 1, 20),
     retention: {
       apiEventsDays: boundedInteger(env.API_EVENTS_RETENTION_DAYS, 7, 1, 365),

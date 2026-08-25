@@ -20,7 +20,7 @@ const DEFAULTS: BackendOrchestratorSettings = {
   enabled: false,
   orchestratorUrl: "",
   sharedSecret: "",
-  syncIntervalMinutes: 5,
+  syncIntervalMinutes: 1,
   pagesPerRun: 5,
 }
 
@@ -40,10 +40,7 @@ function normalize(value: unknown, updatedAt?: string | null): BackendOrchestrat
     enabled: row.enabled === true,
     orchestratorUrl: normalizeUrl(row.orchestratorUrl),
     sharedSecret,
-    syncIntervalMinutes:
-      typeof row.syncIntervalMinutes === "number" && Number.isFinite(row.syncIntervalMinutes)
-        ? Math.max(1, Math.min(60, Math.floor(row.syncIntervalMinutes)))
-        : DEFAULTS.syncIntervalMinutes,
+    syncIntervalMinutes: 1,
     pagesPerRun:
       typeof row.pagesPerRun === "number" && Number.isFinite(row.pagesPerRun)
         ? Math.max(1, Math.min(20, Math.floor(row.pagesPerRun)))

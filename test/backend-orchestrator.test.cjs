@@ -15,6 +15,8 @@ test("backend orchestrator uses the authenticated panel configuration handshake"
   const deploy = read("workers/backend-orchestrator/scripts/deploy.mjs")
   const configRoute = read("src/app/api/internal/backend-orchestrator/config/route.ts")
   const settings = read("src/lib/backend-orchestrator-settings-store.ts")
+  const settingsRoute = read("src/app/api/settings/backend-orchestrator/route.ts")
+  const settingsPage = read("src/app/dashboard/settings/page.tsx")
 
   assert.match(orchestrator, /PANEL_URL: string/)
   assert.match(orchestrator, /PANEL_SHARED_SECRET: string/)
@@ -29,6 +31,11 @@ test("backend orchestrator uses the authenticated panel configuration handshake"
   assert.match(configRoute, /POSTGRES_URL_NON_POOLING/)
   assert.match(settings, /secretConfigured:/)
   assert.doesNotMatch(settings, /sharedSecret: settings\.sharedSecret/)
+  assert.match(settingsRoute, /export async function PATCH/)
+  assert.match(settingsRoute, /body\.action === "test"/)
+  assert.match(settingsRoute, /enabled: false/)
+  assert.match(settingsPage, /Secret saved/)
+  assert.match(settingsPage, /Test connection/)
 })
 
 test("backend orchestrator scans bounded resumable pages and preserves change-only totals", () => {

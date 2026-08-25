@@ -24,7 +24,6 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
 
 export default function DashboardSettingsPage() {
@@ -41,11 +40,13 @@ export default function DashboardSettingsPage() {
   const [paletteMode, setPaletteMode] = React.useState<AmbientPaletteMode>("light")
   const [newThemeName, setNewThemeName] = React.useState("")
   const [orchestratorUrl, setOrchestratorUrl] = React.useState("")
+  const [savedOrchestratorUrl, setSavedOrchestratorUrl] = React.useState("")
   const [orchestratorSecret, setOrchestratorSecret] = React.useState("")
   const [orchestratorEnabled, setOrchestratorEnabled] = React.useState(false)
   const [orchestratorSecretConfigured, setOrchestratorSecretConfigured] = React.useState(false)
   const [orchestratorPagesPerRun, setOrchestratorPagesPerRun] = React.useState(5)
   const [orchestratorState, setOrchestratorState] = React.useState<Record<string, unknown> | null>(null)
+  const [orchestratorConnection, setOrchestratorConnection] = React.useState<"unknown" | "connected" | "failed">("unknown")
   const [orchestratorBusy, setOrchestratorBusy] = React.useState(false)
   const [orchestratorMessage, setOrchestratorMessage] = React.useState("")
 
@@ -58,10 +59,16 @@ export default function DashboardSettingsPage() {
     }
     if (!response.ok) throw new Error(payload.error || "Unable to load Backend Orchestrator settings")
     setOrchestratorEnabled(payload.settings?.enabled === true)
-    setOrchestratorUrl(payload.settings?.orchestratorUrl ?? "")
+    const savedUrl = payload.settings?.orchestratorUrl ?? ""
+    setOrchestratorUrl(savedUrl)
+    setSavedOrchestratorUrl(savedUrl)
     setOrchestratorSecretConfigured(payload.settings?.secretConfigured === true)
     setOrchestratorPagesPerRun(payload.settings?.pagesPerRun ?? 5)
-    setOrchestratorState(payload.state ?? null)
+    const persistedState = payload.state ?? null
+    setOrchestratorState(persistedState)
+    if (persistedState?.last_error) setOrchestratorConnection("failed")
+    else if (["idle", "running"].includes(String(persistedState?.status ?? ""))) setOrchestratorConnection("connected")
+    else setOrchestratorConnection("unknown")
   }, [])
 
   React.useEffect(() => {
@@ -76,7 +83,6 @@ export default function DashboardSettingsPage() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          enabled: orchestratorEnabled,
           orchestratorUrl,
           sharedSecret: orchestratorSecret,
           pagesPerRun: orchestratorPagesPerRun,
@@ -86,8 +92,53 @@ export default function DashboardSettingsPage() {
       if (!response.ok) throw new Error(payload.error || "Unable to save Backend Orchestrator settings")
       setOrchestratorSecret("")
       await loadOrchestratorSettings()
-      setOrchestratorMessage("Backend Orchestrator settings saved.")
+      setOrchestratorConnection("unknown")
+      setOrchestratorMessage("Connection settings saved. Test the connection before enabling.")
     } catch (error) {
+      setOrchestratorMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setOrchestratorBusy(false)
+    }
+  }
+
+  const testOrchestratorConnection = async () => {
+    setOrchestratorBusy(true)
+    setOrchestratorMessage("")
+    try {
+      const response = await fetch("/api/settings/backend-orchestrator", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "test" }),
+      })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || "Connection test failed")
+      setOrchestratorConnection("connected")
+      await loadOrchestratorSettings()
+      setOrchestratorMessage("Authenticated connection succeeded. The Backend Orchestrator can reach PostgreSQL.")
+    } catch (error) {
+      setOrchestratorConnection("failed")
+      setOrchestratorMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setOrchestratorBusy(false)
+    }
+  }
+
+  const setOrchestratorActive = async (enabled: boolean) => {
+    setOrchestratorBusy(true)
+    setOrchestratorMessage("")
+    try {
+      const response = await fetch("/api/settings/backend-orchestrator", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || `Unable to ${enabled ? "enable" : "disable"} Backend Orchestrator`)
+      await loadOrchestratorSettings()
+      if (enabled) setOrchestratorConnection("connected")
+      setOrchestratorMessage(`Backend Orchestrator ${enabled ? "enabled" : "disabled"}.`)
+    } catch (error) {
+      setOrchestratorConnection("failed")
       setOrchestratorMessage(error instanceof Error ? error.message : String(error))
     } finally {
       setOrchestratorBusy(false)
@@ -98,7 +149,11 @@ export default function DashboardSettingsPage() {
     setOrchestratorBusy(true)
     setOrchestratorMessage("")
     try {
-      const response = await fetch("/api/settings/backend-orchestrator", { method: "POST" })
+      const response = await fetch("/api/settings/backend-orchestrator", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "run" }),
+      })
       const payload = await response.json().catch(() => ({})) as { error?: string; result?: unknown }
       if (!response.ok) throw new Error(payload.error || "Backend Orchestrator run failed")
       await loadOrchestratorSettings()
@@ -120,6 +175,9 @@ export default function DashboardSettingsPage() {
     themes.find((theme) => theme.id === selectedThemeId) ??
     themes.find((theme) => theme.id === activeThemeId) ??
     themes[0]
+
+  const orchestratorConnectionDirty =
+    orchestratorUrl.trim().replace(/\/$/, "") !== savedOrchestratorUrl || orchestratorSecret.length > 0
 
   if (!selectedTheme) {
     return null
@@ -147,13 +205,12 @@ export default function DashboardSettingsPage() {
         <CardHeader>
           <CardTitle>Backend Orchestrator</CardTitle>
           <CardDescription>
-            Configure the deployed Backend Orchestrator URL and the same shared secret used by its PANEL_SHARED_SECRET build secret.
+            Save the deployed URL and shared secret, verify the authenticated database connection, then enable processing.
           </CardDescription>
           <CardAction>
-            <div className="flex items-center gap-2">
-              <Label htmlFor="orchestrator-enabled">Enabled</Label>
-              <Switch id="orchestrator-enabled" checked={orchestratorEnabled} onCheckedChange={setOrchestratorEnabled} />
-            </div>
+            <Badge variant={orchestratorEnabled ? "default" : "secondary"}>
+              {orchestratorEnabled ? "Enabled" : "Disabled"}
+            </Badge>
           </CardAction>
         </CardHeader>
         <CardContent className="grid gap-4 lg:grid-cols-2">
@@ -162,22 +219,39 @@ export default function DashboardSettingsPage() {
             <Input id="orchestrator-url" value={orchestratorUrl} onChange={(event) => setOrchestratorUrl(event.target.value)} placeholder="https://backend-orchestrator.example.workers.dev" />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="orchestrator-secret">Shared secret</Label>
-            <Input id="orchestrator-secret" type="password" value={orchestratorSecret} onChange={(event) => setOrchestratorSecret(event.target.value)} placeholder={orchestratorSecretConfigured ? "Configured - leave blank to keep it" : "At least 24 characters"} />
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="orchestrator-secret">Shared secret</Label>
+              <Badge variant={orchestratorSecretConfigured ? "outline" : "destructive"}>
+                {orchestratorSecretConfigured ? "Secret saved" : "Secret required"}
+              </Badge>
+            </div>
+            <Input id="orchestrator-secret" type="password" value={orchestratorSecret} onChange={(event) => setOrchestratorSecret(event.target.value)} placeholder={orchestratorSecretConfigured ? "Saved securely - enter only to replace" : "At least 24 characters"} />
+            <p className="text-xs text-muted-foreground">
+              For security, a saved secret is never displayed again. A blank field keeps the stored secret.
+            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="orchestrator-pages">R2 pages per invocation</Label>
             <Input id="orchestrator-pages" type="number" min={1} max={20} value={orchestratorPagesPerRun} onChange={(event) => setOrchestratorPagesPerRun(Math.max(1, Math.min(20, Number(event.target.value) || 1)))} />
           </div>
           <div className="rounded-2xl border p-4 text-sm">
-            <p>Status: {String(orchestratorState?.status ?? "Not connected")}</p>
+            <p>Connection: {orchestratorConnection === "connected" ? "Connected" : orchestratorConnection === "failed" ? "Failed" : "Not tested"}</p>
+            <p className="text-muted-foreground">Runtime: {String(orchestratorState?.status ?? "No runtime state")}</p>
             <p className="text-muted-foreground">Last completed: {String(orchestratorState?.last_completed_at ?? "Never")}</p>
             <p className="text-muted-foreground">Last error: {String(orchestratorState?.last_error ?? "None")}</p>
           </div>
           {orchestratorMessage ? <p className="text-sm lg:col-span-2">{orchestratorMessage}</p> : null}
         </CardContent>
-        <CardFooter className="flex gap-2">
-          <Button onClick={saveOrchestratorSettings} disabled={orchestratorBusy}>Save Backend Orchestrator</Button>
+        <CardFooter className="flex flex-wrap gap-2">
+          <Button onClick={saveOrchestratorSettings} disabled={orchestratorBusy}>Save connection</Button>
+          <Button variant="outline" onClick={testOrchestratorConnection} disabled={orchestratorBusy || orchestratorConnectionDirty || !orchestratorUrl || !orchestratorSecretConfigured}>Test connection</Button>
+          <Button
+            variant={orchestratorEnabled ? "destructive" : "secondary"}
+            onClick={() => void setOrchestratorActive(!orchestratorEnabled)}
+            disabled={orchestratorBusy || (!orchestratorEnabled && orchestratorConnection !== "connected")}
+          >
+            {orchestratorEnabled ? "Disable" : "Enable"}
+          </Button>
           <Button variant="outline" onClick={runOrchestratorNow} disabled={orchestratorBusy || !orchestratorEnabled}>Run now</Button>
         </CardFooter>
       </Card>
