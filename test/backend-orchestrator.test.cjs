@@ -63,6 +63,8 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
 
   assert.match(orchestrator, /const BUCKET_BATCH_SIZE = 25/)
   assert.match(orchestrator, /drive_backend_orchestrator_progress/)
+  assert.match(orchestrator, /async function ensureProgressSchema/)
+  assert.match(orchestrator, /await ensureProgressSchema\(db\)/)
   assert.match(orchestrator, /bucket_offset integer not null default 0/)
   assert.match(orchestrator, /status: "in_progress"/)
   assert.match(orchestrator, /processedBuckets: nextOffset/)

@@ -139,6 +139,19 @@ async function ensureSchema(db: Client) {
   `)
 }
 
+async function ensureProgressSchema(db: Client) {
+  await db.query(`
+    create table if not exists drive_backend_orchestrator_progress (
+      id boolean primary key default true check (id),
+      account_id uuid not null,
+      bucket_names jsonb not null default '[]'::jsonb,
+      bucket_offset integer not null default 0 check (bucket_offset >= 0),
+      started_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    )
+  `)
+}
+
 async function setState(db: Client, input: { status: string; orchestratorUrl?: string; error?: string | null; result?: unknown; completed?: boolean }) {
   await db.query(
     `
@@ -505,7 +518,7 @@ async function runCycle(env: Env, orchestratorUrl?: string) {
   await db.connect()
   let locked = false
   try {
-    await ensureSchema(db)
+    await ensureProgressSchema(db)
     const lock = await db.query<{ locked: boolean }>(`select pg_try_advisory_lock(hashtext('drive-backend-orchestrator')) locked`)
     locked = lock.rows[0]?.locked === true
     if (!locked) return { ok: true, skipped: "Another Backend Orchestrator cycle is active" }
@@ -560,7 +573,6 @@ export default {
         const config = runtimeConfig(env)
         db = dbClient(config.postgresUrl)
         await db.connect()
-        await ensureSchema(db)
         const state = await db.query(`select * from drive_backend_orchestrator_state where id=true limit 1`)
         return json({ ok: true, state: state.rows[0] ?? null })
       } catch (error) {
