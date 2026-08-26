@@ -95,12 +95,14 @@ export async function PUT(
       contentType: request.headers.get("content-type") ?? undefined,
     })
 
-    await recordProjectApiEvent({
-      project: authorized.auth.project,
-      apiKeyId: authorized.auth.apiKey.id,
-      action: "storage.object.put",
-      objectKey: key,
-      request,
+    after(async () => {
+      await recordProjectApiEvent({
+        project: authorized.auth.project,
+        apiKeyId: authorized.auth.apiKey.id,
+        action: "storage.object.put",
+        objectKey: key,
+        request,
+      })
     })
 
     return NextResponse.json({

@@ -9,6 +9,8 @@ import {
 } from "./projects-store"
 import { r2HeadBucket, type R2ClientConfig } from "./r2-s3"
 
+const PROJECT_BUCKET_ASSIGNMENT_CACHE_MAX_ENTRIES = 256
+
 declare global {
   var __driveProjectActiveAccountCache:
     | { expiresAt: number; account: CloudflareAccount | null }
@@ -16,6 +18,9 @@ declare global {
   var __driveProjectActiveAccountInflight: Promise<CloudflareAccount | null> | undefined
   var __driveProjectBucketAssignmentCache:
     | Map<string, { expiresAt: number; bucketNames: string[] }>
+    | undefined
+  var __driveProjectBucketAssignmentInflight:
+    | Map<string, Promise<string[]>>
     | undefined
   var __driveProjectBucketAvailabilityCache:
     | Map<string, { expiresAt: number; ok: boolean }>
@@ -125,6 +130,13 @@ function getProjectBucketAssignmentCache() {
   return global.__driveProjectBucketAssignmentCache
 }
 
+function getProjectBucketAssignmentInflight() {
+  if (!global.__driveProjectBucketAssignmentInflight) {
+    global.__driveProjectBucketAssignmentInflight = new Map()
+  }
+  return global.__driveProjectBucketAssignmentInflight
+}
+
 function getRateLimitCache() {
   if (!global.__driveProjectRateLimitCache) {
     global.__driveProjectRateLimitCache = new Map()
@@ -193,16 +205,37 @@ export async function resolveProjectBucketName(
   const cache = getProjectBucketAssignmentCache()
   const cacheKey = project.id
   const cached = cache.get(cacheKey)
-  const bucketNames = cached && cached.expiresAt > Date.now()
-    ? cached.bucketNames
-    : await listProjectBuckets(project.id).then(assignments => {
+  let bucketNames: string[]
+  if (cached && cached.expiresAt > Date.now()) {
+    bucketNames = cached.bucketNames
+  } else {
+    const inflight = getProjectBucketAssignmentInflight()
+    const pending = inflight.get(cacheKey)
+    const lookup = pending ?? (async () => {
+      const assignments = await listProjectBuckets(project.id)
       const nextBucketNames = assignments.map(bucket => bucket.bucketName)
+      const now = Date.now()
+      for (const [projectKey, entry] of cache) {
+        if (entry.expiresAt <= now) cache.delete(projectKey)
+      }
+      while (cache.size >= PROJECT_BUCKET_ASSIGNMENT_CACHE_MAX_ENTRIES) {
+        const oldest = cache.keys().next().value
+        if (typeof oldest !== "string") break
+        cache.delete(oldest)
+      }
       cache.set(cacheKey, {
         bucketNames: nextBucketNames,
-        expiresAt: Date.now() + cacheTtlMs("PROJECT_BUCKET_ASSIGNMENT_CACHE_TTL_SECONDS", 60),
+        expiresAt: now + cacheTtlMs("PROJECT_BUCKET_ASSIGNMENT_CACHE_TTL_SECONDS", 60),
       })
       return nextBucketNames
-    })
+    })()
+    if (!pending) inflight.set(cacheKey, lookup)
+    try {
+      bucketNames = await lookup
+    } finally {
+      if (inflight.get(cacheKey) === lookup) inflight.delete(cacheKey)
+    }
+  }
   const isAssigned = bucketNames.some((bucketName) => bucketName === selectedBucketName)
   if (!isAssigned) {
     return {
