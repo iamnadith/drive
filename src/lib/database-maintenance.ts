@@ -14,6 +14,12 @@ type MaintenanceResult = {
 }
 
 async function ensureMaintenanceSchema() {
+  await queryDb(`do $$ begin
+    if to_regclass('public.drive_bucket_stat_history') is not null
+       and to_regclass('public.drive_storage_stats_history') is null then
+      alter table public.drive_bucket_stat_history rename to drive_storage_stats_history;
+    end if;
+  end $$`)
   await queryDb(`
     create table if not exists drive_maintenance_state (
       task_name text primary key,
@@ -22,7 +28,7 @@ async function ensureMaintenanceSchema() {
     )
   `)
   await queryDb(`
-    create table if not exists drive_bucket_stat_history (
+    create table if not exists drive_storage_stats_history (
       id bigint generated always as identity primary key,
       account_id uuid not null,
       account_label text,
@@ -38,8 +44,8 @@ async function ensureMaintenanceSchema() {
       changed_at timestamptz not null default now()
     )
   `)
-  await queryDb(`create index if not exists drive_bucket_stat_history_bucket_time_idx on drive_bucket_stat_history (account_id, bucket_name, changed_at desc)`)
-  await queryDb(`create index if not exists drive_bucket_stat_history_time_idx on drive_bucket_stat_history (changed_at desc)`)
+  await queryDb(`create index if not exists drive_storage_stats_history_bucket_time_idx on drive_storage_stats_history (account_id, bucket_name, changed_at desc)`)
+  await queryDb(`create index if not exists drive_storage_stats_history_time_idx on drive_storage_stats_history (changed_at desc)`)
   await queryDb(`alter table if exists drive_migrations add column if not exists summary_item_count integer not null default 0`)
   await queryDb(`alter table if exists drive_migrations add column if not exists summary_objects bigint not null default 0`)
   await queryDb(`alter table if exists drive_migrations add column if not exists summary_bytes bigint not null default 0`)
@@ -92,7 +98,7 @@ async function deleteInBatches(input: {
 
 async function backfillBucketHistory() {
   await queryDb(`
-    insert into drive_bucket_stat_history (
+    insert into drive_storage_stats_history (
       account_id, account_label, account_email, bucket_name,
       previous_objects, objects, object_delta,
       previous_bytes, bytes, byte_delta, change_type, changed_at
@@ -103,13 +109,13 @@ async function backfillBucketHistory() {
            'created', coalesce(s.updated_at, now())
     from drive_bucket_stats s
     left join drive_accounts a on a.id = s.account_id
-    where not exists (
-      select 1 from drive_bucket_stat_history h
+      where not exists (
+        select 1 from drive_storage_stats_history h
       where h.account_id = s.account_id and h.bucket_name = s.bucket_name
     )
   `)
   await queryDb(`
-    insert into drive_bucket_stat_history (
+    insert into drive_storage_stats_history (
       account_id, account_label, account_email, bucket_name,
       previous_objects, objects, object_delta,
       previous_bytes, bytes, byte_delta, change_type, changed_at
@@ -119,8 +125,8 @@ async function backfillBucketHistory() {
            null, s.bytes, s.bytes,
            'deleted', coalesce(s.source_updated_at, s.captured_at, now())
     from drive_analytics_bucket_snapshots s
-    where not exists (
-      select 1 from drive_bucket_stat_history h
+      where not exists (
+        select 1 from drive_storage_stats_history h
       where h.account_id = s.account_id and h.bucket_name = s.bucket_name
     )
   `)

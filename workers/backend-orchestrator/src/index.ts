@@ -120,7 +120,7 @@ async function ensureSchema(db: Client) {
     )
   `)
   await db.query(`
-    create table if not exists drive_bucket_stat_history (
+    create table if not exists drive_storage_stats_history (
       id bigint generated always as identity primary key,
       account_id uuid not null,
       account_label text,
@@ -136,8 +136,8 @@ async function ensureSchema(db: Client) {
       changed_at timestamptz not null default now()
     )
   `)
-  await db.query(`create index if not exists drive_bucket_stat_history_bucket_time_idx on drive_bucket_stat_history (account_id, bucket_name, changed_at desc)`)
-  await db.query(`create index if not exists drive_bucket_stat_history_time_idx on drive_bucket_stat_history (changed_at desc)`)
+  await db.query(`create index if not exists drive_storage_stats_history_bucket_time_idx on drive_storage_stats_history (account_id, bucket_name, changed_at desc)`)
+  await db.query(`create index if not exists drive_storage_stats_history_time_idx on drive_storage_stats_history (changed_at desc)`)
   await db.query(`
     create table if not exists drive_analytics_bucket_snapshots (
       account_id uuid not null,
@@ -172,6 +172,12 @@ async function ensureSchema(db: Client) {
 }
 
 async function ensureProgressSchema(db: Client) {
+  await db.query(`do $$ begin
+    if to_regclass('public.drive_bucket_stat_history') is not null
+       and to_regclass('public.drive_storage_stats_history') is null then
+      alter table public.drive_bucket_stat_history rename to drive_storage_stats_history;
+    end if;
+  end $$`)
   await db.query(`
     create table if not exists drive_backend_orchestrator_progress (
       id boolean primary key default true check (id),
@@ -306,12 +312,12 @@ async function recordBucketHistory(db: Client, input: { accountId: string; bucke
   await db.query(
     `
       with latest as (
-        select objects, bytes, change_type from drive_bucket_stat_history
+      select objects, bytes, change_type from drive_storage_stats_history
         where account_id = $1 and bucket_name = $2 order by changed_at desc, id desc limit 1
       ), account as (
         select label, email from drive_accounts where id = $1
       ), inserted as (
-        insert into drive_bucket_stat_history (
+        insert into drive_storage_stats_history (
           account_id, account_label, account_email, bucket_name,
           previous_objects, objects, object_delta, previous_bytes, bytes, byte_delta, change_type
         )
@@ -430,12 +436,12 @@ async function applyBucketMetrics(db: Client, account: AccountRow, metrics: Buck
                history.bytes previous_bytes
         from input
         left join lateral (
-          select objects, bytes from drive_bucket_stat_history
+          select objects, bytes from drive_storage_stats_history
           where account_id=$1 and bucket_name=input.bucket
           order by changed_at desc, id desc limit 1
         ) history on true
       ), inserted as (
-        insert into drive_bucket_stat_history (
+        insert into drive_storage_stats_history (
           account_id, account_label, account_email, bucket_name,
           previous_objects, objects, object_delta, previous_bytes, bytes, byte_delta, change_type
         )

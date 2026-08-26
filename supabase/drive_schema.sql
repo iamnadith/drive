@@ -6,6 +6,13 @@ create extension if not exists pg_trgm;
 -- Ensure we operate on the expected schema in Supabase (usually `public`).
 set search_path = public;
 
+do $$ begin
+  if to_regclass('public.drive_bucket_stat_history') is not null
+     and to_regclass('public.drive_storage_stats_history') is null then
+    alter table public.drive_bucket_stat_history rename to drive_storage_stats_history;
+  end if;
+end $$;
+
 create table if not exists drive_users (
   id uuid primary key,
   name text not null,
@@ -481,7 +488,7 @@ create index if not exists drive_analytics_bucket_snapshots_captured_idx
 
 -- Permanent, change-only bucket totals. Scan pages remain temporary; this
 -- table records only created/changed/deleted totals for each account/bucket.
-create table if not exists drive_bucket_stat_history (
+create table if not exists drive_storage_stats_history (
   id bigint generated always as identity primary key,
   account_id uuid not null,
   account_label text,
@@ -496,10 +503,10 @@ create table if not exists drive_bucket_stat_history (
   change_type text not null,
   changed_at timestamptz not null default now()
 );
-create index if not exists drive_bucket_stat_history_bucket_time_idx
-  on drive_bucket_stat_history (account_id, bucket_name, changed_at desc);
-create index if not exists drive_bucket_stat_history_time_idx
-  on drive_bucket_stat_history (changed_at desc);
+create index if not exists drive_storage_stats_history_bucket_time_idx
+  on drive_storage_stats_history (account_id, bucket_name, changed_at desc);
+create index if not exists drive_storage_stats_history_time_idx
+  on drive_storage_stats_history (changed_at desc);
 
 create table if not exists drive_maintenance_state (
   task_name text primary key,

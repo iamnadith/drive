@@ -262,6 +262,12 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(`alter table if exists drive_users add column if not exists totp_enabled boolean not null default false;`)
       await queryDb(`alter table if exists drive_users add column if not exists totp_secret text;`)
       await queryDb(`alter table if exists drive_users add column if not exists totp_last_used_counter bigint;`)
+      await queryDb(`do $$ begin
+        if to_regclass('public.drive_bucket_stat_history') is not null
+           and to_regclass('public.drive_storage_stats_history') is null then
+          alter table public.drive_bucket_stat_history rename to drive_storage_stats_history;
+        end if;
+      end $$`)
       await queryDb(`
         create table if not exists drive_email_verification_tokens (
           id uuid primary key default gen_random_uuid(),
@@ -730,7 +736,7 @@ export async function ensureDriveSchema(): Promise<void> {
       )
 
       await queryDb(`
-        create table if not exists drive_bucket_stat_history (
+        create table if not exists drive_storage_stats_history (
           id bigint generated always as identity primary key,
           account_id uuid not null,
           account_label text,
@@ -746,8 +752,8 @@ export async function ensureDriveSchema(): Promise<void> {
           changed_at timestamptz not null default now()
         );
       `)
-      await queryDb(`create index if not exists drive_bucket_stat_history_bucket_time_idx on drive_bucket_stat_history (account_id, bucket_name, changed_at desc);`)
-      await queryDb(`create index if not exists drive_bucket_stat_history_time_idx on drive_bucket_stat_history (changed_at desc);`)
+      await queryDb(`create index if not exists drive_storage_stats_history_bucket_time_idx on drive_storage_stats_history (account_id, bucket_name, changed_at desc);`)
+      await queryDb(`create index if not exists drive_storage_stats_history_time_idx on drive_storage_stats_history (changed_at desc);`)
       await queryDb(`
         create table if not exists drive_maintenance_state (
           task_name text primary key,
