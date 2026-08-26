@@ -365,37 +365,6 @@ export default function StoragePage() {
     navigateToDrive(matchingDrive.name)
   }, [drives, drivesLoading, searchParams])
 
-  const needsStatsSync = React.useMemo(() => {
-    if (!activeAccount?.id) return false
-    return drives.some((d) => d.statsStatus && d.statsStatus !== "completed")
-  }, [activeAccount?.id, drives])
-
-  React.useEffect(() => {
-    if (!needsStatsSync) return
-    let stopped = false
-
-    const tick = async () => {
-      if (stopped) return
-      try {
-        await fetch("/api/storage/buckets/stats/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ maxKeysTotal: 5_000 }),
-        })
-      } catch {
-        // ignore
-      }
-      if (!stopped) await loadActiveAndBuckets()
-    }
-
-    void tick()
-    const interval = setInterval(() => void tick(), 3_000)
-    return () => {
-      stopped = true
-      clearInterval(interval)
-    }
-  }, [needsStatsSync, loadActiveAndBuckets])
-
   const pathKey = currentPath.join("/")
 
   React.useEffect(() => {

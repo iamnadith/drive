@@ -54,7 +54,6 @@ import { DashboardAnalyticsSkeleton } from "@/components/dashboard/loading-skele
 import { useDashboardResource } from "@/hooks/use-dashboard-resource"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { syncObjectHistory } from "@/lib/sync-object-history-client"
 
 type RangeKey = "7d" | "30d" | "90d"
 
@@ -443,7 +442,6 @@ export default function DashboardPage() {
     refreshIntervalMs: 20_000,
     staleTimeMs: 10_000,
     fetcher: async ({ signal, force }) => {
-      await syncObjectHistory({ force, signal })
       const res = await fetch(`/api/dashboard/analytics?range=all${force ? "&refresh=1" : ""}`, {
         cache: "no-store",
         signal,

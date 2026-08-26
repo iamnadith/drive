@@ -235,7 +235,6 @@ export default function MigrationsPage() {
   const [pathPrefix, setPathPrefix] = React.useState("")
   const [bucketQuery, setBucketQuery] = React.useState("")
   const [selectedBuckets, setSelectedBuckets] = React.useState<Record<string, boolean>>({})
-  const [bucketStatsSyncing, setBucketStatsSyncing] = React.useState(false)
 
   const loadAll = React.useCallback(async () => {
     setError(null)
@@ -313,35 +312,6 @@ export default function MigrationsPage() {
   }, [loadAll])
 
   const needsBucketStats = React.useMemo(() => buckets.some((b) => b.statsStatus && b.statsStatus !== "completed"), [buckets])
-
-  React.useEffect(() => {
-    if (!needsBucketStats) return
-    let stopped = false
-
-    const tick = async () => {
-      if (stopped) return
-      setBucketStatsSyncing(true)
-      try {
-        await fetch("/api/storage/buckets/stats/sync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ maxKeysTotal: 5_000 }),
-        })
-      } catch {
-        // ignore
-      } finally {
-        if (!stopped) setBucketStatsSyncing(false)
-      }
-      if (!stopped) void loadAll()
-    }
-
-    void tick()
-    const interval = setInterval(() => void tick(), 3_000)
-    return () => {
-      stopped = true
-      clearInterval(interval)
-    }
-  }, [needsBucketStats, loadAll])
 
   React.useEffect(() => {
     if (!activeMigration?.id) return
@@ -851,7 +821,7 @@ export default function MigrationsPage() {
                 />
                 {needsBucketStats ? (
                   <div className="text-xs text-muted-foreground">
-                    {bucketStatsSyncing ? "Calculating bucket stats..." : "Waiting for bucket stats..."}
+                    Waiting for Worker storage stats...
                   </div>
                 ) : null}
               </div>
@@ -902,7 +872,7 @@ export default function MigrationsPage() {
                                 <span>{formatNumber(b.objects)}</span>
                                 {b.statsStatus && b.statsStatus !== "completed" ? (
                                   <span className="text-[11px] text-muted-foreground">
-                                    {b.statsStatus === "error" ? "Error" : bucketStatsSyncing ? "Calculating..." : "Pending..."}
+                                    {b.statsStatus === "error" ? "Error" : "Waiting for Worker..."}
                                   </span>
                                 ) : null}
                               </div>
@@ -912,7 +882,7 @@ export default function MigrationsPage() {
                                 <span>{formatBytes(b.bytes)}</span>
                                 {b.statsStatus && b.statsStatus !== "completed" ? (
                                   <span className="text-[11px] text-muted-foreground">
-                                    {b.statsStatus === "error" ? "Error" : bucketStatsSyncing ? "Calculating..." : "Pending..."}
+                                    {b.statsStatus === "error" ? "Error" : "Waiting for Worker..."}
                                   </span>
                                 ) : null}
                               </div>

@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server"
 import { getAllAccounts } from "@/lib/accounts-store"
-import { r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
 import { r2CreateBucket } from "@/lib/r2-s3"
-import { ensureBucketStatsRows, getBucketStatsMap } from "@/lib/bucket-stats-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { listBucketStats } from "@/lib/bucket-stats-store"
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
@@ -36,54 +35,23 @@ export async function GET() {
       )
     }
 
-    const bucketsList = await r2ListBuckets({
-      accountId: active.cloudflareAccountId,
-      apiToken: active.apiToken,
-    })
-
-    const bucketNames = bucketsList.map((b) => b.name).filter(Boolean)
-    let statsMap = new Map<string, { objects: number; bytes: number; status: string; error?: string }>()
-    let statsError: string | null = null
-    try {
-      await ensureBucketStatsRows(active.id, bucketNames)
-      const map = await getBucketStatsMap(active.id)
-      statsMap = new Map(Array.from(map.entries()).map(([k, v]) => [k, v]))
-    } catch (e: unknown) {
-      statsError =
-        typeof e === "object" && e !== null && "message" in e
-          ? String((e as { message?: unknown }).message ?? "Unable to load bucket stats")
-          : "Unable to load bucket stats"
-    }
-
-    const results = bucketNames
-      .map((name) => {
-        const bucket = bucketsList.find((b) => b.name === name)
-        const stats = statsMap.get(name)
-
-        const fallbackObjects = typeof bucket?.objects === "number" ? bucket.objects : 0
-        const fallbackBytes = typeof bucket?.size === "number" ? bucket.size : 0
-
-        // Prefer cached stats even while running so the UI shows non-zero progressively.
-        const objects =
-          typeof stats?.objects === "number" && stats.objects > 0 ? stats.objects : fallbackObjects
-        const bytes = typeof stats?.bytes === "number" && stats.bytes > 0 ? stats.bytes : fallbackBytes
-
-        return {
-          id: name,
-          name,
-          objects,
-          bytes,
-          statsStatus: stats?.status ?? "pending",
-          statsError: stats?.error ?? statsError ?? undefined,
-          createdAt: bucket?.creation_date,
-          jurisdiction: bucket?.jurisdiction,
-          storageClass: bucket?.storage_class,
-        }
-      })
+    // Storage statistics are a Worker-owned projection. The panel only reads
+    // the latest database snapshot and never enumerates R2 objects here.
+    const stats = await listBucketStats(active.id)
+    const results = stats
+      .map((row) => ({
+        id: row.bucketName,
+        name: row.bucketName,
+        objects: row.objects,
+        bytes: row.bytes,
+        statsStatus: row.status,
+        statsError: row.error,
+        updatedAt: row.updatedAt,
+      }))
       .sort((a, b) => a.name.localeCompare(b.name))
 
     const totalBytes = results.reduce((sum: number, b: { bytes: number }) => sum + (b.bytes ?? 0), 0)
-    return NextResponse.json({ buckets: results, totalBytes, ...(statsError ? { error: statsError } : {}) })
+    return NextResponse.json({ buckets: results, totalBytes, source: "database" })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to list buckets")
     return NextResponse.json(
