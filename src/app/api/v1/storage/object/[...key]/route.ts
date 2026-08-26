@@ -5,6 +5,7 @@ import { assertProjectObjectWritable, clearProjectObjectLock, markTrackedBucketO
 import { r2DeleteObject, r2HeadObject, r2PutObject } from "@/lib/r2-s3"
 import { isSystemDerivativeKey } from "@/lib/storage-delivery.cjs"
 import { rejectDisallowedBucketDeliveryOrigin } from "@/lib/bucket-delivery-origin-guard"
+import { createStorageObjectMetadataHeaders } from "@/lib/storage-object-metadata.cjs"
 
 function keyFromParams(parts: string[]) {
   return parts.map((part) => decodeURIComponent(part)).join("/").trim().replace(/^\/+/, "")
@@ -45,11 +46,10 @@ export async function HEAD(
   return new Response(null, {
     status: 200,
     headers: {
-      ...(typeof head.ContentLength === "number" ? { "Content-Length": String(head.ContentLength) } : {}),
       // A bodyless HEAD response may have Content-Length normalized to zero by
       // the hosting runtime. Preserve the authoritative R2 object size in a
       // dedicated metadata header for storage clients.
-      ...(typeof head.ContentLength === "number" ? { "X-Drive-Object-Size": String(head.ContentLength) } : {}),
+      ...createStorageObjectMetadataHeaders(head.ContentLength),
       ...(head.ContentType ? { "Content-Type": head.ContentType } : {}),
       ...(head.ETag ? { ETag: head.ETag } : {}),
       "Cache-Control": "no-store",
