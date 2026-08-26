@@ -84,5 +84,6 @@ test("worker packages and GitHub workflow use their permanent names", () => {
   assert.match(workflow, /name: Migration Worker/)
   assert.match(workflow, /working-directory: workers\/migration-worker/)
   assert.match(wrangler, /"name": "backend-orchestrator"/)
+  assert.match(wrangler, /nodejs_compat_v2/)
   assert.match(wrangler, /"crons": \["\* \* \* \* \*"\]/)
 })
