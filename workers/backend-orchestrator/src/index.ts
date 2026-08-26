@@ -8,6 +8,7 @@ type Env = {
   API_EVENTS_RETENTION_DAYS: string
   OBJECT_CHANGES_RETENTION_DAYS: string
   SCAN_DETAILS_RETENTION_DAYS: string
+  DISABLE_POSTGRES_SSL: string
 }
 
 type RuntimeConfig = {
@@ -15,6 +16,7 @@ type RuntimeConfig = {
   postgresUrl: string
   syncIntervalMinutes: number
   retention: { apiEventsDays: number; objectChangesDays: number; scanDetailsDays: number }
+  disablePostgresSsl: boolean
 }
 
 type AccountRow = {
@@ -50,6 +52,11 @@ function boundedInteger(value: string, fallback: number, minimum: number, maximu
   return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, Math.floor(parsed))) : fallback
 }
 
+function envFlag(value: string | undefined) {
+  const normalized = String(value ?? "").trim().toLowerCase()
+  return normalized === "1" || normalized === "true"
+}
+
 function runtimeConfig(env: Env): RuntimeConfig {
   if (!env.POSTGRES_URL?.trim()) throw new Error("POSTGRES_URL was not injected during deployment")
   return {
@@ -61,16 +68,23 @@ function runtimeConfig(env: Env): RuntimeConfig {
       objectChangesDays: boundedInteger(env.OBJECT_CHANGES_RETENTION_DAYS, 7, 1, 365),
       scanDetailsDays: boundedInteger(env.SCAN_DETAILS_RETENTION_DAYS, 7, 1, 365),
     },
+    disablePostgresSsl: envFlag(env.DISABLE_POSTGRES_SSL),
   }
 }
 
-function dbClient(connectionString: string) {
+function dbClient(connectionString: string, disablePostgresSsl: boolean) {
+  const host = (() => {
+    try { return new URL(connectionString).hostname.toLowerCase() } catch { return "" }
+  })()
+  const isSupabase = host.endsWith(".supabase.com")
   return new Client({
     connectionString,
-    ssl: { rejectUnauthorized: false },
+    ssl: isSupabase || disablePostgresSsl ? false : { rejectUnauthorized: false },
     connectionTimeoutMillis: 10_000,
     query_timeout: 20_000,
     statement_timeout: 20_000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 5_000,
   })
 }
 
@@ -514,7 +528,7 @@ async function reconcilePanel(env: Env) {
 
 async function runCycle(env: Env, orchestratorUrl?: string) {
   const config = runtimeConfig(env)
-  const db = dbClient(config.postgresUrl)
+  const db = dbClient(config.postgresUrl, config.disablePostgresSsl)
   await db.connect()
   let locked = false
   try {
@@ -553,7 +567,7 @@ export default {
       let db: Client | null = null
       try {
         const config = runtimeConfig(env)
-        db = dbClient(config.postgresUrl)
+        db = dbClient(config.postgresUrl, config.disablePostgresSsl)
         await db.connect()
         await db.query("select 1")
         return json({ ok: true, configured: true, panel: new URL(env.PANEL_URL).origin })
@@ -571,7 +585,7 @@ export default {
       let db: Client | null = null
       try {
         const config = runtimeConfig(env)
-        db = dbClient(config.postgresUrl)
+        db = dbClient(config.postgresUrl, config.disablePostgresSsl)
         await db.connect()
         const state = await db.query(`select * from drive_backend_orchestrator_state where id=true limit 1`)
         return json({ ok: true, state: state.rows[0] ?? null })

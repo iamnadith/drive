@@ -13,6 +13,11 @@ function databaseUrl() {
   ).trim()
 }
 
+function disablePostgresSsl() {
+  const value = String(process.env.DISABLE_POSTGRES_SSL ?? "").trim().toLowerCase()
+  return value === "1" || value === "true"
+}
+
 export async function GET(request: Request) {
   const auth = await authenticateBackendOrchestrator(request)
   if (!auth.ok) return NextResponse.json({ error: "Invalid Backend Orchestrator secret" }, { status: 401 })
@@ -23,6 +28,7 @@ export async function GET(request: Request) {
     {
       version: 2,
       postgresUrl,
+      disablePostgresSsl: disablePostgresSsl(),
       syncIntervalMinutes: auth.settings.syncIntervalMinutes,
       retention: { apiEventsDays: 7, objectChangesDays: 7, scanDetailsDays: 7 },
     },
