@@ -46,6 +46,10 @@ export async function HEAD(
     status: 200,
     headers: {
       ...(typeof head.ContentLength === "number" ? { "Content-Length": String(head.ContentLength) } : {}),
+      // A bodyless HEAD response may have Content-Length normalized to zero by
+      // the hosting runtime. Preserve the authoritative R2 object size in a
+      // dedicated metadata header for storage clients.
+      ...(typeof head.ContentLength === "number" ? { "X-Drive-Object-Size": String(head.ContentLength) } : {}),
       ...(head.ContentType ? { "Content-Type": head.ContentType } : {}),
       ...(head.ETag ? { ETag: head.ETag } : {}),
       "Cache-Control": "no-store",
