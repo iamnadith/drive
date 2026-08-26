@@ -75,6 +75,8 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   assert.equal((orchestrator.match(/fetchWithTimeout\(/g) || []).length >= 5, true)
   assert.match(orchestrator, /External request timed out after \$\{timeoutMs\}ms/)
   assert.match(orchestrator, /return \{ account: account\.label, status: "error", error: message \}/)
+  assert.match(orchestrator, /status in \('active','available'\)/)
+  assert.match(orchestrator, /and status in \('active','available'\) limit 1/)
   assert.match(orchestrator, /drive_backend_orchestrator_progress/)
   assert.match(orchestrator, /async function ensureProgressSchema/)
   assert.match(orchestrator, /await ensureProgressSchema\(db\)/)
