@@ -44,6 +44,9 @@ async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
     return await fetch(input, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error(`External request timed out after ${timeoutMs}ms`)
+    throw error
   } finally {
     clearTimeout(timeout)
   }
@@ -508,7 +511,7 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     await db.query(`update drive_accounts set sync_status='error',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1`, [account.id, message]).catch(() => undefined)
-    throw error
+    return { account: account.label, status: "error", error: message }
   }
 }
 
