@@ -526,21 +526,35 @@ async function reconcilePanel(env: Env) {
   return response.json()
 }
 
+async function claimCycle(db: Client, orchestratorUrl?: string) {
+  const result = await db.query(`
+    insert into drive_backend_orchestrator_state
+      (id,status,orchestrator_url,last_started_at,last_error,last_result,updated_at)
+    values (true,'running',$1,now(),null,'{}'::jsonb,now())
+    on conflict (id) do update set
+      status='running', orchestrator_url=coalesce(excluded.orchestrator_url, drive_backend_orchestrator_state.orchestrator_url),
+      last_started_at=now(), last_error=null, last_result='{}'::jsonb, updated_at=now()
+    where drive_backend_orchestrator_state.status <> 'running'
+       or drive_backend_orchestrator_state.last_started_at < now() - interval '2 minutes'
+    returning id
+  `, [orchestratorUrl ?? null])
+  return result.rowCount === 1
+}
+
 async function runCycle(env: Env, orchestratorUrl?: string) {
   const config = runtimeConfig(env)
   const db = dbClient(config.postgresUrl, config.disablePostgresSsl)
   await db.connect()
-  let locked = false
+  let claimed = false
   try {
     await ensureProgressSchema(db)
-    const lock = await db.query<{ locked: boolean }>(`select pg_try_advisory_lock(hashtext('drive-backend-orchestrator')) locked`)
-    locked = lock.rows[0]?.locked === true
-    if (!locked) return { ok: true, skipped: "Another Backend Orchestrator cycle is active" }
+    claimed = await claimCycle(db, orchestratorUrl)
+    if (!claimed) return { ok: true, skipped: "Another Backend Orchestrator cycle is active" }
     const panel = await reconcilePanel(env)
     if (panel && typeof panel === "object" && "disabled" in panel && panel.disabled === true) {
+      await setState(db, { status: "idle", result: { skipped: "Backend Orchestrator is disabled in the panel" }, completed: true })
       return { ok: true, skipped: "Backend Orchestrator is disabled in the panel" }
     }
-    await setState(db, { status: "running", orchestratorUrl })
     await db.query(`
       update drive_bucket_scans set status='failed',error='Superseded by R2 analytics metrics sync',completed_at=now(),updated_at=now()
       where kind='orchestrator' and status='running'
@@ -555,7 +569,6 @@ async function runCycle(env: Env, orchestratorUrl?: string) {
     await setState(db, { status: "error", error: message, result: { error: message }, completed: true }).catch(() => undefined)
     throw error
   } finally {
-    if (locked) await db.query(`select pg_advisory_unlock(hashtext('drive-backend-orchestrator'))`).catch(() => undefined)
     await db.end().catch(() => undefined)
   }
 }

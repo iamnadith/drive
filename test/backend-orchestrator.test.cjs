@@ -78,6 +78,8 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   assert.match(orchestrator, /processedBuckets: nextOffset/)
   assert.match(orchestrator, /for \(const \[index, bucket\] of batch\.entries\(\)/)
   assert.match(orchestrator, /bucketOffset \+ index \+ 1/)
+  assert.match(orchestrator, /async function claimCycle/)
+  assert.match(orchestrator, /interval '2 minutes'/)
   assert.match(orchestrator, /on conflict \(id\) do update set/)
   assert.match(orchestrator, /r2StorageAdaptiveGroups/)
   assert.doesNotMatch(orchestrator, /ListObjectsV2Command|S3Client|ContinuationToken/)
