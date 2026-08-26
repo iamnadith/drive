@@ -58,6 +58,21 @@ test("backend orchestrator uses account analytics without per-object scans and p
   assert.ok(orchestrator.indexOf("const panel = await reconcilePanel(env)") < orchestrator.indexOf("const sync = await syncNextAccount"))
 })
 
+test("worker sync is aggregate-only and resumable across CPU-limited invocations", () => {
+  const orchestrator = read("workers/backend-orchestrator/src/index.ts")
+
+  assert.match(orchestrator, /const BUCKET_BATCH_SIZE = 25/)
+  assert.match(orchestrator, /drive_backend_orchestrator_progress/)
+  assert.match(orchestrator, /bucket_offset integer not null default 0/)
+  assert.match(orchestrator, /status: "in_progress"/)
+  assert.match(orchestrator, /processedBuckets: nextOffset/)
+  assert.match(orchestrator, /for \(const \[index, bucket\] of batch\.entries\(\)/)
+  assert.match(orchestrator, /bucketOffset \+ index \+ 1/)
+  assert.match(orchestrator, /on conflict \(id\) do update set/)
+  assert.match(orchestrator, /r2StorageAdaptiveGroups/)
+  assert.doesNotMatch(orchestrator, /ListObjectsV2Command|S3Client|ContinuationToken/)
+})
+
 test("worker packages and GitHub workflow use their permanent names", () => {
   const rootPackage = read("package.json")
   const migrationPackage = read("workers/migration-worker/package.json")

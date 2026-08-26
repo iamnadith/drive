@@ -30,6 +30,8 @@ type AccountRow = {
 type BucketInfo = { name: string; jurisdiction: string }
 type BucketMetric = { bucket: string; objects: number; bytes: number; observedAt: string }
 
+const BUCKET_BATCH_SIZE = 25
+
 function json(value: unknown, status = 200) {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store" } })
 }
@@ -123,6 +125,16 @@ async function ensureSchema(db: Client) {
       task_name text primary key,
       last_run_at timestamptz not null default now(),
       last_result jsonb not null default '{}'::jsonb
+    )
+  `)
+  await db.query(`
+    create table if not exists drive_backend_orchestrator_progress (
+      id boolean primary key default true check (id),
+      account_id uuid not null,
+      bucket_names jsonb not null default '[]'::jsonb,
+      bucket_offset integer not null default 0 check (bucket_offset >= 0),
+      started_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
     )
   `)
 }
@@ -304,6 +316,48 @@ async function selectNextAccount(db: Client, syncIntervalMinutes: number) {
   return account.rows[0] ?? null
 }
 
+async function loadSyncProgress(db: Client) {
+  const result = await db.query<{ account_id: string; bucket_names: unknown; bucket_offset: number }>(
+    `select account_id, bucket_names, bucket_offset from drive_backend_orchestrator_progress where id=true limit 1`
+  )
+  const row = result.rows[0]
+  if (!row || !Array.isArray(row.bucket_names)) return null
+  return {
+    accountId: row.account_id,
+    buckets: row.bucket_names.flatMap((value): BucketInfo[] => {
+      if (typeof value === "string" && value.length > 0) return [{ name: value, jurisdiction: "default" }]
+      if (!value || typeof value !== "object") return []
+      const bucket = value as { name?: unknown; jurisdiction?: unknown }
+      return typeof bucket.name === "string" && bucket.name.length > 0
+        ? [{ name: bucket.name, jurisdiction: typeof bucket.jurisdiction === "string" ? bucket.jurisdiction : "default" }]
+        : []
+    }),
+    bucketOffset: Math.max(0, Math.trunc(Number(row.bucket_offset) || 0)),
+  }
+}
+
+async function selectAccountById(db: Client, accountId: string) {
+  const result = await db.query<AccountRow>(`
+    select id,label,email,api_token,cloudflare_account_id,status,last_synced_at
+    from drive_accounts where id=$1 and api_token<>'' limit 1
+  `, [accountId])
+  return result.rows[0] ?? null
+}
+
+async function saveSyncProgress(db: Client, input: { accountId: string; buckets: BucketInfo[]; bucketOffset: number }) {
+  await db.query(`
+    insert into drive_backend_orchestrator_progress (id,account_id,bucket_names,bucket_offset,started_at,updated_at)
+    values (true,$1,$2::jsonb,$3,now(),now())
+    on conflict (id) do update set
+      account_id=excluded.account_id, bucket_names=excluded.bucket_names,
+      bucket_offset=excluded.bucket_offset, updated_at=now()
+  `, [input.accountId, JSON.stringify(input.buckets), input.bucketOffset])
+}
+
+async function clearSyncProgress(db: Client) {
+  await db.query(`delete from drive_backend_orchestrator_progress where id=true`)
+}
+
 async function applyBucketMetrics(db: Client, account: AccountRow, metrics: BucketMetric[]) {
   if (metrics.length === 0) return
   await db.query(
@@ -354,7 +408,15 @@ async function applyBucketMetrics(db: Client, account: AccountRow, metrics: Buck
 }
 
 async function syncNextAccount(db: Client, config: RuntimeConfig) {
-  const account = await selectNextAccount(db, config.syncIntervalMinutes)
+  let progress = await loadSyncProgress(db)
+  let account = progress
+    ? await selectAccountById(db, progress.accountId)
+    : await selectNextAccount(db, config.syncIntervalMinutes)
+  if (progress && !account) {
+    await clearSyncProgress(db)
+    progress = null
+    account = await selectNextAccount(db, config.syncIntervalMinutes)
+  }
   if (!account) return { status: "idle", message: "No account is due for synchronization" }
   try {
     if (!account.cloudflare_account_id) {
@@ -363,15 +425,32 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
       await db.query(`update drive_accounts set cloudflare_account_id=$2,cloudflare_account_name=$3,updated_at=now() where id=$1`, [account.id, resolved.id, resolved.name])
     }
     await db.query(`update drive_accounts set sync_status='syncing',sync_message='Backend Orchestrator metrics sync running',updated_at=now() where id=$1`, [account.id])
-    const buckets = await listBuckets(account)
+    const buckets = progress ? progress.buckets : await listBuckets(account)
     const bucketNames = buckets.map((bucket) => bucket.name)
-    await reconcileBuckets(db, account, bucketNames)
+    const bucketOffset = progress?.accountId === account.id ? Math.min(progress.bucketOffset, buckets.length) : 0
+    if (!progress || progress.accountId !== account.id) {
+      await reconcileBuckets(db, account, bucketNames)
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0 })
+    }
     if (buckets.length === 0) {
+      await clearSyncProgress(db)
       await db.query(`update drive_accounts set total_buckets=0,total_objects=0,total_bytes=0,sync_status='ok',sync_message='No R2 buckets',last_synced_at=now(),updated_at=now() where id=$1`, [account.id])
       return { account: account.label, status: "completed", buckets: 0 }
     }
     const metrics = await getBucketMetrics(account, buckets)
-    await applyBucketMetrics(db, account, metrics)
+    const batch = buckets.slice(bucketOffset, bucketOffset + BUCKET_BATCH_SIZE)
+    const metricByBucket = new Map(metrics.map((metric) => [metric.bucket, metric]))
+    for (const [index, bucket] of batch.entries()) {
+      const metric = metricByBucket.get(bucket.name)
+      if (metric) await applyBucketMetrics(db, account, [metric])
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: bucketOffset + index + 1 })
+    }
+    const nextOffset = bucketOffset + batch.length
+    if (nextOffset < buckets.length) {
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: nextOffset })
+      return { account: account.label, status: "in_progress", buckets: buckets.length, processedBuckets: nextOffset, remainingBuckets: buckets.length - nextOffset }
+    }
+    await clearSyncProgress(db)
     await db.query(`
       update drive_accounts a set
         total_buckets=(select count(*) from drive_bucket_stats s where s.account_id=a.id),
@@ -426,6 +505,7 @@ async function runCycle(env: Env, orchestratorUrl?: string) {
   await db.connect()
   let locked = false
   try {
+    await ensureSchema(db)
     const lock = await db.query<{ locked: boolean }>(`select pg_try_advisory_lock(hashtext('drive-backend-orchestrator')) locked`)
     locked = lock.rows[0]?.locked === true
     if (!locked) return { ok: true, skipped: "Another Backend Orchestrator cycle is active" }
