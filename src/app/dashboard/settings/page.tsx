@@ -47,6 +47,7 @@ export default function DashboardSettingsPage() {
   const [orchestratorUpdatedAt, setOrchestratorUpdatedAt] = React.useState("")
   const [orchestratorLoaded, setOrchestratorLoaded] = React.useState(false)
   const [orchestratorState, setOrchestratorState] = React.useState<Record<string, unknown> | null>(null)
+  const [orchestratorWorker, setOrchestratorWorker] = React.useState<Record<string, unknown> | null>(null)
   const [orchestratorConnection, setOrchestratorConnection] = React.useState<"unknown" | "connected" | "failed">("unknown")
   const [orchestratorBusy, setOrchestratorBusy] = React.useState(false)
   const [orchestratorMessage, setOrchestratorMessage] = React.useState("")
@@ -56,6 +57,7 @@ export default function DashboardSettingsPage() {
     const payload = await response.json().catch(() => ({})) as {
       settings?: { enabled?: boolean; orchestratorUrl?: string; secretConfigured?: boolean; updatedAt?: string }
       state?: Record<string, unknown> | null
+      worker?: Record<string, unknown> | null
       error?: string
     }
     if (!response.ok) throw new Error(payload.error || "Unable to load Backend Orchestrator settings")
@@ -67,6 +69,7 @@ export default function DashboardSettingsPage() {
     setOrchestratorUpdatedAt(payload.settings?.updatedAt ?? "")
     const persistedState = payload.state ?? null
     setOrchestratorState(persistedState)
+    setOrchestratorWorker(payload.worker ?? null)
     if (persistedState?.last_error) setOrchestratorConnection("failed")
     else if (["idle", "running"].includes(String(persistedState?.status ?? ""))) setOrchestratorConnection("connected")
     else setOrchestratorConnection("unknown")
@@ -238,6 +241,7 @@ export default function DashboardSettingsPage() {
             <p>Connection: {!orchestratorLoaded ? "Loading saved settings..." : orchestratorConnection === "connected" ? "Connected" : orchestratorConnection === "failed" ? "Failed" : "Not tested"}</p>
             <p className="text-muted-foreground">Last saved: {orchestratorUpdatedAt ? new Date(orchestratorUpdatedAt).toLocaleString() : "Never"}</p>
             <p className="text-muted-foreground">Runtime: {String(orchestratorState?.status ?? "No runtime state")}</p>
+            <p className="text-muted-foreground">Worker build: {String(orchestratorWorker?.build ?? "Unknown")}</p>
             <p className="text-muted-foreground">Last completed: {String(orchestratorState?.last_completed_at ?? "Never")}</p>
             <p className="text-muted-foreground">Last error: {String(orchestratorState?.last_error ?? "None")}</p>
           </div>

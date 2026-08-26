@@ -38,8 +38,11 @@ export async function GET() {
   const auth = await requireAdmin()
   if (!auth.ok) return auth.response
   const settings = await getBackendOrchestratorSettings()
+  const worker = settings.orchestratorUrl && settings.sharedSecret
+    ? await callOrchestrator(settings, { path: "/status", method: "GET" }).catch(() => null)
+    : null
   return NextResponse.json(
-    { settings: publicBackendOrchestratorSettings(settings), state: await state() },
+    { settings: publicBackendOrchestratorSettings(settings), state: await state(), worker },
     { headers: { "Cache-Control": "no-store, max-age=0" } }
   )
 }

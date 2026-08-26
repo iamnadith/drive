@@ -34,6 +34,10 @@ type BucketMetric = { bucket: string; objects: number; bytes: number; observedAt
 
 const BUCKET_BATCH_SIZE = 25
 const EXTERNAL_REQUEST_TIMEOUT_MS = 8_000
+const METRICS_CACHE_TTL_MS = 10_000
+const WORKER_BUILD = 15
+const RETENTION_BATCH_SIZE = 250
+const metricsCache = new Map<string, { expiresAt: number; metrics: BucketMetric[] }>()
 
 function json(value: unknown, status = 200) {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store" } })
@@ -229,6 +233,10 @@ async function listBuckets(account: AccountRow) {
 
 async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Promise<BucketMetric[]> {
   if (!account.cloudflare_account_id) throw new Error(`Account ${account.label} has no Cloudflare account ID`)
+  const cacheKey = `${account.id}:${buckets.map((bucket) => `${bucket.jurisdiction}:${bucket.name}`).join("|")}`
+  const cached = metricsCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) return cached.metrics
+  if (cached) metricsCache.delete(cacheKey)
   const query = `
     query R2Storage($accountTag: string!, $startDate: Time!, $endDate: Time!) {
       viewer {
@@ -284,11 +292,14 @@ async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Pro
       observedAt,
     })
   }
-  return buckets.flatMap((bucket) => {
+  const metrics = buckets.flatMap((bucket) => {
     const analyticsName = bucket.jurisdiction === "default" ? bucket.name : `${bucket.jurisdiction}_${bucket.name}`
     const metric = latestByAnalyticsName.get(analyticsName)
     return metric ? [{ ...metric, bucket: bucket.name }] : []
   })
+  metricsCache.set(cacheKey, { expiresAt: Date.now() + METRICS_CACHE_TTL_MS, metrics })
+  while (metricsCache.size > 64) metricsCache.delete(metricsCache.keys().next().value as string)
+  return metrics
 }
 
 async function recordBucketHistory(db: Client, input: { accountId: string; bucket: string; objects: number; bytes: number; deleted: boolean }) {
@@ -516,6 +527,19 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
   }
 }
 
+async function deleteRetentionBatch(db: Client, table: string, condition: string, params: unknown[] = [], batchSize = RETENTION_BATCH_SIZE) {
+  try {
+    const result = await db.query(
+      `with doomed as (select ctid from ${table} where ${condition} limit ${Math.max(1, Math.floor(batchSize))})
+       delete from ${table} where ctid in (select ctid from doomed)`,
+      params
+    )
+    return { deleted: result.rowCount ?? 0 }
+  } catch (error) {
+    return { deleted: 0, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
 async function runRetention(db: Client, config: RuntimeConfig) {
   const claim = await db.query(`
     insert into drive_maintenance_state(task_name,last_run_at) values('backend-orchestrator-retention',now())
@@ -523,22 +547,50 @@ async function runRetention(db: Client, config: RuntimeConfig) {
     where drive_maintenance_state.last_run_at<now()-interval '6 hours' returning task_name
   `)
   if (claim.rowCount === 0) return false
-  await db.query(`delete from drive_project_api_events where occurred_at<now()-($1::text||' days')::interval`, [config.retention.apiEventsDays])
-  await db.query(`delete from drive_object_change_events where occurred_at<now()-($1::text||' days')::interval`, [config.retention.objectChangesDays])
-  await db.query(`delete from drive_bucket_scan_objects where created_at<now()-($1::text||' days')::interval`, [config.retention.scanDetailsDays])
-  await db.query(`delete from drive_bucket_verify_diffs where created_at<now()-($1::text||' days')::interval`, [config.retention.scanDetailsDays])
-  await db.query(`delete from drive_bucket_scans where status in('completed','failed') and coalesce(completed_at,updated_at)<now()-($1::text||' days')::interval`, [config.retention.scanDetailsDays])
-  return true
+  const tasks: Array<[string, string, string, unknown[]]> = [
+    ["apiEvents", "drive_project_api_events", "occurred_at<now()-($1::text||' days')::interval", [config.retention.apiEventsDays]],
+    ["objectChanges", "drive_object_change_events", "occurred_at<now()-($1::text||' days')::interval", [config.retention.objectChangesDays]],
+    ["scanObjects", "drive_bucket_scan_objects", "created_at<now()-($1::text||' days')::interval", [config.retention.scanDetailsDays]],
+    ["verifyDiffs", "drive_bucket_verify_diffs", "created_at<now()-($1::text||' days')::interval", [config.retention.scanDetailsDays]],
+    ["bucketScans", "drive_bucket_scans", "status in('completed','failed') and coalesce(completed_at,updated_at)<now()-($1::text||' days')::interval", [config.retention.scanDetailsDays]],
+    ["syncRuns", "drive_object_sync_runs", "status<>'running' and coalesce(completed_at,started_at)<now()-($1::text||' days')::interval", [config.retention.scanDetailsDays]],
+    ["operationJobs", "drive_project_operation_jobs", "status in('completed','failed','canceled') and coalesce(completed_at,updated_at)<now()-($1::text||' days')::interval", [30]],
+    ["activityEvents", "drive_activity_events", "occurred_at<now()-($1::text||' days')::interval", [90]],
+    ["expiredLocks", "drive_project_object_locks", "expires_at is not null and expires_at<now()", []],
+    ["emailTokens", "drive_email_verification_tokens", "(expires_at<now() or consumed_at is not null) and created_at<now()-interval '1 day'", []],
+    ["smsTokens", "drive_sms_verification_tokens", "(expires_at<now() or consumed_at is not null) and created_at<now()-interval '1 day'", []],
+  ]
+  const deleted: Record<string, number> = {}
+  const errors: Record<string, string> = {}
+  let incomplete = false
+  for (const [name, table, condition, params] of tasks) {
+    const result = await deleteRetentionBatch(db, table, condition, params)
+    deleted[name] = result.deleted
+    if (result.error) errors[name] = result.error
+    if (result.deleted >= RETENTION_BATCH_SIZE) incomplete = true
+  }
+  await db.query(
+    `update drive_maintenance_state set
+       last_run_at=case when $2::boolean then now()-interval '6 hours' else now() end,
+       last_result=$3::jsonb
+     where task_name='backend-orchestrator-retention'`,
+    ["backend-orchestrator-retention", incomplete, JSON.stringify({ deleted, errors, incomplete, completedAt: new Date().toISOString() })]
+  )
+  return { ran: true, deleted, errors, incomplete }
 }
 
 async function reconcilePanel(env: Env) {
-  const response = await fetchWithTimeout(panelUrl(env, "/api/internal/backend-orchestrator/reconcile"), {
-    method: "POST",
-    headers: { Authorization: `Bearer ${env.PANEL_SHARED_SECRET}` },
-  })
-  if (response.status === 403) return { ok: false, disabled: true }
-  if (!response.ok) throw new Error(`Panel reconciliation failed (${response.status})`)
-  return response.json()
+  try {
+    const response = await fetchWithTimeout(panelUrl(env, "/api/internal/backend-orchestrator/reconcile"), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.PANEL_SHARED_SECRET}` },
+    })
+    if (response.status === 403) return { ok: false, disabled: true }
+    if (!response.ok) return { ok: false, error: `Panel reconciliation failed (${response.status})` }
+    return response.json()
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 async function claimCycle(db: Client, orchestratorUrl?: string) {
@@ -598,7 +650,7 @@ export default {
         db = dbClient(config.postgresUrl, config.disablePostgresSsl)
         await db.connect()
         await db.query("select 1")
-        return json({ ok: true, configured: true, panel: new URL(env.PANEL_URL).origin })
+        return json({ ok: true, configured: true, build: WORKER_BUILD, panel: new URL(env.PANEL_URL).origin })
       } catch {
         return json({ ok: false, configured: false }, 503)
       } finally {
@@ -616,7 +668,7 @@ export default {
         db = dbClient(config.postgresUrl, config.disablePostgresSsl)
         await db.connect()
         const state = await db.query(`select * from drive_backend_orchestrator_state where id=true limit 1`)
-        return json({ ok: true, state: state.rows[0] ?? null })
+        return json({ ok: true, build: WORKER_BUILD, state: state.rows[0] ?? null })
       } catch (error) {
         return json({ error: error instanceof Error ? error.message : String(error) }, 500)
       } finally {
