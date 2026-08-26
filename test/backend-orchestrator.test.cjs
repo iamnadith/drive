@@ -70,6 +70,9 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   const orchestrator = read("workers/backend-orchestrator/src/index.ts")
 
   assert.match(orchestrator, /const BUCKET_BATCH_SIZE = 25/)
+  assert.match(orchestrator, /const EXTERNAL_REQUEST_TIMEOUT_MS = 8_000/)
+  assert.match(orchestrator, /async function fetchWithTimeout/)
+  assert.equal((orchestrator.match(/fetchWithTimeout\(/g) || []).length >= 5, true)
   assert.match(orchestrator, /drive_backend_orchestrator_progress/)
   assert.match(orchestrator, /async function ensureProgressSchema/)
   assert.match(orchestrator, /await ensureProgressSchema\(db\)/)

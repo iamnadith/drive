@@ -33,9 +33,20 @@ type BucketInfo = { name: string; jurisdiction: string }
 type BucketMetric = { bucket: string; objects: number; bytes: number; observedAt: string }
 
 const BUCKET_BATCH_SIZE = 25
+const EXTERNAL_REQUEST_TIMEOUT_MS = 8_000
 
 function json(value: unknown, status = 200) {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store" } })
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = EXTERNAL_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } finally {
+    clearTimeout(timeout)
+  }
 }
 
 function panelUrl(env: Env, path: string) {
@@ -186,7 +197,7 @@ async function setState(db: Client, input: { status: string; orchestratorUrl?: s
 }
 
 async function resolveCloudflareAccount(account: AccountRow) {
-  const response = await fetch("https://api.cloudflare.com/client/v4/accounts", {
+  const response = await fetchWithTimeout("https://api.cloudflare.com/client/v4/accounts", {
     headers: { Authorization: `Bearer ${account.api_token}` },
   })
   const payload = await response.json().catch(() => ({})) as { result?: unknown; errors?: Array<{ message?: string }> }
@@ -198,7 +209,7 @@ async function resolveCloudflareAccount(account: AccountRow) {
 
 async function listBuckets(account: AccountRow) {
   if (!account.cloudflare_account_id) throw new Error(`Account ${account.label} has no Cloudflare account ID`)
-  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account.cloudflare_account_id)}/r2/buckets`, {
+  const response = await fetchWithTimeout(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account.cloudflare_account_id)}/r2/buckets`, {
     headers: { Authorization: `Bearer ${account.api_token}` },
   })
   const payload = await response.json().catch(() => ({})) as { result?: unknown; errors?: Array<{ message?: string }> }
@@ -231,7 +242,7 @@ async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Pro
       }
     }
   `
-  const response = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+  const response = await fetchWithTimeout("https://api.cloudflare.com/client/v4/graphql", {
     method: "POST",
     headers: { Authorization: `Bearer ${account.api_token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -517,7 +528,7 @@ async function runRetention(db: Client, config: RuntimeConfig) {
 }
 
 async function reconcilePanel(env: Env) {
-  const response = await fetch(panelUrl(env, "/api/internal/backend-orchestrator/reconcile"), {
+  const response = await fetchWithTimeout(panelUrl(env, "/api/internal/backend-orchestrator/reconcile"), {
     method: "POST",
     headers: { Authorization: `Bearer ${env.PANEL_SHARED_SECRET}` },
   })
