@@ -1,3 +1,7 @@
+/**
+ * @param {number | undefined} contentLength
+ * @returns {Record<string, string>}
+ */
 function createStorageObjectMetadataHeaders(contentLength) {
   if (!Number.isSafeInteger(contentLength) || contentLength < 0) return {}
   const size = String(contentLength)
