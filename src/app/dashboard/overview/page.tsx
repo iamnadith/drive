@@ -238,7 +238,6 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
   React.useEffect(() => {
     setTimeRange((current) => {
       if (isMobile && current === "90d") return "7d"
-      if (!isMobile && (current === "7d" || current === "30d")) return "90d"
       return current
     })
   }, [isMobile])
@@ -304,6 +303,8 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
             variant="outline"
             className="hidden *:data-[slot=toggle-group-item]:px-4! @[767px]/card:flex"
           >
+            <ToggleGroupItem value="7d">Last 7 days</ToggleGroupItem>
+            <ToggleGroupItem value="30d">Last 1 month</ToggleGroupItem>
             <ToggleGroupItem value="90d">Last 3 months</ToggleGroupItem>
             <ToggleGroupItem value="180d">Last 6 months</ToggleGroupItem>
             <ToggleGroupItem value="365d">Last 12 months</ToggleGroupItem>
