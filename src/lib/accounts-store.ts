@@ -381,11 +381,10 @@ export async function updateAccount(
       | "totalBuckets"
       | "totalObjects"
       | "totalBytes"
-      | "lastSyncedAt"
       | "syncStatus"
       | "syncMessage"
     >
-  >
+  > & { lastSyncedAt?: string | null }
 ): Promise<CloudflareAccount> {
   const supabase = getSupabaseServerClient()
 
@@ -529,6 +528,9 @@ export async function activateAccountForCompletedMigration(input: {
   if (target.status === "active") {
     return updateAccount(target.id, {
       lastMigrated: completedAt,
+      lastSyncedAt: null,
+      syncStatus: "syncing",
+      syncMessage: "Awaiting Backend Orchestrator refresh after migration activation",
     })
   }
 
@@ -536,6 +538,9 @@ export async function activateAccountForCompletedMigration(input: {
     const updated = await updateAccount(target.id, {
       status: "active",
       lastMigrated: completedAt,
+      lastSyncedAt: null,
+      syncStatus: "syncing",
+      syncMessage: "Awaiting Backend Orchestrator refresh after migration activation",
     })
     const rows = await reconcileAccountStatuses(getSupabaseServerClient(), { preferredActiveAccountId: target.id })
     const reconciled = rows.find((account) => account.id === target.id)
@@ -554,6 +559,9 @@ export async function activateAccountForCompletedMigration(input: {
 
     return updateAccount(activeTarget.id, {
       lastMigrated: completedAt,
+      lastSyncedAt: null,
+      syncStatus: "syncing",
+      syncMessage: "Awaiting Backend Orchestrator refresh after migration activation",
     })
   }
 }

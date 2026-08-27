@@ -35,7 +35,7 @@ type BucketMetric = { bucket: string; objects: number; bytes: number; observedAt
 const BUCKET_BATCH_SIZE = 25
 const EXTERNAL_REQUEST_TIMEOUT_MS = 8_000
 const METRICS_CACHE_TTL_MS = 10_000
-const WORKER_BUILD = 15
+const WORKER_BUILD = 16
 const RETENTION_BATCH_SIZE = 250
 const metricsCache = new Map<string, { expiresAt: number; metrics: BucketMetric[] }>()
 
@@ -154,18 +154,43 @@ async function ensureSchema(db: Client) {
   `)
   await db.query(`
     create table if not exists drive_analytics_active_account_snapshots (
-      captured_day date not null,
+      captured_day date primary key,
       account_id uuid not null,
       account_label text,
       account_email text,
       buckets integer not null default 0,
       objects bigint not null default 0,
       bytes bigint not null default 0,
-      captured_at timestamptz not null default now(),
-      primary key (captured_day, account_id)
+      captured_at timestamptz not null default now()
     )
   `)
+  await db.query(`
+    with ranked as (
+      select ctid, row_number() over (
+        partition by captured_day
+        order by captured_at desc, account_id desc
+      ) position
+      from drive_analytics_active_account_snapshots
+    )
+    delete from drive_analytics_active_account_snapshots snapshots
+    using ranked
+    where snapshots.ctid = ranked.ctid and ranked.position > 1
+  `)
+  await db.query(`create unique index if not exists drive_analytics_active_account_snapshots_one_per_day_idx on drive_analytics_active_account_snapshots (captured_day)`)
   await db.query(`create index if not exists drive_analytics_active_account_snapshots_day_idx on drive_analytics_active_account_snapshots (captured_day desc)`)
+  await db.query(`
+    create table if not exists drive_backend_orchestrator_metric_candidates (
+      account_id uuid not null,
+      bucket_name text not null,
+      objects bigint not null,
+      bytes bigint not null,
+      observed_at timestamptz not null,
+      confirmations integer not null default 1,
+      first_observed_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      primary key (account_id, bucket_name)
+    )
+  `)
   await db.query(`
     create table if not exists drive_maintenance_state (
       task_name text primary key,
@@ -432,6 +457,82 @@ async function clearSyncProgress(db: Client) {
   await db.query(`delete from drive_backend_orchestrator_progress where id=true`)
 }
 
+async function recordDailyAccountSnapshot(db: Client, accountId: string) {
+  await db.query(`
+    insert into drive_analytics_active_account_snapshots
+      (captured_day, account_id, account_label, account_email, buckets, objects, bytes, captured_at)
+    select current_date, a.id, a.label, a.email,
+           a.total_buckets, a.total_objects, a.total_bytes, now()
+    from drive_accounts a
+    where a.id = $1
+    on conflict (captured_day) do update set
+      account_id = excluded.account_id,
+      account_label = excluded.account_label,
+      account_email = excluded.account_email,
+      buckets = excluded.buckets,
+      objects = excluded.objects,
+      bytes = excluded.bytes,
+      captured_at = excluded.captured_at
+  `, [accountId])
+}
+
+async function pendingMetricDecreases(db: Client, accountId: string, metrics: BucketMetric[]) {
+  if (metrics.length === 0) return [] as Array<{ bucketName: string; confirmations: number }>
+  const result = await db.query<{ bucket_name: string; confirmations: number }>(`
+    with input as (
+      select bucket, objects, bytes, observed_at
+      from jsonb_to_recordset($2::jsonb)
+        as value(bucket text, objects bigint, bytes bigint, observed_at timestamptz)
+    ), decreases as (
+      select input.*
+      from input
+      join drive_bucket_stats stats
+        on stats.account_id = $1 and stats.bucket_name = input.bucket
+      where input.objects < stats.objects or input.bytes < stats.bytes
+    ), candidates as (
+      insert into drive_backend_orchestrator_metric_candidates
+        (account_id, bucket_name, objects, bytes, observed_at, confirmations, first_observed_at, updated_at)
+      select $1, bucket, objects, bytes, observed_at, 1, now(), now()
+      from decreases
+      on conflict (account_id, bucket_name) do update set
+        confirmations = case
+          when drive_backend_orchestrator_metric_candidates.objects = excluded.objects
+           and drive_backend_orchestrator_metric_candidates.bytes = excluded.bytes
+           and excluded.observed_at > drive_backend_orchestrator_metric_candidates.observed_at
+            then drive_backend_orchestrator_metric_candidates.confirmations + 1
+          when drive_backend_orchestrator_metric_candidates.objects = excluded.objects
+           and drive_backend_orchestrator_metric_candidates.bytes = excluded.bytes
+            then drive_backend_orchestrator_metric_candidates.confirmations
+          else 1
+        end,
+        first_observed_at = case
+          when drive_backend_orchestrator_metric_candidates.objects = excluded.objects
+           and drive_backend_orchestrator_metric_candidates.bytes = excluded.bytes
+            then drive_backend_orchestrator_metric_candidates.first_observed_at
+          else now()
+        end,
+        objects = excluded.objects,
+        bytes = excluded.bytes,
+        observed_at = greatest(drive_backend_orchestrator_metric_candidates.observed_at, excluded.observed_at),
+        updated_at = now()
+      returning bucket_name, confirmations
+    )
+    select bucket_name, confirmations from candidates where confirmations < 2
+  `, [accountId, JSON.stringify(metrics.map((metric) => ({
+    bucket: metric.bucket,
+    objects: metric.objects,
+    bytes: metric.bytes,
+    observed_at: metric.observedAt,
+  })))])
+  if (result.rows.length === 0) {
+    await db.query(
+      `delete from drive_backend_orchestrator_metric_candidates where account_id=$1 and bucket_name=any($2::text[])`,
+      [accountId, metrics.map((metric) => metric.bucket)]
+    )
+  }
+  return result.rows.map((row) => ({ bucketName: row.bucket_name, confirmations: row.confirmations }))
+}
+
 async function applyBucketMetrics(db: Client, account: AccountRow, metrics: BucketMetric[]) {
   if (metrics.length === 0) return
   await db.query(
@@ -520,6 +621,7 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
     if (buckets.length === 0) {
       await clearSyncProgress(db)
       await db.query(`update drive_accounts set total_buckets=0,total_objects=0,total_bytes=0,sync_status='ok',sync_message='No R2 buckets',last_synced_at=now(),updated_at=now() where id=$1`, [account.id])
+      await recordDailyAccountSnapshot(db, account.id)
       return { account: account.label, status: "completed", buckets: 0 }
     }
     const metrics = await getBucketMetrics(account, buckets)
@@ -542,6 +644,20 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
         missingMetrics: buckets.length - metrics.length,
       }
     }
+    const pendingDecreases = await pendingMetricDecreases(db, account.id, metrics)
+    if (pendingDecreases.length > 0) {
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0 })
+      await db.query(
+        `update drive_accounts set sync_status='syncing',sync_message=$2,updated_at=now() where id=$1`,
+        [account.id, `R2 decrease awaiting a second provider observation for ${pendingDecreases.length} bucket(s); retaining last known totals`]
+      )
+      return {
+        account: account.label,
+        status: "incomplete",
+        buckets: buckets.length,
+        pendingDecreases: pendingDecreases.map((candidate) => candidate.bucketName),
+      }
+    }
     for (const [index, bucket] of batch.entries()) {
       const metric = metricByBucket.get(bucket.name)
       if (metric) await applyBucketMetrics(db, account, [metric])
@@ -561,21 +677,7 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
         sync_status='ok',sync_message=$2,last_synced_at=now(),updated_at=now()
       where a.id=$1
     `, [account.id, `R2 metrics synced for ${metrics.length} of ${buckets.length} buckets`])
-    await db.query(`
-      insert into drive_analytics_active_account_snapshots
-        (captured_day, account_id, account_label, account_email, buckets, objects, bytes, captured_at)
-      select current_date, a.id, a.label, a.email,
-             a.total_buckets, a.total_objects, a.total_bytes, now()
-      from drive_accounts a
-      where a.id = $1
-      on conflict (captured_day, account_id) do update set
-        account_label = excluded.account_label,
-        account_email = excluded.account_email,
-        buckets = excluded.buckets,
-        objects = excluded.objects,
-        bytes = excluded.bytes,
-        captured_at = excluded.captured_at
-    `, [account.id])
+    await recordDailyAccountSnapshot(db, account.id)
     return {
       account: account.label,
       status: "completed",

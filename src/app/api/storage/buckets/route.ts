@@ -50,8 +50,17 @@ export async function GET() {
       }))
       .sort((a, b) => a.name.localeCompare(b.name))
 
-    const totalBytes = results.reduce((sum: number, b: { bytes: number }) => sum + (b.bytes ?? 0), 0)
-    return NextResponse.json({ buckets: results, totalBytes, source: "database" })
+    const bucketBytes = results.reduce((sum: number, b: { bytes: number }) => sum + (b.bytes ?? 0), 0)
+    const totalBytes = active.syncStatus === "ok" ? active.totalBytes : bucketBytes
+    return NextResponse.json({
+      buckets: results,
+      totalBytes,
+      totalObjects: active.syncStatus === "ok"
+        ? active.totalObjects
+        : results.reduce((sum, bucket) => sum + bucket.objects, 0),
+      totalBuckets: active.syncStatus === "ok" ? active.totalBuckets : results.length,
+      source: "database",
+    })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to list buckets")
     return NextResponse.json(

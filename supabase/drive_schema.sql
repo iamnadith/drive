@@ -525,19 +525,17 @@ create table if not exists drive_backend_orchestrator_state (
   updated_at timestamptz not null default now()
 );
 
--- Daily history of whichever account was active when analytics were refreshed.
--- This lets overview charts span current and previous active accounts without
--- summing every stored account at the same time.
+-- One daily chart point written by the Backend Orchestrator after a complete
+-- active-account sync. Later successful syncs replace that day's earlier row.
 create table if not exists drive_analytics_active_account_snapshots (
-  captured_day date not null,
+  captured_day date primary key,
   account_id uuid not null,
   account_label text,
   account_email text,
   buckets integer not null default 0,
   objects bigint not null default 0,
   bytes bigint not null default 0,
-  captured_at timestamptz not null default now(),
-  primary key (captured_day, account_id)
+  captured_at timestamptz not null default now()
 );
 
 create index if not exists drive_analytics_active_account_snapshots_day_idx
