@@ -13,6 +13,7 @@ import {
 import {
   Bar,
   BarChart,
+  Brush,
   CartesianGrid,
   XAxis,
   YAxis,
@@ -106,6 +107,7 @@ type ActivityResponse = {
 }
 
 type UsageRange = "7d" | "30d" | "90d" | "180d" | "365d" | "all"
+type UsageMetric = "both" | "storage" | "objects"
 
 const platformUsageChartConfig = {
   storageGb: {
@@ -234,6 +236,12 @@ function SummaryCard({
 function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccountSeries"] }) {
   const isMobile = useIsMobile()
   const [timeRange, setTimeRange] = React.useState<UsageRange>("90d")
+  const [usageMetric, setUsageMetric] = React.useState<UsageMetric>("both")
+  const [navigatorSelection, setNavigatorSelection] = React.useState<{
+    key: string
+    startIndex: number
+    endIndex: number
+  } | null>(null)
 
   React.useEffect(() => {
     setTimeRange((current) => {
@@ -280,12 +288,28 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
       })
     }
 
-    return chartPoints
+    const maxStorageGb = Math.max(...chartPoints.map((point) => point.storageGb), 0)
+    const maxObjects = Math.max(...chartPoints.map((point) => point.objects), 0)
+
+    return chartPoints.map((point) => ({
+      ...point,
+      storageGb: maxStorageGb > 0 ? Number(((point.storageGb / maxStorageGb) * 100).toFixed(3)) : 0,
+      objects: maxObjects > 0 ? Number(((point.objects / maxObjects) * 100).toFixed(3)) : 0,
+      rawObjects: point.objects,
+    }))
   }, [series, timeRange])
+  const showDateNavigator = chartData.length > 45
+  const navigatorKey = `${timeRange}:${chartData[0]?.date ?? "empty"}:${chartData.at(-1)?.date ?? "empty"}`
+  const visibleStartIndex =
+    navigatorSelection?.key === navigatorKey ? navigatorSelection.startIndex : 0
+  const visibleEndIndex =
+    navigatorSelection?.key === navigatorKey
+      ? navigatorSelection.endIndex
+      : Math.max(0, chartData.length - 1)
 
   return (
-    <Card className="@container/card pb-0 sm:pb-0.5">
-      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-0 md:gap-1">
+    <Card className="@container/card gap-3 py-4 sm:gap-4 sm:py-5">
+      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-0 px-4 sm:px-5 md:gap-1">
         <CardTitle className="leading-none md:leading-tight">Storage Usage</CardTitle>
         <CardDescription className="-mt-1 leading-none md:mt-0 md:leading-tight">
           <span className="hidden @[540px]/card:block">
@@ -301,7 +325,7 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
               if (value) setTimeRange(value as UsageRange)
             }}
             variant="outline"
-            className="hidden *:data-[slot=toggle-group-item]:px-4! @[767px]/card:flex"
+            className="hidden *:data-[slot=toggle-group-item]:px-3! @[767px]/card:flex"
           >
             <ToggleGroupItem value="7d">Last 7 days</ToggleGroupItem>
             <ToggleGroupItem value="30d">Last 1 month</ToggleGroupItem>
@@ -341,16 +365,38 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
           </Select>
         </CardAction>
       </CardHeader>
-      <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
+      <CardContent className="px-3 pt-0 sm:px-5 sm:pt-0">
         {chartData.length === 0 ? (
           <div className="flex h-[250px] items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground">
             No storage history yet
           </div>
         ) : (
-          <ChartContainer
-            config={platformUsageChartConfig}
-            className="aspect-auto h-[280px] w-full overflow-hidden rounded-2xl border border-border/50 bg-muted/10 px-1 pt-3"
-          >
+          <div className="flex flex-col gap-2">
+            <div className="flex min-h-8 flex-wrap items-center justify-between gap-2 px-1">
+              <p className="text-xs text-muted-foreground">
+                {usageMetric === "both"
+                  ? "Both metrics use independent visual scales."
+                  : "Interactive single-metric view."}
+              </p>
+              <ToggleGroup
+                type="single"
+                value={usageMetric}
+                onValueChange={(value) => {
+                  if (value) setUsageMetric(value as UsageMetric)
+                }}
+                variant="outline"
+                size="sm"
+                aria-label="Select chart metrics"
+              >
+                <ToggleGroupItem value="both">Both</ToggleGroupItem>
+                <ToggleGroupItem value="storage">Storage</ToggleGroupItem>
+                <ToggleGroupItem value="objects">Objects</ToggleGroupItem>
+              </ToggleGroup>
+            </div>
+            <ChartContainer
+              config={platformUsageChartConfig}
+              className="aspect-auto h-[300px] w-full overflow-hidden rounded-2xl border border-border/50 bg-muted/10 px-1 pt-3"
+            >
             <BarChart
               accessibilityLayer
               data={chartData}
@@ -373,7 +419,7 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                   })
                 }
               />
-              <YAxis hide domain={[0, "auto"]} />
+              <YAxis hide domain={[0, 100]} />
               <ChartTooltip
                 cursor={{ fill: "var(--muted)", radius: 10 }}
                 content={
@@ -386,15 +432,96 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                         year: "numeric",
                       })
                     }
+                    formatter={(_value, name, item) => {
+                      const isStorage = name === "storageGb"
+                      return (
+                        <>
+                          <div
+                            className="size-2.5 shrink-0 rounded-[2px]"
+                            style={{ backgroundColor: item.color }}
+                          />
+                          <div className="flex flex-1 items-center justify-between gap-4">
+                            <span className="text-muted-foreground">
+                              {isStorage ? "Storage" : "Objects"}
+                            </span>
+                            <span className="font-mono font-medium tabular-nums text-foreground">
+                              {isStorage
+                                ? formatBytes(Number(item.payload?.storageBytes ?? 0))
+                                : formatNumber(Number(item.payload?.rawObjects ?? 0))}
+                            </span>
+                          </div>
+                        </>
+                      )
+                    }}
                     indicator="dot"
                   />
                 }
               />
               <ChartLegend content={<ChartLegendContent />} />
-              <Bar dataKey="storageGb" fill="var(--color-storageGb)" radius={6} maxBarSize={18} />
-              <Bar dataKey="objects" fill="var(--color-objects)" radius={6} maxBarSize={18} />
+              {showDateNavigator ? (
+                <Brush
+                  key={navigatorKey}
+                  ariaLabel="Select and scroll the visible chart dates"
+                  dataKey="date"
+                  height={28}
+                  travellerWidth={8}
+                  startIndex={visibleStartIndex}
+                  endIndex={visibleEndIndex}
+                  fill="var(--muted)"
+                  stroke="var(--muted-foreground)"
+                  tickFormatter={(value) =>
+                    new Date(value).toLocaleDateString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                    })
+                  }
+                  onChange={(range) => {
+                    if (range.startIndex === undefined || range.endIndex === undefined) return
+                    setNavigatorSelection({
+                      key: navigatorKey,
+                      startIndex: range.startIndex,
+                      endIndex: range.endIndex,
+                    })
+                  }}
+                />
+              ) : null}
+              {usageMetric === "both" ? (
+                <>
+                  <Bar dataKey="storageGb" fill="var(--color-storageGb)" radius={6} maxBarSize={18} />
+                  <Bar dataKey="objects" fill="var(--color-objects)" radius={6} maxBarSize={18} />
+                </>
+              ) : (
+                <Bar
+                  dataKey={usageMetric === "storage" ? "storageGb" : "objects"}
+                  fill={
+                    usageMetric === "storage"
+                      ? "var(--color-storageGb)"
+                      : "var(--color-objects)"
+                  }
+                  radius={6}
+                  maxBarSize={22}
+                />
+              )}
             </BarChart>
-          </ChartContainer>
+            </ChartContainer>
+            {showDateNavigator ? (
+              <p className="text-center text-xs text-muted-foreground">
+                Drag the handles to resize the view, or drag the selected range to scroll. Showing{" "}
+                {new Date(chartData[visibleStartIndex]?.date).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                })}
+                {" – "}
+                {new Date(chartData[visibleEndIndex]?.date).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                })}
+                .
+              </p>
+            ) : null}
+          </div>
         )}
       </CardContent>
     </Card>
