@@ -96,18 +96,6 @@ type ActiveAccountSnapshotRow = {
   captured_at: string
 }
 
-type LogicalStorageSnapshotRow = {
-  captured_day: string
-  captured_at: string
-  account_id: string | null
-  buckets: string | number | null
-  objects: string | number | null
-  bytes: string | number | null
-  added: string | number | null
-  updated: string | number | null
-  deleted: string | number | null
-}
-
 function asRange(value: string | null): RangeKey {
   if (value === "7d" || value === "30d" || value === "90d") return value
   return "all"
@@ -317,8 +305,12 @@ async function captureActiveAccountSnapshot(input: {
   account: CloudflareAccount | null
   rows: BucketStatsRow[]
   generatedAt: string
+  ready: boolean
 }) {
-  if (!isPostgresConfigured() || !input.account) return
+  // Never publish a chart point from the worker's in-progress bucket batches.
+  // Account totals are published only after the worker has completed every
+  // bucket, so snapshots must use the same completion boundary.
+  if (!isPostgresConfigured() || !input.account || !input.ready) return
   await ensureAnalyticsArchiveSchema()
   const capturedDay = input.generatedAt.slice(0, 10)
   const buckets = new Set(input.rows.map((row) => row.bucket_name)).size
@@ -386,17 +378,6 @@ async function listActiveAccountSnapshots(): Promise<ActiveAccountSnapshotRow[]>
     limit 730
   `)
   return rows.reverse()
-}
-
-async function listLogicalStorageSnapshots(): Promise<LogicalStorageSnapshotRow[]> {
-  if (!isPostgresConfigured()) return []
-  const { rows } = await queryDb<LogicalStorageSnapshotRow>(`
-    select captured_day::text as captured_day, captured_at, account_id, buckets, objects, bytes, added, updated, deleted
-    from drive_logical_storage_snapshots
-    order by captured_day asc
-    limit 730
-  `)
-  return rows
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
@@ -620,14 +601,21 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const activeAnalyticsBucketStats = activeAccount
     ? analyticsBucketStats.filter((row) => row.account_id === activeAccount.id)
     : []
+  const activeBucketStatsReady = Boolean(
+    activeAccount &&
+      activeAccount.syncStatus === "ok" &&
+      (activeBucketStats.length === 0 ||
+        activeBucketStats.every((row) => String(row.status ?? "").toLowerCase() === "completed"))
+  )
   await capture(
     "active account analytics snapshot write",
     warnings,
     () =>
       captureActiveAccountSnapshot({
         account: activeAccount,
-        rows: activeAnalyticsBucketStats,
+        rows: activeBucketStats,
         generatedAt,
+        ready: activeBucketStatsReady,
       }),
     undefined
   )
@@ -637,13 +625,9 @@ async function buildAnalyticsPayload(range: RangeKey) {
     listActiveAccountSnapshots,
     [] as ActiveAccountSnapshotRow[]
   )
-  const logicalStorageSnapshotRows = await capture(
-    "logical storage snapshots",
-    warnings,
-    listLogicalStorageSnapshots,
-    [] as LogicalStorageSnapshotRow[],
-    { reportWarning: false }
-  )
+  const currentActiveAccountSnapshotRows = activeAccount
+    ? activeAccountSnapshotRows.filter((row) => row.account_id === activeAccount.id)
+    : []
   const archivedAccountLabelById = new Map(
     archivedBucketStats.map((row) => [
       row.account_id,
@@ -654,8 +638,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
     range === "all"
       ? earliestDate([
           ...activeAnalyticsBucketStats.map((row) => row.updated_at),
-          ...activeAccountSnapshotRows.map((row) => row.captured_day),
-          ...logicalStorageSnapshotRows.map((row) => row.captured_day),
+          ...currentActiveAccountSnapshotRows.map((row) => row.captured_day),
           ...migrations.map((migration) => migration.createdAt),
           ...migrations.map((migration) => migration.completedAt),
           ...itemRowsAsItems.map((item) => item.lastProgressAt || item.updatedAt || item.createdAt),
@@ -674,8 +657,8 @@ async function buildAnalyticsPayload(range: RangeKey) {
   })
 
   const legacyStorageSeries =
-    activeAccountSnapshotRows.length > 0
-      ? activeAccountSnapshotRows.map((row) => ({
+    currentActiveAccountSnapshotRows.length > 0
+      ? currentActiveAccountSnapshotRows.map((row) => ({
           date: row.captured_day,
           accountId: row.account_id,
           accountLabel: row.account_label || row.account_email || "Unknown account",
@@ -698,18 +681,6 @@ async function buildAnalyticsPayload(range: RangeKey) {
           ]
         : []
   const storageSeriesByDay = new Map(legacyStorageSeries.map((point) => [point.date, point]))
-  for (const row of logicalStorageSnapshotRows) {
-    const account = row.account_id ? accountById.get(row.account_id) : null
-    storageSeriesByDay.set(row.captured_day, {
-      date: row.captured_day,
-      accountId: row.account_id ?? "logical-storage",
-      accountLabel: account?.label || account?.email || "Logical storage",
-      buckets: toNumber(row.buckets),
-      storageBytes: toNumber(row.bytes),
-      objects: toNumber(row.objects),
-      capturedAt: row.captured_at,
-    })
-  }
   const activeAccountSeries = Array.from(storageSeriesByDay.values()).sort((a, b) => a.date.localeCompare(b.date))
 
   const series = dayKeys.map((day) => {
@@ -764,8 +735,10 @@ async function buildAnalyticsPayload(range: RangeKey) {
     }
   })
 
-  const totalStorageBytes = activeAnalyticsBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0)
-  const totalObjects = activeAnalyticsBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0)
+  // The worker publishes account totals only after all bucket batches finish.
+  // Do not sum partially updated bucket rows while sync_status is syncing.
+  const totalStorageBytes = activeAccount?.totalBytes ?? 0
+  const totalObjects = activeAccount?.totalObjects ?? 0
   const migrationNeedsAttention = (migration: DriveMigration) =>
     migration.status === "failed" ||
     (migration.syncStatus === "error" && migration.status !== "completed" && migration.status !== "canceled")
@@ -947,10 +920,9 @@ export async function GET(request: Request) {
     return NextResponse.json(cached.payload)
   }
 
-  if (!forceRefresh && cached) {
-    void queueAnalyticsPayload(range)
-    return NextResponse.json(cached.payload)
-  }
+  // An expired payload is known to be stale. Await the rebuild so account
+  // deletion and worker completion cannot leave the dashboard showing the old
+  // account or a partial bucket batch for another refresh cycle.
 
   const payload = await queueAnalyticsPayload(range)
   return NextResponse.json(payload)

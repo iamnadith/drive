@@ -227,6 +227,19 @@ export async function putBucketCors(
   )
 }
 
+// Migration settings must be copied exactly. Manual bucket edits intentionally
+// preserve the destination's managed media-delivery rule, but doing that here
+// would make source and destination settings impossible to reconcile when the
+// managed rules differ.
+export async function replaceBucketCors(
+  account: CloudflareAccount,
+  bucket: string,
+  value: unknown
+): Promise<BucketCorsRule[]> {
+  const requested = normalizeCorsRules(value)
+  return writeBucketCors(account, bucket, requested)
+}
+
 export async function deleteBucketCors(account: CloudflareAccount, bucket: string): Promise<void> {
   const current = await getBucketCors(account, bucket)
   await writeBucketCors(
@@ -259,7 +272,7 @@ export async function syncBucketSettings(input: {
     destinationPublic = await setManagedPublicDomain(input.target, input.targetBucket, sourceSettings.publicAccess.enabled)
   }
   if (!corsRulesEqual(currentTarget.corsRules, sourceSettings.corsRules)) {
-    destinationCors = await putBucketCors(input.target, input.targetBucket, sourceSettings.corsRules)
+    destinationCors = await replaceBucketCors(input.target, input.targetBucket, sourceSettings.corsRules)
   }
 
   const verified = { publicAccess: destinationPublic, corsRules: destinationCors }
