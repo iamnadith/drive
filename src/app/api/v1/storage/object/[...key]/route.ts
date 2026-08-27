@@ -43,18 +43,17 @@ export async function HEAD(
     return new Response(null, { status: 404 })
   }
 
-  return new Response(null, {
-    status: 200,
-    headers: {
-      // A bodyless HEAD response may have Content-Length normalized to zero by
-      // the hosting runtime. Preserve the authoritative R2 object size in a
-      // dedicated metadata header for storage clients.
-      ...createStorageObjectMetadataHeaders(head.ContentLength),
-      ...(head.ContentType ? { "Content-Type": head.ContentType } : {}),
-      ...(head.ETag ? { ETag: head.ETag } : {}),
-      "Cache-Control": "no-store",
-    },
-  })
+  // Build this as a Headers instance so the conditional metadata fields are
+  // accepted consistently by the Next.js/Vercel Response type checker.
+  const headers = new Headers({ "Cache-Control": "no-store" })
+  const metadataHeaders = createStorageObjectMetadataHeaders(head.ContentLength)
+  for (const [name, value] of Object.entries(metadataHeaders)) {
+    if (value !== undefined) headers.set(name, value)
+  }
+  if (head.ContentType) headers.set("Content-Type", head.ContentType)
+  if (head.ETag) headers.set("ETag", head.ETag)
+
+  return new Response(null, { status: 200, headers })
 }
 
 export async function PUT(
