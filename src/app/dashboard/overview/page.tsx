@@ -319,7 +319,7 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
       rawObjects: point.objects,
     }))
   }, [series, timeRange])
-  const enableChartNavigation = chartData.length > 45
+  const enableChartNavigation = chartData.length > 1
   const navigatorKey = `${timeRange}:${chartData[0]?.date ?? "empty"}:${chartData.at(-1)?.date ?? "empty"}`
   const visibleStartIndex =
     navigatorSelection?.key === navigatorKey ? navigatorSelection.startIndex : 0
@@ -329,6 +329,7 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
       : Math.max(0, chartData.length - 1)
   const visibleChartData = chartData.slice(visibleStartIndex, visibleEndIndex + 1)
   const latestChartPoint = chartData.at(-1)
+  const minimumRangeDays = isMobile ? 30 : 90
   const visibleDateRange = React.useMemo<DateRange | undefined>(() => {
     const from = chartData[visibleStartIndex]?.date
     const to = chartData[visibleEndIndex]?.date
@@ -338,6 +339,23 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
       to: new Date(`${to}T00:00:00Z`),
     }
   }, [chartData, visibleEndIndex, visibleStartIndex])
+  const visibleDateRangeLabel = React.useMemo(() => {
+    if (!visibleDateRange?.from || !visibleDateRange.to) return "Dates"
+
+    const from = visibleDateRange.from
+    const to = visibleDateRange.to
+    const sameYear = from.getUTCFullYear() === to.getUTCFullYear()
+    const shortDate = (date: Date, includeYear = false) => date.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      ...(includeYear ? { year: "numeric" as const } : {}),
+      timeZone: "UTC",
+    })
+
+    return sameYear
+      ? `${shortDate(from)} - ${shortDate(to)}`
+      : `${shortDate(from, true)} - ${shortDate(to, true)}`
+  }, [visibleDateRange])
   const historyBounds = React.useMemo(() => {
     const dates = series
       .map((item) => item.date)
@@ -349,6 +367,15 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
       to: new Date(`${dates[dates.length - 1]}T00:00:00Z`),
     }
   }, [series])
+  const selectableHistoryDays = historyBounds
+    ? Math.floor((historyBounds.to.getTime() - historyBounds.from.getTime()) / 86_400_000) + 1
+    : minimumRangeDays
+  const minimumSelectableDays = Math.min(minimumRangeDays, selectableHistoryDays)
+  const datePickerDraftDays =
+    datePickerDraft?.from && datePickerDraft.to
+      ? Math.floor((datePickerDraft.to.getTime() - datePickerDraft.from.getTime()) / 86_400_000) + 1
+      : 0
+  const datePickerDraftIsValid = datePickerDraftDays >= minimumSelectableDays
 
   React.useEffect(() => {
     if (!pendingDateRange || timeRange !== "custom" || chartData.length === 0) return
@@ -364,44 +391,108 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
 
   const updateChartViewport = React.useCallback(
     (mode: "pan" | "zoom", delta: number) => {
-      setNavigatorSelection((current) => {
-        const total = chartData.length
-        if (total === 0) return null
+      const total = chartData.length
+      if (total === 0) return
 
-        const startIndex = current?.key === navigatorKey ? current.startIndex : 0
-        const endIndex =
-          current?.key === navigatorKey ? current.endIndex : Math.max(0, total - 1)
-        const windowSize = endIndex - startIndex + 1
+      const startIndex =
+        navigatorSelection?.key === navigatorKey ? navigatorSelection.startIndex : 0
+      const endIndex =
+        navigatorSelection?.key === navigatorKey
+          ? navigatorSelection.endIndex
+          : Math.max(0, total - 1)
+      const windowSize = endIndex - startIndex + 1
+      const moveToCustomRange = (nextStart: number, nextEnd: number) => {
+        const from = chartData[nextStart]?.date
+        const to = chartData[nextEnd]?.date
+        if (!from || !to) return
 
-        if (mode === "pan") {
-          const step = Math.max(1, Math.round(windowSize * 0.08)) * Math.sign(delta)
-          const nextStart = Math.min(Math.max(0, startIndex + step), total - windowSize)
-          return {
-            key: navigatorKey,
-            startIndex: nextStart,
-            endIndex: nextStart + windowSize - 1,
+        if (timeRange === "custom") {
+          setNavigatorSelection({ key: navigatorKey, startIndex: nextStart, endIndex: nextEnd })
+          return
+        }
+
+        setPendingDateRange({ from, to })
+        setNavigatorSelection(null)
+        setTimeRange("custom")
+      }
+
+      if (mode === "pan") {
+        const step = Math.max(1, Math.round(windowSize * 0.08)) * Math.sign(delta)
+        const nextStart = Math.min(Math.max(0, startIndex + step), total - windowSize)
+        if (nextStart !== startIndex) {
+          moveToCustomRange(nextStart, nextStart + windowSize - 1)
+          return
+        }
+
+        if (timeRange !== "custom" && delta < 0 && historyBounds) {
+          const currentFrom = Date.parse(chartData[startIndex].date)
+          const currentTo = Date.parse(chartData[endIndex].date)
+          const historyStart = historyBounds.from.getTime()
+          const shift = Math.min(
+            currentFrom - historyStart,
+            Math.max(1, Math.round(windowSize * 0.08)) * 86_400_000
+          )
+          if (shift > 0) {
+            setPendingDateRange({
+              from: new Date(currentFrom - shift).toISOString().slice(0, 10),
+              to: new Date(currentTo - shift).toISOString().slice(0, 10),
+            })
+            setNavigatorSelection(null)
+            setTimeRange("custom")
           }
         }
+        return
+      }
 
-        const minimumWindow = Math.min(7, total)
-        const scale = delta > 0 ? 1.18 : 0.84
-        const nextWindowSize = Math.min(
-          total,
-          Math.max(minimumWindow, Math.round(windowSize * scale))
-        )
-        const center = startIndex + (windowSize - 1) / 2
-        const nextStart = Math.min(
-          Math.max(0, Math.round(center - (nextWindowSize - 1) / 2)),
-          total - nextWindowSize
-        )
-        return {
-          key: navigatorKey,
-          startIndex: nextStart,
-          endIndex: nextStart + nextWindowSize - 1,
+      const minimumWindow = Math.min(minimumRangeDays, total)
+      const scale = delta > 0 ? 1.18 : 0.84
+      const nextWindowSize = Math.min(
+        total,
+        Math.max(minimumWindow, Math.round(windowSize * scale))
+      )
+
+      if (delta > 0 && nextWindowSize === total) {
+        if (timeRange === "custom") {
+          setNavigatorSelection(null)
+          setPendingDateRange(null)
+          setTimeRange("all")
+          return
         }
-      })
+
+        if (historyBounds) {
+          const currentFrom = Date.parse(chartData[startIndex].date)
+          const currentTo = Date.parse(chartData[endIndex].date)
+          const historyStart = historyBounds.from.getTime()
+          const expansion = Math.max(1, Math.round(windowSize * 0.18)) * 86_400_000
+          const nextFrom = Math.max(historyStart, currentFrom - expansion)
+          if (nextFrom < currentFrom) {
+            setPendingDateRange({
+              from: new Date(nextFrom).toISOString().slice(0, 10),
+              to: new Date(currentTo).toISOString().slice(0, 10),
+            })
+            setNavigatorSelection(null)
+            setTimeRange("custom")
+            return
+          }
+        }
+        if (timeRange !== "all") {
+          setNavigatorSelection(null)
+          setPendingDateRange(null)
+          setTimeRange("all")
+          return
+        }
+      }
+
+      const center = startIndex + (windowSize - 1) / 2
+      const nextStart = Math.min(
+        Math.max(0, Math.round(center - (nextWindowSize - 1) / 2)),
+        total - nextWindowSize
+      )
+      if (nextWindowSize !== windowSize) {
+        moveToCustomRange(nextStart, nextStart + nextWindowSize - 1)
+      }
     },
-    [chartData.length, navigatorKey]
+    [chartData, historyBounds, minimumRangeDays, navigatorKey, navigatorSelection, timeRange]
   )
 
   React.useEffect(() => {
@@ -420,9 +511,9 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
   }, [enableChartNavigation, updateChartViewport])
 
   return (
-    <Card className="@container/card gap-3 py-4 sm:gap-4 sm:py-5">
-      <CardHeader className="flex flex-col gap-3 border-b px-4 pb-3 sm:px-5 sm:pb-4">
-        <div className="flex flex-col gap-3 @[767px]/card:flex-row @[767px]/card:items-start @[767px]/card:justify-between">
+    <Card className="@container/card gap-3 py-3.5 sm:py-4">
+      <CardHeader className="flex flex-col gap-2.5 border-b px-3.5 pb-3 sm:px-4">
+        <div className="flex flex-col gap-2.5 @[900px]/card:flex-row @[900px]/card:items-center @[900px]/card:justify-between">
           <div className="flex min-w-0 flex-col gap-1">
             <CardTitle className="leading-tight">Storage Usage</CardTitle>
             <CardDescription className="leading-tight">
@@ -432,7 +523,43 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
               <span className="@[540px]/card:hidden">Storage and object history</span>
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-2 @[767px]/card:justify-end">
+          <div className="flex min-w-0 flex-col gap-1.5 @[540px]/card:flex-row @[540px]/card:items-center @[900px]/card:justify-end">
+            <ToggleGroup
+              type="single"
+              value={usageMetric}
+              onValueChange={(value) => {
+                if (value) setUsageMetric(value as UsageMetric)
+              }}
+              variant="outline"
+              className="grid h-9 w-full shrink-0 grid-cols-2 gap-0.5 rounded-xl border bg-muted/35 p-0.5 @[540px]/card:w-auto"
+              aria-label="Select chart metric"
+            >
+              <ToggleGroupItem
+                value="storage"
+                className="h-8 min-w-0 justify-between gap-1.5 rounded-[9px] border-0 px-2.5 shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm @[540px]/card:min-w-32"
+              >
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <HardDrive className="size-3.5 shrink-0 text-chart-1" aria-hidden="true" />
+                  <span className="text-xs font-medium">Storage</span>
+                </span>
+                <span className="truncate text-xs font-semibold tabular-nums text-foreground">
+                  {formatBytes(latestChartPoint?.storageBytes)}
+                </span>
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="objects"
+                className="h-8 min-w-0 justify-between gap-1.5 rounded-[9px] border-0 px-2.5 shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm @[540px]/card:min-w-32"
+              >
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <Database className="size-3.5 shrink-0 text-chart-2" aria-hidden="true" />
+                  <span className="text-xs font-medium">Objects</span>
+                </span>
+                <span className="truncate text-xs font-semibold tabular-nums text-foreground">
+                  {formatNumber(latestChartPoint?.rawObjects)}
+                </span>
+              </ToggleGroupItem>
+            </ToggleGroup>
+            <div className="flex min-w-0 items-center gap-1.5">
             <ToggleGroup
               type="single"
               value={timeRange}
@@ -440,12 +567,13 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                 if (value) setTimeRange(value as UsageRange)
               }}
               variant="outline"
-              className="hidden *:data-[slot=toggle-group-item]:px-3! @[767px]/card:flex"
+              size="sm"
+              className="hidden rounded-lg bg-muted/45 p-0.5 *:data-[slot=toggle-group-item]:h-7 *:data-[slot=toggle-group-item]:rounded-md *:data-[slot=toggle-group-item]:border-0 *:data-[slot=toggle-group-item]:px-2.5! *:data-[slot=toggle-group-item]:text-xs *:data-[slot=toggle-group-item]:shadow-none @[767px]/card:flex"
             >
-              <ToggleGroupItem value="90d">Last 3 months</ToggleGroupItem>
-              <ToggleGroupItem value="180d">Last 6 months</ToggleGroupItem>
-              <ToggleGroupItem value="365d">Last 12 months</ToggleGroupItem>
-              <ToggleGroupItem value="all">All time</ToggleGroupItem>
+              <ToggleGroupItem value="90d" aria-label="Last 3 months" title="Last 3 months">3M</ToggleGroupItem>
+              <ToggleGroupItem value="180d" aria-label="Last 6 months" title="Last 6 months">6M</ToggleGroupItem>
+              <ToggleGroupItem value="365d" aria-label="Last 12 months" title="Last 12 months">12M</ToggleGroupItem>
+              <ToggleGroupItem value="all" aria-label="All time" title="All time">All</ToggleGroupItem>
             </ToggleGroup>
             <Select
               value={timeRange}
@@ -454,7 +582,7 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
               }}
             >
               <SelectTrigger
-                className="flex w-40 **:data-[slot=select-value]:block **:data-[slot=select-value]:truncate @[767px]/card:hidden"
+                className="flex h-8 min-w-0 flex-[0.8] rounded-lg px-2.5 text-xs **:data-[slot=select-value]:block **:data-[slot=select-value]:truncate @[767px]/card:hidden"
                 size="sm"
                 aria-label="Select chart range"
               >
@@ -491,31 +619,33 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
               }}
             >
               <PopoverTrigger asChild>
-                <Button variant="outline" size="sm" className="min-w-0 justify-start gap-2 px-3">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 min-w-0 flex-[1.2] justify-start gap-1.5 rounded-lg px-2.5 text-xs tabular-nums @[767px]/card:flex-none"
+                  aria-label={`Choose date range, currently ${visibleDateRangeLabel}`}
+                >
                   <CalendarDays data-icon="inline-start" />
-                  <span className="truncate tabular-nums">
-                    {visibleDateRange?.from && visibleDateRange.to
-                      ? `${visibleDateRange.from.toLocaleDateString("en-US", {
-                          month: "short",
-                          day: "numeric",
-                          year: "numeric",
-                          timeZone: "UTC",
-                        })} – ${visibleDateRange.to.toLocaleDateString("en-US", {
-                          month: "short",
-                          day: "numeric",
-                          year: "numeric",
-                          timeZone: "UTC",
-                        })}`
-                      : "Choose dates"}
-                  </span>
+                  <span className="truncate">{visibleDateRangeLabel}</span>
                 </Button>
               </PopoverTrigger>
-              <PopoverContent align="end" className="w-auto p-2">
+              <PopoverContent
+                align={isMobile ? "center" : "end"}
+                sideOffset={8}
+                className="w-[calc(100vw-2rem)] max-w-fit overflow-hidden rounded-2xl p-0 shadow-xl"
+              >
+                <div className="border-b px-4 py-3">
+                  <p className="text-sm font-semibold">Choose a date range</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {isMobile ? "Minimum 1 month" : "Minimum 3 months"}
+                  </p>
+                </div>
                 <Calendar
                   mode="range"
                   selected={datePickerDraft}
                   defaultMonth={datePickerDraft?.from ?? historyBounds?.from}
                   numberOfMonths={isMobile ? 1 : 2}
+                  min={Math.max(0, minimumSelectableDays - 1)}
                   disabled={
                     historyBounds
                       ? [{ before: historyBounds.from }, { after: historyBounds.to }]
@@ -523,46 +653,55 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                   }
                   onSelect={(range) => {
                     setDatePickerDraft(range)
-                    if (!range?.from || !range.to) return
-                    const from = toLocalDateKey(range.from)
-                    const to = toLocalDateKey(range.to)
-                    setPendingDateRange({
-                      from: from <= to ? from : to,
-                      to: from <= to ? to : from,
-                    })
-                    setNavigatorSelection(null)
-                    setTimeRange("custom")
-                    setDatePickerOpen(false)
                   }}
+                  className="p-3"
                 />
+                <div className="flex items-center justify-between gap-3 border-t bg-muted/20 px-3 py-2.5">
+                  <p className="min-w-0 truncate text-xs tabular-nums text-muted-foreground">
+                    {datePickerDraft?.from && datePickerDraft.to
+                      ? `${datePickerDraftDays} days selected`
+                      : "Select start and end dates"}
+                  </p>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 rounded-lg px-2.5 text-xs"
+                      onClick={() => {
+                        setDatePickerDraft(visibleDateRange)
+                        setDatePickerOpen(false)
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-8 rounded-lg px-3 text-xs"
+                      disabled={!datePickerDraftIsValid || !datePickerDraft?.from || !datePickerDraft.to}
+                      onClick={() => {
+                        if (!datePickerDraft?.from || !datePickerDraft.to || !datePickerDraftIsValid) return
+                        const from = toLocalDateKey(datePickerDraft.from)
+                        const to = toLocalDateKey(datePickerDraft.to)
+                        setPendingDateRange({
+                          from: from <= to ? from : to,
+                          to: from <= to ? to : from,
+                        })
+                        setNavigatorSelection(null)
+                        setTimeRange("custom")
+                        setDatePickerOpen(false)
+                      }}
+                    >
+                      Apply
+                    </Button>
+                  </div>
+                </div>
               </PopoverContent>
             </Popover>
+            </div>
           </div>
         </div>
-        <ToggleGroup
-          type="single"
-          value={usageMetric}
-          onValueChange={(value) => {
-            if (value) setUsageMetric(value as UsageMetric)
-          }}
-          variant="outline"
-          spacing={2}
-          className="grid w-full grid-cols-2"
-          aria-label="Select chart metric"
-        >
-          <ToggleGroupItem value="storage" className="h-auto w-full flex-col items-start gap-1 px-4 py-2.5">
-            <span className="text-xs text-muted-foreground">Storage</span>
-            <span className="text-lg font-semibold tabular-nums">
-              {formatBytes(latestChartPoint?.storageBytes)}
-            </span>
-          </ToggleGroupItem>
-          <ToggleGroupItem value="objects" className="h-auto w-full flex-col items-start gap-1 px-4 py-2.5">
-            <span className="text-xs text-muted-foreground">Objects</span>
-            <span className="text-lg font-semibold tabular-nums">
-              {formatNumber(latestChartPoint?.rawObjects)}
-            </span>
-          </ToggleGroupItem>
-        </ToggleGroup>
       </CardHeader>
       <CardContent className="px-3 pt-0 sm:px-5 sm:pt-0">
         {chartData.length === 0 ? (
@@ -638,7 +777,7 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
               accessibilityLayer
               data={visibleChartData}
               margin={{ top: 8, right: 8, left: 8, bottom: 8 }}
-              barCategoryGap="6%"
+              barCategoryGap="12%"
               barGap={3}
             >
               <CartesianGrid vertical={false} />
@@ -894,8 +1033,8 @@ export default function OverviewPage() {
 
           <div className="dashboard-motion-item dashboard-motion-delay-3 grid gap-4">
             <Card className="overflow-hidden gap-0 py-0">
-              <CardHeader className="border-b flex min-h-16 items-center px-4 py-2.5 pb-0 sm:min-h-0 sm:px-5 md:px-4 md:py-2">
-                <div className="flex w-full items-center justify-between gap-3 md:gap-2">
+              <CardHeader className="flex min-h-16 items-center border-b px-4 py-2.5 pb-0 sm:min-h-0 sm:px-5 lg:py-3">
+                <div className="flex w-full items-center justify-between gap-3">
                   <div className="min-w-0 flex-1 flex flex-col justify-center gap-0.5">
                     <CardTitle className="text-base">Recent Activity</CardTitle>
                     <CardDescription className="text-xs">Latest four actions from the feed.</CardDescription>
@@ -904,7 +1043,7 @@ export default function OverviewPage() {
                     asChild
                     variant="ghost"
                     size="sm"
-                    className="h-8 shrink-0 rounded-full border border-border/70 bg-background/70 px-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] self-center hover:bg-muted/70"
+                    className="h-8 shrink-0 self-center rounded-full border border-border/70 bg-background/70 px-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] hover:bg-muted/70 lg:rounded-lg"
                   >
                     <Link href="/dashboard/activity">
                       View all <ArrowRight className="h-3.5 w-3.5" />
@@ -932,19 +1071,22 @@ export default function OverviewPage() {
                     </div>
                   </div>
                 ) : (
-                  <ul className="divide-y">
+                  <ul className="divide-y lg:grid lg:grid-cols-2 lg:divide-y-0">
                     {recentActivity.map((activity) => (
-                      <li key={activity.id} className="md:py-3 md:first:pt-0 md:last:pb-0">
+                      <li
+                        key={activity.id}
+                        className="lg:border-b lg:odd:border-r lg:[&:nth-last-child(-n+2)]:border-b-0"
+                      >
                         <Link
                           href="/dashboard/activity"
-                          className="group relative block px-4 py-2.5 outline-none transition-[background-color,box-shadow] hover:bg-muted/40 active:bg-muted/60 focus-visible:bg-muted/50 focus-visible:ring-2 focus-visible:ring-primary/20 md:px-4 md:py-0 md:hover:bg-muted/30"
+                          className="group relative block px-4 py-2.5 outline-none transition-[background-color,box-shadow] hover:bg-muted/40 active:bg-muted/60 focus-visible:bg-muted/50 focus-visible:ring-2 focus-visible:ring-primary/20 lg:h-full lg:px-5 lg:py-4 lg:hover:bg-muted/30"
                         >
-                          <ArrowRight className="absolute right-4 top-2.5 h-3.5 w-3.5 text-muted-foreground transition-transform group-hover:translate-x-0.5 md:hidden" />
-                          <div className="grid gap-2.5 md:grid-cols-[144px_minmax(0,1fr)_auto] md:items-center md:gap-4">
-                            <div className="flex items-center justify-between gap-3 md:block md:self-stretch md:border-r md:border-border/60 md:pr-4">
-                              <div className="flex items-center gap-2 md:mb-2">
+                          <ArrowRight className="absolute right-4 top-2.5 h-3.5 w-3.5 text-muted-foreground transition-transform group-hover:translate-x-0.5 lg:hidden" />
+                          <div className="grid gap-2.5 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-x-4 lg:gap-y-3">
+                            <div className="flex items-center justify-between gap-3 lg:col-span-2">
+                              <div className="flex min-w-0 items-center gap-2">
                                 <span
-                                  className={`h-2 w-2 rounded-full ${
+                                  className={`h-2 w-2 shrink-0 rounded-full ${
                                     activity.outcome === "failed"
                                       ? "bg-destructive"
                                       : activity.outcome === "success"
@@ -958,36 +1100,39 @@ export default function OverviewPage() {
                                   {formatAction(activity.action)}
                                 </span>
                               </div>
-                              <div className="hidden text-[11px] leading-4 text-muted-foreground md:block">
-                                <div className="font-medium text-foreground">{formatRelative(activity.occurredAt)}</div>
-                                <div className="mt-0.5">{formatDateTime(activity.occurredAt)}</div>
+                              <div className="hidden shrink-0 items-center gap-2 text-[11px] text-muted-foreground lg:flex">
+                                <span className="font-medium text-foreground">
+                                  {formatRelative(activity.occurredAt)}
+                                </span>
+                                <span aria-hidden="true">·</span>
+                                <span>{formatDateTime(activity.occurredAt)}</span>
                               </div>
                             </div>
-                            <div className="min-w-0 pr-6 md:pr-0">
-                              <div className="text-sm font-medium leading-5 md:text-[15px] md:leading-6">
+                            <div className="min-w-0 pr-6 lg:pr-0">
+                              <div className="text-sm font-medium leading-5 lg:text-[15px] lg:leading-6">
                                 {activity.summary}
                               </div>
-                              <div className="mt-1 text-[11px] leading-4 text-muted-foreground md:text-xs">
+                              <div className="mt-1 truncate text-[11px] leading-4 text-muted-foreground lg:text-xs">
                                 <span>{activity.entityLabel ?? activity.entityType}</span>
                                 {activity.detail ? (
-                                  <span className="hidden md:inline">
+                                  <span className="hidden lg:inline">
                                     {" "} - {activity.detail}
                                   </span>
                                 ) : null}
                               </div>
                             </div>
-                            <div className="flex items-center justify-between gap-3 md:self-stretch md:flex-col md:items-end md:justify-between md:gap-1">
-                              <div className="text-[11px] leading-4 text-muted-foreground md:hidden">
+                            <div className="flex items-center justify-between gap-3 lg:items-end lg:self-center">
+                              <div className="text-[11px] leading-4 text-muted-foreground lg:hidden">
                                 <div className="font-medium text-foreground">{formatRelative(activity.occurredAt)}</div>
                                 <div className="mt-0.5 truncate">{formatDateTime(activity.occurredAt)}</div>
                               </div>
-                              <ArrowRight className="hidden h-3.5 w-3.5 text-muted-foreground transition-transform group-hover:translate-x-0.5 md:block" />
                               <Badge
                                 variant={outcomeVariant(activity.outcome)}
                                 className="h-6 rounded-full px-2 text-[10px] capitalize"
                               >
                                 {activity.outcome}
                               </Badge>
+                              <ArrowRight className="hidden h-3.5 w-3.5 text-muted-foreground transition-transform group-hover:translate-x-0.5 lg:block" />
                             </div>
                           </div>
                         </Link>
