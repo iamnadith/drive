@@ -20,8 +20,8 @@ type DriveBucketStatsRow = {
   id: string
   account_id: string
   bucket_name: string
-  objects: number
-  bytes: number
+  objects: number | string
+  bytes: number | string
   continuation_token: string | null
   status: BucketStatsStatus
   error: string | null
@@ -140,12 +140,16 @@ function normalizeSupabaseError(error: { message: string }): Error {
 }
 
 function mapRow(row: DriveBucketStatsRow): DriveBucketStats {
+  const numeric = (value: number | string) => {
+    const parsed = typeof value === "number" ? value : Number(value)
+    return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0
+  }
   return {
     id: row.id,
     accountId: row.account_id,
     bucketName: row.bucket_name,
-    objects: typeof row.objects === "number" ? row.objects : 0,
-    bytes: typeof row.bytes === "number" ? row.bytes : 0,
+    objects: numeric(row.objects),
+    bytes: numeric(row.bytes),
     continuationToken: row.continuation_token ?? undefined,
     status: row.status,
     error: row.error ?? undefined,

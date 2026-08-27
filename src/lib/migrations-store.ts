@@ -82,9 +82,9 @@ type DriveMigrationRow = {
   sync_status: MigrationSyncStatus | null
   sync_message: string | null
   updated_at: string | null
-  summary_item_count: number | null
-  summary_objects: number | null
-  summary_bytes: number | null
+  summary_item_count: number | string | null
+  summary_objects: number | string | null
+  summary_bytes: number | string | null
   worker_summary: Record<string, unknown> | null
   details_compacted_at: string | null
 }
@@ -96,8 +96,8 @@ type DriveMigrationItemRow = {
   target_bucket: string
   source_jurisdiction: string | null
   source_storage_class: string | null
-  source_objects: number | null
-  source_bytes: number | null
+  source_objects: number | string | null
+  source_bytes: number | string | null
   slurper_job_id: string | null
   slurper_status: string | null
   progress: Record<string, unknown> | null
@@ -108,6 +108,11 @@ type DriveMigrationItemRow = {
 
 const MIGRATIONS_TABLE = "drive_migrations"
 const MIGRATION_ITEMS_TABLE = "drive_migration_items"
+
+function nonNegativeInteger(value: number | string | null | undefined): number {
+  const parsed = typeof value === "number" ? value : Number(value)
+  return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0
+}
 
 type ProgressEvent = {
   at: string
@@ -193,9 +198,9 @@ function mapMigrationRow(row: DriveMigrationRow): DriveMigration {
     syncStatus: row.sync_status ?? undefined,
     syncMessage: row.sync_message ?? undefined,
     updatedAt: row.updated_at ?? undefined,
-    summaryItemCount: row.summary_item_count ?? 0,
-    summaryObjects: row.summary_objects ?? 0,
-    summaryBytes: row.summary_bytes ?? 0,
+    summaryItemCount: nonNegativeInteger(row.summary_item_count),
+    summaryObjects: nonNegativeInteger(row.summary_objects),
+    summaryBytes: nonNegativeInteger(row.summary_bytes),
     workerSummary: row.worker_summary ?? {},
     detailsCompactedAt: row.details_compacted_at ?? undefined,
   }
@@ -209,8 +214,8 @@ function mapMigrationItemRow(row: DriveMigrationItemRow): DriveMigrationItem {
     targetBucket: row.target_bucket,
     sourceJurisdiction: row.source_jurisdiction ?? undefined,
     sourceStorageClass: row.source_storage_class ?? undefined,
-    sourceObjects: row.source_objects ?? undefined,
-    sourceBytes: row.source_bytes ?? undefined,
+    sourceObjects: row.source_objects === null ? undefined : nonNegativeInteger(row.source_objects),
+    sourceBytes: row.source_bytes === null ? undefined : nonNegativeInteger(row.source_bytes),
     slurperJobId: row.slurper_job_id ?? undefined,
     slurperStatus: row.slurper_status ?? undefined,
     progress: row.progress ?? {},
@@ -284,7 +289,37 @@ export async function getMigration(id: string): Promise<DriveMigration | null> {
 
   if (error) throw normalizeSupabaseError(error)
   const row = (data as DriveMigrationRow[])[0]
-  return row ? mapMigrationRow(row) : null
+  if (!row) return null
+  const migration = mapMigrationRow(row)
+  // Older completed migrations may have valid item rows but zero summary
+  // columns because summaries were introduced after completion. Repair the
+  // projection lazily so detail/history routes do not display false zeroes.
+  if (migration.status === "completed" && migration.summaryItemCount === 0) {
+    const { data: summaryRows } = await supabase
+      .from(MIGRATION_ITEMS_TABLE)
+      .select("source_objects,source_bytes")
+      .eq("migration_id", id)
+    const rows = (summaryRows as Array<{ source_objects: number | string | null; source_bytes: number | string | null }> | null) ?? []
+    if (rows.length > 0) {
+      const numeric = (value: number | string | null) => {
+        const parsed = typeof value === "number" ? value : Number(value)
+        return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0
+      }
+      const summary = {
+        summary_item_count: rows.length,
+        summary_objects: rows.reduce((sum, item) => sum + numeric(item.source_objects), 0),
+        summary_bytes: rows.reduce((sum, item) => sum + numeric(item.source_bytes), 0),
+      }
+      await supabase.from(MIGRATIONS_TABLE).update(summary).eq("id", id)
+      return {
+        ...migration,
+        summaryItemCount: summary.summary_item_count,
+        summaryObjects: summary.summary_objects,
+        summaryBytes: summary.summary_bytes,
+      }
+    }
+  }
+  return migration
 }
 
 export async function listMigrationItems(migrationId: string): Promise<DriveMigrationItem[]> {
@@ -403,6 +438,23 @@ export async function updateMigration(
   if (error) throw normalizeSupabaseError(error)
   const migration = mapMigrationRow(data as DriveMigrationRow)
   if (updates.status === "completed") {
+    const { data: summaryRows, error: summaryError } = await supabase
+      .from(MIGRATION_ITEMS_TABLE)
+      .select("source_objects,source_bytes")
+      .eq("migration_id", id)
+    if (!summaryError) {
+      const rows = (summaryRows as Array<{ source_objects: number | string | null; source_bytes: number | string | null }> | null) ?? []
+      const numeric = (value: number | string | null) => {
+        const parsed = typeof value === "number" ? value : Number(value)
+        return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0
+      }
+      const summary = {
+        summary_item_count: rows.length,
+        summary_objects: rows.reduce((sum, row) => sum + numeric(row.source_objects), 0),
+        summary_bytes: rows.reduce((sum, row) => sum + numeric(row.source_bytes), 0),
+      }
+      await supabase.from(MIGRATIONS_TABLE).update(summary).eq("id", id)
+    }
     await compactPreviousMigrationDetails(id).catch((cleanupError) => {
       console.error("Unable to compact previous migration details:", cleanupError)
     })

@@ -41,9 +41,9 @@ type DriveAccountRow = {
   cloudflare_account_name: string | null
   status: CloudflareAccountStatus
   last_migrated: string | null
-  total_buckets: number
-  total_objects: number
-  total_bytes: number
+  total_buckets: number | string
+  total_objects: number | string
+  total_bytes: number | string
   last_synced_at: string | null
   sync_status: CloudflareAccountSyncStatus | null
   sync_message: string | null
@@ -112,6 +112,10 @@ function normalizeSupabaseError(error: { message: string }): Error {
 }
 
 function mapRow(row: DriveAccountRow): CloudflareAccount {
+  const numeric = (value: number | string) => {
+    const parsed = typeof value === "number" ? value : Number(value)
+    return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0
+  }
   return {
     id: row.id,
     label: row.label,
@@ -126,9 +130,9 @@ function mapRow(row: DriveAccountRow): CloudflareAccount {
     cloudflareAccountName: row.cloudflare_account_name ?? undefined,
     status: row.status,
     lastMigrated: row.last_migrated ?? undefined,
-    totalBuckets: row.total_buckets ?? 0,
-    totalObjects: row.total_objects ?? 0,
-    totalBytes: row.total_bytes ?? 0,
+    totalBuckets: numeric(row.total_buckets),
+    totalObjects: numeric(row.total_objects),
+    totalBytes: numeric(row.total_bytes),
     lastSyncedAt: row.last_synced_at ?? undefined,
     syncStatus: row.sync_status ?? undefined,
     syncMessage: row.sync_message ?? undefined,

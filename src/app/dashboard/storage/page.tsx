@@ -319,14 +319,18 @@ export default function StoragePage() {
           totalBytes?: unknown
         }
         const buckets = Array.isArray(data.buckets) ? data.buckets : []
-        const totalBytes = typeof data.totalBytes === "number" ? data.totalBytes : 0
+        const numeric = (value: unknown) => {
+          const parsed = typeof value === "number" ? value : Number(value)
+          return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0
+        }
+        const totalBytes = numeric(data.totalBytes)
         setTotalUsedBytes(totalBytes)
         setDrives(
           buckets.map((b) => ({
             id: String(b.id ?? b.name),
             name: String(b.name ?? "Bucket"),
-            usedBytes: typeof b.bytes === "number" ? b.bytes : 0,
-            objects: typeof b.objects === "number" ? b.objects : 0,
+            usedBytes: numeric(b.bytes),
+            objects: numeric(b.objects),
             statsStatus: typeof b.statsStatus === "string" ? b.statsStatus : undefined,
           }))
         )

@@ -96,6 +96,18 @@ type ActiveAccountSnapshotRow = {
   captured_at: string
 }
 
+type LogicalStorageSnapshotRow = {
+  captured_day: string
+  captured_at: string
+  account_id: string | null
+  buckets: string | number | null
+  objects: string | number | null
+  bytes: string | number | null
+  added: string | number | null
+  updated: string | number | null
+  deleted: string | number | null
+}
+
 function asRange(value: string | null): RangeKey {
   if (value === "7d" || value === "30d" || value === "90d") return value
   return "all"
@@ -362,7 +374,7 @@ async function listActiveAccountSnapshots(): Promise<ActiveAccountSnapshotRow[]>
   const { rows } = await queryDb<ActiveAccountSnapshotRow>(`
     select captured_day, account_id, account_label, account_email, buckets, objects, bytes, captured_at
     from (
-      select distinct on (captured_day)
+      select distinct on (account_id, captured_day)
         captured_day::text as captured_day,
         account_id,
         account_label,
@@ -372,12 +384,23 @@ async function listActiveAccountSnapshots(): Promise<ActiveAccountSnapshotRow[]>
         bytes,
         captured_at
       from drive_analytics_active_account_snapshots
-      order by captured_day desc, captured_at desc
+      order by account_id, captured_day desc, captured_at desc
     ) daily
     order by captured_day desc
     limit 730
   `)
   return rows.reverse()
+}
+
+async function listLogicalStorageSnapshots(): Promise<LogicalStorageSnapshotRow[]> {
+  if (!isPostgresConfigured()) return []
+  const { rows } = await queryDb<LogicalStorageSnapshotRow>(`
+    select captured_day::text as captured_day, captured_at, account_id, buckets, objects, bytes, added, updated, deleted
+    from drive_logical_storage_snapshots
+    order by captured_day asc
+    limit 730
+  `)
+  return rows
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
@@ -526,6 +549,13 @@ async function buildAnalyticsPayload(range: RangeKey) {
     [] as BucketSnapshotRow[],
     { reportWarning: false }
   )
+  const logicalStorageSnapshots = await capture(
+    "logical storage snapshots",
+    warnings,
+    listLogicalStorageSnapshots,
+    [] as LogicalStorageSnapshotRow[],
+    { reportWarning: false }
+  )
 
   const itemRowsAsItems: DriveMigrationItem[] = migrationItemRows.map((row) => ({
     id: row.id,
@@ -627,7 +657,17 @@ async function buildAnalyticsPayload(range: RangeKey) {
   )
   const currentActiveAccountSnapshotRows = activeAccount
     ? activeAccountSnapshotRows.filter((row) => row.account_id === activeAccount.id)
-    : []
+      : []
+  const logicalStorageSeries = logicalStorageSnapshots.map((row) => ({
+    date: row.captured_day,
+    accountId: row.account_id ?? "logical-storage",
+    accountLabel: "Logical storage",
+    buckets: toNumber(row.buckets),
+    storageBytes: toNumber(row.bytes),
+    objects: toNumber(row.objects),
+    capturedAt: row.captured_at,
+  }))
+  const overviewBucketStats = activeAnalyticsBucketStats.length > 0 ? activeAnalyticsBucketStats : analyticsBucketStats
   const archivedAccountLabelById = new Map(
     archivedBucketStats.map((row) => [
       row.account_id,
@@ -638,6 +678,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
     range === "all"
       ? earliestDate([
           ...activeAnalyticsBucketStats.map((row) => row.updated_at),
+          ...logicalStorageSeries.map((row) => row.date),
           ...currentActiveAccountSnapshotRows.map((row) => row.captured_day),
           ...migrations.map((migration) => migration.createdAt),
           ...migrations.map((migration) => migration.completedAt),
@@ -657,7 +698,9 @@ async function buildAnalyticsPayload(range: RangeKey) {
   })
 
   const legacyStorageSeries =
-    currentActiveAccountSnapshotRows.length > 0
+    logicalStorageSeries.length > 0
+      ? logicalStorageSeries
+      : currentActiveAccountSnapshotRows.length > 0
       ? currentActiveAccountSnapshotRows.map((row) => ({
           date: row.captured_day,
           accountId: row.account_id,
@@ -667,15 +710,15 @@ async function buildAnalyticsPayload(range: RangeKey) {
           objects: toNumber(row.objects),
           capturedAt: row.captured_at,
         }))
-      : activeAccount
+      : overviewBucketStats.length > 0
         ? [
             {
               date: generatedAt.slice(0, 10),
-              accountId: activeAccount.id,
-              accountLabel: activeAccount.label || activeAccount.email,
-              buckets: new Set(activeAnalyticsBucketStats.map((row) => row.bucket_name)).size,
-              storageBytes: activeAnalyticsBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0),
-              objects: activeAnalyticsBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0),
+              accountId: "logical-storage",
+              accountLabel: "Logical storage",
+              buckets: new Set(overviewBucketStats.map((row) => `${row.account_id}:${row.bucket_name}`)).size,
+              storageBytes: overviewBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0),
+              objects: overviewBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0),
               capturedAt: generatedAt,
             },
           ]
@@ -738,10 +781,18 @@ async function buildAnalyticsPayload(range: RangeKey) {
   // Prefer finalized account totals. Fall back to bucket rows for accounts
   // populated by an older worker/schema where those aggregate columns remain
   // zero, otherwise the dashboard incorrectly renders an empty account.
-  const bucketObjectsFallback = activeBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0)
-  const bucketBytesFallback = activeBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0)
-  const totalStorageBytes = activeAccount?.totalBytes || bucketBytesFallback
-  const totalObjects = activeAccount?.totalObjects || bucketObjectsFallback
+  const bucketObjectsFallback = overviewBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0)
+  const bucketBytesFallback = overviewBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0)
+  const latestLogicalStorage = logicalStorageSnapshots.at(-1)
+  const totalStorageBytes = latestLogicalStorage
+    ? toNumber(latestLogicalStorage.bytes)
+    : activeAccount?.totalBytes || bucketBytesFallback
+  const totalObjects = latestLogicalStorage
+    ? toNumber(latestLogicalStorage.objects)
+    : activeAccount?.totalObjects || bucketObjectsFallback
+  const totalBuckets = latestLogicalStorage
+    ? toNumber(latestLogicalStorage.buckets)
+    : new Set(overviewBucketStats.map((row) => `${row.account_id}:${row.bucket_name}`)).size
   const migrationNeedsAttention = (migration: DriveMigration) =>
     migration.status === "failed" ||
     (migration.syncStatus === "error" && migration.status !== "completed" && migration.status !== "canceled")
@@ -850,7 +901,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
     metrics: {
       storageBytes: totalStorageBytes,
       objects: totalObjects,
-      buckets: new Set(activeAnalyticsBucketStats.map((row) => `${row.account_id}:${row.bucket_name}`)).size,
+      buckets: totalBuckets,
       accounts: accounts.length,
       activeAccounts: accounts.filter((account) => account.status === "active").length,
       users: users.length,

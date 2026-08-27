@@ -12,7 +12,6 @@ import {
   Ban,
   Globe,
   Trash2,
-  RefreshCw,
   Eye,
   Settings,
   Search,
@@ -255,8 +254,6 @@ export default function AccountsPage() {
   const [r2SecretAccessKey, setR2SecretAccessKey] = React.useState("");
 
   const [isSubmitting, setIsSubmitting] = React.useState(false);
-  const [syncingId, setSyncingId] = React.useState<string | null>(null);
-  const [syncingAll, setSyncingAll] = React.useState(false);
   const [viewAccount, setViewAccount] = React.useState<Account | null>(null);
   const [settingsAccount, setSettingsAccount] = React.useState<Account | null>(
     null,
@@ -314,9 +311,7 @@ export default function AccountsPage() {
   const [deletingMigrationIds, setDeletingMigrationIds] = React.useState<
     Record<string, boolean>
   >({});
-  const hasAutoSyncedRef = React.useRef(false);
   const didHydrateCacheRef = React.useRef(false);
-  const didLoadServerSnapshotRef = React.useRef(false);
 
   const loadAccounts = React.useCallback(
     async ({
@@ -347,7 +342,6 @@ export default function AccountsPage() {
             return merged;
           });
         });
-        didLoadServerSnapshotRef.current = true;
         return rows;
       } catch (err) {
         console.error(err);
@@ -390,16 +384,6 @@ export default function AccountsPage() {
     setShowEditTwoFactor(false);
     setShowEditR2Secret(false);
   }, [settingsAccount]);
-
-  React.useEffect(() => {
-    if (!accounts.length) return;
-    if (!didLoadServerSnapshotRef.current) return;
-    if (hasAutoSyncedRef.current) return;
-    hasAutoSyncedRef.current = true;
-    handleSyncAll({ silent: true }).catch(() => {
-      // errors already handled inside handleSyncAll
-    });
-  }, [accounts]);
 
   React.useEffect(() => {
     let interval: number | undefined;
@@ -803,140 +787,6 @@ export default function AccountsPage() {
     }
   };
 
-  const handleSync = async (id: string, options?: { silent?: boolean }) => {
-    try {
-      setSyncingId(id);
-      setAccounts((prev) =>
-        prev.map((acc) =>
-          acc.id === id
-            ? {
-                ...acc,
-                syncStatus: "syncing",
-                syncMessage: "Sync in progress",
-              }
-            : acc,
-        ),
-      );
-      const res = await fetch(`/api/accounts/${id}/sync`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Unable to sync account");
-
-      const updated = mapAccount(data.account as AccountApiRecord);
-      setAccounts((prev) =>
-        {
-          const next = prev.map((acc) =>
-            acc.id === updated.id
-              ? { ...acc, ...updated }
-              : acc,
-          );
-          writeAccountsCache(next);
-          return next;
-        },
-      );
-      if (!options?.silent) {
-        toast.success("Account synced");
-      }
-    } catch (err: any) {
-      console.error(err);
-      setAccounts((prev) =>
-        prev.map((acc) =>
-          acc.id === id
-            ? {
-                ...acc,
-                syncStatus: "error",
-                syncMessage: err?.message || "Unable to sync account",
-              }
-            : acc,
-        ),
-      );
-      if (!options?.silent) {
-        toast.error(err?.message || "Unable to sync account");
-      }
-    } finally {
-      setSyncingId(null);
-    }
-  };
-
-  const handleSyncAll = async (options?: { silent?: boolean }) => {
-    if (!accounts.length) return;
-    try {
-      setSyncingAll(true);
-      setAccounts((prev) =>
-        prev.map((acc) => ({
-          ...acc,
-          syncStatus: "syncing",
-          syncMessage: "Sync in progress",
-        })),
-      );
-      const results = await Promise.allSettled(
-        accounts.map((acc) =>
-          fetch(`/api/accounts/${acc.id}/sync`, {
-            method: "POST",
-          }).then(async (res) => {
-            if (!res.ok) {
-              const data = await res.json().catch(() => ({}));
-              throw new Error(data.error || `Unable to sync ${acc.name || acc.email}`);
-            }
-            return res.json();
-          }),
-        ),
-      );
-
-      await loadAccounts({ silent: true });
-
-      const failed = results.filter((result) => result.status === "rejected").length;
-      if (!options?.silent) {
-        if (failed === results.length) {
-          toast.error("Unable to sync accounts");
-        }
-      }
-    } catch (err: any) {
-      console.error(err);
-      if (!options?.silent) {
-        toast.error(err?.message || "Unable to sync all accounts");
-      }
-    } finally {
-      setSyncingAll(false);
-    }
-  };
-
-  const handleSyncAccountId = async (id: string) => {
-    try {
-      setSyncingId(id);
-      const res = await fetch(`/api/accounts/${id}/sync-id`, {
-        method: "POST",
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Unable to sync account ID");
-
-      const updated = data.account;
-      const newAccountId = updated.cloudflareAccountId ?? "";
-
-      setAccounts((prev) =>
-        prev.map((acc) =>
-          acc.id === updated.id
-            ? {
-                ...acc,
-                accountId: newAccountId || acc.accountId,
-              }
-            : acc,
-        ),
-      );
-
-      // Keep settings dialog in sync if it's open on this account.
-      if (settingsAccount && settingsAccount.id === updated.id) {
-        setEditAccountId(newAccountId);
-        setSettingsAccount({ ...settingsAccount, accountId: newAccountId });
-      }
-
-      toast.success("Account ID synced");
-    } catch (err: any) {
-      console.error(err);
-      toast.error(err?.message || "Unable to sync account ID");
-    } finally {
-      setSyncingId(null);
-    }
-  };
   const handleSaveSettings = async () => {
     if (!settingsAccount) return;
     if (
@@ -1167,18 +1017,6 @@ export default function AccountsPage() {
               variant="ghost"
               size="icon"
               className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md"
-              onClick={() => handleSync(account.id)}
-              disabled={syncingId === account.id}
-              aria-label="Sync account"
-            >
-              <RefreshCw
-                className={`h-3.5 w-3.5 ${syncingId === account.id ? "animate-spin" : ""}`}
-              />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md"
               onClick={() => setSettingsAccount(account)}
               aria-label="Account settings"
             >
@@ -1238,7 +1076,6 @@ export default function AccountsPage() {
     );
   const pageWindow = totalPages <= 3 ? totalPages : 3;
   const desktopPageWindow = totalPages <= 5 ? totalPages : 5;
-  const isRefreshingAccounts = syncingAll || accountsRefreshing;
   const mobileStart = Math.max(
     0,
     Math.min(
@@ -1280,18 +1117,6 @@ export default function AccountsPage() {
                   className="h-9 w-full pl-8"
                 />
               </div>
-              <Button
-                variant="outline"
-                size="icon"
-                className="size-9 shrink-0 rounded-full border border-border/70 bg-background/85 text-foreground shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
-                onClick={() => {
-                  void handleSyncAll();
-                }}
-                disabled={accounts.length === 0}
-                aria-label="Sync all accounts"
-              >
-                <RefreshCw className={`h-4 w-4 ${isRefreshingAccounts ? "animate-spin" : ""}`} />
-              </Button>
               <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
                 <DialogTrigger asChild>
                   <Button
@@ -2709,17 +2534,6 @@ export default function AccountsPage() {
                       <div className="flex items-center justify-between gap-2">
                         <Label htmlFor="edit-accountId">Account ID</Label>
                         <div className="flex gap-1 text-[11px]">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleSyncAccountId(settingsAccount.id)
-                            }
-                            disabled={syncingId === settingsAccount.id}
-                            className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-muted-foreground hover:bg-muted"
-                            aria-label="Sync account ID from token"
-                          >
-                            <RefreshCw className="h-3 w-3" />
-                          </button>
                           <button
                             type="button"
                             onClick={async () => {

@@ -266,7 +266,7 @@ async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Pro
       query,
       variables: {
         accountTag: account.cloudflare_account_id,
-        startDate: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+        startDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
         endDate: new Date().toISOString(),
       },
     }),
@@ -274,7 +274,7 @@ async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Pro
   const payload = await response.json().catch(() => ({})) as {
     data?: { viewer?: { accounts?: Array<{ r2StorageAdaptiveGroups?: Array<{
       dimensions?: { bucketName?: string; datetime?: string }
-      max?: { objectCount?: number; payloadSize?: number }
+      max?: { objectCount?: number | string; payloadSize?: number | string }
     }> }> } }
     errors?: Array<{ message?: string }>
   }
@@ -289,12 +289,13 @@ async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Pro
     const objectCount = group.max?.objectCount
     const payloadSize = group.max?.payloadSize
     if (!bucket || !observedAt || latestByAnalyticsName.has(bucket)) continue
-    if (typeof objectCount !== "number" || !Number.isFinite(objectCount)) continue
-    if (typeof payloadSize !== "number" || !Number.isFinite(payloadSize)) continue
+    const objects = typeof objectCount === "number" ? objectCount : Number(objectCount)
+    const bytes = typeof payloadSize === "number" ? payloadSize : Number(payloadSize)
+    if (!Number.isFinite(objects) || !Number.isFinite(bytes)) continue
     latestByAnalyticsName.set(bucket, {
       bucket,
-      objects: Math.max(0, Math.trunc(objectCount)),
-      bytes: Math.max(0, Math.trunc(payloadSize)),
+      objects: Math.max(0, Math.trunc(objects)),
+      bytes: Math.max(0, Math.trunc(bytes)),
       observedAt,
     })
   }
@@ -487,6 +488,17 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
     const buckets = progress ? progress.buckets : await listBuckets(account)
     const bucketNames = buckets.map((bucket) => bucket.name)
     const bucketOffset = progress?.accountId === account.id ? Math.min(progress.bucketOffset, buckets.length) : 0
+    const existingBucketCount = await db.query<{ count: string }>(
+      `select count(*)::text count from drive_bucket_stats where account_id=$1`,
+      [account.id]
+    )
+    if (buckets.length === 0 && Number(existingBucketCount.rows[0]?.count ?? 0) > 0) {
+      await db.query(
+        `update drive_accounts set sync_status='syncing',sync_message='R2 bucket listing unavailable; retaining last known totals',updated_at=now() where id=$1`,
+        [account.id]
+      )
+      return { account: account.label, status: "incomplete", message: "R2 bucket listing unavailable" }
+    }
     if (!progress || progress.accountId !== account.id) {
       await reconcileBuckets(db, account, bucketNames)
       await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0 })
@@ -499,6 +511,23 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
     const metrics = await getBucketMetrics(account, buckets)
     const batch = buckets.slice(bucketOffset, bucketOffset + BUCKET_BATCH_SIZE)
     const metricByBucket = new Map(metrics.map((metric) => [metric.bucket, metric]))
+    if (metrics.length < buckets.length) {
+      // Cloudflare analytics can lag after account activation or migration.
+      // Missing provider data is not a valid zero snapshot: preserve the last
+      // known totals and retry the complete bucket set on the next cycle.
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0 })
+      await db.query(
+        `update drive_accounts set sync_status='syncing',sync_message=$2,updated_at=now() where id=$1`,
+        [account.id, `R2 analytics unavailable for ${buckets.length - metrics.length} bucket(s); retaining last known totals`]
+      )
+      return {
+        account: account.label,
+        status: "incomplete",
+        buckets: buckets.length,
+        metrics: metrics.length,
+        missingMetrics: buckets.length - metrics.length,
+      }
+    }
     for (const [index, bucket] of batch.entries()) {
       const metric = metricByBucket.get(bucket.name)
       if (metric) await applyBucketMetrics(db, account, [metric])
@@ -620,6 +649,7 @@ async function runCycle(env: Env, orchestratorUrl?: string) {
   await db.connect()
   let claimed = false
   try {
+    await ensureSchema(db)
     await ensureProgressSchema(db)
     claimed = await claimCycle(db, orchestratorUrl)
     if (!claimed) return { ok: true, skipped: "Another Backend Orchestrator cycle is active" }
