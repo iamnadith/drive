@@ -115,6 +115,8 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   assert.match(analyticsRoute, /activeAccountSnapshotRows\.map\(\(row\) => row\.captured_day\)/)
   assert.match(analyticsRoute, /activeAggregateReady \? toNumber\(activeAccount\.totalBytes\) : activeBucketBytes/)
   assert.doesNotMatch(analyticsRoute, /latestLogicalStorage\.bytes/)
+  assert.doesNotMatch(analyticsRoute, /drive_logical_storage_snapshots/)
+  assert.doesNotMatch(analyticsRoute, /listLogicalStorageSnapshots/)
   assert.doesNotMatch(analyticsRoute, /capture\("accounts"/)
   assert.doesNotMatch(analyticsRoute, /capture\("bucket stats"/)
   assert.match(accountsStore, /Awaiting Backend Orchestrator refresh after migration activation/)

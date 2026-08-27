@@ -96,18 +96,6 @@ type ActiveAccountSnapshotRow = {
   captured_at: string
 }
 
-type LogicalStorageSnapshotRow = {
-  captured_day: string
-  captured_at: string
-  account_id: string | null
-  buckets: string | number | null
-  objects: string | number | null
-  bytes: string | number | null
-  added: string | number | null
-  updated: string | number | null
-  deleted: string | number | null
-}
-
 function asRange(value: string | null): RangeKey {
   if (value === "7d" || value === "30d" || value === "90d") return value
   return "all"
@@ -336,17 +324,6 @@ async function listActiveAccountSnapshots(): Promise<ActiveAccountSnapshotRow[]>
   return rows
 }
 
-async function listLogicalStorageSnapshots(): Promise<LogicalStorageSnapshotRow[]> {
-  if (!isPostgresConfigured()) return []
-  const { rows } = await queryDb<LogicalStorageSnapshotRow>(`
-    select captured_day::text as captured_day, captured_at, account_id, buckets, objects, bytes, added, updated, deleted
-    from drive_logical_storage_snapshots
-    order by captured_day asc
-    limit 730
-  `)
-  return rows
-}
-
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
   return new Promise((resolve) => {
     const timeout = setTimeout(() => resolve(null), ms)
@@ -496,14 +473,6 @@ async function buildAnalyticsPayload(range: RangeKey) {
     [] as BucketSnapshotRow[],
     { reportWarning: false }
   )
-  const logicalStorageSnapshots = await capture(
-    "logical storage snapshots",
-    warnings,
-    listLogicalStorageSnapshots,
-    [] as LogicalStorageSnapshotRow[],
-    { reportWarning: false }
-  )
-
   const itemRowsAsItems: DriveMigrationItem[] = migrationItemRows.map((row) => ({
     id: row.id,
     migrationId: row.migration_id,
@@ -578,21 +547,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const activeAnalyticsBucketStats = activeAccount
     ? analyticsBucketStats.filter((row) => row.account_id === activeAccount.id)
     : []
-  const activeAccountSnapshotRows = await capture(
-    "active account analytics snapshots",
-    warnings,
-    listActiveAccountSnapshots,
-    [] as ActiveAccountSnapshotRow[]
-  )
-  const logicalStorageSeries = logicalStorageSnapshots.map((row) => ({
-    date: row.captured_day,
-    accountId: row.account_id ?? "logical-storage",
-    accountLabel: "Logical storage",
-    buckets: toNumber(row.buckets),
-    storageBytes: toNumber(row.bytes),
-    objects: toNumber(row.objects),
-    capturedAt: row.captured_at,
-  }))
+  const activeAccountSnapshotRows = await listActiveAccountSnapshots()
   const archivedAccountLabelById = new Map(
     archivedBucketStats.map((row) => [
       row.account_id,
@@ -603,7 +558,6 @@ async function buildAnalyticsPayload(range: RangeKey) {
     range === "all"
       ? earliestDate([
           ...activeAnalyticsBucketStats.map((row) => row.updated_at),
-          ...logicalStorageSeries.map((row) => row.date),
           ...activeAccountSnapshotRows.map((row) => row.captured_day),
           ...migrations.map((migration) => migration.createdAt),
           ...migrations.map((migration) => migration.completedAt),
@@ -647,8 +601,6 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const legacyStorageSeries =
     activeHistorySeries.length > 0
       ? activeHistorySeries
-      : logicalStorageSeries.length > 0
-        ? logicalStorageSeries
       : activeAnalyticsBucketStats.length > 0
         ? [
             {
