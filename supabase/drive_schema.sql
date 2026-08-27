@@ -525,8 +525,8 @@ create table if not exists drive_backend_orchestrator_state (
   updated_at timestamptz not null default now()
 );
 
--- One daily chart point written by the Backend Orchestrator after a complete
--- active-account sync. Later successful syncs replace that day's earlier row.
+-- Change-only daily chart history written after complete worker syncs. The
+-- compact fingerprint compares every bucket's name, objects, and bytes.
 create table if not exists drive_analytics_active_account_snapshots (
   captured_day date primary key,
   account_id uuid not null,
@@ -535,6 +535,7 @@ create table if not exists drive_analytics_active_account_snapshots (
   buckets integer not null default 0,
   objects bigint not null default 0,
   bytes bigint not null default 0,
+  bucket_fingerprint text,
   captured_at timestamptz not null default now()
 );
 

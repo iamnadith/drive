@@ -238,9 +238,11 @@ async function ensureAnalyticsArchiveSchema() {
       buckets integer not null default 0,
       objects bigint not null default 0,
       bytes bigint not null default 0,
+      bucket_fingerprint text,
       captured_at timestamptz not null default now()
     );
   `)
+  await queryDb(`alter table drive_analytics_active_account_snapshots add column if not exists bucket_fingerprint text;`)
   await queryDb(`create index if not exists drive_analytics_active_account_snapshots_day_idx on drive_analytics_active_account_snapshots (captured_day desc);`)
 }
 

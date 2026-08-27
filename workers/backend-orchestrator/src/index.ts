@@ -35,7 +35,7 @@ type BucketMetric = { bucket: string; objects: number; bytes: number; observedAt
 const BUCKET_BATCH_SIZE = 25
 const EXTERNAL_REQUEST_TIMEOUT_MS = 8_000
 const METRICS_CACHE_TTL_MS = 10_000
-const WORKER_BUILD = 16
+const WORKER_BUILD = 17
 const RETENTION_BATCH_SIZE = 250
 const metricsCache = new Map<string, { expiresAt: number; metrics: BucketMetric[] }>()
 
@@ -161,9 +161,11 @@ async function ensureSchema(db: Client) {
       buckets integer not null default 0,
       objects bigint not null default 0,
       bytes bigint not null default 0,
+      bucket_fingerprint text,
       captured_at timestamptz not null default now()
     )
   `)
+  await db.query(`alter table drive_analytics_active_account_snapshots add column if not exists bucket_fingerprint text`)
   await db.query(`
     with ranked as (
       select ctid, row_number() over (
@@ -459,12 +461,51 @@ async function clearSyncProgress(db: Client) {
 
 async function recordDailyAccountSnapshot(db: Client, accountId: string) {
   await db.query(`
+    with current_state as (
+      select
+        a.id account_id,
+        a.label account_label,
+        a.email account_email,
+        a.total_buckets buckets,
+        a.total_objects objects,
+        a.total_bytes bytes,
+        md5(coalesce((
+          select string_agg(
+            stats.bucket_name || ':' || stats.objects::text || ':' || stats.bytes::text,
+            '|' order by stats.bucket_name
+          )
+          from drive_bucket_stats stats
+          where stats.account_id = a.id
+        ), '')) bucket_fingerprint
+      from drive_accounts a
+      where a.id = $1
+    ), previous_state as (
+      select bucket_fingerprint
+      from drive_analytics_active_account_snapshots
+      where captured_day < current_date
+      order by captured_day desc
+      limit 1
+    ), remove_reverted_day as (
+      delete from drive_analytics_active_account_snapshots snapshots
+      using current_state current
+      where snapshots.captured_day = current_date
+        and exists (
+          select 1 from previous_state previous
+          where previous.bucket_fingerprint is not null
+            and previous.bucket_fingerprint = current.bucket_fingerprint
+        )
+      returning snapshots.captured_day
+    )
     insert into drive_analytics_active_account_snapshots
-      (captured_day, account_id, account_label, account_email, buckets, objects, bytes, captured_at)
-    select current_date, a.id, a.label, a.email,
-           a.total_buckets, a.total_objects, a.total_bytes, now()
-    from drive_accounts a
-    where a.id = $1
+      (captured_day, account_id, account_label, account_email, buckets, objects, bytes, bucket_fingerprint, captured_at)
+    select current_date, current.account_id, current.account_label, current.account_email,
+           current.buckets, current.objects, current.bytes, current.bucket_fingerprint, now()
+    from current_state current
+    where not exists (
+      select 1 from previous_state previous
+      where previous.bucket_fingerprint is not null
+        and previous.bucket_fingerprint = current.bucket_fingerprint
+    )
     on conflict (captured_day) do update set
       account_id = excluded.account_id,
       account_label = excluded.account_label,
@@ -472,6 +513,7 @@ async function recordDailyAccountSnapshot(db: Client, accountId: string) {
       buckets = excluded.buckets,
       objects = excluded.objects,
       bytes = excluded.bytes,
+      bucket_fingerprint = excluded.bucket_fingerprint,
       captured_at = excluded.captured_at
   `, [accountId])
 }
