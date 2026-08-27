@@ -11,8 +11,8 @@ import {
   Server,
 } from "lucide-react"
 import {
-  Area,
-  AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
   XAxis,
   YAxis,
@@ -26,6 +26,8 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import {
   ChartConfig,
   ChartContainer,
+  ChartLegend,
+  ChartLegendContent,
   ChartTooltip,
   ChartTooltipContent,
 } from "@/components/ui/chart"
@@ -75,6 +77,7 @@ type OverviewResponse = {
     storageBytes: number
     objects: number
     capturedAt: string
+    hasSnapshot: boolean
   }>
   syncHealth: {
     partial: boolean
@@ -102,7 +105,7 @@ type ActivityResponse = {
   events: RecentActivityItem[]
 }
 
-type UsageRange = "7d" | "30d" | "90d"
+type UsageRange = "7d" | "30d" | "90d" | "180d" | "365d" | "all"
 
 const platformUsageChartConfig = {
   storageGb: {
@@ -111,9 +114,17 @@ const platformUsageChartConfig = {
   },
   objects: {
     label: "Objects",
-    color: "var(--primary)",
+    color: "var(--muted-foreground)",
   },
 } satisfies ChartConfig
+
+const usageRangeDays: Record<Exclude<UsageRange, "all">, number> = {
+  "7d": 7,
+  "30d": 30,
+  "90d": 90,
+  "180d": 180,
+  "365d": 365,
+}
 
 const DASHBOARD_ANALYTICS_CACHE_KEY = "dashboard-analytics:range=all"
 
@@ -225,28 +236,52 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
   const [timeRange, setTimeRange] = React.useState<UsageRange>("90d")
 
   React.useEffect(() => {
-    if (isMobile) setTimeRange("7d")
+    setTimeRange((current) => {
+      if (isMobile && current === "90d") return "7d"
+      if (!isMobile && (current === "7d" || current === "30d")) return "90d"
+      return current
+    })
   }, [isMobile])
 
   const chartData = React.useMemo(() => {
-    const referenceTime = series.reduce((latest, item) => {
-      const time = Date.parse(item.date)
-      return Number.isFinite(time) ? Math.max(latest, time) : latest
-    }, 0)
-    const referenceDate = referenceTime > 0 ? new Date(referenceTime) : new Date()
-    const daysToSubtract = timeRange === "30d" ? 30 : timeRange === "7d" ? 7 : 90
-    const startDate = new Date(referenceDate)
-    startDate.setDate(startDate.getDate() - daysToSubtract)
+    const validSeries = series
+      .filter((item) => Number.isFinite(Date.parse(item.date)))
+      .sort((a, b) => a.date.localeCompare(b.date))
+    if (validSeries.length === 0) return []
 
-    return series
-      .filter((item) => {
-        const date = new Date(item.date)
-        return Number.isFinite(date.getTime()) && date >= startDate
+    const referenceTime = Date.parse(validSeries[validSeries.length - 1].date)
+    const firstSnapshot = validSeries.find(
+      (item) => item.hasSnapshot ?? item.accountId !== "logical-storage"
+    )
+    if (timeRange === "all" && !firstSnapshot) return []
+
+    const startTime =
+      timeRange === "all"
+        ? Date.parse(firstSnapshot!.date)
+        : referenceTime - (usageRangeDays[timeRange] - 1) * 86_400_000
+    const chartPoints = []
+    let sourceIndex = -1
+
+    for (let dayTime = startTime; dayTime <= referenceTime; dayTime += 86_400_000) {
+      const date = new Date(dayTime).toISOString().slice(0, 10)
+      while (sourceIndex + 1 < validSeries.length && validSeries[sourceIndex + 1].date <= date) {
+        sourceIndex += 1
+      }
+      const source = sourceIndex >= 0 ? validSeries[sourceIndex] : undefined
+      const hasSnapshot = Boolean(
+        source && (source.hasSnapshot ?? source.accountId !== "logical-storage")
+      )
+      const storageBytes = hasSnapshot ? source?.storageBytes ?? 0 : 0
+
+      chartPoints.push({
+        date,
+        storageBytes,
+        storageGb: Number((storageBytes / 1024 / 1024 / 1024).toFixed(2)),
+        objects: hasSnapshot ? source?.objects ?? 0 : 0,
       })
-      .map((item) => ({
-        ...item,
-        storageGb: Number((item.storageBytes / 1024 / 1024 / 1024).toFixed(2)),
-      }))
+    }
+
+    return chartPoints
   }, [series, timeRange])
 
   return (
@@ -270,8 +305,9 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
             className="hidden *:data-[slot=toggle-group-item]:px-4! @[767px]/card:flex"
           >
             <ToggleGroupItem value="90d">Last 3 months</ToggleGroupItem>
-            <ToggleGroupItem value="30d">Last 30 days</ToggleGroupItem>
-            <ToggleGroupItem value="7d">Last 7 days</ToggleGroupItem>
+            <ToggleGroupItem value="180d">Last 6 months</ToggleGroupItem>
+            <ToggleGroupItem value="365d">Last 12 months</ToggleGroupItem>
+            <ToggleGroupItem value="all">All time</ToggleGroupItem>
           </ToggleGroup>
           <Select value={timeRange} onValueChange={(value) => setTimeRange(value as UsageRange)}>
             <SelectTrigger
@@ -282,14 +318,23 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
               <SelectValue placeholder="Last 3 months" />
             </SelectTrigger>
             <SelectContent className="rounded-xl">
+              <SelectItem value="7d" className="rounded-lg">
+                Last 7 days
+              </SelectItem>
+              <SelectItem value="30d" className="rounded-lg">
+                Last 1 month
+              </SelectItem>
               <SelectItem value="90d" className="rounded-lg">
                 Last 3 months
               </SelectItem>
-              <SelectItem value="30d" className="rounded-lg">
-                Last 30 days
+              <SelectItem value="180d" className="rounded-lg">
+                Last 6 months
               </SelectItem>
-              <SelectItem value="7d" className="rounded-lg">
-                Last 7 days
+              <SelectItem value="365d" className="rounded-lg">
+                Last 12 months
+              </SelectItem>
+              <SelectItem value="all" className="rounded-lg">
+                All time
               </SelectItem>
             </SelectContent>
           </Select>
@@ -301,18 +346,17 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
             No storage history yet
           </div>
         ) : (
-          <ChartContainer config={platformUsageChartConfig} className="aspect-auto h-[250px] w-full">
-            <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 28 }}>
-              <defs>
-                <linearGradient id="fillStorage" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="var(--color-storageGb)" stopOpacity={1} />
-                  <stop offset="95%" stopColor="var(--color-storageGb)" stopOpacity={0.1} />
-                </linearGradient>
-                <linearGradient id="fillObjects" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="var(--color-objects)" stopOpacity={0.8} />
-                  <stop offset="95%" stopColor="var(--color-objects)" stopOpacity={0.1} />
-                </linearGradient>
-              </defs>
+          <ChartContainer
+            config={platformUsageChartConfig}
+            className="aspect-auto h-[280px] w-full overflow-hidden rounded-2xl border border-border/50 bg-muted/10 px-1 pt-3"
+          >
+            <BarChart
+              accessibilityLayer
+              data={chartData}
+              margin={{ top: 8, right: 8, left: 8, bottom: 8 }}
+              barCategoryGap="18%"
+              barGap={3}
+            >
               <CartesianGrid vertical={false} />
               <XAxis
                 dataKey="date"
@@ -328,37 +372,27 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                   })
                 }
               />
-              <YAxis yAxisId="objects" hide domain={["auto", "auto"]} />
-              <YAxis yAxisId="storage" hide orientation="right" domain={["auto", "auto"]} />
+              <YAxis hide domain={[0, "auto"]} />
               <ChartTooltip
-                cursor={false}
+                cursor={{ fill: "var(--muted)", radius: 10 }}
                 content={
                   <ChartTooltipContent
+                    className="rounded-2xl bg-popover/95 px-3 py-2 shadow-lg backdrop-blur-xl"
                     labelFormatter={(value) =>
                       new Date(value).toLocaleDateString("en-US", {
                         month: "short",
                         day: "numeric",
+                        year: "numeric",
                       })
                     }
                     indicator="dot"
                   />
                 }
               />
-              <Area
-                yAxisId="objects"
-                dataKey="objects"
-                type="stepAfter"
-                fill="url(#fillObjects)"
-                stroke="var(--color-objects)"
-              />
-              <Area
-                yAxisId="storage"
-                dataKey="storageGb"
-                type="stepAfter"
-                fill="url(#fillStorage)"
-                stroke="var(--color-storageGb)"
-              />
-            </AreaChart>
+              <ChartLegend content={<ChartLegendContent />} />
+              <Bar dataKey="storageGb" fill="var(--color-storageGb)" radius={6} maxBarSize={18} />
+              <Bar dataKey="objects" fill="var(--color-objects)" radius={6} maxBarSize={18} />
+            </BarChart>
           </ChartContainer>
         )}
       </CardContent>

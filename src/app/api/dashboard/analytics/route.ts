@@ -619,9 +619,23 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const storageSeriesByDay = new Map(legacyStorageSeries.map((point) => [point.date, point]))
   const activeAccountSeries = Array.from(storageSeriesByDay.values()).sort((a, b) => a.date.localeCompare(b.date))
 
+  // Walk the sparse storage snapshots once. Each snapshot remains effective
+  // until the next change; dates before the first snapshot are explicitly
+  // marked unknown so fixed chart ranges can render them as zero without
+  // confusing them with a real zero-value snapshot.
+  const logicalStorageByDay = new Map<string, (typeof activeAccountSeries)[number] | undefined>()
+  let logicalStorageIndex = -1
   const series = dayKeys.map((day) => {
     const dayEnd = Date.parse(`${day}T23:59:59.999Z`)
-    const logicalStoragePoint = [...activeAccountSeries].reverse().find((point) => point.date <= day)
+    while (
+      logicalStorageIndex + 1 < activeAccountSeries.length &&
+      activeAccountSeries[logicalStorageIndex + 1].date <= day
+    ) {
+      logicalStorageIndex += 1
+    }
+    const logicalStoragePoint =
+      logicalStorageIndex >= 0 ? activeAccountSeries[logicalStorageIndex] : undefined
+    logicalStorageByDay.set(day, logicalStoragePoint)
     const storageBytes = logicalStoragePoint?.storageBytes ?? 0
     const objects = logicalStoragePoint?.objects ?? 0
     const createdMigrations = migrations.filter((m) => dateKey(m.createdAt) === day).length
@@ -659,7 +673,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
     }
   })
   const dailyStorageSeries = series.map((point) => {
-    const source = [...activeAccountSeries].reverse().find((item) => item.date <= point.date)
+    const source = logicalStorageByDay.get(point.date)
     return {
       date: point.date,
       accountId: source?.accountId ?? "logical-storage",
@@ -668,6 +682,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
       storageBytes: point.storageBytes,
       objects: point.objects,
       capturedAt: source?.capturedAt ?? generatedAt,
+      hasSnapshot: Boolean(source),
     }
   })
 
