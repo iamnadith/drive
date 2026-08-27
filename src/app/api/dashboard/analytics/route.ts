@@ -735,10 +735,13 @@ async function buildAnalyticsPayload(range: RangeKey) {
     }
   })
 
-  // The worker publishes account totals only after all bucket batches finish.
-  // Do not sum partially updated bucket rows while sync_status is syncing.
-  const totalStorageBytes = activeAccount?.totalBytes ?? 0
-  const totalObjects = activeAccount?.totalObjects ?? 0
+  // Prefer finalized account totals. Fall back to bucket rows for accounts
+  // populated by an older worker/schema where those aggregate columns remain
+  // zero, otherwise the dashboard incorrectly renders an empty account.
+  const bucketObjectsFallback = activeBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0)
+  const bucketBytesFallback = activeBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0)
+  const totalStorageBytes = activeAccount?.totalBytes || bucketBytesFallback
+  const totalObjects = activeAccount?.totalObjects || bucketObjectsFallback
   const migrationNeedsAttention = (migration: DriveMigration) =>
     migration.status === "failed" ||
     (migration.syncStatus === "error" && migration.status !== "completed" && migration.status !== "canceled")

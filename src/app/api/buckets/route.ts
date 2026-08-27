@@ -115,11 +115,11 @@ export async function GET() {
       activeAccount: { id: account.id, label: account.label, status: account.status },
       summary: {
         totalBuckets: buckets.length,
-        // Per-bucket rows are updated in bounded worker batches. Use the
-        // account totals, which are published only after the full sync, so a
-        // partially refreshed bucket list cannot report a false aggregate.
-        totalObjects: account.totalObjects ?? 0,
-        totalBytes: account.totalBytes ?? 0,
+        // Older deployments may have bucket rows populated before the account
+        // aggregate columns were introduced. Keep the panel useful during
+        // that transition, while preferring the finalized account totals.
+        totalObjects: account.totalObjects || buckets.reduce((sum, bucket) => sum + bucket.objects, 0),
+        totalBytes: account.totalBytes || buckets.reduce((sum, bucket) => sum + bucket.bytes, 0),
         publicBuckets: buckets.filter((bucket) => bucket.settings?.publicAccess.enabled).length,
         corsPolicies: buckets.filter((bucket) => (bucket.settings?.corsRules.length ?? 0) > 0).length,
       },
