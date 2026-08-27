@@ -313,61 +313,6 @@ async function listBucketSnapshots(): Promise<BucketSnapshotRow[]> {
   return rows
 }
 
-async function captureActiveAccountSnapshot(input: {
-  account: CloudflareAccount | null
-  rows: BucketStatsRow[]
-  generatedAt: string
-  ready: boolean
-}) {
-  // Never publish a chart point from the worker's in-progress bucket batches.
-  // Account totals are published only after the worker has completed every
-  // bucket, so snapshots must use the same completion boundary.
-  if (!isPostgresConfigured() || !input.account || !input.ready) return
-  await ensureAnalyticsArchiveSchema()
-  const capturedDay = input.generatedAt.slice(0, 10)
-  const buckets = new Set(input.rows.map((row) => row.bucket_name)).size
-  const objects = input.rows.reduce((sum, row) => sum + toNumber(row.objects), 0)
-  const bytes = input.rows.reduce((sum, row) => sum + toNumber(row.bytes), 0)
-  await queryDb(
-    `
-      with latest as (
-        select buckets, objects, bytes
-        from drive_analytics_active_account_snapshots
-        where account_id = $2
-        order by captured_at desc
-        limit 1
-      )
-      insert into drive_analytics_active_account_snapshots
-        (captured_day, account_id, account_label, account_email, buckets, objects, bytes, captured_at)
-      select $1, $2, $3, $4, $5, $6, $7, $8
-      where not exists (select 1 from latest)
-         or exists (
-           select 1 from latest
-           where latest.buckets is distinct from $5
-              or latest.objects is distinct from $6
-              or latest.bytes is distinct from $7
-         )
-      on conflict (captured_day, account_id) do update set
-        account_label = excluded.account_label,
-        account_email = excluded.account_email,
-        buckets = excluded.buckets,
-        objects = excluded.objects,
-        bytes = excluded.bytes,
-        captured_at = excluded.captured_at;
-    `,
-    [
-      capturedDay,
-      input.account.id,
-      input.account.label,
-      input.account.email,
-      buckets,
-      Math.max(0, Math.floor(objects)),
-      Math.max(0, Math.floor(bytes)),
-      input.generatedAt,
-    ]
-  )
-}
-
 async function listActiveAccountSnapshots(): Promise<ActiveAccountSnapshotRow[]> {
   if (!isPostgresConfigured()) return []
   await ensureAnalyticsArchiveSchema()
@@ -631,24 +576,6 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const activeAnalyticsBucketStats = activeAccount
     ? analyticsBucketStats.filter((row) => row.account_id === activeAccount.id)
     : []
-  const activeBucketStatsReady = Boolean(
-    activeAccount &&
-      activeAccount.syncStatus === "ok" &&
-      (activeBucketStats.length === 0 ||
-        activeBucketStats.every((row) => String(row.status ?? "").toLowerCase() === "completed"))
-  )
-  await capture(
-    "active account analytics snapshot write",
-    warnings,
-    () =>
-      captureActiveAccountSnapshot({
-        account: activeAccount,
-        rows: activeBucketStats,
-        generatedAt,
-        ready: activeBucketStatsReady,
-      }),
-    undefined
-  )
   const activeAccountSnapshotRows = await capture(
     "active account analytics snapshots",
     warnings,
@@ -697,19 +624,33 @@ async function buildAnalyticsPayload(range: RangeKey) {
     return dateKey(date)
   })
 
+  // Build the chart from persisted daily snapshots, selecting the latest
+  // snapshot for each day regardless of which account is active now. Account
+  // activation changes the current projection, but it must not rewrite the
+  // historical chart or make it jump back to an older logical snapshot.
+  const activeHistoryByDay = new Map<string, ActiveAccountSnapshotRow>()
+  for (const row of activeAccountSnapshotRows) {
+    const previous = activeHistoryByDay.get(row.captured_day)
+    if (!previous || Date.parse(row.captured_at) >= Date.parse(previous.captured_at)) {
+      activeHistoryByDay.set(row.captured_day, row)
+    }
+  }
+  const activeHistorySeries = [...activeHistoryByDay.values()]
+    .sort((a, b) => a.captured_day.localeCompare(b.captured_day))
+    .map((row) => ({
+      date: row.captured_day,
+      accountId: row.account_id,
+      accountLabel: row.account_label || row.account_email || "Unknown account",
+      buckets: toNumber(row.buckets),
+      storageBytes: toNumber(row.bytes),
+      objects: toNumber(row.objects),
+      capturedAt: row.captured_at,
+    }))
   const legacyStorageSeries =
-    logicalStorageSeries.length > 0
-      ? logicalStorageSeries
-      : currentActiveAccountSnapshotRows.length > 0
-      ? currentActiveAccountSnapshotRows.map((row) => ({
-          date: row.captured_day,
-          accountId: row.account_id,
-          accountLabel: row.account_label || row.account_email || "Unknown account",
-          buckets: toNumber(row.buckets),
-          storageBytes: toNumber(row.bytes),
-          objects: toNumber(row.objects),
-          capturedAt: row.captured_at,
-        }))
+    activeHistorySeries.length > 0
+      ? activeHistorySeries
+      : logicalStorageSeries.length > 0
+        ? logicalStorageSeries
       : overviewBucketStats.length > 0
         ? [
             {
@@ -784,15 +725,41 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const bucketObjectsFallback = overviewBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0)
   const bucketBytesFallback = overviewBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0)
   const latestLogicalStorage = logicalStorageSnapshots.at(-1)
-  const totalStorageBytes = latestLogicalStorage
-    ? toNumber(latestLogicalStorage.bytes)
-    : activeAccount?.totalBytes || bucketBytesFallback
-  const totalObjects = latestLogicalStorage
-    ? toNumber(latestLogicalStorage.objects)
-    : activeAccount?.totalObjects || bucketObjectsFallback
-  const totalBuckets = latestLogicalStorage
-    ? toNumber(latestLogicalStorage.buckets)
-    : new Set(overviewBucketStats.map((row) => `${row.account_id}:${row.bucket_name}`)).size
+  // The KPI is a current-state value and must come from the active account's
+  // worker projection. Logical storage snapshots are historical chart data;
+  // after an account activation they may still describe the previous account
+  // until the next logical inventory run completes.
+  const activeCurrentBucketCount = activeAccount
+    ? new Set(activeBucketStats.map((row) => `${row.account_id}:${row.bucket_name}`)).size
+    : 0
+  const activeBucketObjects = activeBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0)
+  const activeBucketBytes = activeBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0)
+  const activeCurrentObjects = activeAccount
+    ? Math.max(0, toNumber(activeAccount.totalObjects) || activeBucketObjects)
+    : 0
+  const activeCurrentBytes = activeAccount
+    ? Math.max(0, toNumber(activeAccount.totalBytes) || activeBucketBytes)
+    : 0
+  const hasCurrentActiveTotals = Boolean(
+    activeAccount &&
+      (activeAccount.syncStatus === "ok" || activeCurrentBucketCount > 0) &&
+      (activeCurrentBucketCount > 0 || activeCurrentObjects > 0 || activeCurrentBytes > 0)
+  )
+  const totalStorageBytes = hasCurrentActiveTotals
+    ? activeCurrentBytes
+    : latestLogicalStorage
+      ? toNumber(latestLogicalStorage.bytes)
+      : bucketBytesFallback
+  const totalObjects = hasCurrentActiveTotals
+    ? activeCurrentObjects
+    : latestLogicalStorage
+      ? toNumber(latestLogicalStorage.objects)
+      : bucketObjectsFallback
+  const totalBuckets = hasCurrentActiveTotals
+    ? activeCurrentBucketCount
+    : latestLogicalStorage
+      ? toNumber(latestLogicalStorage.buckets)
+      : new Set(overviewBucketStats.map((row) => `${row.account_id}:${row.bucket_name}`)).size
   const migrationNeedsAttention = (migration: DriveMigration) =>
     migration.status === "failed" ||
     (migration.syncStatus === "error" && migration.status !== "completed" && migration.status !== "canceled")

@@ -153,6 +153,20 @@ async function ensureSchema(db: Client) {
     )
   `)
   await db.query(`
+    create table if not exists drive_analytics_active_account_snapshots (
+      captured_day date not null,
+      account_id uuid not null,
+      account_label text,
+      account_email text,
+      buckets integer not null default 0,
+      objects bigint not null default 0,
+      bytes bigint not null default 0,
+      captured_at timestamptz not null default now(),
+      primary key (captured_day, account_id)
+    )
+  `)
+  await db.query(`create index if not exists drive_analytics_active_account_snapshots_day_idx on drive_analytics_active_account_snapshots (captured_day desc)`)
+  await db.query(`
     create table if not exists drive_maintenance_state (
       task_name text primary key,
       last_run_at timestamptz not null default now(),
@@ -547,6 +561,21 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
         sync_status='ok',sync_message=$2,last_synced_at=now(),updated_at=now()
       where a.id=$1
     `, [account.id, `R2 metrics synced for ${metrics.length} of ${buckets.length} buckets`])
+    await db.query(`
+      insert into drive_analytics_active_account_snapshots
+        (captured_day, account_id, account_label, account_email, buckets, objects, bytes, captured_at)
+      select current_date, a.id, a.label, a.email,
+             a.total_buckets, a.total_objects, a.total_bytes, now()
+      from drive_accounts a
+      where a.id = $1
+      on conflict (captured_day, account_id) do update set
+        account_label = excluded.account_label,
+        account_email = excluded.account_email,
+        buckets = excluded.buckets,
+        objects = excluded.objects,
+        bytes = excluded.bytes,
+        captured_at = excluded.captured_at
+    `, [account.id])
     return {
       account: account.label,
       status: "completed",
