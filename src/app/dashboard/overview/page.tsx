@@ -4,6 +4,7 @@ import * as React from "react"
 import {
   AlertTriangle,
   ArrowRight,
+  CalendarDays,
   CheckCircle2,
   Database,
   HardDrive,
@@ -13,17 +14,18 @@ import {
 import {
   Bar,
   BarChart,
-  Brush,
   CartesianGrid,
   XAxis,
   YAxis,
 } from "recharts"
 import Link from "next/link"
+import type { DateRange } from "react-day-picker"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Calendar } from "@/components/ui/calendar"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   ChartConfig,
   ChartContainer,
@@ -41,6 +43,7 @@ import {
 } from "@/components/ui/select"
 import { DashboardOverviewSkeleton } from "@/components/dashboard/loading-skeletons"
 import { useDashboardResource } from "@/hooks/use-dashboard-resource"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useIsMobile } from "@/hooks/use-mobile"
 
@@ -106,8 +109,8 @@ type ActivityResponse = {
   events: RecentActivityItem[]
 }
 
-type UsageRange = "7d" | "30d" | "90d" | "180d" | "365d" | "all"
-type UsageMetric = "both" | "storage" | "objects"
+type UsageRange = "30d" | "90d" | "180d" | "365d" | "all" | "custom"
+type UsageMetric = "storage" | "objects"
 
 const platformUsageChartConfig = {
   storageGb: {
@@ -120,8 +123,7 @@ const platformUsageChartConfig = {
   },
 } satisfies ChartConfig
 
-const usageRangeDays: Record<Exclude<UsageRange, "all">, number> = {
-  "7d": 7,
+const usageRangeDays: Record<Exclude<UsageRange, "all" | "custom">, number> = {
   "30d": 30,
   "90d": 90,
   "180d": 180,
@@ -181,6 +183,13 @@ function formatDateTime(value: string): string {
   }).format(date)
 }
 
+function toLocalDateKey(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, "0")
+  const day = String(date.getDate()).padStart(2, "0")
+  return `${year}-${month}-${day}`
+}
+
 function formatAction(value: string): string {
   return value
     .split(/[._-]/)
@@ -236,16 +245,28 @@ function SummaryCard({
 function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccountSeries"] }) {
   const isMobile = useIsMobile()
   const [timeRange, setTimeRange] = React.useState<UsageRange>("90d")
-  const [usageMetric, setUsageMetric] = React.useState<UsageMetric>("both")
+  const [usageMetric, setUsageMetric] = React.useState<UsageMetric>("storage")
+  const [datePickerOpen, setDatePickerOpen] = React.useState(false)
+  const [datePickerDraft, setDatePickerDraft] = React.useState<DateRange | undefined>()
+  const [pendingDateRange, setPendingDateRange] = React.useState<{
+    from: string
+    to: string
+  } | null>(null)
   const [navigatorSelection, setNavigatorSelection] = React.useState<{
     key: string
     startIndex: number
     endIndex: number
   } | null>(null)
+  const chartInteractionRef = React.useRef<HTMLDivElement>(null)
+  const touchGestureRef = React.useRef<{
+    distance?: number
+    lastX?: number
+  }>({})
 
   React.useEffect(() => {
     setTimeRange((current) => {
-      if (isMobile && current === "90d") return "7d"
+      if (isMobile && current === "90d") return "30d"
+      if (!isMobile && current === "30d") return "90d"
       return current
     })
   }, [isMobile])
@@ -260,10 +281,10 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
     const firstSnapshot = validSeries.find(
       (item) => item.hasSnapshot ?? item.accountId !== "logical-storage"
     )
-    if (timeRange === "all" && !firstSnapshot) return []
+    if ((timeRange === "all" || timeRange === "custom") && !firstSnapshot) return []
 
     const startTime =
-      timeRange === "all"
+      timeRange === "all" || timeRange === "custom"
         ? Date.parse(firstSnapshot!.date)
         : referenceTime - (usageRangeDays[timeRange] - 1) * 86_400_000
     const chartPoints = []
@@ -298,7 +319,7 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
       rawObjects: point.objects,
     }))
   }, [series, timeRange])
-  const showDateNavigator = chartData.length > 45
+  const enableChartNavigation = chartData.length > 45
   const navigatorKey = `${timeRange}:${chartData[0]?.date ?? "empty"}:${chartData.at(-1)?.date ?? "empty"}`
   const visibleStartIndex =
     navigatorSelection?.key === navigatorKey ? navigatorSelection.startIndex : 0
@@ -306,64 +327,242 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
     navigatorSelection?.key === navigatorKey
       ? navigatorSelection.endIndex
       : Math.max(0, chartData.length - 1)
+  const visibleChartData = chartData.slice(visibleStartIndex, visibleEndIndex + 1)
+  const latestChartPoint = chartData.at(-1)
+  const visibleDateRange = React.useMemo<DateRange | undefined>(() => {
+    const from = chartData[visibleStartIndex]?.date
+    const to = chartData[visibleEndIndex]?.date
+    if (!from || !to) return undefined
+    return {
+      from: new Date(`${from}T00:00:00Z`),
+      to: new Date(`${to}T00:00:00Z`),
+    }
+  }, [chartData, visibleEndIndex, visibleStartIndex])
+  const historyBounds = React.useMemo(() => {
+    const dates = series
+      .map((item) => item.date)
+      .filter((date) => Number.isFinite(Date.parse(date)))
+      .sort()
+    if (dates.length === 0) return undefined
+    return {
+      from: new Date(`${dates[0]}T00:00:00Z`),
+      to: new Date(`${dates[dates.length - 1]}T00:00:00Z`),
+    }
+  }, [series])
+
+  React.useEffect(() => {
+    if (!pendingDateRange || timeRange !== "custom" || chartData.length === 0) return
+    const startIndex = chartData.findIndex((point) => point.date >= pendingDateRange.from)
+    const reverseEndIndex = [...chartData]
+      .reverse()
+      .findIndex((point) => point.date <= pendingDateRange.to)
+    const endIndex = reverseEndIndex < 0 ? chartData.length - 1 : chartData.length - 1 - reverseEndIndex
+    if (startIndex < 0 || endIndex < startIndex) return
+    setNavigatorSelection({ key: navigatorKey, startIndex, endIndex })
+    setPendingDateRange(null)
+  }, [chartData, navigatorKey, pendingDateRange, timeRange])
+
+  const updateChartViewport = React.useCallback(
+    (mode: "pan" | "zoom", delta: number) => {
+      setNavigatorSelection((current) => {
+        const total = chartData.length
+        if (total === 0) return null
+
+        const startIndex = current?.key === navigatorKey ? current.startIndex : 0
+        const endIndex =
+          current?.key === navigatorKey ? current.endIndex : Math.max(0, total - 1)
+        const windowSize = endIndex - startIndex + 1
+
+        if (mode === "pan") {
+          const step = Math.max(1, Math.round(windowSize * 0.08)) * Math.sign(delta)
+          const nextStart = Math.min(Math.max(0, startIndex + step), total - windowSize)
+          return {
+            key: navigatorKey,
+            startIndex: nextStart,
+            endIndex: nextStart + windowSize - 1,
+          }
+        }
+
+        const minimumWindow = Math.min(7, total)
+        const scale = delta > 0 ? 1.18 : 0.84
+        const nextWindowSize = Math.min(
+          total,
+          Math.max(minimumWindow, Math.round(windowSize * scale))
+        )
+        const center = startIndex + (windowSize - 1) / 2
+        const nextStart = Math.min(
+          Math.max(0, Math.round(center - (nextWindowSize - 1) / 2)),
+          total - nextWindowSize
+        )
+        return {
+          key: navigatorKey,
+          startIndex: nextStart,
+          endIndex: nextStart + nextWindowSize - 1,
+        }
+      })
+    },
+    [chartData.length, navigatorKey]
+  )
+
+  React.useEffect(() => {
+    const chart = chartInteractionRef.current
+    if (!chart || !enableChartNavigation) return
+
+    const handleWheel = (event: WheelEvent) => {
+      const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+      if (delta === 0) return
+      event.preventDefault()
+      updateChartViewport(event.ctrlKey || event.metaKey ? "zoom" : "pan", delta)
+    }
+
+    chart.addEventListener("wheel", handleWheel, { passive: false })
+    return () => chart.removeEventListener("wheel", handleWheel)
+  }, [enableChartNavigation, updateChartViewport])
 
   return (
     <Card className="@container/card gap-3 py-4 sm:gap-4 sm:py-5">
-      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-0 px-4 sm:px-5 md:gap-1">
-        <CardTitle className="leading-none md:leading-tight">Storage Usage</CardTitle>
-        <CardDescription className="-mt-1 leading-none md:mt-0 md:leading-tight">
-          <span className="hidden @[540px]/card:block">
-            Logical storage history across migrations, without counting copied data twice.
-          </span>
-          <span className="@[540px]/card:hidden">Storage and object history</span>
-        </CardDescription>
-        <CardAction className="col-start-2 row-start-1 mt-0 justify-self-end self-start">
-          <ToggleGroup
-            type="single"
-            value={timeRange}
-            onValueChange={(value) => {
-              if (value) setTimeRange(value as UsageRange)
-            }}
-            variant="outline"
-            className="hidden *:data-[slot=toggle-group-item]:px-3! @[767px]/card:flex"
-          >
-            <ToggleGroupItem value="7d">Last 7 days</ToggleGroupItem>
-            <ToggleGroupItem value="30d">Last 1 month</ToggleGroupItem>
-            <ToggleGroupItem value="90d">Last 3 months</ToggleGroupItem>
-            <ToggleGroupItem value="180d">Last 6 months</ToggleGroupItem>
-            <ToggleGroupItem value="365d">Last 12 months</ToggleGroupItem>
-            <ToggleGroupItem value="all">All time</ToggleGroupItem>
-          </ToggleGroup>
-          <Select value={timeRange} onValueChange={(value) => setTimeRange(value as UsageRange)}>
-            <SelectTrigger
-              className="flex w-40 **:data-[slot=select-value]:block **:data-[slot=select-value]:truncate @[767px]/card:hidden"
-              size="sm"
-              aria-label="Select chart range"
+      <CardHeader className="flex flex-col gap-3 border-b px-4 pb-3 sm:px-5 sm:pb-4">
+        <div className="flex flex-col gap-3 @[767px]/card:flex-row @[767px]/card:items-start @[767px]/card:justify-between">
+          <div className="flex min-w-0 flex-col gap-1">
+            <CardTitle className="leading-tight">Storage Usage</CardTitle>
+            <CardDescription className="leading-tight">
+              <span className="hidden @[540px]/card:block">
+                Logical storage history across migrations, without counting copied data twice.
+              </span>
+              <span className="@[540px]/card:hidden">Storage and object history</span>
+            </CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 @[767px]/card:justify-end">
+            <ToggleGroup
+              type="single"
+              value={timeRange}
+              onValueChange={(value) => {
+                if (value) setTimeRange(value as UsageRange)
+              }}
+              variant="outline"
+              className="hidden *:data-[slot=toggle-group-item]:px-3! @[767px]/card:flex"
             >
-              <SelectValue placeholder="Last 3 months" />
-            </SelectTrigger>
-            <SelectContent className="rounded-xl">
-              <SelectItem value="7d" className="rounded-lg">
-                Last 7 days
-              </SelectItem>
-              <SelectItem value="30d" className="rounded-lg">
-                Last 1 month
-              </SelectItem>
-              <SelectItem value="90d" className="rounded-lg">
-                Last 3 months
-              </SelectItem>
-              <SelectItem value="180d" className="rounded-lg">
-                Last 6 months
-              </SelectItem>
-              <SelectItem value="365d" className="rounded-lg">
-                Last 12 months
-              </SelectItem>
-              <SelectItem value="all" className="rounded-lg">
-                All time
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </CardAction>
+              <ToggleGroupItem value="90d">Last 3 months</ToggleGroupItem>
+              <ToggleGroupItem value="180d">Last 6 months</ToggleGroupItem>
+              <ToggleGroupItem value="365d">Last 12 months</ToggleGroupItem>
+              <ToggleGroupItem value="all">All time</ToggleGroupItem>
+            </ToggleGroup>
+            <Select
+              value={timeRange}
+              onValueChange={(value) => {
+                if (value !== "custom") setTimeRange(value as UsageRange)
+              }}
+            >
+              <SelectTrigger
+                className="flex w-40 **:data-[slot=select-value]:block **:data-[slot=select-value]:truncate @[767px]/card:hidden"
+                size="sm"
+                aria-label="Select chart range"
+              >
+                <SelectValue placeholder="Last 3 months" />
+              </SelectTrigger>
+              <SelectContent className="rounded-xl">
+                <SelectItem value="30d" className="rounded-lg">
+                  Last 1 month
+                </SelectItem>
+                <SelectItem value="90d" className="rounded-lg">
+                  Last 3 months
+                </SelectItem>
+                <SelectItem value="180d" className="rounded-lg">
+                  Last 6 months
+                </SelectItem>
+                <SelectItem value="365d" className="rounded-lg">
+                  Last 12 months
+                </SelectItem>
+                <SelectItem value="all" className="rounded-lg">
+                  All time
+                </SelectItem>
+                {timeRange === "custom" ? (
+                  <SelectItem value="custom" className="rounded-lg">
+                    Custom range
+                  </SelectItem>
+                ) : null}
+              </SelectContent>
+            </Select>
+            <Popover
+              open={datePickerOpen}
+              onOpenChange={(open) => {
+                setDatePickerOpen(open)
+                if (open) setDatePickerDraft(visibleDateRange)
+              }}
+            >
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="sm" className="min-w-0 justify-start gap-2 px-3">
+                  <CalendarDays data-icon="inline-start" />
+                  <span className="truncate tabular-nums">
+                    {visibleDateRange?.from && visibleDateRange.to
+                      ? `${visibleDateRange.from.toLocaleDateString("en-US", {
+                          month: "short",
+                          day: "numeric",
+                          year: "numeric",
+                          timeZone: "UTC",
+                        })} – ${visibleDateRange.to.toLocaleDateString("en-US", {
+                          month: "short",
+                          day: "numeric",
+                          year: "numeric",
+                          timeZone: "UTC",
+                        })}`
+                      : "Choose dates"}
+                  </span>
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="w-auto p-2">
+                <Calendar
+                  mode="range"
+                  selected={datePickerDraft}
+                  defaultMonth={datePickerDraft?.from ?? historyBounds?.from}
+                  numberOfMonths={isMobile ? 1 : 2}
+                  disabled={
+                    historyBounds
+                      ? [{ before: historyBounds.from }, { after: historyBounds.to }]
+                      : undefined
+                  }
+                  onSelect={(range) => {
+                    setDatePickerDraft(range)
+                    if (!range?.from || !range.to) return
+                    const from = toLocalDateKey(range.from)
+                    const to = toLocalDateKey(range.to)
+                    setPendingDateRange({
+                      from: from <= to ? from : to,
+                      to: from <= to ? to : from,
+                    })
+                    setNavigatorSelection(null)
+                    setTimeRange("custom")
+                    setDatePickerOpen(false)
+                  }}
+                />
+              </PopoverContent>
+            </Popover>
+          </div>
+        </div>
+        <ToggleGroup
+          type="single"
+          value={usageMetric}
+          onValueChange={(value) => {
+            if (value) setUsageMetric(value as UsageMetric)
+          }}
+          variant="outline"
+          spacing={2}
+          className="grid w-full grid-cols-2"
+          aria-label="Select chart metric"
+        >
+          <ToggleGroupItem value="storage" className="h-auto w-full flex-col items-start gap-1 px-4 py-2.5">
+            <span className="text-xs text-muted-foreground">Storage</span>
+            <span className="text-lg font-semibold tabular-nums">
+              {formatBytes(latestChartPoint?.storageBytes)}
+            </span>
+          </ToggleGroupItem>
+          <ToggleGroupItem value="objects" className="h-auto w-full flex-col items-start gap-1 px-4 py-2.5">
+            <span className="text-xs text-muted-foreground">Objects</span>
+            <span className="text-lg font-semibold tabular-nums">
+              {formatNumber(latestChartPoint?.rawObjects)}
+            </span>
+          </ToggleGroupItem>
+        </ToggleGroup>
       </CardHeader>
       <CardContent className="px-3 pt-0 sm:px-5 sm:pt-0">
         {chartData.length === 0 ? (
@@ -372,36 +571,74 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
           </div>
         ) : (
           <div className="flex flex-col gap-2">
-            <div className="flex min-h-8 flex-wrap items-center justify-between gap-2 px-1">
-              <p className="text-xs text-muted-foreground">
-                {usageMetric === "both"
-                  ? "Both metrics use independent visual scales."
-                  : "Interactive single-metric view."}
-              </p>
-              <ToggleGroup
-                type="single"
-                value={usageMetric}
-                onValueChange={(value) => {
-                  if (value) setUsageMetric(value as UsageMetric)
-                }}
-                variant="outline"
-                size="sm"
-                aria-label="Select chart metrics"
-              >
-                <ToggleGroupItem value="both">Both</ToggleGroupItem>
-                <ToggleGroupItem value="storage">Storage</ToggleGroupItem>
-                <ToggleGroupItem value="objects">Objects</ToggleGroupItem>
-              </ToggleGroup>
-            </div>
-            <ChartContainer
-              config={platformUsageChartConfig}
-              className="aspect-auto h-[300px] w-full overflow-hidden rounded-2xl border border-border/50 bg-muted/10 px-1 pt-3"
+            <div
+              ref={chartInteractionRef}
+              role="region"
+              aria-label="Interactive storage history chart"
+              tabIndex={enableChartNavigation ? 0 : -1}
+              className="rounded-2xl [touch-action:pan-y] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              onDoubleClick={() => setNavigatorSelection(null)}
+              onKeyDown={(event) => {
+                if (!enableChartNavigation) return
+                if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+                  event.preventDefault()
+                  updateChartViewport("pan", event.key === "ArrowLeft" ? -1 : 1)
+                } else if (event.key === "+" || event.key === "=") {
+                  event.preventDefault()
+                  updateChartViewport("zoom", -1)
+                } else if (event.key === "-") {
+                  event.preventDefault()
+                  updateChartViewport("zoom", 1)
+                }
+              }}
+              onTouchStart={(event) => {
+                if (!enableChartNavigation) return
+                if (event.touches.length === 2) {
+                  const [first, second] = Array.from(event.touches)
+                  touchGestureRef.current = {
+                    distance: Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY),
+                  }
+                } else if (event.touches.length === 1) {
+                  touchGestureRef.current = { lastX: event.touches[0].clientX }
+                }
+              }}
+              onTouchMove={(event) => {
+                if (!enableChartNavigation) return
+                if (event.touches.length === 2) {
+                  event.preventDefault()
+                  const [first, second] = Array.from(event.touches)
+                  const distance = Math.hypot(
+                    second.clientX - first.clientX,
+                    second.clientY - first.clientY
+                  )
+                  const previousDistance = touchGestureRef.current.distance
+                  if (previousDistance && Math.abs(distance - previousDistance) >= 6) {
+                    updateChartViewport("zoom", distance > previousDistance ? -1 : 1)
+                    touchGestureRef.current.distance = distance
+                  }
+                } else if (event.touches.length === 1) {
+                  const currentX = event.touches[0].clientX
+                  const previousX = touchGestureRef.current.lastX
+                  if (previousX !== undefined && Math.abs(previousX - currentX) >= 10) {
+                    updateChartViewport("pan", previousX - currentX)
+                    touchGestureRef.current.lastX = currentX
+                  }
+                }
+              }}
+              onTouchEnd={(event) => {
+                touchGestureRef.current =
+                  event.touches.length === 1 ? { lastX: event.touches[0].clientX } : {}
+              }}
             >
+              <ChartContainer
+                config={platformUsageChartConfig}
+                className="aspect-auto h-[300px] w-full overflow-hidden rounded-2xl border border-border/50 bg-muted/10 px-1 pt-3"
+              >
             <BarChart
               accessibilityLayer
-              data={chartData}
+              data={visibleChartData}
               margin={{ top: 8, right: 8, left: 8, bottom: 8 }}
-              barCategoryGap="18%"
+              barCategoryGap="6%"
               barGap={3}
             >
               <CartesianGrid vertical={false} />
@@ -458,61 +695,28 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                 }
               />
               <ChartLegend content={<ChartLegendContent />} />
-              {showDateNavigator ? (
-                <Brush
-                  key={navigatorKey}
-                  ariaLabel="Select and scroll the visible chart dates"
-                  dataKey="date"
-                  height={28}
-                  travellerWidth={8}
-                  startIndex={visibleStartIndex}
-                  endIndex={visibleEndIndex}
-                  fill="var(--muted)"
-                  stroke="var(--muted-foreground)"
-                  tickFormatter={(value) =>
-                    new Date(value).toLocaleDateString("en-US", {
-                      month: "short",
-                      day: "numeric",
-                    })
-                  }
-                  onChange={(range) => {
-                    if (range.startIndex === undefined || range.endIndex === undefined) return
-                    setNavigatorSelection({
-                      key: navigatorKey,
-                      startIndex: range.startIndex,
-                      endIndex: range.endIndex,
-                    })
-                  }}
-                />
-              ) : null}
-              {usageMetric === "both" ? (
-                <>
-                  <Bar dataKey="storageGb" fill="var(--color-storageGb)" radius={6} maxBarSize={18} />
-                  <Bar dataKey="objects" fill="var(--color-objects)" radius={6} maxBarSize={18} />
-                </>
-              ) : (
-                <Bar
-                  dataKey={usageMetric === "storage" ? "storageGb" : "objects"}
-                  fill={
-                    usageMetric === "storage"
-                      ? "var(--color-storageGb)"
-                      : "var(--color-objects)"
-                  }
-                  radius={6}
-                  maxBarSize={22}
-                />
-              )}
-            </BarChart>
-            </ChartContainer>
-            {showDateNavigator ? (
+              <Bar
+                dataKey={usageMetric === "storage" ? "storageGb" : "objects"}
+                fill={
+                  usageMetric === "storage"
+                    ? "var(--color-storageGb)"
+                    : "var(--color-objects)"
+                }
+                radius={0}
+                maxBarSize={22}
+              />
+              </BarChart>
+              </ChartContainer>
+            </div>
+            {enableChartNavigation ? (
               <p className="text-center text-xs text-muted-foreground">
-                Drag the handles to resize the view, or drag the selected range to scroll. Showing{" "}
+                Scroll or swipe to move through time. Hold Ctrl while scrolling, or pinch, to zoom. Showing{" "}
                 {new Date(chartData[visibleStartIndex]?.date).toLocaleDateString("en-US", {
                   month: "short",
                   day: "numeric",
                   year: "numeric",
                 })}
-                {" – "}
+                {" to "}
                 {new Date(chartData[visibleEndIndex]?.date).toLocaleDateString("en-US", {
                   month: "short",
                   day: "numeric",
