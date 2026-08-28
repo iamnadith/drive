@@ -5,13 +5,17 @@ import { join } from "node:path"
 
 const panelUrl = String(process.env.PANEL_URL || "").trim().replace(/\/$/, "")
 const sharedSecret = String(process.env.PANEL_SHARED_SECRET || "").trim()
-if (!panelUrl || !sharedSecret) {
-  throw new Error("PANEL_URL and PANEL_SHARED_SECRET are the only required build variables")
+const orchestratorUrl = String(process.env.ORCHESTRATOR_URL || "").trim().replace(/\/$/, "")
+if (!panelUrl || !sharedSecret || !orchestratorUrl) {
+  throw new Error("PANEL_URL, PANEL_SHARED_SECRET, and ORCHESTRATOR_URL are required build variables")
 }
 if (!/^https:\/\//i.test(panelUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(panelUrl)) {
   throw new Error("PANEL_URL must use HTTPS")
 }
 if (sharedSecret.length < 24) throw new Error("PANEL_SHARED_SECRET must contain at least 24 characters")
+if (!/^https:\/\//i.test(orchestratorUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(orchestratorUrl)) {
+  throw new Error("ORCHESTRATOR_URL must use HTTPS")
+}
 
 function workerDatabaseUrl(value) {
   const url = new URL(String(value).trim())
@@ -33,6 +37,7 @@ if (![1, 2].includes(config?.version) || typeof config?.postgresUrl !== "string"
 const deployedBindings = {
   PANEL_URL: panelUrl,
   PANEL_SHARED_SECRET: sharedSecret,
+  ORCHESTRATOR_URL: orchestratorUrl,
   POSTGRES_URL: workerDatabaseUrl(config.postgresUrl),
   SYNC_INTERVAL_MINUTES: String(config.syncIntervalMinutes ?? 1),
   API_EVENTS_RETENTION_DAYS: String(config.retention?.apiEventsDays ?? 7),

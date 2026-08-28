@@ -48,7 +48,7 @@ test("backend orchestrator uses the authenticated panel configuration handshake"
   assert.match(settingsRoute, /worker \}/)
   assert.match(settingsPage, /Worker build:/)
   assert.match(orchestrator, /case when \$5::boolean then now\(\)/)
-  assert.match(orchestrator, /Scheduled Backend Orchestrator cycle failed/)
+  assert.match(orchestrator, /Scheduled Backend Orchestrator dispatch failed/)
 })
 
 test("backend orchestrator uses account analytics without per-object scans and preserves change-only totals", () => {
@@ -77,7 +77,7 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   const accountsStore = read("src/lib/accounts-store.ts")
 
   assert.match(orchestrator, /const BUCKET_BATCH_SIZE = 25/)
-  assert.match(orchestrator, /const WORKER_BUILD = 17/)
+  assert.match(orchestrator, /const WORKER_BUILD = 18/)
   assert.match(orchestrator, /build: WORKER_BUILD/)
   assert.match(orchestrator, /const METRICS_CACHE_TTL_MS = 10_000/)
   assert.match(orchestrator, /const RETENTION_BATCH_SIZE = 250/)
@@ -90,6 +90,8 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   assert.match(orchestrator, /async function fetchWithTimeout/)
   assert.equal((orchestrator.match(/fetchWithTimeout\(/g) || []).length >= 5, true)
   assert.match(orchestrator, /External request timed out after \$\{timeoutMs\}ms/)
+  assert.match(orchestrator, /ctx\.waitUntil\(/)
+  assert.match(orchestrator, /ORCHESTRATOR_URL was not injected during deployment/)
   assert.match(orchestrator, /return \{ account: account\.label, status: "error", error: message \}/)
   assert.match(orchestrator, /Panel reconciliation failed \(\$\{response\.status\}\)/)
   assert.match(orchestrator, /return \{ ok: false, error: error instanceof Error \? error\.message : String\(error\) \}/)

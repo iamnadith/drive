@@ -16,10 +16,11 @@ Add these build variables/secrets:
 
 - `PANEL_URL`: canonical Drive panel URL, for example `https://drive.example.com`
 - `PANEL_SHARED_SECRET`: a random secret containing at least 24 characters
+- `ORCHESTRATOR_URL`: the exact deployed Worker URL used by cron to dispatch the resumable HTTP runner
 
 The panel may set `DISABLE_POSTGRES_SSL=true` when its PostgreSQL provider requires plaintext connections. The Worker disables SSL by default for Supabase hosts; all other providers use SSL unless this panel variable is explicitly true.
 
-Those are the only values entered in Cloudflare. During deployment, the script authenticates to the panel configuration endpoint, fetches the PostgreSQL URL plus scan and retention settings, and injects them into the deployed Backend Orchestrator as encrypted Worker secrets. Runtime scan cycles use those injected bindings and do not fetch the database URL from the website.
+During deployment, the script authenticates to the panel configuration endpoint, fetches the PostgreSQL URL plus scan and retention settings, and injects them into the deployed Backend Orchestrator as encrypted Worker secrets. Runtime scan cycles use those injected bindings and do not fetch the database URL from the website. Cron only dispatches `/run`; the HTTP runner performs the database work and resumes from durable bucket checkpoints after termination.
 
 The connected Cloudflare Worker project must be named `backend-orchestrator`. If Cloudflare says it expected another name such as `drive`, create or reconnect the build to the `backend-orchestrator` Worker before deploying; otherwise Cloudflare will override the configured name.
 

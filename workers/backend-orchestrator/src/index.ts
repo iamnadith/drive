@@ -3,6 +3,7 @@ import { Client } from "pg"
 type Env = {
   PANEL_URL: string
   PANEL_SHARED_SECRET: string
+  ORCHESTRATOR_URL: string
   POSTGRES_URL: string
   SYNC_INTERVAL_MINUTES: string
   API_EVENTS_RETENTION_DAYS: string
@@ -35,7 +36,7 @@ type BucketMetric = { bucket: string; objects: number; bytes: number; observedAt
 const BUCKET_BATCH_SIZE = 25
 const EXTERNAL_REQUEST_TIMEOUT_MS = 8_000
 const METRICS_CACHE_TTL_MS = 10_000
-const WORKER_BUILD = 17
+const WORKER_BUILD = 18
 const RETENTION_BATCH_SIZE = 250
 const metricsCache = new Map<string, { expiresAt: number; metrics: BucketMetric[] }>()
 
@@ -860,6 +861,27 @@ async function runCycle(env: Env, orchestratorUrl?: string) {
   }
 }
 
+function scheduledRunnerUrl(env: Env) {
+  const value = env.ORCHESTRATOR_URL?.trim()
+  if (!value) throw new Error("ORCHESTRATOR_URL was not injected during deployment")
+  const url = new URL(value)
+  if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+    throw new Error("ORCHESTRATOR_URL must use HTTPS")
+  }
+  return url.toString().replace(/\/$/, "")
+}
+
+async function dispatchScheduledRun(env: Env) {
+  const response = await fetch(`${scheduledRunnerUrl(env)}/run`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.PANEL_SHARED_SECRET.trim()}`,
+      "Content-Length": "0",
+    },
+  })
+  if (!response.ok) console.error(`Scheduled Backend Orchestrator dispatch failed (${response.status})`)
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url)
@@ -898,11 +920,14 @@ export default {
     void ctx
     return json({ error: "Not found" }, 404)
   },
-  async scheduled(_controller, env, _ctx): Promise<void> {
-    try {
-      await runCycle(env)
-    } catch (error) {
-      console.error("Scheduled Backend Orchestrator cycle failed:", error instanceof Error ? error.message : String(error))
-    }
+  async scheduled(_controller, env, ctx): Promise<void> {
+    // Keep the scheduled invocation below the free-plan CPU budget. The HTTP
+    // runner owns the database work and checkpoints after each bucket, so a
+    // terminated invocation resumes from durable progress on the next tick.
+    ctx.waitUntil(
+      dispatchScheduledRun(env).catch((error) => {
+        console.error("Scheduled Backend Orchestrator dispatch failed:", error instanceof Error ? error.message : String(error))
+      })
+    )
   },
 } satisfies ExportedHandler<Env>
