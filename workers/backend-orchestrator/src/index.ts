@@ -3,7 +3,6 @@ import { Client } from "pg"
 type Env = {
   PANEL_URL: string
   PANEL_SHARED_SECRET: string
-  ORCHESTRATOR_URL: string
   POSTGRES_URL: string
   SYNC_INTERVAL_MINUTES: string
   API_EVENTS_RETENTION_DAYS: string
@@ -861,27 +860,6 @@ async function runCycle(env: Env, orchestratorUrl?: string) {
   }
 }
 
-function scheduledRunnerUrl(env: Env) {
-  const value = env.ORCHESTRATOR_URL?.trim()
-  if (!value) throw new Error("ORCHESTRATOR_URL was not injected during deployment")
-  const url = new URL(value)
-  if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
-    throw new Error("ORCHESTRATOR_URL must use HTTPS")
-  }
-  return url.toString().replace(/\/$/, "")
-}
-
-async function dispatchScheduledRun(env: Env) {
-  const response = await fetch(`${scheduledRunnerUrl(env)}/run`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.PANEL_SHARED_SECRET.trim()}`,
-      "Content-Length": "0",
-    },
-  })
-  if (!response.ok) console.error(`Scheduled Backend Orchestrator dispatch failed (${response.status})`)
-}
-
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url)
@@ -921,11 +899,17 @@ export default {
     return json({ error: "Not found" }, 404)
   },
   async scheduled(_controller, env, ctx): Promise<void> {
-    // Keep the scheduled invocation below the free-plan CPU budget. The HTTP
-    // runner owns the database work and checkpoints after each bucket, so a
-    // terminated invocation resumes from durable progress on the next tick.
+    // Use Cloudflare's automatic loopback binding instead of a public self-URL.
+    // The scheduled event only dispatches; /run owns the database work and
+    // checkpoints every bucket so a terminated run resumes on the next tick.
+    const loopback = (ctx.exports as unknown as { default: { fetch(request: Request): Promise<Response> } }).default
     ctx.waitUntil(
-      dispatchScheduledRun(env).catch((error) => {
+      loopback.fetch(new Request("https://internal-backend-orchestrator/run", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.PANEL_SHARED_SECRET.trim()}` },
+      })).then(async (response) => {
+        if (!response.ok) console.error(`Scheduled Backend Orchestrator dispatch failed (${response.status})`)
+      }).catch((error) => {
         console.error("Scheduled Backend Orchestrator dispatch failed:", error instanceof Error ? error.message : String(error))
       })
     )
