@@ -544,11 +544,7 @@ async function pendingMetricDecreases(db: Client, accountId: string, metrics: Bu
         confirmations = case
           when drive_backend_orchestrator_metric_candidates.objects = excluded.objects
            and drive_backend_orchestrator_metric_candidates.bytes = excluded.bytes
-           and excluded.observed_at > drive_backend_orchestrator_metric_candidates.observed_at
             then drive_backend_orchestrator_metric_candidates.confirmations + 1
-          when drive_backend_orchestrator_metric_candidates.objects = excluded.objects
-           and drive_backend_orchestrator_metric_candidates.bytes = excluded.bytes
-            then drive_backend_orchestrator_metric_candidates.confirmations
           else 1
         end,
         first_observed_at = case
