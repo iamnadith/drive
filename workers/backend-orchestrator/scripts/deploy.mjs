@@ -32,7 +32,7 @@ if (![1, 2].includes(config?.version) || typeof config?.postgresUrl !== "string"
 }
 
 const orchestratorUrl = configuredOrchestratorUrl || String(config?.orchestratorUrl || "").trim().replace(/\/$/, "")
-if (!orchestratorUrl) throw new Error("Backend Orchestrator URL is not configured in the panel")
+if (!orchestratorUrl) throw new Error("Backend Orchestrator URL is not configured; set it in Drive Settings or ORCHESTRATOR_URL")
 if (!/^https:\/\//i.test(orchestratorUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(orchestratorUrl)) {
   throw new Error("ORCHESTRATOR_URL must use HTTPS")
 }

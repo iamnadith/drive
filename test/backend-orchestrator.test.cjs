@@ -76,6 +76,7 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   const orchestrator = read("workers/backend-orchestrator/src/index.ts")
   const analyticsRoute = read("src/app/api/dashboard/analytics/route.ts")
   const accountsStore = read("src/lib/accounts-store.ts")
+  const deploy = read("workers/backend-orchestrator/scripts/deploy.mjs")
 
   assert.match(orchestrator, /const BUCKET_BATCH_SIZE = 25/)
   assert.match(orchestrator, /const WORKER_BUILD = 18/)
@@ -93,6 +94,7 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   assert.match(orchestrator, /External request timed out after \$\{timeoutMs\}ms/)
   assert.match(orchestrator, /ctx\.waitUntil\(/)
   assert.match(orchestrator, /ORCHESTRATOR_URL was not injected during deployment/)
+  assert.match(deploy, /Backend Orchestrator URL is not configured/)
   assert.match(orchestrator, /return \{ account: account\.label, status: "error", error: message \}/)
   assert.match(orchestrator, /Panel reconciliation failed \(\$\{response\.status\}\)/)
   assert.match(orchestrator, /return \{ ok: false, error: error instanceof Error \? error\.message : String\(error\) \}/)
