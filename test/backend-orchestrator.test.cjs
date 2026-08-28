@@ -93,6 +93,8 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   assert.match(orchestrator, /External request timed out after \$\{timeoutMs\}ms/)
   assert.match(orchestrator, /ctx\.exports/)
   assert.match(orchestrator, /internal-backend-orchestrator\/run/)
+  assert.doesNotMatch(orchestrator, /workers\.dev|ORCHESTRATOR_URL/)
+  assert.doesNotMatch(deploy, /workers\.dev|ORCHESTRATOR_URL/)
   assert.match(orchestrator, /return \{ account: account\.label, status: "error", error: message \}/)
   assert.match(orchestrator, /Panel reconciliation failed \(\$\{response\.status\}\)/)
   assert.match(orchestrator, /return \{ ok: false, error: error instanceof Error \? error\.message : String\(error\) \}/)
