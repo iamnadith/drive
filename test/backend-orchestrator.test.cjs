@@ -47,6 +47,8 @@ test("backend orchestrator uses the authenticated panel configuration handshake"
   assert.match(settingsRoute, /path: "\/status", method: "GET"/)
   assert.match(settingsRoute, /worker \}/)
   assert.match(settingsPage, /Worker build:/)
+  assert.match(orchestrator, /case when \$5::boolean then now\(\)/)
+  assert.match(orchestrator, /Scheduled Backend Orchestrator cycle failed/)
 })
 
 test("backend orchestrator uses account analytics without per-object scans and preserves change-only totals", () => {
@@ -130,6 +132,10 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   assert.match(orchestrator, /bucketOffset \+ index \+ 1/)
   assert.match(orchestrator, /async function claimCycle/)
   assert.match(orchestrator, /interval '2 minutes'/)
+  assert.match(orchestrator, /reconciled boolean not null default false/)
+  assert.match(orchestrator, /bucket_offset, reconciled from drive_backend_orchestrator_progress/)
+  assert.match(orchestrator, /Persist the account and bucket list before doing reconciliation/)
+  assert.match(orchestrator, /bucketOffset: bucketOffset \+ index \+ 1, reconciled: true/)
   assert.match(orchestrator, /on conflict \(id\) do update set/)
   assert.match(orchestrator, /r2StorageAdaptiveGroups/)
   assert.doesNotMatch(orchestrator, /ListObjectsV2Command|S3Client|ContinuationToken/)

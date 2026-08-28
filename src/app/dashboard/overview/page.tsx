@@ -531,35 +531,24 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                 if (value) setUsageMetric(value as UsageMetric)
               }}
               variant="outline"
-              className="grid h-9 w-full shrink-0 grid-cols-2 gap-0.5 rounded-xl border bg-muted/35 p-0.5 @[540px]/card:w-auto"
+              spacing={2}
+              className="grid w-full grid-cols-2 @[540px]/card:w-auto"
               aria-label="Select chart metric"
             >
-              <ToggleGroupItem
-                value="storage"
-                className="h-8 min-w-0 justify-between gap-1.5 rounded-[9px] border-0 px-2.5 shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm @[540px]/card:min-w-32"
-              >
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <HardDrive className="size-3.5 shrink-0 text-chart-1" aria-hidden="true" />
-                  <span className="text-xs font-medium">Storage</span>
-                </span>
-                <span className="truncate text-xs font-semibold tabular-nums text-foreground">
+              <ToggleGroupItem value="storage" className="h-auto w-full flex-col items-start gap-0.5 px-3 py-1.5 @[540px]/card:min-w-32">
+                <span className="text-[11px] text-muted-foreground">Storage</span>
+                <span className="text-base font-semibold tabular-nums">
                   {formatBytes(latestChartPoint?.storageBytes)}
                 </span>
               </ToggleGroupItem>
-              <ToggleGroupItem
-                value="objects"
-                className="h-8 min-w-0 justify-between gap-1.5 rounded-[9px] border-0 px-2.5 shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm @[540px]/card:min-w-32"
-              >
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <Database className="size-3.5 shrink-0 text-chart-2" aria-hidden="true" />
-                  <span className="text-xs font-medium">Objects</span>
-                </span>
-                <span className="truncate text-xs font-semibold tabular-nums text-foreground">
+              <ToggleGroupItem value="objects" className="h-auto w-full flex-col items-start gap-0.5 px-3 py-1.5 @[540px]/card:min-w-32">
+                <span className="text-[11px] text-muted-foreground">Objects</span>
+                <span className="text-base font-semibold tabular-nums">
                   {formatNumber(latestChartPoint?.rawObjects)}
                 </span>
               </ToggleGroupItem>
             </ToggleGroup>
-            <div className="flex min-w-0 items-center gap-1.5">
+            <div className="flex min-w-0 items-center gap-1.5 @[767px]/card:gap-1 @[767px]/card:rounded-xl @[767px]/card:border @[767px]/card:bg-muted/30 @[767px]/card:p-1">
             <ToggleGroup
               type="single"
               value={timeRange}
@@ -568,7 +557,7 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
               }}
               variant="outline"
               size="sm"
-              className="hidden rounded-lg bg-muted/45 p-0.5 *:data-[slot=toggle-group-item]:h-7 *:data-[slot=toggle-group-item]:rounded-md *:data-[slot=toggle-group-item]:border-0 *:data-[slot=toggle-group-item]:px-2.5! *:data-[slot=toggle-group-item]:text-xs *:data-[slot=toggle-group-item]:shadow-none @[767px]/card:flex"
+              className="hidden rounded-lg p-0 *:data-[slot=toggle-group-item]:h-7 *:data-[slot=toggle-group-item]:rounded-md *:data-[slot=toggle-group-item]:border-0 *:data-[slot=toggle-group-item]:px-2.5! *:data-[slot=toggle-group-item]:text-xs *:data-[slot=toggle-group-item]:shadow-none @[767px]/card:flex"
             >
               <ToggleGroupItem value="90d" aria-label="Last 3 months" title="Last 3 months">3M</ToggleGroupItem>
               <ToggleGroupItem value="180d" aria-label="Last 6 months" title="Last 6 months">6M</ToggleGroupItem>
@@ -622,7 +611,7 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-8 min-w-0 flex-[1.2] justify-start gap-1.5 rounded-lg px-2.5 text-xs tabular-nums @[767px]/card:flex-none"
+                  className="h-8 min-w-0 flex-[1.2] justify-start gap-1.5 rounded-lg px-2.5 text-xs tabular-nums @[767px]/card:flex-none @[767px]/card:rounded-l-none @[767px]/card:border-0 @[767px]/card:border-l @[767px]/card:border-border/70 @[767px]/card:bg-transparent @[767px]/card:pl-3 @[767px]/card:shadow-none @[767px]/card:hover:bg-background/70"
                   aria-label={`Choose date range, currently ${visibleDateRangeLabel}`}
                 >
                   <CalendarDays data-icon="inline-start" />
@@ -1079,10 +1068,10 @@ export default function OverviewPage() {
                       >
                         <Link
                           href="/dashboard/activity"
-                          className="group relative block px-4 py-2.5 outline-none transition-[background-color,box-shadow] hover:bg-muted/40 active:bg-muted/60 focus-visible:bg-muted/50 focus-visible:ring-2 focus-visible:ring-primary/20 lg:h-full lg:px-5 lg:py-4 lg:hover:bg-muted/30"
+                          className="group relative block px-4 py-2.5 outline-none transition-[background-color,box-shadow] hover:bg-muted/40 active:bg-muted/60 focus-visible:bg-muted/50 focus-visible:ring-2 focus-visible:ring-primary/20 lg:h-full lg:px-5 lg:py-3 lg:hover:bg-muted/30"
                         >
                           <ArrowRight className="absolute right-4 top-2.5 h-3.5 w-3.5 text-muted-foreground transition-transform group-hover:translate-x-0.5 lg:hidden" />
-                          <div className="grid gap-2.5 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-x-4 lg:gap-y-3">
+                          <div className="grid gap-2.5 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-x-4 lg:gap-y-2">
                             <div className="flex items-center justify-between gap-3 lg:col-span-2">
                               <div className="flex min-w-0 items-center gap-2">
                                 <span

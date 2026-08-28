@@ -206,6 +206,7 @@ async function ensureSchema(db: Client) {
       account_id uuid not null,
       bucket_names jsonb not null default '[]'::jsonb,
       bucket_offset integer not null default 0 check (bucket_offset >= 0),
+      reconciled boolean not null default false,
       started_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     )
@@ -225,10 +226,12 @@ async function ensureProgressSchema(db: Client) {
       account_id uuid not null,
       bucket_names jsonb not null default '[]'::jsonb,
       bucket_offset integer not null default 0 check (bucket_offset >= 0),
+      reconciled boolean not null default false,
       started_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     )
   `)
+  await db.query(`alter table drive_backend_orchestrator_progress add column if not exists reconciled boolean not null default false`)
 }
 
 async function setState(db: Client, input: { status: string; orchestratorUrl?: string; error?: string | null; result?: unknown; completed?: boolean }) {
@@ -236,12 +239,12 @@ async function setState(db: Client, input: { status: string; orchestratorUrl?: s
     `
       insert into drive_backend_orchestrator_state
         (id, status, orchestrator_url, last_started_at, last_completed_at, last_error, last_result, updated_at)
-      values (true, $1, $2, now(), case when $5 then now() else null end, $3, $4::jsonb, now())
+      values (true, $1, $2, now(), case when $5::boolean then now() else null end, $3, $4::jsonb, now())
       on conflict (id) do update set
         status = excluded.status,
         orchestrator_url = coalesce(excluded.orchestrator_url, drive_backend_orchestrator_state.orchestrator_url),
         last_started_at = case when excluded.status = 'running' then now() else drive_backend_orchestrator_state.last_started_at end,
-        last_completed_at = case when $5 then now() else drive_backend_orchestrator_state.last_completed_at end,
+        last_completed_at = case when $5::boolean then now() else drive_backend_orchestrator_state.last_completed_at end,
         last_error = excluded.last_error,
         last_result = excluded.last_result,
         updated_at = now()
@@ -418,8 +421,8 @@ async function selectNextAccount(db: Client, syncIntervalMinutes: number) {
 }
 
 async function loadSyncProgress(db: Client) {
-  const result = await db.query<{ account_id: string; bucket_names: unknown; bucket_offset: number }>(
-    `select account_id, bucket_names, bucket_offset from drive_backend_orchestrator_progress where id=true limit 1`
+  const result = await db.query<{ account_id: string; bucket_names: unknown; bucket_offset: number; reconciled: boolean }>(
+    `select account_id, bucket_names, bucket_offset, reconciled from drive_backend_orchestrator_progress where id=true limit 1`
   )
   const row = result.rows[0]
   if (!row || !Array.isArray(row.bucket_names)) return null
@@ -434,6 +437,7 @@ async function loadSyncProgress(db: Client) {
         : []
     }),
     bucketOffset: Math.max(0, Math.trunc(Number(row.bucket_offset) || 0)),
+    reconciled: row.reconciled === true,
   }
 }
 
@@ -445,14 +449,14 @@ async function selectAccountById(db: Client, accountId: string) {
   return result.rows[0] ?? null
 }
 
-async function saveSyncProgress(db: Client, input: { accountId: string; buckets: BucketInfo[]; bucketOffset: number }) {
+async function saveSyncProgress(db: Client, input: { accountId: string; buckets: BucketInfo[]; bucketOffset: number; reconciled?: boolean }) {
   await db.query(`
-    insert into drive_backend_orchestrator_progress (id,account_id,bucket_names,bucket_offset,started_at,updated_at)
-    values (true,$1,$2::jsonb,$3,now(),now())
+    insert into drive_backend_orchestrator_progress (id,account_id,bucket_names,bucket_offset,reconciled,started_at,updated_at)
+    values (true,$1,$2::jsonb,$3,$4::boolean,now(),now())
     on conflict (id) do update set
       account_id=excluded.account_id, bucket_names=excluded.bucket_names,
-      bucket_offset=excluded.bucket_offset, updated_at=now()
-  `, [input.accountId, JSON.stringify(input.buckets), input.bucketOffset])
+      bucket_offset=excluded.bucket_offset, reconciled=excluded.reconciled, updated_at=now()
+  `, [input.accountId, JSON.stringify(input.buckets), input.bucketOffset, input.reconciled === true])
 }
 
 async function clearSyncProgress(db: Client) {
@@ -657,8 +661,15 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
       return { account: account.label, status: "incomplete", message: "R2 bucket listing unavailable" }
     }
     if (!progress || progress.accountId !== account.id) {
+      // Persist the account and bucket list before doing reconciliation. If the
+      // invocation is killed at the CPU limit, the next cron run can resume
+      // from this durable checkpoint instead of starting from account selection.
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0, reconciled: false })
       await reconcileBuckets(db, account, bucketNames)
-      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0 })
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0, reconciled: true })
+    } else if (!progress.reconciled) {
+      await reconcileBuckets(db, account, bucketNames)
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset, reconciled: true })
     }
     if (buckets.length === 0) {
       await clearSyncProgress(db)
@@ -673,7 +684,7 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
       // Cloudflare analytics can lag after account activation or migration.
       // Missing provider data is not a valid zero snapshot: preserve the last
       // known totals and retry the complete bucket set on the next cycle.
-      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0 })
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0, reconciled: true })
       await db.query(
         `update drive_accounts set sync_status='syncing',sync_message=$2,updated_at=now() where id=$1`,
         [account.id, `R2 analytics unavailable for ${buckets.length - metrics.length} bucket(s); retaining last known totals`]
@@ -688,7 +699,7 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
     }
     const pendingDecreases = await pendingMetricDecreases(db, account.id, metrics)
     if (pendingDecreases.length > 0) {
-      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0 })
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0, reconciled: true })
       await db.query(
         `update drive_accounts set sync_status='syncing',sync_message=$2,updated_at=now() where id=$1`,
         [account.id, `R2 decrease awaiting a second provider observation for ${pendingDecreases.length} bucket(s); retaining last known totals`]
@@ -703,11 +714,11 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
     for (const [index, bucket] of batch.entries()) {
       const metric = metricByBucket.get(bucket.name)
       if (metric) await applyBucketMetrics(db, account, [metric])
-      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: bucketOffset + index + 1 })
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: bucketOffset + index + 1, reconciled: true })
     }
     const nextOffset = bucketOffset + batch.length
     if (nextOffset < buckets.length) {
-      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: nextOffset })
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: nextOffset, reconciled: true })
       return { account: account.label, status: "in_progress", buckets: buckets.length, processedBuckets: nextOffset, remainingBuckets: buckets.length - nextOffset }
     }
     await clearSyncProgress(db)
@@ -888,6 +899,10 @@ export default {
     return json({ error: "Not found" }, 404)
   },
   async scheduled(_controller, env, _ctx): Promise<void> {
-    await runCycle(env)
+    try {
+      await runCycle(env)
+    } catch (error) {
+      console.error("Scheduled Backend Orchestrator cycle failed:", error instanceof Error ? error.message : String(error))
+    }
   },
 } satisfies ExportedHandler<Env>
