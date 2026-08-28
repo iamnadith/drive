@@ -16,7 +16,7 @@ Add these build variables/secrets:
 
 - `PANEL_URL`: canonical Drive panel URL, for example `https://drive.example.com`
 - `PANEL_SHARED_SECRET`: a random secret containing at least 24 characters
-- `ORCHESTRATOR_URL`: the exact deployed Worker URL used by cron to dispatch the resumable HTTP runner
+- `ORCHESTRATOR_URL`: optional deployment override for the Worker URL; when omitted, deployment uses the URL saved in Drive Settings
 
 The panel may set `DISABLE_POSTGRES_SSL=true` when its PostgreSQL provider requires plaintext connections. The Worker disables SSL by default for Supabase hosts; all other providers use SSL unless this panel variable is explicitly true.
 

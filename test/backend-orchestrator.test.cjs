@@ -37,6 +37,7 @@ test("backend orchestrator uses the authenticated panel configuration handshake"
   assert.match(configRoute, /DISABLE_POSTGRES_SSL/)
   assert.match(configRoute, /value === "1" \|\| value === "true"/)
   assert.match(deploy, /DISABLE_POSTGRES_SSL: config\.disablePostgresSsl === true \? "1" : "0"/)
+  assert.match(configRoute, /orchestratorUrl: auth\.settings\.orchestratorUrl/)
   assert.match(settings, /secretConfigured:/)
   assert.doesNotMatch(settings, /sharedSecret: settings\.sharedSecret/)
   assert.match(settingsRoute, /export async function PATCH/)

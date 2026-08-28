@@ -28,6 +28,7 @@ export async function GET(request: Request) {
     {
       version: 2,
       postgresUrl,
+      orchestratorUrl: auth.settings.orchestratorUrl,
       disablePostgresSsl: disablePostgresSsl(),
       syncIntervalMinutes: auth.settings.syncIntervalMinutes,
       retention: { apiEventsDays: 7, objectChangesDays: 7, scanDetailsDays: 7 },
