@@ -35,7 +35,7 @@ type BucketMetric = { bucket: string; objects: number; bytes: number; observedAt
 const BUCKET_BATCH_SIZE = 25
 const EXTERNAL_REQUEST_TIMEOUT_MS = 8_000
 const METRICS_CACHE_TTL_MS = 10_000
-const WORKER_BUILD = 18
+const WORKER_BUILD = 19
 const RETENTION_BATCH_SIZE = 250
 const metricsCache = new Map<string, { expiresAt: number; metrics: BucketMetric[] }>()
 

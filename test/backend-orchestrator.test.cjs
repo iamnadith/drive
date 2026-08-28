@@ -78,7 +78,7 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   const deploy = read("workers/backend-orchestrator/scripts/deploy.mjs")
 
   assert.match(orchestrator, /const BUCKET_BATCH_SIZE = 25/)
-  assert.match(orchestrator, /const WORKER_BUILD = 18/)
+  assert.match(orchestrator, /const WORKER_BUILD = 19/)
   assert.match(orchestrator, /build: WORKER_BUILD/)
   assert.match(orchestrator, /const METRICS_CACHE_TTL_MS = 10_000/)
   assert.match(orchestrator, /const RETENTION_BATCH_SIZE = 250/)
