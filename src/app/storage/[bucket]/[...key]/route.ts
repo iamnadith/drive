@@ -10,6 +10,9 @@ import {
   createStorageDeliveryOptionsResponse,
   createStorageDeliveryRedirect,
   isStorageDeliveryOriginAllowed,
+  isSystemDerivativeKey,
+  STORAGE_DERIVATIVE_OBJECT_CACHE_CONTROL,
+  STORAGE_DERIVATIVE_REDIRECT_CACHE_CONTROL,
 } from "@/lib/storage-delivery.cjs"
 
 export const dynamic = "force-dynamic"
@@ -68,6 +71,7 @@ async function redirectToStorageObject(
   }
   const url = new URL(request.url)
   const download = url.searchParams.get("download") === "1"
+  const cacheDerivative = !download && isSystemDerivativeKey(objectKey)
   const config = {
     accountId: active.cloudflareAccountId,
     accessKeyId: active.r2AccessKeyId,
@@ -79,9 +83,17 @@ async function redirectToStorageObject(
       : await r2CreateSignedDownloadUrl(config, bucket, objectKey, {
           expiresInSeconds: 900,
           ...(download ? { filename: objectKey.split("/").pop() ?? objectKey } : {}),
+          ...(cacheDerivative ? {
+            cacheControl: STORAGE_DERIVATIVE_OBJECT_CACHE_CONTROL,
+          } : {}),
         })
 
-  return createStorageDeliveryRedirect(signedUrl, request.headers.get("origin"), configuredOrigins)
+  return createStorageDeliveryRedirect(
+    signedUrl,
+    request.headers.get("origin"),
+    configuredOrigins,
+    cacheDerivative ? STORAGE_DERIVATIVE_REDIRECT_CACHE_CONTROL : undefined
+  )
 }
 
 export async function GET(

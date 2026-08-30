@@ -1,4 +1,6 @@
 const STORAGE_REDIRECT_CACHE_CONTROL = "private, no-store, max-age=0"
+const STORAGE_DERIVATIVE_REDIRECT_CACHE_CONTROL = "private, max-age=840, stale-while-revalidate=30"
+const STORAGE_DERIVATIVE_OBJECT_CACHE_CONTROL = "public, max-age=31536000, immutable"
 const STORAGE_CORS_ENV = "DRIVE_MEDIA_ALLOWED_ORIGINS"
 const SYSTEM_DERIVATIVE_KEY_REGEX = /(?:-(?:poster|preview|stream|subtitles(?:\.[a-z0-9_-]+)?)\.[a-z0-9]{1,8}|-hls(?:-(?:high|720p))?(?:\.m3u8|-init\.mp4|-[0-9]{5}\.m4s))$/i
 
@@ -31,9 +33,9 @@ function isStorageDeliveryOriginAllowed(origin, configuredOrigins) {
   return allowedOrigins.includes("*") || allowedOrigins.includes(normalizedOrigin)
 }
 
-function createStorageDeliveryHeaders(origin, configuredOrigins) {
+function createStorageDeliveryHeaders(origin, configuredOrigins, cacheControl = STORAGE_REDIRECT_CACHE_CONTROL) {
   const headers = new Headers({
-    "Cache-Control": STORAGE_REDIRECT_CACHE_CONTROL,
+    "Cache-Control": cacheControl,
     "CDN-Cache-Control": "no-store",
     "Surrogate-Control": "no-store",
     "Cross-Origin-Resource-Policy": "cross-origin",
@@ -58,8 +60,8 @@ function createStorageDeliveryHeaders(origin, configuredOrigins) {
   return headers
 }
 
-function createStorageDeliveryRedirect(location, origin, configuredOrigins) {
-  const headers = createStorageDeliveryHeaders(origin, configuredOrigins)
+function createStorageDeliveryRedirect(location, origin, configuredOrigins, cacheControl) {
+  const headers = createStorageDeliveryHeaders(origin, configuredOrigins, cacheControl)
   headers.set("Location", location)
   return new Response(null, { status: 302, headers })
 }
@@ -73,6 +75,8 @@ function createStorageDeliveryOptionsResponse(origin, configuredOrigins) {
 
 module.exports = {
   STORAGE_CORS_ENV,
+  STORAGE_DERIVATIVE_OBJECT_CACHE_CONTROL,
+  STORAGE_DERIVATIVE_REDIRECT_CACHE_CONTROL,
   STORAGE_REDIRECT_CACHE_CONTROL,
   isSystemDerivativeKey,
   isStorageDeliveryOriginAllowed,

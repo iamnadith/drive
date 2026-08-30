@@ -4,6 +4,7 @@ const test = require("node:test")
 
 const {
   STORAGE_REDIRECT_CACHE_CONTROL,
+  STORAGE_DERIVATIVE_REDIRECT_CACHE_CONTROL,
   allowedStorageCorsOrigins,
   createStorageDeliveryOptionsResponse,
   createStorageDeliveryRedirect,
@@ -99,4 +100,18 @@ test("GET and HEAD use the same non-cacheable redirect envelope", () => {
   assert.equal(redirect.status, 302)
   assert.equal(redirect.headers.get("Location")?.startsWith("https://example.r2.cloudflarestorage.com/"), true)
   assert.equal(redirect.headers.get("Cache-Control"), STORAGE_REDIRECT_CACHE_CONTROL)
+})
+
+test("canonical derivatives can use a private redirect cache within signed URL lifetime", () => {
+  const redirect = createStorageDeliveryRedirect(
+    "https://example.r2.cloudflarestorage.com/media/video-poster.jpg?X-Amz-Signature=redacted",
+    "https://panel.example.com",
+    "https://panel.example.com",
+    STORAGE_DERIVATIVE_REDIRECT_CACHE_CONTROL
+  )
+  assert.equal(
+    redirect.headers.get("Cache-Control"),
+    "private, max-age=840, stale-while-revalidate=30"
+  )
+  assert.equal(redirect.headers.get("CDN-Cache-Control"), "no-store")
 })

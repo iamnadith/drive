@@ -715,7 +715,12 @@ export async function r2CreateSignedDownloadUrl(
   config: R2ClientConfig,
   bucket: string,
   key: string,
-  input?: { expiresInSeconds?: number; filename?: string; contentType?: string }
+  input?: {
+    expiresInSeconds?: number
+    filename?: string
+    contentType?: string
+    cacheControl?: string
+  }
 ) {
   const client = createR2Client(config)
   const expiresInSeconds =
@@ -733,6 +738,9 @@ export async function r2CreateSignedDownloadUrl(
       : {}),
     ...(typeof input?.contentType === "string" && input.contentType.trim()
       ? { ResponseContentType: input.contentType.trim() }
+      : {}),
+    ...(typeof input?.cacheControl === "string" && input.cacheControl.trim()
+      ? { ResponseCacheControl: input.cacheControl.trim() }
       : {}),
   })
 
