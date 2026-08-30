@@ -63,6 +63,8 @@ export async function POST(request: Request) {
     action: "file.multipart.complete",
     objectKey: key,
     request,
+    status: 200,
+    outcome: "success",
   })
   return NextResponse.json({ ok: true, projectId, key, fileId: trackedObject?.fileId ?? null })
 }

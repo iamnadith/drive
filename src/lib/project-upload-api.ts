@@ -219,6 +219,8 @@ export async function completeProjectUpload(request: Request, body: UploadComple
       action: "file.upload.complete",
       objectKey: key,
       request,
+      status: 202,
+      outcome: "warning",
       metadata: { bucketName: resolved.r2.bucketName, pending: true },
     }).catch(() => undefined)
     return NextResponse.json(
@@ -245,6 +247,8 @@ export async function completeProjectUpload(request: Request, body: UploadComple
     action: "file.upload.complete",
     objectKey: key,
     request,
+    status: 200,
+    outcome: "success",
     metadata: { bucketName: resolved.r2.bucketName, size: head.ContentLength ?? 0 },
   })
 

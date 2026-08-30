@@ -135,14 +135,16 @@ export async function POST(request: Request) {
   await r2CompleteMultipartUpload(r2.config, r2.bucketName, key, uploadId, parts)
   // Storage completion is authoritative. Audit persistence must never turn a
   // successfully committed object into an HTTP 500 seen by upload clients.
-  after(() => recordProjectApiEvent({
+  await recordProjectApiEvent({
     project: authorized.auth.project,
     apiKeyId: authorized.auth.apiKey.id,
     action: "file.multipart.complete",
     objectKey: key,
     request,
+    status: 200,
+    outcome: "success",
     metadata: { bucketName: r2.bucketName, parts: parts.length },
-  }))
+  })
 
   return NextResponse.json({
     ok: true,
