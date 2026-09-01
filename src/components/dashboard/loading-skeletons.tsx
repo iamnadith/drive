@@ -95,62 +95,21 @@ function OverviewMetricCardsSkeleton() {
 
 function OverviewUsageChartSkeleton() {
   return (
-    <Card className="overflow-hidden gap-0 py-0">
-      <CardHeader className="border-b bg-muted/10 px-4 py-5 sm:px-6">
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <Skeleton className="size-10 shrink-0 rounded-2xl" />
-            <div className="flex min-w-0 flex-col gap-1.5">
-              <Skeleton className="h-2.5 w-28" />
-              <Skeleton className="h-6 w-36" />
-              <Skeleton className="h-4 w-[min(32rem,70vw)]" />
-            </div>
+    <Card className="@container/card overflow-hidden gap-0 py-0">
+      <CardHeader className="border-b px-4 py-3.5 sm:px-5">
+        <div className="flex flex-col gap-3 @[1120px]/card:flex-row @[1120px]/card:items-center @[1120px]/card:justify-between">
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <Skeleton className="h-5 w-32" />
+            <Skeleton className="h-3.5 w-[min(28rem,78vw)]" />
           </div>
-          <Skeleton className="hidden h-6 w-28 rounded-full sm:block" />
+          <div className="flex flex-col gap-2 @[767px]/card:flex-row @[767px]/card:items-center">
+            <Skeleton className="h-10 w-full rounded-xl @[540px]/card:w-72" />
+            <Skeleton className="h-10 w-full rounded-xl @[540px]/card:w-72" />
+          </div>
         </div>
       </CardHeader>
-      <CardContent className="grid gap-0 p-0 lg:grid-cols-[minmax(15rem,0.34fr)_minmax(0,1fr)]">
-        <div className="flex flex-col gap-6 border-b p-4 sm:p-6 lg:border-b-0 lg:border-r">
-          <div className="flex flex-col gap-3">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex flex-col gap-1.5">
-                <Skeleton className="h-4 w-28" />
-                <Skeleton className="h-3 w-48" />
-              </div>
-              <Skeleton className="h-5 w-12 rounded-full" />
-            </div>
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
-              {Array.from({ length: 2 }).map((_, index) => (
-                <div key={index} className="flex min-h-24 flex-col justify-between gap-2 rounded-2xl border p-3.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <Skeleton className="h-3 w-16" />
-                    <Skeleton className="h-3 w-12" />
-                  </div>
-                  <Skeleton className="h-7 w-24" />
-                </div>
-              ))}
-            </div>
-          </div>
-          <div className="mt-auto flex flex-col gap-2.5 rounded-2xl border bg-muted/20 p-4">
-            <div className="flex items-center justify-between gap-3">
-              <Skeleton className="h-3 w-28" />
-              <Skeleton className="h-5 w-20 rounded-full" />
-            </div>
-            <Skeleton className="h-8 w-full" />
-          </div>
-        </div>
-        <div className="min-w-0 p-4 sm:p-6">
-          <div className="flex flex-col gap-3 border-b border-border/60 pb-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex flex-col gap-1.5">
-              <Skeleton className="h-4 w-24" />
-              <Skeleton className="h-3 w-36" />
-            </div>
-            <div className="flex items-center gap-2">
-              <Skeleton className="h-8 w-36 rounded-xl" />
-              <Skeleton className="h-8 w-32 rounded-xl" />
-            </div>
-          </div>
-          <div className="mt-4 rounded-2xl border border-border/40 bg-muted/20 px-3 pt-3">
+      <CardContent className="px-3 py-3 sm:px-5 sm:py-4">
+          <div className="rounded-2xl border border-border/40 bg-muted/20 px-3 pt-3">
             <div className="flex h-[300px] items-end gap-1.5 sm:gap-2">
               {Array.from({ length: 12 }).map((_, index) => (
                 <Skeleton
@@ -164,7 +123,6 @@ function OverviewUsageChartSkeleton() {
               ))}
             </div>
           </div>
-        </div>
       </CardContent>
     </Card>
   )

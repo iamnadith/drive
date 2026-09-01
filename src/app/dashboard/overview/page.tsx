@@ -263,61 +263,31 @@ function UsageMetricSelector({
   objects: number
 }) {
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-sm font-medium">Current inventory</p>
-          <p className="mt-0.5 text-xs leading-4 text-muted-foreground">
-            Latest live totals from the active account
-          </p>
-        </div>
-        <Badge variant="secondary" className="shrink-0 rounded-full px-2.5 text-[10px]">
-          Live
-        </Badge>
-      </div>
-      <ToggleGroup
-        type="single"
-        value={value}
-        onValueChange={(nextValue) => {
-          if (nextValue) onValueChange(nextValue as UsageMetric)
-        }}
-        variant="outline"
-        spacing={2}
-        className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-1"
-        aria-label="Select storage history metric"
+    <ToggleGroup
+      type="single"
+      value={value}
+      onValueChange={(nextValue) => {
+        if (nextValue) onValueChange(nextValue as UsageMetric)
+      }}
+      variant="outline"
+      className="grid w-full grid-cols-2 rounded-xl border bg-muted/20 p-1 @[540px]/card:w-auto"
+      aria-label="Select storage history metric"
+    >
+      <ToggleGroupItem
+        value="storage"
+        className="h-8 w-full gap-2 rounded-lg border-0 px-2.5 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm @[540px]/card:min-w-36"
       >
-        <ToggleGroupItem
-          value="storage"
-          className="min-h-24 w-full flex-col items-start justify-between gap-2 rounded-2xl px-3.5 py-3 text-left data-[state=on]:border-primary/40 data-[state=on]:bg-background data-[state=on]:shadow-sm"
-        >
-          <span className="flex w-full items-center justify-between gap-2">
-            <span className="flex items-center gap-2 text-xs font-medium">
-              <HardDrive className="size-4 text-muted-foreground" />
-              Storage
-            </span>
-            <span className="text-[10px] text-muted-foreground">Capacity</span>
-          </span>
-          <span className="text-[1.45rem] font-semibold tracking-tight tabular-nums">
-            {formatBytes(storageBytes)}
-          </span>
-        </ToggleGroupItem>
-        <ToggleGroupItem
-          value="objects"
-          className="min-h-24 w-full flex-col items-start justify-between gap-2 rounded-2xl px-3.5 py-3 text-left data-[state=on]:border-primary/40 data-[state=on]:bg-background data-[state=on]:shadow-sm"
-        >
-          <span className="flex w-full items-center justify-between gap-2">
-            <span className="flex items-center gap-2 text-xs font-medium">
-              <Database className="size-4 text-muted-foreground" />
-              Objects
-            </span>
-            <span className="text-[10px] text-muted-foreground">Count</span>
-          </span>
-          <span className="text-[1.45rem] font-semibold tracking-tight tabular-nums">
-            {formatNumber(objects)}
-          </span>
-        </ToggleGroupItem>
-      </ToggleGroup>
-    </div>
+        <span className="text-muted-foreground">Storage</span>
+        <span className="font-semibold tabular-nums">{formatBytes(storageBytes)}</span>
+      </ToggleGroupItem>
+      <ToggleGroupItem
+        value="objects"
+        className="h-8 w-full gap-2 rounded-lg border-0 px-2.5 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm @[540px]/card:min-w-36"
+      >
+        <span className="text-muted-foreground">Objects</span>
+        <span className="font-semibold tabular-nums">{formatNumber(objects)}</span>
+      </ToggleGroupItem>
+    </ToggleGroup>
   )
 }
 
@@ -355,14 +325,7 @@ function StorageHistoryControls({
   onApplyDateRange,
 }: StorageHistoryControlsProps) {
   return (
-    <div className="flex flex-col gap-3 border-b border-border/60 pb-4 sm:flex-row sm:items-center sm:justify-between">
-      <div className="min-w-0">
-        <p className="text-sm font-medium">Usage history</p>
-        <p className="mt-0.5 truncate text-xs tabular-nums text-muted-foreground">
-          {visibleDateRangeLabel}
-        </p>
-      </div>
-      <div className="flex min-w-0 items-center gap-2 sm:justify-end">
+    <div className="flex min-w-0 items-center gap-2">
         <ToggleGroup
           type="single"
           value={timeRange}
@@ -371,7 +334,7 @@ function StorageHistoryControls({
           }}
           variant="outline"
           size="sm"
-          className="hidden rounded-xl border bg-muted/30 p-1 md:flex"
+          className="hidden rounded-xl border bg-muted/20 p-1 @[767px]/card:flex"
           aria-label="Select history range"
         >
           <ToggleGroupItem
@@ -414,7 +377,7 @@ function StorageHistoryControls({
           }}
         >
           <SelectTrigger
-            className="h-8 min-w-0 flex-1 rounded-xl px-2.5 text-xs md:hidden"
+            className="h-8 min-w-0 flex-1 rounded-xl px-2.5 text-xs @[767px]/card:hidden"
             size="sm"
             aria-label="Select history range"
           >
@@ -454,7 +417,7 @@ function StorageHistoryControls({
             <Button
               variant="outline"
               size="sm"
-              className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-xl px-2.5 text-xs tabular-nums md:flex-none"
+              className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-xl px-2.5 text-xs tabular-nums @[767px]/card:flex-none"
               aria-label={`Choose date range, currently ${visibleDateRangeLabel}`}
             >
               <CalendarDays data-icon="inline-start" />
@@ -522,7 +485,6 @@ function StorageHistoryControls({
             </div>
           </PopoverContent>
         </Popover>
-      </div>
     </div>
   )
 }
@@ -801,77 +763,54 @@ function PlatformUsageChart({
   }, [enableChartNavigation, updateChartViewport])
 
   return (
-    <Card className="overflow-hidden gap-0 py-0">
-      <CardHeader className="border-b bg-muted/10 px-4 py-5 sm:px-6">
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <div className="flex size-10 shrink-0 items-center justify-center rounded-2xl border bg-background/70 shadow-sm">
-              <HardDrive className="size-5 text-primary" />
-            </div>
-            <div className="min-w-0">
-              <p className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                Storage overview
-              </p>
-              <CardTitle className="mt-1 text-lg leading-tight">Storage Usage</CardTitle>
-              <CardDescription className="mt-1 max-w-2xl leading-5">
-                Logical storage history across migrations, without counting copied data twice.
-              </CardDescription>
-            </div>
+    <Card className="@container/card overflow-hidden gap-0 py-0">
+      <CardHeader className="border-b px-4 py-3.5 sm:px-5">
+        <div className="flex flex-col gap-3 @[1120px]/card:flex-row @[1120px]/card:items-center @[1120px]/card:justify-between">
+          <div className="min-w-0">
+            <CardTitle className="text-base leading-tight">Storage Usage</CardTitle>
+            <CardDescription className="mt-1 leading-4">
+              Logical storage history across migrations, without counting copied data twice.
+            </CardDescription>
           </div>
-          <Badge variant="outline" className="hidden shrink-0 rounded-full px-2.5 text-[10px] sm:inline-flex">
-            Logical inventory
-          </Badge>
+          <div className="flex min-w-0 flex-col gap-2 @[767px]/card:flex-row @[767px]/card:items-center">
+            <UsageMetricSelector
+              value={usageMetric}
+              onValueChange={setUsageMetric}
+              storageBytes={metrics.storageBytes}
+              objects={metrics.objects}
+            />
+            <StorageHistoryControls
+              timeRange={timeRange}
+              onTimeRangeChange={setTimeRange}
+              isMobile={isMobile}
+              visibleDateRangeLabel={visibleDateRangeLabel}
+              datePickerOpen={datePickerOpen}
+              onDatePickerOpenChange={setDatePickerOpen}
+              visibleDateRange={visibleDateRange}
+              datePickerDraft={datePickerDraft}
+              onDatePickerDraftChange={setDatePickerDraft}
+              historyBounds={historyBounds}
+              minimumSelectableDays={minimumSelectableDays}
+              datePickerDraftDays={datePickerDraftDays}
+              datePickerDraftIsValid={datePickerDraftIsValid}
+              onApplyDateRange={(range) => {
+                if (!range.from || !range.to) return
+                const from = toLocalDateKey(range.from)
+                const to = toLocalDateKey(range.to)
+                setPendingDateRange({
+                  from: from <= to ? from : to,
+                  to: from <= to ? to : from,
+                })
+                setNavigatorSelection(null)
+                setTimeRange("custom")
+              }}
+            />
+          </div>
         </div>
       </CardHeader>
-      <CardContent className="grid gap-0 p-0 lg:grid-cols-[minmax(15rem,0.34fr)_minmax(0,1fr)]">
-        <section className="flex flex-col gap-6 border-b p-4 sm:p-6 lg:border-b-0 lg:border-r">
-          <UsageMetricSelector
-            value={usageMetric}
-            onValueChange={setUsageMetric}
-            storageBytes={metrics.storageBytes}
-            objects={metrics.objects}
-          />
-          <div className="mt-auto flex flex-col gap-2.5 rounded-2xl border bg-muted/20 p-4">
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-xs font-medium">How this is counted</p>
-              <Badge variant="outline" className="rounded-full px-2 py-0.5 text-[10px]">
-                Deduplicated
-              </Badge>
-            </div>
-            <p className="text-xs leading-5 text-muted-foreground">
-              One logical object is counted once, even when a migration copies it between accounts.
-            </p>
-          </div>
-        </section>
-        <section className="min-w-0 p-4 sm:p-6">
-          <StorageHistoryControls
-            timeRange={timeRange}
-            onTimeRangeChange={setTimeRange}
-            isMobile={isMobile}
-            visibleDateRangeLabel={visibleDateRangeLabel}
-            datePickerOpen={datePickerOpen}
-            onDatePickerOpenChange={setDatePickerOpen}
-            visibleDateRange={visibleDateRange}
-            datePickerDraft={datePickerDraft}
-            onDatePickerDraftChange={setDatePickerDraft}
-            historyBounds={historyBounds}
-            minimumSelectableDays={minimumSelectableDays}
-            datePickerDraftDays={datePickerDraftDays}
-            datePickerDraftIsValid={datePickerDraftIsValid}
-            onApplyDateRange={(range) => {
-              if (!range.from || !range.to) return
-              const from = toLocalDateKey(range.from)
-              const to = toLocalDateKey(range.to)
-              setPendingDateRange({
-                from: from <= to ? from : to,
-                to: from <= to ? to : from,
-              })
-              setNavigatorSelection(null)
-              setTimeRange("custom")
-            }}
-          />
+      <CardContent className="px-3 py-3 sm:px-5 sm:py-4">
           {chartData.length === 0 ? (
-            <Empty className="mt-4 min-h-[280px] rounded-2xl border bg-muted/10 px-6 py-10">
+            <Empty className="min-h-[280px] rounded-2xl border bg-muted/10 px-6 py-10">
               <EmptyHeader>
                 <EmptyMedia variant="icon">
                   <Database />
@@ -883,7 +822,7 @@ function PlatformUsageChart({
               </EmptyHeader>
             </Empty>
           ) : (
-            <div className="mt-4 flex flex-col gap-3">
+            <div className="flex flex-col gap-3">
             <div
               ref={chartInteractionRef}
               role="region"
@@ -1040,7 +979,6 @@ function PlatformUsageChart({
             ) : null}
           </div>
           )}
-        </section>
       </CardContent>
     </Card>
   )
