@@ -30,8 +30,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import {
   ChartConfig,
   ChartContainer,
-  ChartLegend,
-  ChartLegendContent,
   ChartTooltip,
   ChartTooltipContent,
 } from "@/components/ui/chart"
@@ -51,6 +49,7 @@ import {
 } from "@/components/ui/select"
 import { DashboardOverviewSkeleton } from "@/components/dashboard/loading-skeletons"
 import { useDashboardResource } from "@/hooks/use-dashboard-resource"
+import { cn } from "@/lib/utils"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -264,31 +263,40 @@ function UsageMetricSelector({
   objects: number
 }) {
   return (
-    <ToggleGroup
-      type="single"
-      value={value}
-      onValueChange={(nextValue) => {
-        if (nextValue) onValueChange(nextValue as UsageMetric)
-      }}
-      variant="outline"
-      className="grid w-full grid-cols-2 rounded-xl border bg-muted/20 p-1 @[540px]/card:w-72"
-      aria-label="Select storage history metric"
-    >
-      <ToggleGroupItem
-        value="storage"
-        className="h-8 w-full gap-2 rounded-lg border-0 px-2.5 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm @[540px]/card:min-w-36"
+    <div className="relative w-full overflow-hidden rounded-xl border bg-muted/20 p-1 @[540px]/card:w-72 @[767px]/card:h-10">
+      <span
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute inset-y-1 left-1 hidden w-1/2 rounded-full bg-primary/10 transition-transform duration-300 ease-out motion-reduce:transition-none @[767px]/card:block",
+          value === "objects" && "translate-x-full"
+        )}
+      />
+      <ToggleGroup
+        type="single"
+        value={value}
+        onValueChange={(nextValue) => {
+          if (nextValue) onValueChange(nextValue as UsageMetric)
+        }}
+        variant="outline"
+        className="relative z-10 grid h-full w-full grid-cols-2 border-0 bg-transparent p-0 shadow-none"
+        aria-label="Select storage history metric"
       >
-        <span className="text-muted-foreground">Storage</span>
-        <span className="font-semibold tabular-nums">{formatBytes(storageBytes)}</span>
-      </ToggleGroupItem>
-      <ToggleGroupItem
-        value="objects"
-        className="h-8 w-full gap-2 rounded-lg border-0 px-2.5 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm @[540px]/card:min-w-36"
-      >
-        <span className="text-muted-foreground">Objects</span>
-        <span className="font-semibold tabular-nums">{formatNumber(objects)}</span>
-      </ToggleGroupItem>
-    </ToggleGroup>
+        <ToggleGroupItem
+          value="storage"
+          className="h-8 w-full min-w-0 gap-2 rounded-lg border-0 px-2.5 text-xs shadow-none transition-[color,transform] duration-300 ease-out data-[state=on]:bg-background @[767px]/card:!rounded-full @[767px]/card:data-[state=on]:bg-transparent"
+        >
+          <span className="text-muted-foreground">Storage</span>
+          <span className="font-semibold tabular-nums">{formatBytes(storageBytes)}</span>
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value="objects"
+          className="h-8 w-full min-w-0 gap-2 rounded-lg border-0 px-2.5 text-xs shadow-none transition-[color,transform] duration-300 ease-out data-[state=on]:bg-background @[767px]/card:!rounded-full @[767px]/card:data-[state=on]:bg-transparent"
+        >
+          <span className="text-muted-foreground">Objects</span>
+          <span className="font-semibold tabular-nums">{formatNumber(objects)}</span>
+        </ToggleGroupItem>
+      </ToggleGroup>
+    </div>
   )
 }
 
@@ -344,52 +352,72 @@ function StorageHistoryControls({
     }
   }, [historyBounds, visibleDateRange])
 
+  const rangeIndicatorPosition =
+    timeRange === "180d"
+      ? "translate-x-full"
+      : timeRange === "365d"
+        ? "translate-x-[200%]"
+        : timeRange === "all"
+          ? "translate-x-[300%]"
+          : "translate-x-0"
+  const rangeIndicatorVisible = timeRange !== "custom" && timeRange !== "30d"
+
   return (
     <div className="flex min-w-0 items-center gap-2">
-      <ToggleGroup
-        type="single"
-        value={timeRange}
-        onValueChange={(value) => {
-          if (value) onTimeRangeChange(value as UsageRange)
-        }}
-        variant="outline"
-        size="sm"
-        className="hidden w-56 grid-cols-4 rounded-xl border bg-muted/20 p-1 @[767px]/card:grid"
-        aria-label="Select history range"
-      >
-        <ToggleGroupItem
-          value="90d"
-          aria-label="Last 3 months"
-          title="Last 3 months"
-          className="h-7 w-full rounded-lg border-0 px-2 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
+      <div className="relative hidden w-56 overflow-hidden rounded-xl border bg-muted/20 p-1 @[767px]/card:grid @[767px]/card:h-10">
+        <span
+          aria-hidden="true"
+          className={cn(
+            "pointer-events-none absolute inset-y-1 left-1 w-1/4 rounded-full bg-primary/10 transition-[transform,opacity] duration-300 ease-out motion-reduce:transition-none",
+            rangeIndicatorPosition,
+            !rangeIndicatorVisible && "opacity-0"
+          )}
+        />
+        <ToggleGroup
+          type="single"
+          value={timeRange}
+          onValueChange={(value) => {
+            if (value) onTimeRangeChange(value as UsageRange)
+          }}
+          variant="outline"
+          size="sm"
+          className="relative z-10 grid h-full w-full grid-cols-4 border-0 bg-transparent p-0 shadow-none"
+          aria-label="Select history range"
         >
-          3M
-        </ToggleGroupItem>
-        <ToggleGroupItem
-          value="180d"
-          aria-label="Last 6 months"
-          title="Last 6 months"
-          className="h-7 w-full rounded-lg border-0 px-2 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
-        >
-          6M
-        </ToggleGroupItem>
-        <ToggleGroupItem
-          value="365d"
-          aria-label="Last 12 months"
-          title="Last 12 months"
-          className="h-7 w-full rounded-lg border-0 px-2 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
-        >
-          12M
-        </ToggleGroupItem>
-        <ToggleGroupItem
-          value="all"
-          aria-label="All time"
-          title="All time"
-          className="h-7 w-full rounded-lg border-0 px-2 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
-        >
-          All
-        </ToggleGroupItem>
-      </ToggleGroup>
+          <ToggleGroupItem
+            value="90d"
+            aria-label="Last 3 months"
+            title="Last 3 months"
+            className="h-8 w-full min-w-0 !rounded-full border-0 px-2 text-xs shadow-none transition-[color,transform] duration-300 ease-out data-[state=on]:bg-transparent"
+          >
+            3M
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="180d"
+            aria-label="Last 6 months"
+            title="Last 6 months"
+            className="h-8 w-full min-w-0 !rounded-full border-0 px-2 text-xs shadow-none transition-[color,transform] duration-300 ease-out data-[state=on]:bg-transparent"
+          >
+            6M
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="365d"
+            aria-label="Last 12 months"
+            title="Last 12 months"
+            className="h-8 w-full min-w-0 !rounded-full border-0 px-2 text-xs shadow-none transition-[color,transform] duration-300 ease-out data-[state=on]:bg-transparent"
+          >
+            12M
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="all"
+            aria-label="All time"
+            title="All time"
+            className="h-8 w-full min-w-0 !rounded-full border-0 px-2 text-xs shadow-none transition-[color,transform] duration-300 ease-out data-[state=on]:bg-transparent"
+          >
+            All
+          </ToggleGroupItem>
+        </ToggleGroup>
+      </div>
       <Select
         value={timeRange}
         onValueChange={(value) => {
@@ -437,7 +465,7 @@ function StorageHistoryControls({
           <Button
             variant="outline"
             size="sm"
-            className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-xl px-2.5 text-xs tabular-nums @[767px]/card:w-56 @[767px]/card:flex-none"
+            className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-xl px-2.5 text-xs tabular-nums @[767px]/card:w-56 @[767px]/card:flex-none @[767px]/card:h-10"
             aria-label={`Choose date range, currently ${visibleDateRangeLabel}`}
             aria-expanded={datePickerOpen}
           >
@@ -806,6 +834,9 @@ function PlatformUsageChart({
         <div className="flex flex-col gap-3 @[1120px]/card:flex-row @[1120px]/card:items-center @[1120px]/card:justify-between">
           <div className="min-w-0">
             <CardTitle className="text-base leading-tight">Storage Usage</CardTitle>
+            <CardDescription className="mt-1 leading-4">
+              Track storage and object totals across the selected date range.
+            </CardDescription>
           </div>
           <div className="flex min-w-0 flex-col gap-2 @[767px]/card:flex-row @[767px]/card:items-center">
             <UsageMetricSelector
@@ -956,32 +987,42 @@ function PlatformUsageChart({
                             year: "numeric",
                           })
                         }
-                        formatter={(_value, name, item) => {
-                          const isStorage = name === "storageGb"
+                        formatter={(_value, _name, item) => {
                           return (
-                            <>
-                              <div
-                                className="size-2.5 shrink-0 rounded-[2px]"
-                                style={{ backgroundColor: item.color }}
-                              />
-                              <div className="flex flex-1 items-center justify-between gap-4">
-                                <span className="text-muted-foreground">
-                                  {isStorage ? "Storage" : "Objects"}
+                            <div className="grid w-full gap-1.5">
+                              <div className="flex w-full items-center justify-between gap-4">
+                                <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
+                                  <span
+                                    aria-hidden="true"
+                                    className="size-2.5 shrink-0 rounded-[2px]"
+                                    style={{ backgroundColor: "var(--color-storageGb)" }}
+                                  />
+                                  Storage
                                 </span>
                                 <span className="font-mono font-medium tabular-nums text-foreground">
-                                  {isStorage
-                                    ? formatBytes(Number(item.payload?.storageBytes ?? 0))
-                                    : formatNumber(Number(item.payload?.rawObjects ?? 0))}
+                                  {formatBytes(Number(item.payload?.storageBytes ?? 0))}
                                 </span>
                               </div>
-                            </>
+                              <div className="flex w-full items-center justify-between gap-4">
+                                <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
+                                  <span
+                                    aria-hidden="true"
+                                    className="size-2.5 shrink-0 rounded-[2px]"
+                                    style={{ backgroundColor: "var(--color-objects)" }}
+                                  />
+                                  Objects
+                                </span>
+                                <span className="font-mono font-medium tabular-nums text-foreground">
+                                  {formatNumber(Number(item.payload?.rawObjects ?? 0))}
+                                </span>
+                              </div>
+                            </div>
                           )
                         }}
                         indicator="dot"
                       />
                     }
                   />
-                  <ChartLegend content={<ChartLegendContent />} />
                   <Bar
                     dataKey={usageMetric === "storage" ? "storageGb" : "objects"}
                     fill={
@@ -1096,10 +1137,7 @@ export default function OverviewPage() {
         <div className="-mt-1 min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
           <div className="mt-px flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground sm:text-sm">
-            <span>Logical storage and file history</span>
-            <span className="hidden md:inline">-</span>
             <span>Last refreshed at {formatRefreshTime(data?.generatedAt)}</span>
-            {isRefreshing ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null}
           </div>
         </div>
         <div className="flex justify-end gap-2 self-start">
