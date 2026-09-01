@@ -10,6 +10,7 @@ import {
   HardDrive,
   RefreshCw,
   Server,
+  X,
 } from "lucide-react"
 import {
   Bar,
@@ -270,7 +271,7 @@ function UsageMetricSelector({
         if (nextValue) onValueChange(nextValue as UsageMetric)
       }}
       variant="outline"
-      className="grid w-full grid-cols-2 rounded-xl border bg-muted/20 p-1 @[540px]/card:w-auto"
+      className="grid w-full grid-cols-2 rounded-xl border bg-muted/20 p-1 @[540px]/card:w-72"
       aria-label="Select storage history metric"
     >
       <ToggleGroupItem
@@ -324,117 +325,150 @@ function StorageHistoryControls({
   datePickerDraftIsValid,
   onApplyDateRange,
 }: StorageHistoryControlsProps) {
+  const currentDateRange = React.useMemo<DateRange | undefined>(() => {
+    const from = visibleDateRange?.from
+    const to = visibleDateRange?.to
+    if (!from || !to) return undefined
+
+    const boundedFrom = historyBounds
+      ? Math.max(from.getTime(), historyBounds.from.getTime())
+      : from.getTime()
+    const boundedTo = historyBounds
+      ? Math.min(to.getTime(), historyBounds.to.getTime())
+      : to.getTime()
+    if (boundedFrom > boundedTo) return undefined
+
+    return {
+      from: new Date(boundedFrom),
+      to: new Date(boundedTo),
+    }
+  }, [historyBounds, visibleDateRange])
+
   return (
     <div className="flex min-w-0 items-center gap-2">
-        <ToggleGroup
-          type="single"
-          value={timeRange}
-          onValueChange={(value) => {
-            if (value) onTimeRangeChange(value as UsageRange)
-          }}
-          variant="outline"
+      <ToggleGroup
+        type="single"
+        value={timeRange}
+        onValueChange={(value) => {
+          if (value) onTimeRangeChange(value as UsageRange)
+        }}
+        variant="outline"
+        size="sm"
+        className="hidden w-56 grid-cols-4 rounded-xl border bg-muted/20 p-1 @[767px]/card:grid"
+        aria-label="Select history range"
+      >
+        <ToggleGroupItem
+          value="90d"
+          aria-label="Last 3 months"
+          title="Last 3 months"
+          className="h-7 w-full rounded-lg border-0 px-2 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
+        >
+          3M
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value="180d"
+          aria-label="Last 6 months"
+          title="Last 6 months"
+          className="h-7 w-full rounded-lg border-0 px-2 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
+        >
+          6M
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value="365d"
+          aria-label="Last 12 months"
+          title="Last 12 months"
+          className="h-7 w-full rounded-lg border-0 px-2 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
+        >
+          12M
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value="all"
+          aria-label="All time"
+          title="All time"
+          className="h-7 w-full rounded-lg border-0 px-2 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
+        >
+          All
+        </ToggleGroupItem>
+      </ToggleGroup>
+      <Select
+        value={timeRange}
+        onValueChange={(value) => {
+          if (value !== "custom") onTimeRangeChange(value as UsageRange)
+        }}
+      >
+        <SelectTrigger
+          className="h-8 min-w-0 flex-1 rounded-xl px-2.5 text-xs @[767px]/card:hidden"
           size="sm"
-          className="hidden rounded-xl border bg-muted/20 p-1 @[767px]/card:flex"
           aria-label="Select history range"
         >
-          <ToggleGroupItem
-            value="90d"
-            aria-label="Last 3 months"
-            title="Last 3 months"
-            className="h-7 rounded-lg border-0 px-3 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
-          >
-            3M
-          </ToggleGroupItem>
-          <ToggleGroupItem
-            value="180d"
-            aria-label="Last 6 months"
-            title="Last 6 months"
-            className="h-7 rounded-lg border-0 px-3 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
-          >
-            6M
-          </ToggleGroupItem>
-          <ToggleGroupItem
-            value="365d"
-            aria-label="Last 12 months"
-            title="Last 12 months"
-            className="h-7 rounded-lg border-0 px-3 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
-          >
-            12M
-          </ToggleGroupItem>
-          <ToggleGroupItem
-            value="all"
-            aria-label="All time"
-            title="All time"
-            className="h-7 rounded-lg border-0 px-3 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
-          >
-            All
-          </ToggleGroupItem>
-        </ToggleGroup>
-        <Select
-          value={timeRange}
-          onValueChange={(value) => {
-            if (value !== "custom") onTimeRangeChange(value as UsageRange)
-          }}
-        >
-          <SelectTrigger
-            className="h-8 min-w-0 flex-1 rounded-xl px-2.5 text-xs @[767px]/card:hidden"
+          <SelectValue placeholder="Last 3 months" />
+        </SelectTrigger>
+        <SelectContent className="rounded-xl">
+          <SelectItem value="30d" className="rounded-lg">
+            Last 1 month
+          </SelectItem>
+          <SelectItem value="90d" className="rounded-lg">
+            Last 3 months
+          </SelectItem>
+          <SelectItem value="180d" className="rounded-lg">
+            Last 6 months
+          </SelectItem>
+          <SelectItem value="365d" className="rounded-lg">
+            Last 12 months
+          </SelectItem>
+          <SelectItem value="all" className="rounded-lg">
+            All time
+          </SelectItem>
+          {timeRange === "custom" ? (
+            <SelectItem value="custom" className="rounded-lg">
+              Custom range
+            </SelectItem>
+          ) : null}
+        </SelectContent>
+      </Select>
+      <Popover
+        open={datePickerOpen}
+        onOpenChange={(open) => {
+          onDatePickerOpenChange(open)
+          if (open) onDatePickerDraftChange(currentDateRange)
+        }}
+      >
+        <PopoverTrigger asChild>
+          <Button
+            variant="outline"
             size="sm"
-            aria-label="Select history range"
+            className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-xl px-2.5 text-xs tabular-nums @[767px]/card:w-56 @[767px]/card:flex-none"
+            aria-label={`Choose date range, currently ${visibleDateRangeLabel}`}
+            aria-expanded={datePickerOpen}
           >
-            <SelectValue placeholder="Last 3 months" />
-          </SelectTrigger>
-          <SelectContent className="rounded-xl">
-            <SelectItem value="30d" className="rounded-lg">
-              Last 1 month
-            </SelectItem>
-            <SelectItem value="90d" className="rounded-lg">
-              Last 3 months
-            </SelectItem>
-            <SelectItem value="180d" className="rounded-lg">
-              Last 6 months
-            </SelectItem>
-            <SelectItem value="365d" className="rounded-lg">
-              Last 12 months
-            </SelectItem>
-            <SelectItem value="all" className="rounded-lg">
-              All time
-            </SelectItem>
-            {timeRange === "custom" ? (
-              <SelectItem value="custom" className="rounded-lg">
-                Custom range
-              </SelectItem>
-            ) : null}
-          </SelectContent>
-        </Select>
-        <Popover
-          open={datePickerOpen}
-          onOpenChange={(open) => {
-            onDatePickerOpenChange(open)
-            if (open) onDatePickerDraftChange(visibleDateRange)
-          }}
+            <CalendarDays data-icon="inline-start" />
+            <span className="truncate">{visibleDateRangeLabel}</span>
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent
+          align={isMobile ? "center" : "end"}
+          side="bottom"
+          sideOffset={8}
+          collisionPadding={12}
+          className="w-[calc(100vw-2rem)] max-w-[40rem] overflow-hidden rounded-2xl p-0 shadow-xl"
         >
-          <PopoverTrigger asChild>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-xl px-2.5 text-xs tabular-nums @[767px]/card:flex-none"
-              aria-label={`Choose date range, currently ${visibleDateRangeLabel}`}
-            >
-              <CalendarDays data-icon="inline-start" />
-              <span className="truncate">{visibleDateRangeLabel}</span>
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent
-            align={isMobile ? "center" : "end"}
-            sideOffset={8}
-            className="w-[calc(100vw-2rem)] max-w-fit overflow-hidden rounded-2xl p-0 shadow-xl"
-          >
-            <div className="border-b px-4 py-3">
+          <div className="flex items-start justify-between gap-4 border-b px-4 py-3 sm:px-5">
+            <div className="min-w-0">
               <p className="text-sm font-semibold">Choose a date range</p>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                {isMobile ? "Minimum 1 month" : "Minimum 3 months"}
-              </p>
+              <p className="mt-0.5 text-xs text-muted-foreground">Select a start and end date.</p>
             </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0 rounded-lg"
+              aria-label="Close date picker"
+              onClick={() => onDatePickerOpenChange(false)}
+            >
+              <X data-icon="inline-start" aria-hidden="true" />
+            </Button>
+          </div>
+          <div className="overflow-x-auto">
             <Calendar
               mode="range"
               selected={datePickerDraft}
@@ -447,44 +481,48 @@ function StorageHistoryControls({
                   : undefined
               }
               onSelect={onDatePickerDraftChange}
-              className="p-3"
+              initialFocus
+              className="mx-auto p-3 sm:p-4"
             />
-            <div className="flex items-center justify-between gap-3 border-t bg-muted/20 px-3 py-2.5">
-              <p className="min-w-0 truncate text-xs tabular-nums text-muted-foreground">
-                {datePickerDraft?.from && datePickerDraft.to
-                  ? `${datePickerDraftDays} days selected`
+          </div>
+          <div className="flex flex-col gap-3 border-t bg-muted/20 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-4">
+            <p className="min-w-0 text-xs tabular-nums text-muted-foreground" aria-live="polite">
+              {datePickerDraft?.from && datePickerDraft.to
+                ? `${datePickerDraftDays} days selected`
+                : datePickerDraft?.from
+                  ? "Select an end date"
                   : "Select start and end dates"}
-              </p>
-              <div className="flex shrink-0 items-center gap-1.5">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 rounded-lg px-2.5 text-xs"
-                  onClick={() => {
-                    onDatePickerDraftChange(visibleDateRange)
-                    onDatePickerOpenChange(false)
-                  }}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="h-8 rounded-lg px-3 text-xs"
-                  disabled={!datePickerDraftIsValid || !datePickerDraft?.from || !datePickerDraft.to}
-                  onClick={() => {
-                    if (!datePickerDraft?.from || !datePickerDraft.to || !datePickerDraftIsValid) return
-                    onApplyDateRange(datePickerDraft)
-                    onDatePickerOpenChange(false)
-                  }}
-                >
-                  Apply
-                </Button>
-              </div>
+            </p>
+            <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:shrink-0">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 w-full rounded-lg px-2.5 text-xs sm:w-auto"
+                onClick={() => {
+                  onDatePickerDraftChange(currentDateRange)
+                  onDatePickerOpenChange(false)
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className="h-8 w-full rounded-lg px-3 text-xs sm:w-auto"
+                disabled={!datePickerDraftIsValid || !datePickerDraft?.from || !datePickerDraft.to}
+                onClick={() => {
+                  if (!datePickerDraft?.from || !datePickerDraft.to || !datePickerDraftIsValid) return
+                  onApplyDateRange(datePickerDraft)
+                  onDatePickerOpenChange(false)
+                }}
+              >
+                Apply
+              </Button>
             </div>
-          </PopoverContent>
-        </Popover>
+          </div>
+        </PopoverContent>
+      </Popover>
     </div>
   )
 }
@@ -768,9 +806,6 @@ function PlatformUsageChart({
         <div className="flex flex-col gap-3 @[1120px]/card:flex-row @[1120px]/card:items-center @[1120px]/card:justify-between">
           <div className="min-w-0">
             <CardTitle className="text-base leading-tight">Storage Usage</CardTitle>
-            <CardDescription className="mt-1 leading-4">
-              Logical storage history across migrations, without counting copied data twice.
-            </CardDescription>
           </div>
           <div className="flex min-w-0 flex-col gap-2 @[767px]/card:flex-row @[767px]/card:items-center">
             <UsageMetricSelector
@@ -1167,7 +1202,7 @@ export default function OverviewPage() {
                   </Button>
                 </div>
               </CardHeader>
-              <CardContent className="p-0">
+              <CardContent className="!p-0">
                 {activityLoading && recentActivity.length === 0 ? (
                   <div className="space-y-2 p-3.5 sm:p-5">
                     {Array.from({ length: 4 }).map((_, index) => (
@@ -1200,18 +1235,7 @@ export default function OverviewPage() {
                           <ArrowRight className="absolute right-4 top-2.5 h-3.5 w-3.5 text-muted-foreground transition-transform group-hover:translate-x-0.5 lg:hidden" />
                           <div className="grid gap-2.5 lg:grid-cols-[minmax(0,1fr)_auto] lg:gap-x-4 lg:gap-y-2">
                             <div className="flex items-center justify-between gap-3 lg:col-span-2">
-                              <div className="flex min-w-0 items-center gap-2">
-                                <span
-                                  className={`h-2 w-2 shrink-0 rounded-full ${
-                                    activity.outcome === "failed"
-                                      ? "bg-destructive"
-                                      : activity.outcome === "success"
-                                        ? "bg-primary"
-                                        : activity.outcome === "warning"
-                                          ? "bg-amber-500"
-                                          : "bg-muted-foreground"
-                                  }`}
-                                />
+                              <div className="flex min-w-0 items-center">
                                 <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
                                   {formatAction(activity.action)}
                                 </span>
