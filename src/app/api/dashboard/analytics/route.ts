@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 
-import { getAllAccounts, type CloudflareAccount } from "@/lib/accounts-store"
+import { getAllAccounts } from "@/lib/accounts-store"
 import { listAgents, type DriveAgent, type DriveAgentRun } from "@/lib/agents-store"
 import {
   listMigrations,
@@ -8,8 +8,7 @@ import {
   type DriveMigrationItem,
 } from "@/lib/migrations-store"
 import { getMergedBucketSnapshot } from "@/lib/migration-bucket-state"
-import { syncMigrationLiveState } from "@/lib/migration-live-state"
-import { reconcileRepairJobs, type DriveRepairJob } from "@/lib/repair-jobs-store"
+import { type DriveRepairJob } from "@/lib/repair-jobs-store"
 import { isPostgresConfigured, queryDb } from "@/lib/db"
 import { getSupabaseServerClient } from "@/lib/supabase"
 import { getAllUsers, type User } from "@/lib/users-store"
@@ -71,18 +70,6 @@ type RepairJobRow = {
   last_heartbeat_at: string | null
   created_at: string
   updated_at: string
-}
-
-type BucketSnapshotRow = {
-  account_id: string
-  account_label: string | null
-  account_email: string | null
-  bucket_name: string
-  objects: string | number | null
-  bytes: string | number | null
-  status: string | null
-  source_updated_at: string | null
-  captured_at: string
 }
 
 type ActiveAccountSnapshotRow = {
@@ -212,99 +199,8 @@ async function countRows(table: string): Promise<number> {
   return count ?? 0
 }
 
-async function ensureAnalyticsArchiveSchema() {
-  if (!isPostgresConfigured()) return
-  await queryDb(`
-    create table if not exists drive_analytics_bucket_snapshots (
-      account_id uuid not null,
-      account_label text,
-      account_email text,
-      bucket_name text not null,
-      objects bigint not null default 0,
-      bytes bigint not null default 0,
-      status text,
-      source_updated_at timestamptz,
-      captured_at timestamptz not null default now(),
-      primary key (account_id, bucket_name)
-    );
-  `)
-  await queryDb(`create index if not exists drive_analytics_bucket_snapshots_captured_idx on drive_analytics_bucket_snapshots (captured_at desc);`)
-  await queryDb(`
-    create table if not exists drive_analytics_active_account_snapshots (
-      captured_day date primary key,
-      account_id uuid not null,
-      account_label text,
-      account_email text,
-      buckets integer not null default 0,
-      objects bigint not null default 0,
-      bytes bigint not null default 0,
-      bucket_fingerprint text,
-      captured_at timestamptz not null default now()
-    );
-  `)
-  await queryDb(`alter table drive_analytics_active_account_snapshots add column if not exists bucket_fingerprint text;`)
-  await queryDb(`create index if not exists drive_analytics_active_account_snapshots_day_idx on drive_analytics_active_account_snapshots (captured_day desc);`)
-}
-
-async function archiveBucketStats(accounts: CloudflareAccount[], rows: BucketStatsRow[]) {
-  if (!isPostgresConfigured() || rows.length === 0) return
-  await ensureAnalyticsArchiveSchema()
-  const accountById = new Map(accounts.map((account) => [account.id, account]))
-  const values: unknown[] = []
-  const placeholders = rows
-    .map((row, index) => {
-      const account = accountById.get(row.account_id)
-      const base = index * 8
-      values.push(
-        row.account_id,
-        account?.label ?? null,
-        account?.email ?? null,
-        row.bucket_name,
-        Math.max(0, Math.floor(toNumber(row.objects))),
-        Math.max(0, Math.floor(toNumber(row.bytes))),
-        row.status ?? null,
-        row.updated_at ?? null
-      )
-      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8})`
-    })
-    .join(",")
-
-  await queryDb(
-    `
-      insert into drive_analytics_bucket_snapshots
-        (account_id, account_label, account_email, bucket_name, objects, bytes, status, source_updated_at)
-      values ${placeholders}
-      on conflict (account_id, bucket_name) do update set
-        account_label = excluded.account_label,
-        account_email = excluded.account_email,
-        objects = excluded.objects,
-        bytes = excluded.bytes,
-        status = excluded.status,
-        source_updated_at = excluded.source_updated_at,
-        captured_at = now()
-      where drive_analytics_bucket_snapshots.account_label is distinct from excluded.account_label
-         or drive_analytics_bucket_snapshots.account_email is distinct from excluded.account_email
-         or drive_analytics_bucket_snapshots.objects is distinct from excluded.objects
-         or drive_analytics_bucket_snapshots.bytes is distinct from excluded.bytes
-         or drive_analytics_bucket_snapshots.status is distinct from excluded.status;
-    `,
-    values
-  )
-}
-
-async function listBucketSnapshots(): Promise<BucketSnapshotRow[]> {
-  if (!isPostgresConfigured()) return []
-  await ensureAnalyticsArchiveSchema()
-  const { rows } = await queryDb<BucketSnapshotRow>(`
-    select account_id, account_label, account_email, bucket_name, objects, bytes, status, source_updated_at, captured_at
-    from drive_analytics_bucket_snapshots
-  `)
-  return rows
-}
-
 async function listActiveAccountSnapshots(): Promise<ActiveAccountSnapshotRow[]> {
   if (!isPostgresConfigured()) return []
-  await ensureAnalyticsArchiveSchema()
   const { rows } = await queryDb<ActiveAccountSnapshotRow>(`
     select captured_day, account_id, account_label, account_email, buckets, objects, bytes, captured_at
     from (
@@ -326,22 +222,7 @@ async function listActiveAccountSnapshots(): Promise<ActiveAccountSnapshotRow[]>
   return rows
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
-  return new Promise((resolve) => {
-    const timeout = setTimeout(() => resolve(null), ms)
-    promise
-      .then((value) => resolve(value))
-      .catch(() => resolve(null))
-      .finally(() => clearTimeout(timeout))
-  })
-}
-
 const ANALYTICS_CACHE_TTL_MS = 20_000
-const ANALYTICS_RECONCILE_TTL_MS = 45_000
-const ANALYTICS_REPAIR_RECONCILE_TTL_MS = 30_000
-
-let lastAnalyticsReconcileAt = 0
-let lastRepairReconcileAt = 0
 
 const analyticsCache = new Map<RangeKey, { expiresAt: number; payload: unknown }>()
 const analyticsInFlight = new Map<RangeKey, Promise<unknown>>()
@@ -372,37 +253,6 @@ function mapRepairJobRow(row: RepairJobRow): DriveRepairJob {
   }
 }
 
-async function maybeReconcileAnalyticsState(migrations: DriveMigration[], warnings: string[]) {
-  if (Date.now() - lastAnalyticsReconcileAt < ANALYTICS_RECONCILE_TTL_MS) return migrations
-
-  lastAnalyticsReconcileAt = Date.now()
-  const reconcileCandidates = migrations
-    .filter((m) => m.status === "running" || m.status === "verifying" || m.syncStatus === "syncing")
-    .slice(0, 5)
-
-  if (reconcileCandidates.length === 0) return migrations
-
-  await Promise.all(
-    reconcileCandidates.map((migration) =>
-      withTimeout(syncMigrationLiveState(migration.id), 4_000).catch((error: unknown) => {
-        const message =
-          typeof error === "object" && error !== null && "message" in error
-            ? String((error as { message?: unknown }).message ?? "Unable to reconcile migration")
-            : "Unable to reconcile migration"
-        warnings.push(`migration ${migration.id}: ${message}`)
-      })
-    )
-  )
-
-  return capture("refreshed migrations", warnings, () => listMigrations(100), migrations)
-}
-
-function kickRepairJobReconcile() {
-  if (Date.now() - lastRepairReconcileAt < ANALYTICS_REPAIR_RECONCILE_TTL_MS) return
-  lastRepairReconcileAt = Date.now()
-  void reconcileRepairJobs().catch(() => undefined)
-}
-
 async function buildAnalyticsPayload(range: RangeKey) {
   const days = rangeDays(range)
   const generatedAt = new Date().toISOString()
@@ -416,9 +266,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
 
   const warnings: string[] = []
 
-  let migrations = await capture("migrations", warnings, () => listMigrations(100), [] as DriveMigration[])
-  migrations = await maybeReconcileAnalyticsState(migrations, warnings)
-  kickRepairJobReconcile()
+  const migrations = await capture("migrations", warnings, () => listMigrations(100), [] as DriveMigration[])
 
   const [
     accounts,
@@ -442,13 +290,30 @@ async function buildAnalyticsPayload(range: RangeKey) {
         "repair jobs",
         warnings,
         async () => {
-          const rows = await selectRows<RepairJobRow>("drive_repair_jobs", "*", { column: "created_at", ascending: false }, 100)
+          const rows = await selectRows<RepairJobRow>(
+            "drive_repair_jobs",
+            "id,migration_id,requested_by_agent_id,claimed_by_agent_id,status,mode,payload,progress,result,summary,error,claimed_at,started_at,completed_at,last_heartbeat_at,created_at,updated_at",
+            { column: "created_at", ascending: false },
+            100
+          )
           return rows.map(mapRepairJobRow)
         },
         [] as DriveRepairJob[]
       ),
-      selectRows<BucketStatsRow>("drive_bucket_stats"),
-      capture("migration items", warnings, () => selectRows<MigrationItemRow>("drive_migration_items"), [] as MigrationItemRow[]),
+      selectRows<BucketStatsRow>(
+        "drive_bucket_stats",
+        "id,account_id,bucket_name,objects,bytes,status,error,updated_at"
+      ),
+      capture(
+        "migration items",
+        warnings,
+        () =>
+          selectRows<MigrationItemRow>(
+            "drive_migration_items",
+            "id,migration_id,source_bucket,target_bucket,source_objects,source_bytes,slurper_job_id,slurper_status,progress,last_progress_at,created_at,updated_at"
+          ),
+        [] as MigrationItemRow[]
+      ),
       capture(
         "verification diffs",
         warnings,
@@ -465,16 +330,6 @@ async function buildAnalyticsPayload(range: RangeKey) {
       capture("verification diff count", warnings, () => countRows("drive_bucket_verify_diffs"), 0),
     ])
 
-  await capture("analytics archive write", warnings, () => archiveBucketStats(accounts, bucketStats), undefined, {
-    reportWarning: false,
-  })
-  const archivedBucketStats = await capture(
-    "analytics archive read",
-    warnings,
-    listBucketSnapshots,
-    [] as BucketSnapshotRow[],
-    { reportWarning: false }
-  )
   const itemRowsAsItems: DriveMigrationItem[] = migrationItemRows.map((row) => ({
     id: row.id,
     migrationId: row.migration_id,
@@ -532,29 +387,14 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const activeBucketStats = activeAccount
     ? bucketStats.filter((row) => row.account_id === activeAccount.id)
     : []
-  const currentBucketKeys = new Set(bucketStats.map((row) => `${row.account_id}:${row.bucket_name}`))
-  const archivedDeletedBucketStats: BucketStatsRow[] = archivedBucketStats
-    .filter((row) => !currentBucketKeys.has(`${row.account_id}:${row.bucket_name}`))
-    .map((row) => ({
-      id: `${row.account_id}:${row.bucket_name}`,
-      account_id: row.account_id,
-      bucket_name: row.bucket_name,
-      objects: row.objects,
-      bytes: row.bytes,
-      status: row.status,
-      error: null,
-      updated_at: row.source_updated_at ?? row.captured_at,
-    }))
-  const analyticsBucketStats = [...bucketStats, ...archivedDeletedBucketStats]
   const activeAnalyticsBucketStats = activeAccount
-    ? analyticsBucketStats.filter((row) => row.account_id === activeAccount.id)
+    ? bucketStats.filter((row) => row.account_id === activeAccount.id)
     : []
-  const activeAccountSnapshotRows = await listActiveAccountSnapshots()
-  const archivedAccountLabelById = new Map(
-    archivedBucketStats.map((row) => [
-      row.account_id,
-      row.account_label || row.account_email || "Deleted account",
-    ])
+  const activeAccountSnapshotRows = await capture(
+    "active account snapshots",
+    warnings,
+    listActiveAccountSnapshots,
+    [] as ActiveAccountSnapshotRow[]
   )
   const chartStart =
     range === "all"
@@ -715,7 +555,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
     .map((row) => ({
       id: row.id,
       accountId: row.account_id,
-      accountLabel: accountById.get(row.account_id)?.label ?? archivedAccountLabelById.get(row.account_id) ?? "Unknown account",
+      accountLabel: accountById.get(row.account_id)?.label ?? "Unknown account",
       name: row.bucket_name,
       objects: toNumber(row.objects),
       bytes: toNumber(row.bytes),
@@ -870,22 +710,27 @@ function queueAnalyticsPayload(range: RangeKey): Promise<unknown> {
 }
 
 export async function GET(request: Request) {
-  const auth = await requireAdmin()
-  if (!auth.ok) return auth.response
+  try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
 
-  const url = new URL(request.url)
-  const range = asRange(url.searchParams.get("range"))
-  const forceRefresh = url.searchParams.get("refresh") === "1"
-  const cached = analyticsCache.get(range)
+    const url = new URL(request.url)
+    const range = asRange(url.searchParams.get("range"))
+    const forceRefresh = url.searchParams.get("refresh") === "1"
+    const cached = analyticsCache.get(range)
 
-  if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
-    return NextResponse.json(cached.payload)
+    if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
+      return NextResponse.json(cached.payload)
+    }
+
+    const payload = await queueAnalyticsPayload(range)
+    return NextResponse.json(payload)
+  } catch (error: unknown) {
+    console.error("[analytics] dashboard refresh failed", error)
+    const message = error instanceof Error ? error.message : "Unable to read dashboard data"
+    return NextResponse.json(
+      { error: `Dashboard data is temporarily unavailable: ${message}` },
+      { status: 503 }
+    )
   }
-
-  // An expired payload is known to be stale. Await the rebuild so account
-  // deletion and worker completion cannot leave the dashboard showing the old
-  // account or a partial bucket batch for another refresh cycle.
-
-  const payload = await queueAnalyticsPayload(range)
-  return NextResponse.json(payload)
 }
