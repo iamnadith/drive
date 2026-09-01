@@ -725,7 +725,7 @@ export async function r2CreateSignedDownloadUrl(
   const client = createR2Client(config)
   const expiresInSeconds =
     typeof input?.expiresInSeconds === "number" && Number.isFinite(input.expiresInSeconds)
-      ? Math.max(30, Math.min(3600, Math.floor(input.expiresInSeconds)))
+      ? Math.max(30, Math.min(604800, Math.floor(input.expiresInSeconds)))
       : 300
 
   const command = new GetObjectCommand({

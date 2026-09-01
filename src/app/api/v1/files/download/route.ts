@@ -37,7 +37,7 @@ export async function GET(request: Request) {
 
   const expiresInSeconds = Math.max(
     30,
-    Math.min(3600, Number(url.searchParams.get("expiresInSeconds") ?? 900))
+    Math.min(604_800, Number(url.searchParams.get("expiresInSeconds") ?? 900))
   )
   const requestedDownloadName = url.searchParams.get("downloadName")
     ?.replace(/[\u0000-\u001f\u007f]/g, "")
