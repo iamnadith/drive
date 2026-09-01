@@ -35,6 +35,13 @@ import {
   ChartTooltipContent,
 } from "@/components/ui/chart"
 import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty"
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -242,7 +249,291 @@ function SummaryCard({
   )
 }
 
-function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccountSeries"] }) {
+type StorageMetrics = Pick<OverviewResponse["metrics"], "storageBytes" | "objects">
+
+function UsageMetricSelector({
+  value,
+  onValueChange,
+  storageBytes,
+  objects,
+}: {
+  value: UsageMetric
+  onValueChange: (value: UsageMetric) => void
+  storageBytes: number
+  objects: number
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Current inventory</p>
+          <p className="mt-0.5 text-xs leading-4 text-muted-foreground">
+            Latest live totals from the active account
+          </p>
+        </div>
+        <Badge variant="secondary" className="shrink-0 rounded-full px-2.5 text-[10px]">
+          Live
+        </Badge>
+      </div>
+      <ToggleGroup
+        type="single"
+        value={value}
+        onValueChange={(nextValue) => {
+          if (nextValue) onValueChange(nextValue as UsageMetric)
+        }}
+        variant="outline"
+        spacing={2}
+        className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-1"
+        aria-label="Select storage history metric"
+      >
+        <ToggleGroupItem
+          value="storage"
+          className="min-h-24 w-full flex-col items-start justify-between gap-2 rounded-2xl px-3.5 py-3 text-left data-[state=on]:border-primary/40 data-[state=on]:bg-background data-[state=on]:shadow-sm"
+        >
+          <span className="flex w-full items-center justify-between gap-2">
+            <span className="flex items-center gap-2 text-xs font-medium">
+              <HardDrive className="size-4 text-muted-foreground" />
+              Storage
+            </span>
+            <span className="text-[10px] text-muted-foreground">Capacity</span>
+          </span>
+          <span className="text-[1.45rem] font-semibold tracking-tight tabular-nums">
+            {formatBytes(storageBytes)}
+          </span>
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value="objects"
+          className="min-h-24 w-full flex-col items-start justify-between gap-2 rounded-2xl px-3.5 py-3 text-left data-[state=on]:border-primary/40 data-[state=on]:bg-background data-[state=on]:shadow-sm"
+        >
+          <span className="flex w-full items-center justify-between gap-2">
+            <span className="flex items-center gap-2 text-xs font-medium">
+              <Database className="size-4 text-muted-foreground" />
+              Objects
+            </span>
+            <span className="text-[10px] text-muted-foreground">Count</span>
+          </span>
+          <span className="text-[1.45rem] font-semibold tracking-tight tabular-nums">
+            {formatNumber(objects)}
+          </span>
+        </ToggleGroupItem>
+      </ToggleGroup>
+    </div>
+  )
+}
+
+type StorageHistoryControlsProps = {
+  timeRange: UsageRange
+  onTimeRangeChange: (value: UsageRange) => void
+  isMobile: boolean
+  visibleDateRangeLabel: string
+  datePickerOpen: boolean
+  onDatePickerOpenChange: (open: boolean) => void
+  visibleDateRange: DateRange | undefined
+  datePickerDraft: DateRange | undefined
+  onDatePickerDraftChange: (range: DateRange | undefined) => void
+  historyBounds: { from: Date; to: Date } | undefined
+  minimumSelectableDays: number
+  datePickerDraftDays: number
+  datePickerDraftIsValid: boolean
+  onApplyDateRange: (range: DateRange) => void
+}
+
+function StorageHistoryControls({
+  timeRange,
+  onTimeRangeChange,
+  isMobile,
+  visibleDateRangeLabel,
+  datePickerOpen,
+  onDatePickerOpenChange,
+  visibleDateRange,
+  datePickerDraft,
+  onDatePickerDraftChange,
+  historyBounds,
+  minimumSelectableDays,
+  datePickerDraftDays,
+  datePickerDraftIsValid,
+  onApplyDateRange,
+}: StorageHistoryControlsProps) {
+  return (
+    <div className="flex flex-col gap-3 border-b border-border/60 pb-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="min-w-0">
+        <p className="text-sm font-medium">Usage history</p>
+        <p className="mt-0.5 truncate text-xs tabular-nums text-muted-foreground">
+          {visibleDateRangeLabel}
+        </p>
+      </div>
+      <div className="flex min-w-0 items-center gap-2 sm:justify-end">
+        <ToggleGroup
+          type="single"
+          value={timeRange}
+          onValueChange={(value) => {
+            if (value) onTimeRangeChange(value as UsageRange)
+          }}
+          variant="outline"
+          size="sm"
+          className="hidden rounded-xl border bg-muted/30 p-1 md:flex"
+          aria-label="Select history range"
+        >
+          <ToggleGroupItem
+            value="90d"
+            aria-label="Last 3 months"
+            title="Last 3 months"
+            className="h-7 rounded-lg border-0 px-3 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
+          >
+            3M
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="180d"
+            aria-label="Last 6 months"
+            title="Last 6 months"
+            className="h-7 rounded-lg border-0 px-3 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
+          >
+            6M
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="365d"
+            aria-label="Last 12 months"
+            title="Last 12 months"
+            className="h-7 rounded-lg border-0 px-3 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
+          >
+            12M
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="all"
+            aria-label="All time"
+            title="All time"
+            className="h-7 rounded-lg border-0 px-3 text-xs shadow-none data-[state=on]:bg-background data-[state=on]:shadow-sm"
+          >
+            All
+          </ToggleGroupItem>
+        </ToggleGroup>
+        <Select
+          value={timeRange}
+          onValueChange={(value) => {
+            if (value !== "custom") onTimeRangeChange(value as UsageRange)
+          }}
+        >
+          <SelectTrigger
+            className="h-8 min-w-0 flex-1 rounded-xl px-2.5 text-xs md:hidden"
+            size="sm"
+            aria-label="Select history range"
+          >
+            <SelectValue placeholder="Last 3 months" />
+          </SelectTrigger>
+          <SelectContent className="rounded-xl">
+            <SelectItem value="30d" className="rounded-lg">
+              Last 1 month
+            </SelectItem>
+            <SelectItem value="90d" className="rounded-lg">
+              Last 3 months
+            </SelectItem>
+            <SelectItem value="180d" className="rounded-lg">
+              Last 6 months
+            </SelectItem>
+            <SelectItem value="365d" className="rounded-lg">
+              Last 12 months
+            </SelectItem>
+            <SelectItem value="all" className="rounded-lg">
+              All time
+            </SelectItem>
+            {timeRange === "custom" ? (
+              <SelectItem value="custom" className="rounded-lg">
+                Custom range
+              </SelectItem>
+            ) : null}
+          </SelectContent>
+        </Select>
+        <Popover
+          open={datePickerOpen}
+          onOpenChange={(open) => {
+            onDatePickerOpenChange(open)
+            if (open) onDatePickerDraftChange(visibleDateRange)
+          }}
+        >
+          <PopoverTrigger asChild>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 min-w-0 flex-1 justify-start gap-1.5 rounded-xl px-2.5 text-xs tabular-nums md:flex-none"
+              aria-label={`Choose date range, currently ${visibleDateRangeLabel}`}
+            >
+              <CalendarDays data-icon="inline-start" />
+              <span className="truncate">{visibleDateRangeLabel}</span>
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            align={isMobile ? "center" : "end"}
+            sideOffset={8}
+            className="w-[calc(100vw-2rem)] max-w-fit overflow-hidden rounded-2xl p-0 shadow-xl"
+          >
+            <div className="border-b px-4 py-3">
+              <p className="text-sm font-semibold">Choose a date range</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {isMobile ? "Minimum 1 month" : "Minimum 3 months"}
+              </p>
+            </div>
+            <Calendar
+              mode="range"
+              selected={datePickerDraft}
+              defaultMonth={datePickerDraft?.from ?? historyBounds?.from}
+              numberOfMonths={isMobile ? 1 : 2}
+              min={Math.max(0, minimumSelectableDays - 1)}
+              disabled={
+                historyBounds
+                  ? [{ before: historyBounds.from }, { after: historyBounds.to }]
+                  : undefined
+              }
+              onSelect={onDatePickerDraftChange}
+              className="p-3"
+            />
+            <div className="flex items-center justify-between gap-3 border-t bg-muted/20 px-3 py-2.5">
+              <p className="min-w-0 truncate text-xs tabular-nums text-muted-foreground">
+                {datePickerDraft?.from && datePickerDraft.to
+                  ? `${datePickerDraftDays} days selected`
+                  : "Select start and end dates"}
+              </p>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 rounded-lg px-2.5 text-xs"
+                  onClick={() => {
+                    onDatePickerDraftChange(visibleDateRange)
+                    onDatePickerOpenChange(false)
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-8 rounded-lg px-3 text-xs"
+                  disabled={!datePickerDraftIsValid || !datePickerDraft?.from || !datePickerDraft.to}
+                  onClick={() => {
+                    if (!datePickerDraft?.from || !datePickerDraft.to || !datePickerDraftIsValid) return
+                    onApplyDateRange(datePickerDraft)
+                    onDatePickerOpenChange(false)
+                  }}
+                >
+                  Apply
+                </Button>
+              </div>
+            </div>
+          </PopoverContent>
+        </Popover>
+      </div>
+    </div>
+  )
+}
+
+function PlatformUsageChart({
+  series,
+  metrics,
+}: {
+  series: OverviewResponse["activeAccountSeries"]
+  metrics: StorageMetrics
+}) {
   const isMobile = useIsMobile()
   const [timeRange, setTimeRange] = React.useState<UsageRange>("90d")
   const [usageMetric, setUsageMetric] = React.useState<UsageMetric>("storage")
@@ -328,7 +619,6 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
       ? navigatorSelection.endIndex
       : Math.max(0, chartData.length - 1)
   const visibleChartData = chartData.slice(visibleStartIndex, visibleEndIndex + 1)
-  const latestChartPoint = chartData.at(-1)
   const minimumRangeDays = isMobile ? 30 : 90
   const visibleDateRange = React.useMemo<DateRange | undefined>(() => {
     const from = chartData[visibleStartIndex]?.date
@@ -511,194 +801,89 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
   }, [enableChartNavigation, updateChartViewport])
 
   return (
-    <Card className="@container/card gap-3 py-3.5 sm:py-4">
-      <CardHeader className="flex flex-col gap-2.5 border-b px-3.5 pb-3 sm:px-4">
-        <div className="flex flex-col gap-2.5 @[900px]/card:flex-row @[900px]/card:items-center @[900px]/card:justify-between">
-          <div className="flex min-w-0 flex-col gap-1">
-            <CardTitle className="leading-tight">Storage Usage</CardTitle>
-            <CardDescription className="leading-tight">
-              <span className="hidden @[540px]/card:block">
+    <Card className="overflow-hidden gap-0 py-0">
+      <CardHeader className="border-b bg-muted/10 px-4 py-5 sm:px-6">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-2xl border bg-background/70 shadow-sm">
+              <HardDrive className="size-5 text-primary" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                Storage overview
+              </p>
+              <CardTitle className="mt-1 text-lg leading-tight">Storage Usage</CardTitle>
+              <CardDescription className="mt-1 max-w-2xl leading-5">
                 Logical storage history across migrations, without counting copied data twice.
-              </span>
-              <span className="@[540px]/card:hidden">Storage and object history</span>
-            </CardDescription>
-          </div>
-          <div className="flex min-w-0 flex-col gap-1.5 @[540px]/card:flex-row @[540px]/card:items-center @[900px]/card:justify-end">
-            <ToggleGroup
-              type="single"
-              value={usageMetric}
-              onValueChange={(value) => {
-                if (value) setUsageMetric(value as UsageMetric)
-              }}
-              variant="outline"
-              spacing={2}
-              className="grid w-full grid-cols-2 @[540px]/card:w-auto"
-              aria-label="Select chart metric"
-            >
-              <ToggleGroupItem value="storage" className="h-auto w-full flex-col items-start gap-0.5 px-3 py-1.5 @[540px]/card:min-w-32">
-                <span className="text-[11px] text-muted-foreground">Storage</span>
-                <span className="text-base font-semibold tabular-nums">
-                  {formatBytes(latestChartPoint?.storageBytes)}
-                </span>
-              </ToggleGroupItem>
-              <ToggleGroupItem value="objects" className="h-auto w-full flex-col items-start gap-0.5 px-3 py-1.5 @[540px]/card:min-w-32">
-                <span className="text-[11px] text-muted-foreground">Objects</span>
-                <span className="text-base font-semibold tabular-nums">
-                  {formatNumber(latestChartPoint?.rawObjects)}
-                </span>
-              </ToggleGroupItem>
-            </ToggleGroup>
-            <div className="flex min-w-0 items-center gap-1.5 @[767px]/card:gap-1 @[767px]/card:rounded-xl @[767px]/card:border @[767px]/card:bg-muted/30 @[767px]/card:p-1">
-            <ToggleGroup
-              type="single"
-              value={timeRange}
-              onValueChange={(value) => {
-                if (value) setTimeRange(value as UsageRange)
-              }}
-              variant="outline"
-              size="sm"
-              className="hidden rounded-lg p-0 *:data-[slot=toggle-group-item]:h-7 *:data-[slot=toggle-group-item]:rounded-md *:data-[slot=toggle-group-item]:border-0 *:data-[slot=toggle-group-item]:px-2.5! *:data-[slot=toggle-group-item]:text-xs *:data-[slot=toggle-group-item]:shadow-none @[767px]/card:flex"
-            >
-              <ToggleGroupItem value="90d" aria-label="Last 3 months" title="Last 3 months">3M</ToggleGroupItem>
-              <ToggleGroupItem value="180d" aria-label="Last 6 months" title="Last 6 months">6M</ToggleGroupItem>
-              <ToggleGroupItem value="365d" aria-label="Last 12 months" title="Last 12 months">12M</ToggleGroupItem>
-              <ToggleGroupItem value="all" aria-label="All time" title="All time">All</ToggleGroupItem>
-            </ToggleGroup>
-            <Select
-              value={timeRange}
-              onValueChange={(value) => {
-                if (value !== "custom") setTimeRange(value as UsageRange)
-              }}
-            >
-              <SelectTrigger
-                className="flex h-8 min-w-0 flex-[0.8] rounded-lg px-2.5 text-xs **:data-[slot=select-value]:block **:data-[slot=select-value]:truncate @[767px]/card:hidden"
-                size="sm"
-                aria-label="Select chart range"
-              >
-                <SelectValue placeholder="Last 3 months" />
-              </SelectTrigger>
-              <SelectContent className="rounded-xl">
-                <SelectItem value="30d" className="rounded-lg">
-                  Last 1 month
-                </SelectItem>
-                <SelectItem value="90d" className="rounded-lg">
-                  Last 3 months
-                </SelectItem>
-                <SelectItem value="180d" className="rounded-lg">
-                  Last 6 months
-                </SelectItem>
-                <SelectItem value="365d" className="rounded-lg">
-                  Last 12 months
-                </SelectItem>
-                <SelectItem value="all" className="rounded-lg">
-                  All time
-                </SelectItem>
-                {timeRange === "custom" ? (
-                  <SelectItem value="custom" className="rounded-lg">
-                    Custom range
-                  </SelectItem>
-                ) : null}
-              </SelectContent>
-            </Select>
-            <Popover
-              open={datePickerOpen}
-              onOpenChange={(open) => {
-                setDatePickerOpen(open)
-                if (open) setDatePickerDraft(visibleDateRange)
-              }}
-            >
-              <PopoverTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 min-w-0 flex-[1.2] justify-start gap-1.5 rounded-lg px-2.5 text-xs tabular-nums @[767px]/card:flex-none @[767px]/card:rounded-l-none @[767px]/card:border-0 @[767px]/card:border-l @[767px]/card:border-border/70 @[767px]/card:bg-transparent @[767px]/card:pl-3 @[767px]/card:shadow-none @[767px]/card:hover:bg-background/70"
-                  aria-label={`Choose date range, currently ${visibleDateRangeLabel}`}
-                >
-                  <CalendarDays data-icon="inline-start" />
-                  <span className="truncate">{visibleDateRangeLabel}</span>
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent
-                align={isMobile ? "center" : "end"}
-                sideOffset={8}
-                className="w-[calc(100vw-2rem)] max-w-fit overflow-hidden rounded-2xl p-0 shadow-xl"
-              >
-                <div className="border-b px-4 py-3">
-                  <p className="text-sm font-semibold">Choose a date range</p>
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    {isMobile ? "Minimum 1 month" : "Minimum 3 months"}
-                  </p>
-                </div>
-                <Calendar
-                  mode="range"
-                  selected={datePickerDraft}
-                  defaultMonth={datePickerDraft?.from ?? historyBounds?.from}
-                  numberOfMonths={isMobile ? 1 : 2}
-                  min={Math.max(0, minimumSelectableDays - 1)}
-                  disabled={
-                    historyBounds
-                      ? [{ before: historyBounds.from }, { after: historyBounds.to }]
-                      : undefined
-                  }
-                  onSelect={(range) => {
-                    setDatePickerDraft(range)
-                  }}
-                  className="p-3"
-                />
-                <div className="flex items-center justify-between gap-3 border-t bg-muted/20 px-3 py-2.5">
-                  <p className="min-w-0 truncate text-xs tabular-nums text-muted-foreground">
-                    {datePickerDraft?.from && datePickerDraft.to
-                      ? `${datePickerDraftDays} days selected`
-                      : "Select start and end dates"}
-                  </p>
-                  <div className="flex shrink-0 items-center gap-1.5">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 rounded-lg px-2.5 text-xs"
-                      onClick={() => {
-                        setDatePickerDraft(visibleDateRange)
-                        setDatePickerOpen(false)
-                      }}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      className="h-8 rounded-lg px-3 text-xs"
-                      disabled={!datePickerDraftIsValid || !datePickerDraft?.from || !datePickerDraft.to}
-                      onClick={() => {
-                        if (!datePickerDraft?.from || !datePickerDraft.to || !datePickerDraftIsValid) return
-                        const from = toLocalDateKey(datePickerDraft.from)
-                        const to = toLocalDateKey(datePickerDraft.to)
-                        setPendingDateRange({
-                          from: from <= to ? from : to,
-                          to: from <= to ? to : from,
-                        })
-                        setNavigatorSelection(null)
-                        setTimeRange("custom")
-                        setDatePickerOpen(false)
-                      }}
-                    >
-                      Apply
-                    </Button>
-                  </div>
-                </div>
-              </PopoverContent>
-            </Popover>
+              </CardDescription>
             </div>
           </div>
+          <Badge variant="outline" className="hidden shrink-0 rounded-full px-2.5 text-[10px] sm:inline-flex">
+            Logical inventory
+          </Badge>
         </div>
       </CardHeader>
-      <CardContent className="px-3 pt-0 sm:px-5 sm:pt-0">
-        {chartData.length === 0 ? (
-          <div className="flex h-[250px] items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground">
-            No storage history yet
+      <CardContent className="grid gap-0 p-0 lg:grid-cols-[minmax(15rem,0.34fr)_minmax(0,1fr)]">
+        <section className="flex flex-col gap-6 border-b p-4 sm:p-6 lg:border-b-0 lg:border-r">
+          <UsageMetricSelector
+            value={usageMetric}
+            onValueChange={setUsageMetric}
+            storageBytes={metrics.storageBytes}
+            objects={metrics.objects}
+          />
+          <div className="mt-auto flex flex-col gap-2.5 rounded-2xl border bg-muted/20 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs font-medium">How this is counted</p>
+              <Badge variant="outline" className="rounded-full px-2 py-0.5 text-[10px]">
+                Deduplicated
+              </Badge>
+            </div>
+            <p className="text-xs leading-5 text-muted-foreground">
+              One logical object is counted once, even when a migration copies it between accounts.
+            </p>
           </div>
-        ) : (
-          <div className="flex flex-col gap-2">
+        </section>
+        <section className="min-w-0 p-4 sm:p-6">
+          <StorageHistoryControls
+            timeRange={timeRange}
+            onTimeRangeChange={setTimeRange}
+            isMobile={isMobile}
+            visibleDateRangeLabel={visibleDateRangeLabel}
+            datePickerOpen={datePickerOpen}
+            onDatePickerOpenChange={setDatePickerOpen}
+            visibleDateRange={visibleDateRange}
+            datePickerDraft={datePickerDraft}
+            onDatePickerDraftChange={setDatePickerDraft}
+            historyBounds={historyBounds}
+            minimumSelectableDays={minimumSelectableDays}
+            datePickerDraftDays={datePickerDraftDays}
+            datePickerDraftIsValid={datePickerDraftIsValid}
+            onApplyDateRange={(range) => {
+              if (!range.from || !range.to) return
+              const from = toLocalDateKey(range.from)
+              const to = toLocalDateKey(range.to)
+              setPendingDateRange({
+                from: from <= to ? from : to,
+                to: from <= to ? to : from,
+              })
+              setNavigatorSelection(null)
+              setTimeRange("custom")
+            }}
+          />
+          {chartData.length === 0 ? (
+            <Empty className="mt-4 min-h-[280px] rounded-2xl border bg-muted/10 px-6 py-10">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <Database />
+                </EmptyMedia>
+                <EmptyTitle>No storage history yet</EmptyTitle>
+                <EmptyDescription>
+                  Run a bucket sync to start tracking logical storage over time.
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          ) : (
+            <div className="mt-4 flex flex-col gap-3">
             <div
               ref={chartInteractionRef}
               role="region"
@@ -762,78 +947,78 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
                 config={platformUsageChartConfig}
                 className="aspect-auto h-[300px] w-full overflow-hidden rounded-2xl border border-border/50 bg-muted/10 px-1 pt-3"
               >
-            <BarChart
-              accessibilityLayer
-              data={visibleChartData}
-              margin={{ top: 8, right: 8, left: 8, bottom: 8 }}
-              barCategoryGap="12%"
-              barGap={3}
-            >
-              <CartesianGrid vertical={false} />
-              <XAxis
-                dataKey="date"
-                tickLine={false}
-                axisLine={false}
-                height={40}
-                tickMargin={12}
-                minTickGap={32}
-                tickFormatter={(value) =>
-                  new Date(value).toLocaleDateString("en-US", {
-                    month: "short",
-                    day: "numeric",
-                  })
-                }
-              />
-              <YAxis hide domain={[0, 100]} />
-              <ChartTooltip
-                cursor={{ fill: "var(--muted)", radius: 10 }}
-                content={
-                  <ChartTooltipContent
-                    className="rounded-2xl bg-popover/95 px-3 py-2 shadow-lg backdrop-blur-xl"
-                    labelFormatter={(value) =>
+                <BarChart
+                  accessibilityLayer
+                  data={visibleChartData}
+                  margin={{ top: 8, right: 8, left: 8, bottom: 8 }}
+                  barCategoryGap="12%"
+                  barGap={3}
+                >
+                  <CartesianGrid vertical={false} />
+                  <XAxis
+                    dataKey="date"
+                    tickLine={false}
+                    axisLine={false}
+                    height={40}
+                    tickMargin={12}
+                    minTickGap={32}
+                    tickFormatter={(value) =>
                       new Date(value).toLocaleDateString("en-US", {
                         month: "short",
                         day: "numeric",
-                        year: "numeric",
                       })
                     }
-                    formatter={(_value, name, item) => {
-                      const isStorage = name === "storageGb"
-                      return (
-                        <>
-                          <div
-                            className="size-2.5 shrink-0 rounded-[2px]"
-                            style={{ backgroundColor: item.color }}
-                          />
-                          <div className="flex flex-1 items-center justify-between gap-4">
-                            <span className="text-muted-foreground">
-                              {isStorage ? "Storage" : "Objects"}
-                            </span>
-                            <span className="font-mono font-medium tabular-nums text-foreground">
-                              {isStorage
-                                ? formatBytes(Number(item.payload?.storageBytes ?? 0))
-                                : formatNumber(Number(item.payload?.rawObjects ?? 0))}
-                            </span>
-                          </div>
-                        </>
-                      )
-                    }}
-                    indicator="dot"
                   />
-                }
-              />
-              <ChartLegend content={<ChartLegendContent />} />
-              <Bar
-                dataKey={usageMetric === "storage" ? "storageGb" : "objects"}
-                fill={
-                  usageMetric === "storage"
-                    ? "var(--color-storageGb)"
-                    : "var(--color-objects)"
-                }
-                radius={0}
-                maxBarSize={22}
-              />
-              </BarChart>
+                  <YAxis hide domain={[0, 100]} />
+                  <ChartTooltip
+                    cursor={{ fill: "var(--muted)", radius: 10 }}
+                    content={
+                      <ChartTooltipContent
+                        className="rounded-2xl bg-popover/95 px-3 py-2 shadow-lg backdrop-blur-xl"
+                        labelFormatter={(value) =>
+                          new Date(value).toLocaleDateString("en-US", {
+                            month: "short",
+                            day: "numeric",
+                            year: "numeric",
+                          })
+                        }
+                        formatter={(_value, name, item) => {
+                          const isStorage = name === "storageGb"
+                          return (
+                            <>
+                              <div
+                                className="size-2.5 shrink-0 rounded-[2px]"
+                                style={{ backgroundColor: item.color }}
+                              />
+                              <div className="flex flex-1 items-center justify-between gap-4">
+                                <span className="text-muted-foreground">
+                                  {isStorage ? "Storage" : "Objects"}
+                                </span>
+                                <span className="font-mono font-medium tabular-nums text-foreground">
+                                  {isStorage
+                                    ? formatBytes(Number(item.payload?.storageBytes ?? 0))
+                                    : formatNumber(Number(item.payload?.rawObjects ?? 0))}
+                                </span>
+                              </div>
+                            </>
+                          )
+                        }}
+                        indicator="dot"
+                      />
+                    }
+                  />
+                  <ChartLegend content={<ChartLegendContent />} />
+                  <Bar
+                    dataKey={usageMetric === "storage" ? "storageGb" : "objects"}
+                    fill={
+                      usageMetric === "storage"
+                        ? "var(--color-storageGb)"
+                        : "var(--color-objects)"
+                    }
+                    radius={0}
+                    maxBarSize={22}
+                  />
+                </BarChart>
               </ChartContainer>
             </div>
             {enableChartNavigation ? (
@@ -854,7 +1039,8 @@ function PlatformUsageChart({ series }: { series: OverviewResponse["activeAccoun
               </p>
             ) : null}
           </div>
-        )}
+          )}
+        </section>
       </CardContent>
     </Card>
   )
@@ -1017,7 +1203,10 @@ export default function OverviewPage() {
           </div>
 
           <div className="dashboard-motion-item dashboard-motion-delay-2">
-            <PlatformUsageChart series={data.activeAccountSeries ?? []} />
+            <PlatformUsageChart
+              series={data.activeAccountSeries ?? []}
+              metrics={metrics}
+            />
           </div>
 
           <div className="dashboard-motion-item dashboard-motion-delay-3 grid gap-4">

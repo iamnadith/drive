@@ -95,30 +95,74 @@ function OverviewMetricCardsSkeleton() {
 
 function OverviewUsageChartSkeleton() {
   return (
-    <Card className="@container/card pb-0 sm:pb-0.5">
-      <CardHeader className="grid-cols-[minmax(0,1fr)_auto] gap-0 md:gap-1">
-        <div className="space-y-2">
-          <Skeleton className="h-5 w-32" />
-          <Skeleton className="h-3.5 w-32 @[540px]/card:w-52 md:h-4" />
-        </div>
-        <div className="col-start-2 row-start-1 mt-0 justify-self-end self-start">
-          <Skeleton className="h-9 w-[8.75rem] rounded-xl @[767px]/card:hidden" />
-          <Skeleton className="hidden h-8 w-[22rem] rounded-full @[767px]/card:block" />
+    <Card className="overflow-hidden gap-0 py-0">
+      <CardHeader className="border-b bg-muted/10 px-4 py-5 sm:px-6">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <Skeleton className="size-10 shrink-0 rounded-2xl" />
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <Skeleton className="h-2.5 w-28" />
+              <Skeleton className="h-6 w-36" />
+              <Skeleton className="h-4 w-[min(32rem,70vw)]" />
+            </div>
+          </div>
+          <Skeleton className="hidden h-6 w-28 rounded-full sm:block" />
         </div>
       </CardHeader>
-      <CardContent className="px-2 pt-4 sm:px-6 sm:pt-6">
-        <div className="rounded-2xl border border-border/40 bg-muted/20 px-3 pt-3">
-          <div className="flex h-[250px] items-end gap-1.5 sm:gap-2">
-            {Array.from({ length: 12 }).map((_, index) => (
-              <Skeleton
-                key={index}
-                className="dashboard-motion-item w-full rounded-full"
-                style={{
-                  ["--dashboard-motion-delay" as string]: `${220 + index * 35}ms`,
-                  height: `${24 + ((index * 9) % 54)}%`,
-                }}
-              />
-            ))}
+      <CardContent className="grid gap-0 p-0 lg:grid-cols-[minmax(15rem,0.34fr)_minmax(0,1fr)]">
+        <div className="flex flex-col gap-6 border-b p-4 sm:p-6 lg:border-b-0 lg:border-r">
+          <div className="flex flex-col gap-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex flex-col gap-1.5">
+                <Skeleton className="h-4 w-28" />
+                <Skeleton className="h-3 w-48" />
+              </div>
+              <Skeleton className="h-5 w-12 rounded-full" />
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
+              {Array.from({ length: 2 }).map((_, index) => (
+                <div key={index} className="flex min-h-24 flex-col justify-between gap-2 rounded-2xl border p-3.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <Skeleton className="h-3 w-16" />
+                    <Skeleton className="h-3 w-12" />
+                  </div>
+                  <Skeleton className="h-7 w-24" />
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="mt-auto flex flex-col gap-2.5 rounded-2xl border bg-muted/20 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <Skeleton className="h-3 w-28" />
+              <Skeleton className="h-5 w-20 rounded-full" />
+            </div>
+            <Skeleton className="h-8 w-full" />
+          </div>
+        </div>
+        <div className="min-w-0 p-4 sm:p-6">
+          <div className="flex flex-col gap-3 border-b border-border/60 pb-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-1.5">
+              <Skeleton className="h-4 w-24" />
+              <Skeleton className="h-3 w-36" />
+            </div>
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-8 w-36 rounded-xl" />
+              <Skeleton className="h-8 w-32 rounded-xl" />
+            </div>
+          </div>
+          <div className="mt-4 rounded-2xl border border-border/40 bg-muted/20 px-3 pt-3">
+            <div className="flex h-[300px] items-end gap-1.5 sm:gap-2">
+              {Array.from({ length: 12 }).map((_, index) => (
+                <Skeleton
+                  key={index}
+                  className="dashboard-motion-item w-full rounded-full"
+                  style={{
+                    ["--dashboard-motion-delay" as string]: `${220 + index * 35}ms`,
+                    height: `${24 + ((index * 9) % 54)}%`,
+                  }}
+                />
+              ))}
+            </div>
           </div>
         </div>
       </CardContent>
