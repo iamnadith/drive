@@ -28,4 +28,6 @@ dotnet publish tools/drive-sync/gui/DriveSync.Gui.csproj -c Release -r win-x64 -
 
 The portable executable is written under `tools/drive-sync/gui/bin/Release/` and can be launched as `DriveSync.Gui-portable\DriveSync.Gui.exe`. The framework-dependent publish is much smaller, but requires the .NET Windows Desktop runtime on the machine.
 
+A small framework-dependent build is checked in under [`release/`](release/). Run [`release/DriveSync.Gui.exe`](release/DriveSync.Gui.exe) on Windows with the .NET 7 Windows Desktop runtime installed; `drive_sync.py` is included beside it.
+
 Python must be installed and available as `python`, or select `python.exe` in the GUI. The executable copies `drive_sync.py` beside itself during publish.
