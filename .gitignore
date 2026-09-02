@@ -24,6 +24,8 @@ pnpm-lock.yaml
 .next
 out
 .vercel
+tools/drive-sync/gui/bin/
+tools/drive-sync/gui/obj/
 /.swc
 /.turbo
 *.tsbuildinfo

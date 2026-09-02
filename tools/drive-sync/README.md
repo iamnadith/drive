@@ -4,6 +4,16 @@
 
 The client is a single command, not a subcommand-based CLI. Running the same command again with the same selection and state file is the current resume operation.
 
+## Native Windows GUI
+
+For a low-memory desktop workflow, use the native .NET WinForms wrapper in [`gui/`](gui/). It keeps this Python engine unchanged, lets you choose a folder or individual files, loads an existing resume JSON, and passes the API key to the child process through its environment instead of the command line. Run it from the repository root with:
+
+```powershell
+dotnet run --project tools/drive-sync/gui/DriveSync.Gui.csproj
+```
+
+The GUI supports the same bounded file and multipart worker settings. Its publish instructions are in [`gui/README.md`](gui/README.md).
+
 ## Configuration
 
 Values are resolved in this order: explicit command-line option, JSON config, environment variable, then an interactive prompt. `--non-interactive` disables prompts and fails when a value is missing.
