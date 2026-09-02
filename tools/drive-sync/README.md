@@ -93,9 +93,14 @@ For a known multipart upload, resume reuses the saved `uploadId` and re-uploads 
 
 On a later run, a state record marked `complete` is checked again through
 `PATCH /files/upload` before it is counted as skipped. A missing, replaced, or
-wrong-size object is repaired at the same logical key. The API routes for
-listing and authenticated `HEAD` are documented below for broader operator
-reconciliation.
+wrong-size object is repaired at the same logical key. Use
+`--no-verify-completed` when the local state is intentionally authoritative:
+completed records are skipped without a remote check, and an explicitly listed
+source file that is already complete but no longer exists locally is ignored.
+This mode will not repair an object that was later deleted or replaced
+remotely. `--verify-completed` restores the default repair behavior. The API
+routes for listing and authenticated `HEAD` are documented below for broader
+operator reconciliation.
 
 ## Concurrency and retries
 
@@ -112,6 +117,7 @@ The defaults are:
 | `--retries` | `5` | Bounded retry attempts for eligible operations. |
 | `--timeout` | `120` seconds | Per-request socket timeout. |
 | `--finalize-timeout` | `60` seconds | Visibility/finalization polling window. |
+| `--verify-completed` / `--no-verify-completed` | verify enabled | Check or trust files already marked complete in local state. |
 
 Multipart parts are 1-based, at most `10,000`, and use the configured part size except for the final part. The current implementation uses thread pools and streams file sections instead of loading a whole file into memory.
 

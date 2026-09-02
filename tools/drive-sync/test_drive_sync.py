@@ -206,7 +206,29 @@ class DriveSyncTests(unittest.TestCase):
             [(1, 0, 5 * 1024 * 1024), (2, 5 * 1024 * 1024, 5 * 1024 * 1024), (3, 10 * 1024 * 1024, 1024 * 1024)],
         )
 
-    def run_runner(self, snapshot: sync.FileSnapshot, server: ThreadingHTTPServer, state_path: Path, threshold: int, part_size: int) -> dict[str, int]:
+    def test_scan_can_ignore_missing_completed_source(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "already-complete.bin"
+            result = sync.scan_sources(
+                [path],
+                None,
+                "incoming",
+                include_root=True,
+                preserve_empty_folders=False,
+                ignore_missing_paths={str(path.resolve())},
+            )
+            self.assertEqual(result.files, ())
+            self.assertEqual(result.errors, ())
+
+    def run_runner(
+        self,
+        snapshot: sync.FileSnapshot,
+        server: ThreadingHTTPServer,
+        state_path: Path,
+        threshold: int,
+        part_size: int,
+        verify_completed: bool = True,
+    ) -> dict[str, int]:
         identity = {
             "panelUrl": f"http://127.0.0.1:{server.server_port}",
             "projectId": "project",
@@ -231,6 +253,7 @@ class DriveSyncTests(unittest.TestCase):
             preserve_empty_folders=False,
             reset_ambiguous=False,
             quiet=True,
+            verify_completed=verify_completed,
         )
         return runner.run()
 
@@ -248,6 +271,34 @@ class DriveSyncTests(unittest.TestCase):
                 second = self.run_runner(snapshot, server, state_path, threshold=1024, part_size=5 * 1024 * 1024)
                 self.assertEqual(second["skipped"], 1)
                 self.assertEqual(server.store["single_puts"], puts)  # type: ignore[attr-defined]
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_no_verify_completed_skips_without_remote_check(self) -> None:
+        server, thread = start_mock()
+        try:
+            with tempfile.TemporaryDirectory() as raw:
+                path = Path(raw) / "file.unknown"
+                path.write_bytes(b"binary\x00payload")
+                snapshot = sync.snapshot_file(path, "single/file.unknown")
+                state_path = Path(raw) / "state.json"
+                first = self.run_runner(snapshot, server, state_path, threshold=1024, part_size=5 * 1024 * 1024)
+                self.assertEqual(first["uploaded"], 1)
+                puts = server.store["single_puts"]  # type: ignore[attr-defined]
+                finalizes = server.store["finalize_calls"]  # type: ignore[attr-defined]
+                second = self.run_runner(
+                    snapshot,
+                    server,
+                    state_path,
+                    threshold=1024,
+                    part_size=5 * 1024 * 1024,
+                    verify_completed=False,
+                )
+                self.assertEqual(second["skipped"], 1)
+                self.assertEqual(server.store["single_puts"], puts)  # type: ignore[attr-defined]
+                self.assertEqual(server.store["finalize_calls"], finalizes)  # type: ignore[attr-defined]
         finally:
             server.shutdown()
             server.server_close()

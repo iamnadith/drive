@@ -884,6 +884,7 @@ def scan_sources(
     *,
     include_root: bool,
     preserve_empty_folders: bool,
+    ignore_missing_paths: set[str] | None = None,
 ) -> ScanResult:
     collected: dict[str, FileSnapshot] = {}
     empty: dict[str, FolderSnapshot] = {}
@@ -894,6 +895,13 @@ def scan_sources(
         try:
             snapshot = snapshot_file(path, normalized_key)
         except SyncError as exc:
+            if ignore_missing_paths and str(path.resolve()) in ignore_missing_paths:
+                try:
+                    path.stat()
+                except FileNotFoundError:
+                    return
+                except OSError:
+                    pass
             errors.append(str(exc))
             return
         previous = collected.get(normalized_key)
@@ -1024,6 +1032,7 @@ class SyncRunner:
         preserve_empty_folders: bool,
         reset_ambiguous: bool,
         quiet: bool,
+        verify_completed: bool = True,
     ) -> None:
         self.client = client
         self.state = state
@@ -1037,6 +1046,7 @@ class SyncRunner:
         self.preserve_empty_folders = preserve_empty_folders
         self.reset_ambiguous = reset_ambiguous
         self.quiet = quiet
+        self.verify_completed = verify_completed
         self.progress = ProgressReporter(scan.files, quiet=quiet)
 
     def prepare_state(self) -> None:
@@ -1187,6 +1197,9 @@ class SyncRunner:
                 self._reset_for_snapshot(current)
                 record = self.state.get_file(key)
             if record and record.get("status") == "complete":
+                if not self.verify_completed:
+                    self.progress.mark_skipped(key)
+                    return "skipped"
                 marker = source_fingerprint(
                     self.client.project_id,
                     self.client.bucket,
@@ -1638,6 +1651,30 @@ def load_config(path: Path | None) -> dict[str, Any]:
     return loaded
 
 
+def load_completed_source_paths(path: Path | None) -> set[str]:
+    if path is None or not path.exists():
+        return set()
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SyncError(
+            f"Resume state is unreadable; preserve it and fix or choose another --state-file: {path}"
+        ) from exc
+    if not isinstance(loaded, dict) or loaded.get("version") != STATE_VERSION:
+        raise SyncError(f"Unsupported resume state version in {path}")
+    records = loaded.get("files")
+    if not isinstance(records, dict):
+        raise SyncError(f"Resume state has invalid file/folder maps: {path}")
+    completed: set[str] = set()
+    for record in records.values():
+        if not isinstance(record, dict) or record.get("status") != "complete":
+            continue
+        source_path = record.get("sourcePath")
+        if isinstance(source_path, str) and source_path.strip():
+            completed.add(str(Path(source_path).expanduser().resolve()))
+    return completed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Upload selected files or a complete folder tree to Drive with crash-safe resume."
@@ -1664,6 +1701,21 @@ def build_parser() -> argparse.ArgumentParser:
     empty.add_argument("--preserve-empty-folders", dest="preserve_empty", action="store_true", default=True)
     empty.add_argument("--no-preserve-empty-folders", dest="preserve_empty", action="store_false")
     parser.add_argument("--state-file", type=Path, help="Resume state path (default: %%LOCALAPPDATA%%/DriveSync/state)")
+    completed = parser.add_mutually_exclusive_group()
+    completed.add_argument(
+        "--verify-completed",
+        dest="verify_completed",
+        action="store_true",
+        default=True,
+        help="Verify objects already marked complete before skipping them (default)",
+    )
+    completed.add_argument(
+        "--no-verify-completed",
+        "--skip-completed-check",
+        dest="verify_completed",
+        action="store_false",
+        help="Trust complete state and skip remote verification",
+    )
     parser.add_argument("--workers", type=lambda value: parse_positive_int(value, "workers"), default=3)
     parser.add_argument("--part-workers", type=lambda value: parse_positive_int(value, "part-workers"), default=4)
     parser.add_argument(
@@ -1794,13 +1846,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     normalized_panel_url = normalize_panel_url(panel_url)
     normalized_prefix = normalize_key_part(args.prefix)
     files, folder = resolve_sources(args)
-    scan = scan_sources(
-        files,
-        folder,
-        normalized_prefix,
-        include_root=not args.contents_only,
-        preserve_empty_folders=args.preserve_empty,
-    )
     state_identity = {
         "panelUrl": normalized_panel_url,
         "projectId": project_id.strip(),
@@ -1814,6 +1859,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
     }
     state_path = args.state_file.expanduser().resolve() if args.state_file else default_state_path(state_identity)
+    completed_source_paths = (
+        load_completed_source_paths(state_path) if not args.verify_completed else set()
+    )
+    scan = scan_sources(
+        files,
+        folder,
+        normalized_prefix,
+        include_root=not args.contents_only,
+        preserve_empty_folders=args.preserve_empty,
+        ignore_missing_paths=completed_source_paths,
+    )
     print_scan(scan, state_path)
     if scan.errors:
         raise SyncError("Scan failed; no upload was started")
@@ -1855,6 +1911,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             preserve_empty_folders=args.preserve_empty,
             reset_ambiguous=args.reset_ambiguous,
             quiet=args.quiet,
+            verify_completed=args.verify_completed,
         )
         stats = runner.run()
 
