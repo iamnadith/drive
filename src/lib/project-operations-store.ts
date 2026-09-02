@@ -3,6 +3,7 @@ import { queryDb } from "./db"
 import { scheduleDatabaseMaintenance } from "./database-maintenance"
 import { getActiveProjectBucketR2Config } from "./project-api-auth"
 import { getProjectByIdentifier, hashProjectSecret, type Project } from "./projects-store"
+import { ProjectObjectLockedError } from "./project-object-lock"
 import {
   r2CopyObject,
   r2DeleteObject,
@@ -722,9 +723,14 @@ export async function assertProjectObjectWritable(
   lockToken?: string | null
 ) {
   await ensureProjectOperationsSchema()
-  const { rows } = await queryDb<{ lock_token_hash: string; expires_at: string | null }>(
+  const { rows } = await queryDb<{
+    lock_token_hash: string
+    reason: string | null
+    expires_at: string | null
+    created_at: string
+  }>(
     `
-      select lock_token_hash, expires_at
+      select lock_token_hash, reason, expires_at, created_at
       from drive_project_object_locks
       where project_id = $1
         and bucket_name = $2
@@ -737,7 +743,47 @@ export async function assertProjectObjectWritable(
   const lock = rows[0]
   if (!lock) return
   if (lockToken && hashProjectSecret(lockToken) === lock.lock_token_hash) return
-  throw new Error("Object is locked")
+  throw new ProjectObjectLockedError({
+    reason: lock.reason,
+    expiresAt: lock.expires_at,
+    createdAt: lock.created_at,
+  })
+}
+
+export async function getProjectObjectLock(
+  projectId: string,
+  bucketName: string,
+  key: string
+) {
+  await ensureProjectOperationsSchema()
+  const { rows } = await queryDb<{
+    reason: string | null
+    expires_at: string | null
+    created_at: string
+    active: boolean
+  }>(
+    `
+      select
+        reason,
+        expires_at,
+        created_at,
+        (expires_at is null or expires_at > now()) as active
+      from drive_project_object_locks
+      where project_id = $1
+        and bucket_name = $2
+        and object_key = $3
+      limit 1;
+    `,
+    [projectId, bucketName, key]
+  )
+  const lock = rows[0]
+  if (!lock) return null
+  return {
+    reason: lock.reason,
+    expiresAt: lock.expires_at,
+    createdAt: lock.created_at,
+    active: lock.active,
+  }
 }
 
 export async function assertProjectBucketHasNoActiveLocks(projectId: string, bucketName: string) {

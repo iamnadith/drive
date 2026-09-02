@@ -13,6 +13,7 @@ import {
   recordProjectApiEvent,
   syncRenamedTrackedBucketObject,
 } from "@/lib/project-operations-store"
+import { projectObjectLockResponse } from "@/lib/project-object-lock"
 import { r2CopyObject, r2DeleteObject } from "@/lib/r2-s3"
 
 export const runtime = "nodejs"
@@ -101,8 +102,13 @@ export async function PATCH(request: Request) {
       fromKey,
       request.headers.get("x-drive-lock-token")
     )
-  } catch {
-    return NextResponse.json({ error: "Object is locked" }, { status: 409 })
+  } catch (error) {
+    return projectObjectLockResponse(error, {
+      operation: "file.rename",
+      projectId: authorized.auth.project.id,
+      bucketName: r2.bucketName,
+      key: fromKey,
+    })
   }
 
   await r2CopyObject(r2.config, r2.bucketName, fromKey, toKey, {

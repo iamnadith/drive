@@ -9,6 +9,7 @@ import {
   assertProjectObjectWritable,
   recordProjectApiEvent,
 } from "@/lib/project-operations-store"
+import { projectObjectLockResponse } from "@/lib/project-object-lock"
 import {
   r2CreateMultipartUpload,
   r2CreateSignedUploadUrl,
@@ -134,8 +135,13 @@ export async function startProjectUpload(
       key,
       request.headers.get("x-drive-lock-token")
     )
-  } catch {
-    return NextResponse.json({ error: "Object is locked" }, { status: 409 })
+  } catch (error) {
+    return projectObjectLockResponse(error, {
+      operation: "file.upload.start",
+      projectId: resolved.authorized.auth.project.id,
+      bucketName: resolved.r2.bucketName,
+      key,
+    })
   }
 
   const metadata = parseUploadMetadata(body.metadata)

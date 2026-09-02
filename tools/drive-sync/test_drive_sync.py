@@ -61,6 +61,15 @@ class MockDriveHandler(BaseHTTPRequestHandler):
             )
             return
         if path == "/api/v1/files/uploads/multipart":
+            if self.store.get("lock_check_unavailable"):
+                self.send_json(
+                    503,
+                    {
+                        "error": "Unable to verify object lock",
+                        "code": "LOCK_CHECK_UNAVAILABLE",
+                    },
+                )
+                return
             upload_id = f"upload-{len(self.store['sessions']) + 1}"
             self.store["sessions"][upload_id] = {
                 "key": body["key"],
@@ -173,6 +182,7 @@ def start_mock() -> tuple[ThreadingHTTPServer, threading.Thread]:
         "finalize_calls": 0,
         "pending_seen": set(),
         "complete_parts": [],
+        "lock_check_unavailable": False,
     }
     server = ThreadingHTTPServer(("127.0.0.1", 0), MockDriveHandler)
     server.store = store  # type: ignore[attr-defined]
@@ -269,6 +279,57 @@ class DriveSyncTests(unittest.TestCase):
                     [part["etag"] for part in server.store["complete_parts"]],  # type: ignore[attr-defined]
                     ['"part-1"', '"part-2"', '"part-3"'],
                 )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_lock_check_unavailable_is_not_marked_as_ambiguous_start(self) -> None:
+        server, thread = start_mock()
+        server.store["lock_check_unavailable"] = True  # type: ignore[attr-defined]
+        try:
+            with tempfile.TemporaryDirectory() as raw:
+                path = Path(raw) / "large.bin"
+                path.write_bytes(b"multipart data")
+                snapshot = sync.snapshot_file(path, "large/large.bin")
+                state_path = Path(raw) / "state.json"
+                identity = {
+                    "panelUrl": f"http://127.0.0.1:{server.server_port}",
+                    "projectId": "project",
+                    "bucket": "bucket",
+                    "prefix": "",
+                    "source": {
+                        "files": [str(snapshot.path)],
+                        "folder": None,
+                        "includeRoot": True,
+                        "preserveEmptyFolders": False,
+                    },
+                }
+                state = sync.StateStore.load(state_path, identity)
+                client = sync.DriveClient(
+                    identity["panelUrl"], "project", "bucket", "test-key", timeout=10, retries=1
+                )
+                runner = sync.SyncRunner(
+                    client,
+                    state,
+                    sync.ScanResult((snapshot,), (), ()),
+                    single_threshold=1,
+                    requested_part_size=5 * 1024 * 1024,
+                    file_workers=1,
+                    part_workers=1,
+                    retries=1,
+                    finalize_timeout=3,
+                    preserve_empty_folders=False,
+                    reset_ambiguous=False,
+                    quiet=True,
+                )
+                result = runner.run()
+                self.assertEqual(result["failed"], 1)
+                record = state.get_file(snapshot.key)
+                self.assertIsNotNone(record)
+                self.assertEqual(record["status"], "failed")
+                self.assertNotEqual(record["status"], "ambiguous_multipart_start")
+                self.assertIn("LOCK_CHECK_UNAVAILABLE", record["lastError"])
         finally:
             server.shutdown()
             server.server_close()

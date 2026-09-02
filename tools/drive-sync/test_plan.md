@@ -59,7 +59,7 @@ Use a fake clock or zero-delay backoff in unit tests. Keep one small integration
 - [ ] Trim a trailing slash from `panel_url`; append paths exactly once. Reject a missing/invalid panel URL, project ID, bucket value, API key, non-positive worker count, or unusable state directory before making HTTP calls.
 - [ ] Send the API key as `Authorization: Bearer ...`; verify project and bucket are present in the panel JSON request. A project with no requested bucket uses the primary bucket; an explicitly requested bucket is retained.
 - [ ] Verify that the API key is absent from signed single-upload and signed-part `PUT` requests. Signed URLs receive only the headers returned by the panel and the file bytes.
-- [ ] Return useful errors for `401 Missing/Invalid API key`, `403 project/permission`, `404`, `409`, and `429`; do not retry authorization, project, bucket, or lock failures blindly.
+- [ ] Return useful errors for `401 Missing/Invalid API key`, `403 project/permission`, `404`, real `409 OBJECT_LOCKED`, `503 LOCK_CHECK_UNAVAILABLE`, and `429`; do not retry authorization, project, bucket, or lock failures blindly.
 - [ ] A selected file uploads regardless of extension, MIME type, binary contents, or zero length. `contentType` is optional; when supplied, the exact value is used for the direct `PUT`.
 - [ ] A selected folder recursively maps `relative/path` to POSIX-style remote keys below the configured prefix. Cover nested directories, Unicode, spaces, `#`, `%`, leading-dot names, extensionless files, duplicate basenames in different directories, and an empty directory.
 - [ ] Define and test symlink/reparse-point policy. The default must not follow a link outside the selected root or recurse into a cycle.
@@ -68,12 +68,12 @@ Use a fake clock or zero-delay backoff in unit tests. Keep one small integration
 
 ### 2. JSON/error parsing and retry policy
 
-- [ ] Parse a normal JSON error such as `{ "error": "Object is locked" }` and preserve HTTP status, endpoint, operation, and safe server message.
+- [ ] Parse a normal JSON error such as `{ "error": "Object is locked", "code": "OBJECT_LOCKED" }` and preserve HTTP status, endpoint, operation, and safe server message.
 - [ ] Handle a `4xx` response with malformed JSON, HTML, plain text, and an empty body without raising a secondary JSON-decoding exception. The final error must contain the status and a bounded body preview.
 - [ ] Handle a signed-R2 XML/HTML error in the same way; never require the direct R2 response to be JSON.
 - [ ] On `429`, parse `Retry-After` and/or `retryAfterSeconds`, cap it, and retry only while the operation deadline remains. Test a missing, invalid, fractional, and excessive header.
 - [ ] Retry network timeouts, connection resets, and `502/503/504` only for operations classified safe below. Use bounded exponential backoff with jitter, an attempt cap, and a total deadline; prove there is no infinite retry loop.
-- [ ] Do not retry `400/401/403/404/409` automatically. A `409 Object is locked` is a user-visible conflict, not a transient upload failure. A signed-URL `403` may be retried only when it is explicitly classified as an expired/invalid signed URL and a fresh URL is requested; a panel authorization `403` is terminal.
+- [ ] Do not retry `400/401/403/404/409` automatically. A `409 OBJECT_LOCKED` is a user-visible conflict, not a transient upload failure. `503 LOCK_CHECK_UNAVAILABLE` from multipart start is safe to retry because the panel returns it before creating the R2 session; other ambiguous multipart-start `5xx` responses must remain protected by the unknown-start barrier. A signed-URL `403` may be retried only when it is explicitly classified as an expired/invalid signed URL and a fresh URL is requested; a panel authorization `403` is terminal.
 - [ ] A retry must reuse the same logical key and, for multipart, the same `uploadId` and part number. It must never create a second destination key as a fallback.
 
 Operation safety rules to assert explicitly:
@@ -179,7 +179,7 @@ test_folder_inventory_matches_remote_keys_and_sizes
 
 1. The current single-upload finalize implementation returns `fileId: null`, despite the dashboard example showing a permanent ID. Sync completion must be based on the verified key and size, not on `fileId`.
 2. The current multipart complete response does not include remote size or ETag. Exact-size and fingerprint verification therefore needs the finalize request (which uses `upload` permission) or `list`, `readMetadata`, or `read` permission after completion.
-3. Multipart start has no idempotency key or session-status endpoint. A transport failure after session creation cannot be proven safe to repeat; the client must preserve `unknown_start` and avoid a blind second start, or the API must later add an idempotent start/status contract.
+3. Multipart start has no idempotency key or session-status endpoint. A transport failure after session creation cannot be proven safe to repeat; the client must preserve `unknown_start` and avoid a blind second start. The explicit `LOCK_CHECK_UNAVAILABLE` response is the narrow exception because it is emitted before session creation.
 4. `/api/v1/files/uploads/multipart/...` and `/api/v1/storage/multipart` are not interchangeable contracts. Keep their payload and ETag rules isolated in tests.
 5. Exact size does not prove byte identity by itself. The current API has no portable checksum field; the sync fingerprint metadata must round-trip for this client, and a stronger cross-client byte-integrity requirement needs a checksum contract and its own test.
 

@@ -75,6 +75,17 @@ class AmbiguousMultipartStart(AmbiguousRequestError):
     pass
 
 
+def panel_error_code(body: str) -> str | None:
+    try:
+        decoded = json.loads(body)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    code = decoded.get("code")
+    return code.strip() if isinstance(code, str) and code.strip() else None
+
+
 class DriveHttpError(SyncError):
     def __init__(
         self,
@@ -87,6 +98,7 @@ class DriveHttpError(SyncError):
         self.status = status
         self.body = body
         self.retry_after = retry_after
+        self.api_code = panel_error_code(body)
         detail = f"HTTP {status}: {message}"
         if body:
             compact = " ".join(body.split())
@@ -1377,6 +1389,12 @@ class SyncRunner:
                     "the state was left behind to prevent a duplicate start"
                 ) from exc
             except DriveHttpError as exc:
+                # The panel's lock-check failure response is emitted before
+                # multipart creation, so it is safe to retry on a later run.
+                # Other 5xx responses may be ambiguous because R2 could have
+                # accepted the multipart-start request before the panel failed.
+                if exc.api_code == "LOCK_CHECK_UNAVAILABLE":
+                    raise
                 if exc.status in RETRYABLE_HTTP_STATUSES:
                     self.state.update_file(
                         snapshot.key,

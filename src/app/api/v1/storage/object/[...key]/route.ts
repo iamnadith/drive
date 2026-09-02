@@ -2,6 +2,7 @@ import { after, NextResponse } from "next/server"
 import { authorizeProjectRequest, getActiveProjectBucketR2Config, projectBucketFromRequest, projectIdFromUrl } from "@/lib/project-api-auth"
 import { buildProjectStorageObjectUrl } from "@/lib/project-storage-gateway"
 import { assertProjectObjectWritable, clearProjectObjectLock, markTrackedBucketObjectDeleted, recordProjectApiEvent } from "@/lib/project-operations-store"
+import { projectObjectLockResponse } from "@/lib/project-object-lock"
 import { r2DeleteObject, r2HeadObject, r2PutObject } from "@/lib/r2-s3"
 import { isSystemDerivativeKey } from "@/lib/storage-delivery.cjs"
 import { rejectDisallowedBucketDeliveryOrigin } from "@/lib/bucket-delivery-origin-guard"
@@ -81,8 +82,13 @@ export async function PUT(
         key,
         request.headers.get("x-drive-lock-token")
       )
-    } catch {
-      return NextResponse.json({ error: "Object is locked" }, { status: 409 })
+    } catch (error) {
+      return projectObjectLockResponse(error, {
+        operation: "storage.object.put",
+        projectId: authorized.auth.project.id,
+        bucketName: r2.bucketName,
+        key,
+      })
     }
   }
 
@@ -142,8 +148,13 @@ export async function DELETE(
         key,
         request.headers.get("x-drive-lock-token")
       )
-    } catch {
-      return NextResponse.json({ error: "Object is locked" }, { status: 409 })
+    } catch (error) {
+      return projectObjectLockResponse(error, {
+        operation: "storage.object.delete",
+        projectId: authorized.auth.project.id,
+        bucketName: r2.bucketName,
+        key,
+      })
     }
   }
 

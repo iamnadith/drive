@@ -14,6 +14,7 @@ import {
   processProjectOperationJob,
   recordProjectApiEvent,
 } from "@/lib/project-operations-store"
+import { projectObjectLockResponse } from "@/lib/project-object-lock"
 import { r2DeleteObject, r2ListObjectsPageWithDelimiter } from "@/lib/r2-s3"
 
 function toNumber(value: string | null, fallback: number) {
@@ -123,8 +124,13 @@ export async function DELETE(request: Request) {
         resolvedKey,
         request.headers.get("x-drive-lock-token")
       )
-    } catch {
-      return NextResponse.json({ error: "Object is locked" }, { status: 409 })
+    } catch (error) {
+      return projectObjectLockResponse(error, {
+        operation: "file.delete",
+        projectId: authorized.auth.project.id,
+        bucketName: r2.bucketName,
+        key: resolvedKey,
+      })
     }
   }
 

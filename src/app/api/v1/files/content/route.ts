@@ -10,6 +10,7 @@ import {
   recordProjectApiEvent,
   syncTrackedBucketObject,
 } from "@/lib/project-operations-store"
+import { projectObjectLockResponse } from "@/lib/project-object-lock"
 import { r2PutObject } from "@/lib/r2-s3"
 
 export async function PUT(request: Request) {
@@ -50,8 +51,13 @@ export async function PUT(request: Request) {
       key,
       request.headers.get("x-drive-lock-token")
     )
-  } catch {
-    return NextResponse.json({ error: "Object is locked" }, { status: 409 })
+  } catch (error) {
+    return projectObjectLockResponse(error, {
+      operation: "file.content.write",
+      projectId: authorized.auth.project.id,
+      bucketName: r2.bucketName,
+      key,
+    })
   }
 
   const content =

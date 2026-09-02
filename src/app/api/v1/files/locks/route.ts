@@ -3,13 +3,62 @@ import { queryDb } from "@/lib/db"
 import {
   authorizeProjectRequest,
   projectBucketFromRequest,
+  projectIdFromUrl,
   resolveProjectBucketName,
 } from "@/lib/project-api-auth"
 import {
   ensureProjectOperationsSchema,
+  getProjectObjectLock,
   recordProjectApiEvent,
 } from "@/lib/project-operations-store"
 import { hashProjectSecret } from "@/lib/projects-store"
+import { projectObjectLockResponse } from "@/lib/project-object-lock"
+
+export async function GET(request: Request) {
+  const projectId = projectIdFromUrl(request)
+  const bucketName = projectBucketFromRequest(request)
+  const key = new URL(request.url).searchParams.get("key")?.trim() ?? ""
+  if (!key || key.endsWith("/")) {
+    return NextResponse.json({ error: "Valid object key is required" }, { status: 400 })
+  }
+
+  const authorized = await authorizeProjectRequest(request, projectId, "read")
+  if ("response" in authorized) return authorized.response
+  const resolvedBucket = await resolveProjectBucketName(authorized.auth.project, bucketName)
+  if ("response" in resolvedBucket) return resolvedBucket.response
+
+  try {
+    const lock = await getProjectObjectLock(
+      authorized.auth.project.id,
+      resolvedBucket.bucketName,
+      key
+    )
+    return NextResponse.json(
+      {
+        projectId: authorized.auth.project.projectId,
+        bucketName: resolvedBucket.bucketName,
+        key,
+        locked: Boolean(lock?.active),
+        lock: lock
+          ? {
+              active: lock.active,
+              reason: lock.reason,
+              expiresAt: lock.expiresAt,
+              createdAt: lock.createdAt,
+            }
+          : null,
+      },
+      { headers: { "Cache-Control": "no-store" } }
+    )
+  } catch (error) {
+    return projectObjectLockResponse(error, {
+      operation: "file.lock.inspect",
+      projectId: authorized.auth.project.id,
+      bucketName: resolvedBucket.bucketName,
+      key,
+    })
+  }
+}
 
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as {

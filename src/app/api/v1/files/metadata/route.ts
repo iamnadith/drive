@@ -12,6 +12,7 @@ import {
   recordProjectApiEvent,
   syncTrackedBucketObject,
 } from "@/lib/project-operations-store"
+import { projectObjectLockResponse } from "@/lib/project-object-lock"
 import { r2HeadObject, r2UpdateObjectMetadata } from "@/lib/r2-s3"
 
 export async function GET(request: Request) {
@@ -95,8 +96,13 @@ export async function PATCH(request: Request) {
       key,
       request.headers.get("x-drive-lock-token")
     )
-  } catch {
-    return NextResponse.json({ error: "Object is locked" }, { status: 409 })
+  } catch (error) {
+    return projectObjectLockResponse(error, {
+      operation: "file.metadata.write",
+      projectId: authorized.auth.project.id,
+      bucketName: r2.bucketName,
+      key,
+    })
   }
 
   const metadata =

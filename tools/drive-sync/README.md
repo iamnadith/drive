@@ -156,7 +156,9 @@ The current script verifies an active upload through `PATCH /files/upload` and i
 
 ## Locks and safe behavior
 
-The panel can protect an object with `/files/locks`, and write routes can respond with `409 Object is locked`. The current client does not acquire, clear, or override server-side locks and does not expose a lock-token option. A locked item remains failed in local state for operator resolution; it is not blindly retried.
+The panel can protect an object with `/files/locks`, and write routes respond with `409 Object is locked` plus `code: OBJECT_LOCKED` when an active lock is found. The response may include the lock `reason`, `createdAt`, and `expiresAt`, but never the lock token. Use `GET /files/locks?projectId=...&bucket=...&key=...` with a read-capable API key to inspect one key without changing it. The current client does not acquire, clear, or override server-side locks and does not expose a lock-token option. A locked item remains failed in local state for operator resolution; it is not blindly retried.
+
+If the panel cannot query its lock store, it returns `503 LOCK_CHECK_UNAVAILABLE` instead of incorrectly reporting a lock. This is safe to rerun because the multipart session has not been created when that response is returned.
 
 The client is safe by default in these ways:
 
