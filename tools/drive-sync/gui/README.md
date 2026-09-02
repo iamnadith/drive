@@ -26,4 +26,6 @@ For a portable single-file build that includes the .NET runtime:
 dotnet publish tools/drive-sync/gui/DriveSync.Gui.csproj -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true
 ```
 
+The portable executable is written under `tools/drive-sync/gui/bin/Release/` and can be launched as `DriveSync.Gui-portable\DriveSync.Gui.exe`. The framework-dependent publish is much smaller, but requires the .NET Windows Desktop runtime on the machine.
+
 Python must be installed and available as `python`, or select `python.exe` in the GUI. The executable copies `drive_sync.py` beside itself during publish.

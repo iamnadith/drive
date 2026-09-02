@@ -41,11 +41,11 @@ internal sealed class MainForm : Form
     {
         Text = "Drive Sync";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(900, 650);
-        Size = new Size(1080, 820);
+        MinimumSize = new Size(760, 560);
+        Size = new Size(820, 620);
         AutoScaleMode = AutoScaleMode.Dpi;
         Font = new Font("Segoe UI", 9F);
-        BackColor = Color.FromArgb(248, 249, 251);
+        BackColor = Color.FromArgb(244, 246, 249);
 
         ConfigureControls();
         BuildLayout();
@@ -56,24 +56,31 @@ internal sealed class MainForm : Form
     {
         ConfigureTextBox(_panelUrl, "https://drive.nadith.pro");
         ConfigureTextBox(_projectId);
+        _projectId.PlaceholderText = "Project ID";
         ConfigureTextBox(_bucket);
+        _bucket.PlaceholderText = "Bucket name";
         ConfigureTextBox(_apiKey);
         _apiKey.UseSystemPasswordChar = true;
-        _apiKey.PlaceholderText = "Enter the project API key";
+        _apiKey.PlaceholderText = "Project API key";
 
         ConfigureTextBox(_folder);
+        _folder.PlaceholderText = "Choose a folder, or add files below";
         ConfigureTextBox(_prefix);
+        _prefix.PlaceholderText = "Optional destination prefix";
         ConfigureTextBox(_stateFile);
+        _stateFile.PlaceholderText = "Optional resume JSON";
         ConfigureTextBox(_python, "python");
 
         _files.Dock = DockStyle.Fill;
         _files.HorizontalScrollbar = true;
         _files.IntegralHeight = false;
         _files.SelectionMode = SelectionMode.MultiExtended;
+        _files.BackColor = Color.White;
+        _files.BorderStyle = BorderStyle.FixedSingle;
 
-        _contentsOnly.Text = "Contents only (omit selected folder name)";
+        _contentsOnly.Text = "Contents only";
         _contentsOnly.AutoSize = true;
-        _preserveEmpty.Text = "Preserve empty folders";
+        _preserveEmpty.Text = "Keep empty folders";
         _preserveEmpty.Checked = true;
         _preserveEmpty.AutoSize = true;
 
@@ -103,11 +110,21 @@ internal sealed class MainForm : Form
         _start.Text = "Start sync";
         _start.AutoSize = true;
         _start.Padding = new Padding(12, 4, 12, 4);
+        _start.FlatStyle = FlatStyle.Flat;
+        _start.FlatAppearance.BorderSize = 0;
+        _start.BackColor = Color.FromArgb(37, 99, 235);
+        _start.ForeColor = Color.White;
+        _start.Cursor = Cursors.Hand;
         _start.Click += async (_, _) => await StartSyncAsync();
 
         _stop.Text = "Stop";
         _stop.AutoSize = true;
         _stop.Padding = new Padding(12, 4, 12, 4);
+        _stop.FlatStyle = FlatStyle.Flat;
+        _stop.FlatAppearance.BorderColor = Color.FromArgb(209, 213, 219);
+        _stop.BackColor = Color.White;
+        _stop.ForeColor = Color.FromArgb(55, 65, 81);
+        _stop.Cursor = Cursors.Hand;
         _stop.Enabled = false;
         _stop.Click += (_, _) => StopSync();
     }
@@ -124,7 +141,7 @@ internal sealed class MainForm : Form
         control.Minimum = minimum;
         control.Maximum = maximum;
         control.Value = value;
-        control.Width = 78;
+        control.Width = 64;
         control.Anchor = AnchorStyles.Left;
     }
 
@@ -133,16 +150,16 @@ internal sealed class MainForm : Form
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(14),
+            Padding = new Padding(12),
             ColumnCount = 1,
             RowCount = 7,
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 154));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 126));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 142));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(root);
 
@@ -157,20 +174,26 @@ internal sealed class MainForm : Form
 
     private Control CreateHeader()
     {
-        var panel = new Panel { Dock = DockStyle.Fill };
+        var panel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.FromArgb(31, 41, 55),
+            Padding = new Padding(14, 4, 14, 0),
+        };
         var title = new Label
         {
             Text = "Drive Sync",
-            Font = new Font("Segoe UI Semibold", 19F),
+            Font = new Font("Segoe UI Semibold", 16F),
+            ForeColor = Color.White,
             AutoSize = true,
             Location = new Point(0, 0),
         };
         var subtitle = new Label
         {
             Text = "Resumable uploads with bounded workers and exact verification",
-            ForeColor = Color.FromArgb(90, 98, 110),
+            ForeColor = Color.FromArgb(203, 213, 225),
             AutoSize = true,
-            Location = new Point(2, 34),
+            Location = new Point(2, 27),
         };
         panel.Controls.Add(title);
         panel.Controls.Add(subtitle);
@@ -179,19 +202,29 @@ internal sealed class MainForm : Form
 
     private GroupBox CreateConnectionGroup()
     {
-        var group = new GroupBox { Text = "Drive connection", Dock = DockStyle.Fill, Padding = new Padding(10) };
-        var grid = CreateFieldGrid(4);
-        AddField(grid, 0, "Panel URL", _panelUrl);
-        AddField(grid, 1, "Project ID", _projectId);
-        AddField(grid, 2, "Bucket", _bucket);
-        AddField(grid, 3, "API key", _apiKey);
+        var group = new GroupBox { Text = "Drive connection", Dock = DockStyle.Fill, Padding = new Padding(8), BackColor = Color.White };
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 2 };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        grid.Controls.Add(FieldLabel("Panel URL"), 0, 0);
+        grid.Controls.Add(_panelUrl, 1, 0);
+        grid.Controls.Add(FieldLabel("Project ID"), 2, 0);
+        grid.Controls.Add(_projectId, 3, 0);
+        grid.Controls.Add(FieldLabel("Bucket"), 0, 1);
+        grid.Controls.Add(_bucket, 1, 1);
+        grid.Controls.Add(FieldLabel("API key"), 2, 1);
+        grid.Controls.Add(_apiKey, 3, 1);
         group.Controls.Add(grid);
         return group;
     }
 
     private GroupBox CreateSourceGroup()
     {
-        var group = new GroupBox { Text = "Source", Dock = DockStyle.Fill, Padding = new Padding(10) };
+        var group = new GroupBox { Text = "Source", Dock = DockStyle.Fill, Padding = new Padding(8), BackColor = Color.White };
         var grid = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -199,10 +232,10 @@ internal sealed class MainForm : Form
             RowCount = 2,
             Padding = new Padding(0),
         };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 95));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 116));
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 108));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 29));
         grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         grid.Controls.Add(FieldLabel("Folder"), 0, 0);
@@ -212,8 +245,8 @@ internal sealed class MainForm : Form
         grid.Controls.Add(FieldLabel("Files"), 0, 1);
         grid.Controls.Add(_files, 1, 1);
         var fileButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
-        fileButtons.Controls.Add(MakeButton("Add files", ChooseFiles, 108));
-        fileButtons.Controls.Add(MakeButton("Clear source", ClearSource, 108));
+        fileButtons.Controls.Add(MakeButton("Add files", ChooseFiles, 100));
+        fileButtons.Controls.Add(MakeButton("Clear source", ClearSource, 100));
         grid.Controls.Add(fileButtons, 2, 1);
 
         group.Controls.Add(grid);
@@ -222,19 +255,19 @@ internal sealed class MainForm : Form
 
     private GroupBox CreateOptionsGroup()
     {
-        var group = new GroupBox { Text = "Resume and transfer options", Dock = DockStyle.Fill, Padding = new Padding(10) };
+        var group = new GroupBox { Text = "Resume and transfer options", Dock = DockStyle.Fill, Padding = new Padding(8), BackColor = Color.White };
         var grid = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 4,
             RowCount = 3,
         };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 95));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 78));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
+        grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
         grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         grid.Controls.Add(FieldLabel("Prefix"), 0, 0);
@@ -244,8 +277,8 @@ internal sealed class MainForm : Form
 
         grid.Controls.Add(FieldLabel("State JSON"), 0, 1);
         grid.Controls.Add(_stateFile, 1, 1);
-        grid.Controls.Add(MakeButton("Browse", BrowseState, 96), 2, 1);
-        grid.Controls.Add(MakeButton("Load state", LoadState, 96), 3, 1);
+        grid.Controls.Add(MakeButton("Browse", BrowseState, 88), 2, 1);
+        grid.Controls.Add(MakeButton("Load state", LoadState, 88), 3, 1);
 
         var checks = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true, AutoSize = true };
         checks.Controls.Add(_contentsOnly);
@@ -264,14 +297,14 @@ internal sealed class MainForm : Form
     private Control CreateActionBar()
     {
         var bar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1 };
-        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 95));
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 65));
         bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         bar.Controls.Add(FieldLabel("Python"), 0, 0);
         bar.Controls.Add(_python, 1, 0);
-        bar.Controls.Add(MakeButton("Browse", BrowsePython, 96), 2, 0);
+        bar.Controls.Add(MakeButton("Browse", BrowsePython, 84), 2, 0);
         bar.Controls.Add(_start, 3, 0);
         bar.Controls.Add(_stop, 4, 0);
         return bar;
@@ -289,24 +322,9 @@ internal sealed class MainForm : Form
 
     private Control CreateLogGroup()
     {
-        var group = new GroupBox { Text = "Activity", Dock = DockStyle.Fill, Padding = new Padding(8) };
+        var group = new GroupBox { Text = "Activity", Dock = DockStyle.Fill, Padding = new Padding(8), BackColor = Color.White };
         group.Controls.Add(_log);
         return group;
-    }
-
-    private static TableLayoutPanel CreateFieldGrid(int rows)
-    {
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = rows };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 95));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var i = 0; i < rows; i++) grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        return grid;
-    }
-
-    private static void AddField(TableLayoutPanel grid, int row, string label, Control control)
-    {
-        grid.Controls.Add(FieldLabel(label), 0, row);
-        grid.Controls.Add(control, 1, row);
     }
 
     private static Label FieldLabel(string text) => new()
@@ -314,12 +332,23 @@ internal sealed class MainForm : Form
         Text = text,
         AutoSize = true,
         Anchor = AnchorStyles.Left,
-        Padding = new Padding(2, 6, 0, 0),
+        Padding = new Padding(2, 4, 0, 0),
     };
 
     private static Button MakeButton(string text, Action action, int width = 110)
     {
-        var button = new Button { Text = text, Width = width, Height = 27, Margin = new Padding(3) };
+        var button = new Button
+        {
+            Text = text,
+            Width = width,
+            Height = 26,
+            Margin = new Padding(3, 1, 3, 1),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.White,
+            ForeColor = Color.FromArgb(55, 65, 81),
+            Cursor = Cursors.Hand,
+        };
+        button.FlatAppearance.BorderColor = Color.FromArgb(209, 213, 219);
         button.Click += (_, _) => action();
         return button;
     }
