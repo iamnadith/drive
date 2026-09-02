@@ -197,6 +197,12 @@ export async function startProjectUpload(
     expiresAt: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
     headers: {
       ...(typeof body.contentType === "string" ? { "Content-Type": body.contentType } : {}),
+      ...Object.fromEntries(
+        Object.entries(metadata ?? {}).map(([name, value]) => [
+          `x-amz-meta-${name.toLowerCase()}`,
+          value,
+        ])
+      ),
     },
   })
 }

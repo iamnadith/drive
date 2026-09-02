@@ -172,6 +172,13 @@ export function createR2Client({
     region: "auto",
     endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
     credentials: { accessKeyId, secretAccessKey },
+    // AWS SDK v3 enables CRC32 request checksums by default in newer
+    // releases. R2 does not support that full-object checksum mode; leaving
+    // it enabled also puts x-amz-checksum-* parameters into presigned URLs
+    // that R2 rejects. Only calculate/validate checksums when an operation
+    // explicitly requires one.
+    requestChecksumCalculation: "WHEN_REQUIRED",
+    responseChecksumValidation: "WHEN_REQUIRED",
   })
   cache.set(cacheKey, client)
   // Account credentials can be rotated. Keep the cache bounded so old
@@ -257,7 +264,20 @@ export async function r2CreateSignedUploadUrl(
     ...(input?.ifMatch ? { IfMatch: input.ifMatch } : {}),
     ...(input?.ifNoneMatch ? { IfNoneMatch: input.ifNoneMatch } : {}),
   })
-  return getSignedUrl(client, command, { expiresIn: expiresInSeconds })
+  const metadataHeaders = new Set(
+    Object.keys(input?.metadata ?? {}).map((name) => `x-amz-meta-${name.toLowerCase()}`)
+  )
+  const signableHeaders = new Set<string>()
+  if (input?.contentType) signableHeaders.add("content-type")
+
+  return getSignedUrl(client, command, {
+    expiresIn: expiresInSeconds,
+    // Keep Content-Type and user metadata as request headers with the URL
+    // signature. This prevents the SDK from hoisting x-amz metadata into the
+    // query string and prevents R2 from seeing an unsigned x-amz-* header.
+    ...(signableHeaders.size > 0 ? { signableHeaders } : {}),
+    ...(metadataHeaders.size > 0 ? { unhoistableHeaders: metadataHeaders } : {}),
+  })
 }
 
 export async function r2HeadBucket(config: R2ClientConfig, bucket: string) {
