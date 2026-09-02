@@ -16,6 +16,12 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## Database schema during builds
+
+The build now applies the idempotent `supabase/drive_schema.sql` before Next.js compiles. Configure `POSTGRES_URL` (or `POSTGRES_URL_NON_POOLING`) in the Vercel build environment, and keep the existing `POSTGRES_SSL*` settings when required by your database. The build fails before deployment if the schema cannot be prepared, preventing first-request schema races.
+
+Run the schema step by itself with `npm run db:schema`. `DRIVE_SCHEMA_DRY_RUN=1` validates configuration without changing the database. `DRIVE_SKIP_SCHEMA_BUILD=1` is an explicit emergency escape hatch; production builds should leave it unset.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.

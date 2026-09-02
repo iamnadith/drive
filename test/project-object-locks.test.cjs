@@ -30,6 +30,39 @@ test("lock checks distinguish real locks from unavailable lock infrastructure", 
   assert.match(operationsStore, /expiresAt: lock\.expires_at/)
 })
 
+test("upload lock checks do not run the broad schema migration", () => {
+  const guard = operationsStore.match(
+    /export async function assertProjectObjectWritable[\s\S]*?\n}\n\nexport async function getProjectObjectLock/
+  )?.[0]
+  assert.ok(guard)
+  assert.doesNotMatch(guard, /ensureProjectOperationsSchema\(\)/)
+  assert.match(operationsStore, /code === "42P01"/)
+  assert.match(operationsStore, /code === "42703"/)
+})
+
+test("canonical lock schema is bucket-scoped", () => {
+  const schema = read("supabase/drive_schema.sql")
+  const lockTable = schema.match(
+    /create table if not exists drive_project_object_locks[\s\S]*?;\n\nalter table/
+  )?.[0]
+  assert.ok(lockTable)
+  assert.match(lockTable, /bucket_name text not null/)
+  assert.match(lockTable, /primary key \(project_id, bucket_name, object_key\)/)
+  assert.match(schema, /add column if not exists bucket_name text/)
+})
+
+test("canonical inventory schema matches the runtime key", () => {
+  const schema = read("supabase/drive_schema.sql")
+  const inventoryTable = schema.match(
+    /create table if not exists drive_project_object_inventory[\s\S]*?;\n\nalter table/
+  )?.[0]
+  assert.ok(inventoryTable)
+  assert.match(inventoryTable, /bucket_name text not null/)
+  assert.match(inventoryTable, /file_id text not null/)
+  assert.match(inventoryTable, /primary key \(project_id, bucket_name, object_key\)/)
+  assert.match(schema, /drive_project_object_inventory_file_id_key/)
+})
+
 test("every object write guard uses the shared lock classifier", () => {
   for (const relativePath of lockGuardRoutes) {
     const source = read(relativePath)

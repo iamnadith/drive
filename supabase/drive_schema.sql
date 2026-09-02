@@ -406,7 +406,9 @@ create index if not exists drive_project_api_events_action_time_idx
 
 create table if not exists drive_project_object_inventory (
   project_id uuid not null references drive_projects(id) on delete cascade,
+  bucket_name text not null,
   object_key text not null,
+  file_id text not null default encode(gen_random_bytes(12), 'hex'),
   size bigint not null default 0,
   etag text,
   content_type text,
@@ -414,11 +416,13 @@ create table if not exists drive_project_object_inventory (
   last_modified timestamptz,
   deleted_at timestamptz,
   updated_at timestamptz not null default now(),
-  primary key (project_id, object_key)
+  primary key (project_id, bucket_name, object_key)
 );
 
 alter table if exists public.drive_project_object_inventory add column if not exists project_id uuid references public.drive_projects(id) on delete cascade;
+alter table if exists public.drive_project_object_inventory add column if not exists bucket_name text;
 alter table if exists public.drive_project_object_inventory add column if not exists object_key text;
+alter table if exists public.drive_project_object_inventory add column if not exists file_id text;
 alter table if exists public.drive_project_object_inventory add column if not exists size bigint not null default 0;
 alter table if exists public.drive_project_object_inventory add column if not exists etag text;
 alter table if exists public.drive_project_object_inventory add column if not exists content_type text;
@@ -426,29 +430,62 @@ alter table if exists public.drive_project_object_inventory add column if not ex
 alter table if exists public.drive_project_object_inventory add column if not exists last_modified timestamptz;
 alter table if exists public.drive_project_object_inventory add column if not exists deleted_at timestamptz;
 alter table if exists public.drive_project_object_inventory add column if not exists updated_at timestamptz not null default now();
+update public.drive_project_object_inventory i
+set bucket_name = coalesce(nullif(p.bucket_name, ''), '')
+from public.drive_projects p
+where p.id = i.project_id
+  and i.bucket_name is null;
+update public.drive_project_object_inventory
+set bucket_name = ''
+where bucket_name is null;
+update public.drive_project_object_inventory
+set file_id = encode(gen_random_bytes(12), 'hex')
+where file_id is null or file_id = '';
+alter table public.drive_project_object_inventory alter column bucket_name set default '';
+alter table public.drive_project_object_inventory alter column bucket_name set not null;
+alter table public.drive_project_object_inventory alter column file_id set default encode(gen_random_bytes(12), 'hex');
+alter table public.drive_project_object_inventory alter column file_id set not null;
+alter table public.drive_project_object_inventory drop constraint if exists drive_project_object_inventory_pkey;
+alter table public.drive_project_object_inventory add constraint drive_project_object_inventory_pkey primary key (project_id, bucket_name, object_key);
+create unique index if not exists drive_project_object_inventory_file_id_key
+  on drive_project_object_inventory (file_id);
 
 create index if not exists drive_project_object_inventory_search_idx
-  on drive_project_object_inventory (project_id, object_key text_pattern_ops)
+  on drive_project_object_inventory (project_id, bucket_name, object_key text_pattern_ops)
   where deleted_at is null;
 create index if not exists drive_project_object_inventory_updated_idx
-  on drive_project_object_inventory (project_id, updated_at desc);
+  on drive_project_object_inventory (project_id, bucket_name, updated_at desc);
 
 create table if not exists drive_project_object_locks (
   project_id uuid not null references drive_projects(id) on delete cascade,
+  bucket_name text not null,
   object_key text not null,
   lock_token_hash text not null,
   reason text,
   expires_at timestamptz,
   created_at timestamptz not null default now(),
-  primary key (project_id, object_key)
+  primary key (project_id, bucket_name, object_key)
 );
 
 alter table if exists public.drive_project_object_locks add column if not exists project_id uuid references public.drive_projects(id) on delete cascade;
+alter table if exists public.drive_project_object_locks add column if not exists bucket_name text;
 alter table if exists public.drive_project_object_locks add column if not exists object_key text;
 alter table if exists public.drive_project_object_locks add column if not exists lock_token_hash text;
 alter table if exists public.drive_project_object_locks add column if not exists reason text;
 alter table if exists public.drive_project_object_locks add column if not exists expires_at timestamptz;
 alter table if exists public.drive_project_object_locks add column if not exists created_at timestamptz not null default now();
+update public.drive_project_object_locks l
+set bucket_name = coalesce(nullif(p.bucket_name, ''), '')
+from public.drive_projects p
+where p.id = l.project_id
+  and l.bucket_name is null;
+update public.drive_project_object_locks
+set bucket_name = ''
+where bucket_name is null;
+alter table public.drive_project_object_locks alter column bucket_name set default '';
+alter table public.drive_project_object_locks alter column bucket_name set not null;
+alter table public.drive_project_object_locks drop constraint if exists drive_project_object_locks_pkey;
+alter table public.drive_project_object_locks add constraint drive_project_object_locks_pkey primary key (project_id, bucket_name, object_key);
 
 create table if not exists drive_project_webhooks (
   id uuid primary key default gen_random_uuid(),

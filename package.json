@@ -7,7 +7,8 @@
   },
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "npm run db:schema && next build",
+    "db:schema": "node scripts/prepare-schema.mjs",
     "start": "next start",
     "lint": "eslint",
     "test": "node --test test/*.test.cjs",
@@ -75,6 +76,7 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
+    "@next/env": "16.0.10",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/pg": "^8.16.0",

@@ -134,6 +134,133 @@ function mapInventoryRow(row: InventoryRow): ProjectInventoryObject {
   }
 }
 
+type ProjectObjectLockRow = {
+  lock_token_hash: string
+  reason: string | null
+  expires_at: string | null
+  created_at: string
+  active: boolean
+}
+
+function postgresErrorCode(error: unknown) {
+  if (!error || typeof error !== "object" || !("code" in error)) return null
+  const code = (error as { code?: unknown }).code
+  return typeof code === "string" ? code : null
+}
+
+/**
+ * The lock guard is on the upload hot path. It must never start the broad
+ * operations-schema migration: that migration changes several primary keys
+ * and indexes and is not a safe per-request operation across cold instances.
+ * Only create the small lock table when a genuinely fresh database has no
+ * table yet; existing tables are read without any DDL.
+ */
+async function ensureProjectObjectLocksTable() {
+  await queryDb(`
+    create table if not exists public.drive_project_object_locks (
+      project_id uuid not null references public.drive_projects(id) on delete cascade,
+      bucket_name text not null,
+      object_key text not null,
+      lock_token_hash text not null,
+      reason text,
+      expires_at timestamptz,
+      created_at timestamptz not null default now(),
+      primary key (project_id, bucket_name, object_key)
+    );
+  `)
+}
+
+async function selectProjectObjectLock(
+  projectId: string,
+  bucketName: string,
+  key: string,
+  options: { activeOnly: boolean }
+): Promise<ProjectObjectLockRow | null> {
+  const activeClause = options.activeOnly
+    ? "and (expires_at is null or expires_at > now())"
+    : ""
+
+  const selectLock = async (bucketAware: boolean) => {
+    const bucketClause = bucketAware ? "and bucket_name = $2" : ""
+    const keyParameter = bucketAware ? "$3" : "$2"
+    const params = bucketAware
+      ? [projectId, bucketName, key]
+      : [projectId, key]
+    const { rows } = await queryDb<ProjectObjectLockRow>(
+      `
+        select
+          lock_token_hash,
+          reason,
+          expires_at,
+          created_at,
+          (expires_at is null or expires_at > now()) as active
+        from public.drive_project_object_locks
+        where project_id = $1
+          ${bucketClause}
+          and object_key = ${keyParameter}
+          ${activeClause}
+        limit 1;
+      `,
+      params
+    )
+    return rows[0] ?? null
+  }
+
+  try {
+    return await selectLock(true)
+  } catch (error) {
+    const code = postgresErrorCode(error)
+
+    // A clean install may not have run the optional operations schema yet.
+    // Bootstrap only this table, then retry the exact read. This path is
+    // idempotent and does not run the inventory/job migrations.
+    if (code === "42P01") {
+      await ensureProjectObjectLocksTable()
+      return selectLock(true)
+    }
+
+    // Older installations used a project/key primary key before locks became
+    // bucket-scoped. Read that shape conservatively until the schema job
+    // migrates it; do not run that migration from an upload request.
+    if (code === "42703") return selectLock(false)
+    throw error
+  }
+}
+
+async function isProjectOperationsSchemaReady() {
+  const { rows } = await queryDb<{ ready: boolean }>(`
+    select (
+      to_regclass('public.drive_project_operation_jobs') is not null
+      and to_regclass('public.drive_project_api_events') is not null
+      and to_regclass('public.drive_project_object_inventory') is not null
+      and to_regclass('public.drive_project_object_locks') is not null
+      and to_regclass('public.drive_project_webhooks') is not null
+      and exists (
+        select 1
+        from information_schema.columns
+        where table_schema = 'public'
+          and table_name = 'drive_project_object_inventory'
+          and column_name = 'bucket_name'
+      )
+      and exists (
+        select 1
+        from information_schema.columns
+        where table_schema = 'public'
+          and table_name = 'drive_project_object_inventory'
+          and column_name = 'file_id'
+      )
+      and exists (
+        select 1
+        from information_schema.columns
+        where table_schema = 'public'
+          and table_name = 'drive_project_object_locks'
+          and column_name = 'bucket_name'
+      )
+    ) as ready;
+  `)
+  return rows[0]?.ready === true
+}
+
 async function findProjectIdsForTrackedBucket(bucketName: string) {
   await ensureProjectOperationsSchema()
   const { rows } = await queryDb<{ project_id: string }>(
@@ -150,6 +277,10 @@ async function findProjectIdsForTrackedBucket(bucketName: string) {
 export function ensureProjectOperationsSchema(): Promise<void> {
   if (!global.__driveProjectOperationsSchema) {
     global.__driveProjectOperationsSchema = (async () => {
+      // Builds provision the canonical schema. Keep this read-only fast path
+      // so a cold runtime does not repeat DDL or race another instance.
+      if (await isProjectOperationsSchemaReady()) return
+
       await queryDb(`create extension if not exists pgcrypto;`)
   await queryDb(`
     create table if not exists drive_project_operation_jobs (
@@ -722,25 +853,9 @@ export async function assertProjectObjectWritable(
   key: string,
   lockToken?: string | null
 ) {
-  await ensureProjectOperationsSchema()
-  const { rows } = await queryDb<{
-    lock_token_hash: string
-    reason: string | null
-    expires_at: string | null
-    created_at: string
-  }>(
-    `
-      select lock_token_hash, reason, expires_at, created_at
-      from drive_project_object_locks
-      where project_id = $1
-        and bucket_name = $2
-        and object_key = $3
-        and (expires_at is null or expires_at > now())
-      limit 1;
-    `,
-    [projectId, bucketName, key]
-  )
-  const lock = rows[0]
+  const lock = await selectProjectObjectLock(projectId, bucketName, key, {
+    activeOnly: true,
+  })
   if (!lock) return
   if (lockToken && hashProjectSecret(lockToken) === lock.lock_token_hash) return
   throw new ProjectObjectLockedError({
@@ -755,28 +870,9 @@ export async function getProjectObjectLock(
   bucketName: string,
   key: string
 ) {
-  await ensureProjectOperationsSchema()
-  const { rows } = await queryDb<{
-    reason: string | null
-    expires_at: string | null
-    created_at: string
-    active: boolean
-  }>(
-    `
-      select
-        reason,
-        expires_at,
-        created_at,
-        (expires_at is null or expires_at > now()) as active
-      from drive_project_object_locks
-      where project_id = $1
-        and bucket_name = $2
-        and object_key = $3
-      limit 1;
-    `,
-    [projectId, bucketName, key]
-  )
-  const lock = rows[0]
+  const lock = await selectProjectObjectLock(projectId, bucketName, key, {
+    activeOnly: false,
+  })
   if (!lock) return null
   return {
     reason: lock.reason,
