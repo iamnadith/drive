@@ -63,6 +63,11 @@ test("canonical inventory schema matches the runtime key", () => {
   assert.match(schema, /drive_project_object_inventory_file_id_key/)
 })
 
+test("canonical schema keeps Supabase extension objects visible", () => {
+  const schema = read("supabase/drive_schema.sql")
+  assert.match(schema, /set search_path = public, extensions;/)
+})
+
 test("every object write guard uses the shared lock classifier", () => {
   for (const relativePath of lockGuardRoutes) {
     const source = read(relativePath)

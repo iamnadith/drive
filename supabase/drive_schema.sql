@@ -4,7 +4,9 @@ create extension if not exists pgcrypto;
 create extension if not exists pg_trgm;
 
 -- Ensure we operate on the expected schema in Supabase (usually `public`).
-set search_path = public;
+-- Supabase installs pgcrypto/pg_trgm objects in `extensions`, so keep that
+-- schema visible for gen_random_bytes() and gin_trgm_ops as well.
+set search_path = public, extensions;
 
 do $$ begin
   if to_regclass('public.drive_bucket_stat_history') is not null
