@@ -4,6 +4,14 @@
 
 The client is a single command, not a subcommand-based CLI. Running the same command again with the same selection and state file is the current resume operation.
 
+For a saved state containing many individually selected files, use
+`resume_from_state.py`. It reconstructs the original selection in memory and
+avoids Windows command-line length limits:
+
+```powershell
+python tools/drive-sync/resume_from_state.py "C:\path\to\state.json" --no-verify-completed --workers 3 --part-workers 4
+```
+
 ## Native Windows GUI
 
 For a low-memory desktop workflow, use the native .NET WinForms wrapper in [`gui/`](gui/). It keeps this Python engine unchanged, lets you choose a folder or individual files, loads an existing resume JSON, and passes the API key to the child process through its environment instead of the command line. Run it from the repository root with:
