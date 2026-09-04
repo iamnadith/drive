@@ -858,10 +858,13 @@ export default function AccountsPage() {
   ).length;
   const disabledCount = accounts.filter((a) => a.status === "disabled").length;
   const syncErrorCount = accounts.filter(
-    (a) => a.syncStatus === "error",
+    (a) => a.status !== "disabled" && a.syncStatus === "error",
   ).length;
   const pendingSyncCount = accounts.filter(
-    (a) => a.syncStatus === "idle" || a.syncStatus === "syncing",
+    (a) =>
+      a.status !== "disabled" &&
+      a.syncStatus === "idle" &&
+      !a.lastSyncedAt,
   ).length;
 
   const filteredAccounts = React.useMemo(() => {
@@ -937,7 +940,7 @@ export default function AccountsPage() {
           <div className="flex min-h-[40px] w-full items-center justify-center text-center">
             <Badge
               variant={
-                syncStatus === "error"
+                status !== "disabled" && syncStatus === "error"
                   ? "destructive"
                   : status === "active"
                     ? "default"
@@ -946,7 +949,7 @@ export default function AccountsPage() {
                       : "secondary"
               }
               className={
-                syncStatus === "error"
+                status !== "disabled" && syncStatus === "error"
                   ? "bg-red-600 text-white hover:bg-red-700"
                   : status === "active"
                     ? "bg-green-500 hover:bg-green-600"
@@ -1057,17 +1060,9 @@ export default function AccountsPage() {
   const totalRows = filteredAccounts.length;
   const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
   const currentPageIndex = Math.min(pageIndex, totalPages - 1);
-  const latestSyncedAt = accounts.reduce<string | null>((latest, account) => {
-    if (!account.lastSyncedAt) return latest;
-    if (!latest) return account.lastSyncedAt;
-    return new Date(account.lastSyncedAt).getTime() >
-      new Date(latest).getTime()
-      ? account.lastSyncedAt
-      : latest;
-  }, null);
-  const accountsHeaderDescription = latestSyncedAt
-    ? `Last refreshed ${new Date(latestSyncedAt).toLocaleString()}`
-    : "Last refreshed Never";
+  const accountsHeaderDescription = activeAccount?.lastSyncedAt
+    ? `Last Synced At ${new Date(activeAccount.lastSyncedAt).toLocaleString()}`
+    : "Last Synced At Never";
   const paginatedRows = table
     .getRowModel()
     .rows.slice(

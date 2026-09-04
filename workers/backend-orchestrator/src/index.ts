@@ -29,13 +29,34 @@ type AccountRow = {
   last_synced_at: string | null
 }
 
-type BucketInfo = { name: string; jurisdiction: string }
+type BucketInfo = {
+  name: string
+  creationDate: string | null
+  jurisdiction: string
+  location: string | null
+  storageClass: string
+}
 type BucketMetric = { bucket: string; objects: number; bytes: number; observedAt: string }
+type BucketCorsRule = {
+  id?: string
+  allowedOrigins: string[]
+  allowedMethods: string[]
+  allowedHeaders: string[]
+  exposeHeaders: string[]
+  maxAgeSeconds?: number
+}
+type BucketSettings = {
+  publicAccess: { enabled: boolean; domain: string | null; bucketId: string | null }
+  corsRules: BucketCorsRule[]
+}
 
-const BUCKET_BATCH_SIZE = 25
+// Each bucket settings refresh uses two Cloudflare API requests. Keep the batch
+// bounded so one invocation stays below Workers subrequest limits and can
+// persist progress after every bucket.
+const BUCKET_BATCH_SIZE = 10
 const EXTERNAL_REQUEST_TIMEOUT_MS = 8_000
 const METRICS_CACHE_TTL_MS = 10_000
-const WORKER_BUILD = 19
+const WORKER_BUILD = 20
 const RETENTION_BATCH_SIZE = 250
 const metricsCache = new Map<string, { expiresAt: number; metrics: BucketMetric[] }>()
 
@@ -138,6 +159,26 @@ async function ensureSchema(db: Client) {
   `)
   await db.query(`create index if not exists drive_storage_stats_history_bucket_time_idx on drive_storage_stats_history (account_id, bucket_name, changed_at desc)`)
   await db.query(`create index if not exists drive_storage_stats_history_time_idx on drive_storage_stats_history (changed_at desc)`)
+  await db.query(`
+    create table if not exists drive_bucket_settings_snapshots (
+      account_id uuid not null references drive_accounts(id) on delete cascade,
+      bucket_name text not null,
+      bucket_created_at timestamptz,
+      jurisdiction text not null default 'default',
+      location text,
+      storage_class text not null default 'Standard',
+      public_access jsonb not null default '{"enabled":false,"domain":null,"bucketId":null}'::jsonb,
+      cors_rules jsonb not null default '[]'::jsonb,
+      settings_status text not null default 'pending',
+      settings_error text,
+      settings_last_attempted_at timestamptz,
+      settings_last_synced_at timestamptz,
+      inventory_synced_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      primary key (account_id, bucket_name)
+    )
+  `)
+  await db.query(`create index if not exists drive_bucket_settings_snapshots_account_idx on drive_bucket_settings_snapshots (account_id)`)
   await db.query(`
     create table if not exists drive_analytics_bucket_snapshots (
       account_id uuid not null,
@@ -276,9 +317,90 @@ async function listBuckets(account: AccountRow) {
   return values
     .map((value): BucketInfo => ({
       name: String((value as { name?: unknown })?.name ?? ""),
+      creationDate: typeof (value as { creation_date?: unknown })?.creation_date === "string"
+        ? String((value as { creation_date: unknown }).creation_date)
+        : null,
       jurisdiction: String((value as { jurisdiction?: unknown })?.jurisdiction ?? "default"),
+      location: typeof (value as { location?: unknown })?.location === "string"
+        ? String((value as { location: unknown }).location)
+        : null,
+      storageClass: typeof (value as { storage_class?: unknown })?.storage_class === "string"
+        ? String((value as { storage_class: unknown }).storage_class)
+        : "Standard",
     }))
     .filter((value) => value.name.length > 0)
+}
+
+async function cloudflareBucketSubresource(
+  account: AccountRow,
+  bucket: BucketInfo,
+  suffix: string
+) {
+  if (!account.cloudflare_account_id) throw new Error(`Account ${account.label} has no Cloudflare account ID`)
+  const response = await fetchWithTimeout(
+    `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account.cloudflare_account_id)}/r2/buckets/${encodeURIComponent(bucket.name)}/${suffix}`,
+    {
+      headers: {
+        Authorization: `Bearer ${account.api_token}`,
+        ...(bucket.jurisdiction !== "default" ? { "cf-r2-jurisdiction": bucket.jurisdiction } : {}),
+      },
+    }
+  )
+  const payload = await response.json().catch(() => ({})) as {
+    result?: unknown
+    errors?: Array<{ message?: string }>
+  }
+  if (!response.ok) {
+    throw new Error(payload.errors?.[0]?.message || `${suffix} lookup failed (${response.status})`)
+  }
+  return payload.result
+}
+
+function stringArray(value: unknown) {
+  return Array.isArray(value)
+    ? Array.from(new Set(value.filter((item): item is string => typeof item === "string")))
+    : []
+}
+
+async function readBucketSettings(account: AccountRow, bucket: BucketInfo): Promise<BucketSettings> {
+  const [managedResult, corsResult] = await Promise.all([
+    cloudflareBucketSubresource(account, bucket, "domains/managed"),
+    cloudflareBucketSubresource(account, bucket, "cors"),
+  ])
+  const managed = managedResult && typeof managedResult === "object"
+    ? managedResult as Record<string, unknown>
+    : {}
+  const cors = corsResult && typeof corsResult === "object"
+    ? corsResult as { rules?: unknown }
+    : {}
+  const corsRules = Array.isArray(cors.rules)
+    ? cors.rules.flatMap((value): BucketCorsRule[] => {
+        if (!value || typeof value !== "object") return []
+        const rule = value as Record<string, unknown>
+        const allowed = rule.allowed && typeof rule.allowed === "object"
+          ? rule.allowed as Record<string, unknown>
+          : {}
+        const allowedOrigins = stringArray(allowed.origins)
+        const allowedMethods = stringArray(allowed.methods)
+        if (allowedOrigins.length === 0 || allowedMethods.length === 0) return []
+        return [{
+          ...(typeof rule.id === "string" ? { id: rule.id } : {}),
+          allowedOrigins,
+          allowedMethods,
+          allowedHeaders: stringArray(allowed.headers),
+          exposeHeaders: stringArray(rule.exposeHeaders),
+          ...(typeof rule.maxAgeSeconds === "number" ? { maxAgeSeconds: rule.maxAgeSeconds } : {}),
+        }]
+      })
+    : []
+  return {
+    publicAccess: {
+      enabled: managed.enabled === true,
+      domain: typeof managed.domain === "string" && managed.domain ? managed.domain : null,
+      bucketId: typeof managed.bucketId === "string" && managed.bucketId ? managed.bucketId : null,
+    },
+    corsRules,
+  }
 }
 
 async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Promise<BucketMetric[]> {
@@ -389,7 +511,8 @@ async function recordBucketHistory(db: Client, input: { accountId: string; bucke
   )
 }
 
-async function reconcileBuckets(db: Client, account: AccountRow, bucketNames: string[]) {
+async function reconcileBuckets(db: Client, account: AccountRow, buckets: BucketInfo[]) {
+  const bucketNames = buckets.map((bucket) => bucket.name)
   const current = await db.query<{ id: string; bucket_name: string; objects: string; bytes: string }>(
     `select id, bucket_name, objects, bytes from drive_bucket_stats where account_id=$1`, [account.id]
   )
@@ -398,14 +521,85 @@ async function reconcileBuckets(db: Client, account: AccountRow, bucketNames: st
     await recordBucketHistory(db, { accountId: account.id, bucket: row.bucket_name, objects: 0, bytes: 0, deleted: true })
     await db.query(`delete from drive_bucket_stats where id=$1`, [row.id])
   }
-  for (const bucket of bucketNames) {
+  await db.query(
+    `delete from drive_bucket_settings_snapshots where account_id=$1 and not (bucket_name=any($2::text[]))`,
+    [account.id, bucketNames]
+  )
+  for (const bucket of buckets) {
     await db.query(
       `insert into drive_bucket_stats (id,account_id,bucket_name,objects,bytes,status,updated_at)
        values (gen_random_uuid(),$1,$2,0,0,'pending',now())
        on conflict (account_id,bucket_name) do nothing`,
-      [account.id, bucket]
+      [account.id, bucket.name]
+    )
+    await db.query(
+      `insert into drive_bucket_settings_snapshots
+        (account_id,bucket_name,bucket_created_at,jurisdiction,location,storage_class,
+         settings_status,inventory_synced_at,updated_at)
+       values ($1,$2,$3,$4,$5,$6,'syncing',now(),now())
+       on conflict(account_id,bucket_name) do update set
+         bucket_created_at=excluded.bucket_created_at,
+         jurisdiction=excluded.jurisdiction,
+         location=excluded.location,
+         storage_class=excluded.storage_class,
+         settings_status='syncing',
+         inventory_synced_at=now(),
+         updated_at=now()`,
+      [account.id, bucket.name, bucket.creationDate, bucket.jurisdiction, bucket.location, bucket.storageClass]
     )
   }
+}
+
+async function syncBucketSettingsBatch(db: Client, account: AccountRow, buckets: BucketInfo[]) {
+  const results = await Promise.all(buckets.map(async (bucket) => {
+    try {
+      const settings = await readBucketSettings(account, bucket)
+      return {
+        bucket: bucket.name,
+        ok: true,
+        publicAccess: settings.publicAccess,
+        corsRules: settings.corsRules,
+        error: null,
+      }
+    } catch (error) {
+      return {
+        bucket: bucket.name,
+        ok: false,
+        publicAccess: null,
+        corsRules: null,
+        error: (error instanceof Error ? error.message : String(error)).slice(0, 1000),
+      }
+    }
+  }))
+  if (results.length > 0) {
+    // One atomic, idempotent write is substantially cheaper than one query per
+    // bucket. Failed rows update only status metadata and retain verified JSON.
+    await db.query(`
+      with input as (
+        select bucket,ok,public_access,cors_rules,error
+        from jsonb_to_recordset($2::jsonb) as value(
+          bucket text, ok boolean, public_access jsonb, cors_rules jsonb, error text
+        )
+      )
+      update drive_bucket_settings_snapshots snapshots set
+        public_access=case when input.ok then input.public_access else snapshots.public_access end,
+        cors_rules=case when input.ok then input.cors_rules else snapshots.cors_rules end,
+        settings_status=case when input.ok then 'completed' else 'error' end,
+        settings_error=input.error,
+        settings_last_attempted_at=now(),
+        settings_last_synced_at=case when input.ok then now() else snapshots.settings_last_synced_at end,
+        updated_at=now()
+      from input
+      where snapshots.account_id=$1 and snapshots.bucket_name=input.bucket
+    `, [account.id, JSON.stringify(results.map((result) => ({
+      bucket: result.bucket,
+      ok: result.ok,
+      public_access: result.publicAccess,
+      cors_rules: result.corsRules,
+      error: result.error,
+    })))])
+  }
+  return results.flatMap((result) => result.error ? [{ bucket: result.bucket, error: result.error }] : [])
 }
 
 async function selectNextAccount(db: Client, syncIntervalMinutes: number) {
@@ -413,9 +607,11 @@ async function selectNextAccount(db: Client, syncIntervalMinutes: number) {
     select id,label,email,api_token,cloudflare_account_id,status,last_synced_at
     from drive_accounts
     where api_token<>''
-      and status = 'active'
+      and status in ('active', 'available')
       and (last_synced_at is null or last_synced_at < now() - ($1::text || ' minutes')::interval)
-    order by last_synced_at asc nulls first, created_at asc limit 1
+    order by last_synced_at asc nulls first,
+             case when status='active' then 0 else 1 end,
+             created_at asc limit 1
   `, [syncIntervalMinutes])
   return account.rows[0] ?? null
 }
@@ -429,11 +625,29 @@ async function loadSyncProgress(db: Client) {
   return {
     accountId: row.account_id,
     buckets: row.bucket_names.flatMap((value): BucketInfo[] => {
-      if (typeof value === "string" && value.length > 0) return [{ name: value, jurisdiction: "default" }]
+      if (typeof value === "string" && value.length > 0) return [{
+        name: value,
+        creationDate: null,
+        jurisdiction: "default",
+        location: null,
+        storageClass: "Standard",
+      }]
       if (!value || typeof value !== "object") return []
-      const bucket = value as { name?: unknown; jurisdiction?: unknown }
+      const bucket = value as {
+        name?: unknown
+        creationDate?: unknown
+        jurisdiction?: unknown
+        location?: unknown
+        storageClass?: unknown
+      }
       return typeof bucket.name === "string" && bucket.name.length > 0
-        ? [{ name: bucket.name, jurisdiction: typeof bucket.jurisdiction === "string" ? bucket.jurisdiction : "default" }]
+        ? [{
+            name: bucket.name,
+            creationDate: typeof bucket.creationDate === "string" ? bucket.creationDate : null,
+            jurisdiction: typeof bucket.jurisdiction === "string" ? bucket.jurisdiction : "default",
+            location: typeof bucket.location === "string" ? bucket.location : null,
+            storageClass: typeof bucket.storageClass === "string" ? bucket.storageClass : "Standard",
+          }]
         : []
     }),
     bucketOffset: Math.max(0, Math.trunc(Number(row.bucket_offset) || 0)),
@@ -444,7 +658,7 @@ async function loadSyncProgress(db: Client) {
 async function selectAccountById(db: Client, accountId: string) {
   const result = await db.query<AccountRow>(`
     select id,label,email,api_token,cloudflare_account_id,status,last_synced_at
-    from drive_accounts where id=$1 and api_token<>'' and status='active' limit 1
+    from drive_accounts where id=$1 and api_token<>'' and status in ('active','available') limit 1
   `, [accountId])
   return result.rows[0] ?? null
 }
@@ -482,7 +696,7 @@ async function recordDailyAccountSnapshot(db: Client, accountId: string) {
           where stats.account_id = a.id
         ), '')) bucket_fingerprint
       from drive_accounts a
-      where a.id = $1
+      where a.id = $1 and a.status = 'active'
     ), previous_state as (
       select bucket_fingerprint
       from drive_analytics_active_account_snapshots
@@ -661,10 +875,10 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
       // invocation is killed at the CPU limit, the next cron run can resume
       // from this durable checkpoint instead of starting from account selection.
       await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0, reconciled: false })
-      await reconcileBuckets(db, account, bucketNames)
+      await reconcileBuckets(db, account, buckets)
       await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0, reconciled: true })
     } else if (!progress.reconciled) {
-      await reconcileBuckets(db, account, bucketNames)
+      await reconcileBuckets(db, account, buckets)
       await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset, reconciled: true })
     }
     if (buckets.length === 0) {
@@ -676,11 +890,16 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
     const metrics = await getBucketMetrics(account, buckets)
     const batch = buckets.slice(bucketOffset, bucketOffset + BUCKET_BATCH_SIZE)
     const metricByBucket = new Map(metrics.map((metric) => [metric.bucket, metric]))
+    const settingsErrors = await syncBucketSettingsBatch(db, account, batch)
     if (metrics.length < buckets.length) {
       // Cloudflare analytics can lag after account activation or migration.
       // Missing provider data is not a valid zero snapshot: preserve the last
-      // known totals and retry the complete bucket set on the next cycle.
-      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0, reconciled: true })
+      // known totals. Bucket settings use the same durable cursor and continue
+      // refreshing even while analytics is temporarily incomplete.
+      const nextSettingsOffset = bucketOffset + batch.length < buckets.length
+        ? bucketOffset + batch.length
+        : 0
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: nextSettingsOffset, reconciled: true })
       await db.query(
         `update drive_accounts set sync_status='syncing',sync_message=$2,updated_at=now() where id=$1`,
         [account.id, `R2 analytics unavailable for ${buckets.length - metrics.length} bucket(s); retaining last known totals`]
@@ -691,11 +910,16 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
         buckets: buckets.length,
         metrics: metrics.length,
         missingMetrics: buckets.length - metrics.length,
+        refreshedSettings: batch.length,
+        settingsErrors,
       }
     }
     const pendingDecreases = await pendingMetricDecreases(db, account.id, metrics)
     if (pendingDecreases.length > 0) {
-      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: 0, reconciled: true })
+      const nextSettingsOffset = bucketOffset + batch.length < buckets.length
+        ? bucketOffset + batch.length
+        : 0
+      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: nextSettingsOffset, reconciled: true })
       await db.query(
         `update drive_accounts set sync_status='syncing',sync_message=$2,updated_at=now() where id=$1`,
         [account.id, `R2 decrease awaiting a second provider observation for ${pendingDecreases.length} bucket(s); retaining last known totals`]
@@ -705,19 +929,27 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
         status: "incomplete",
         buckets: buckets.length,
         pendingDecreases: pendingDecreases.map((candidate) => candidate.bucketName),
+        refreshedSettings: batch.length,
+        settingsErrors,
       }
     }
-    for (const [index, bucket] of batch.entries()) {
+    const batchMetrics = batch.flatMap((bucket) => {
       const metric = metricByBucket.get(bucket.name)
-      if (metric) await applyBucketMetrics(db, account, [metric])
-      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: bucketOffset + index + 1, reconciled: true })
-    }
+      return metric ? [metric] : []
+    })
+    await applyBucketMetrics(db, account, batchMetrics)
     const nextOffset = bucketOffset + batch.length
+    await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: nextOffset, reconciled: true })
     if (nextOffset < buckets.length) {
-      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: nextOffset, reconciled: true })
       return { account: account.label, status: "in_progress", buckets: buckets.length, processedBuckets: nextOffset, remainingBuckets: buckets.length - nextOffset }
     }
     await clearSyncProgress(db)
+    const staleSettings = await db.query<{ count: string }>(`
+      select count(*)::text count
+      from drive_bucket_settings_snapshots
+      where account_id=$1 and settings_status<>'completed'
+    `, [account.id])
+    const staleSettingsCount = Number(staleSettings.rows[0]?.count ?? 0)
     await db.query(`
       update drive_accounts a set
         total_buckets=(select count(*) from drive_bucket_stats s where s.account_id=a.id),
@@ -725,7 +957,12 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
         total_bytes=(select coalesce(sum(bytes),0) from drive_bucket_stats s where s.account_id=a.id),
         sync_status='ok',sync_message=$2,last_synced_at=now(),updated_at=now()
       where a.id=$1
-    `, [account.id, `R2 metrics synced for ${metrics.length} of ${buckets.length} buckets`])
+    `, [
+      account.id,
+      staleSettingsCount > 0
+        ? `R2 metrics synced; settings need retry for ${staleSettingsCount} bucket(s)`
+        : `R2 metrics and settings synced for ${buckets.length} buckets`,
+    ])
     await recordDailyAccountSnapshot(db, account.id)
     return {
       account: account.label,
@@ -733,11 +970,12 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
       buckets: buckets.length,
       metrics: metrics.length,
       missingMetrics: buckets.length - metrics.length,
+      staleSettings: staleSettingsCount,
       latestObservedAt: metrics.reduce<string | null>((latest, metric) => !latest || metric.observedAt > latest ? metric.observedAt : latest, null),
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    await db.query(`update drive_accounts set sync_status='error',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1`, [account.id, message]).catch(() => undefined)
+    await db.query(`update drive_accounts set sync_status='error',sync_message=$2,updated_at=now() where id=$1`, [account.id, message]).catch(() => undefined)
     return { account: account.label, status: "error", error: message }
   }
 }
@@ -843,6 +1081,14 @@ async function runCycle(env: Env, orchestratorUrl?: string) {
       where kind='orchestrator' and status='running'
     `)
     const sync = await syncNextAccount(db, config)
+    // Publish the synchronization result before optional retention work. If a
+    // Worker invocation is terminated during maintenance, a successfully
+    // synced account must not remain displayed as pending behind a stale lock.
+    await setState(db, {
+      status: "idle",
+      result: { sync, maintenance: { status: "pending" }, panel },
+      completed: true,
+    })
     const maintenance = await runRetention(db, config)
     const result = { sync, maintenance, panel }
     await setState(db, { status: "idle", result, completed: true })

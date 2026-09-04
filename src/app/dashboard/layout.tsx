@@ -106,9 +106,9 @@ export default function DashboardLayout({
   }
 
   return (
-    <SidebarProvider>
+    <SidebarProvider className="h-svh min-h-0 overflow-hidden overscroll-none">
       <AppSidebar />
-      <SidebarInset className="h-svh min-w-0 overflow-x-hidden overflow-y-auto">
+      <SidebarInset className="h-full min-h-0 min-w-0 touch-pan-y overflow-x-hidden overflow-y-auto overscroll-y-contain [-webkit-overflow-scrolling:touch]">
         <header className="dashboard-header-glass sticky top-0 z-50 overflow-hidden border-b transition-[background-color,backdrop-filter,border-color]">
           <div className="page-shell relative z-10 flex min-h-14 items-center justify-between gap-2 px-4 sm:h-16 sm:px-6">
             <div className="flex min-w-0 flex-1 items-center gap-2">

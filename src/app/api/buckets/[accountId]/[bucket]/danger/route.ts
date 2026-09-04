@@ -3,6 +3,7 @@ import { getAllAccounts } from "@/lib/accounts-store"
 import { runBucketDangerAction, type BucketDangerAction } from "@/lib/bucket-danger-actions"
 import { recordActivity, getRequestActivityContext } from "@/lib/activity-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { deleteBucketSettingsSnapshot } from "@/lib/bucket-settings-snapshot-store"
 
 export async function POST(request: Request, context: { params: Promise<{ accountId: string; bucket: string }> }) {
   try {
@@ -15,6 +16,9 @@ export async function POST(request: Request, context: { params: Promise<{ accoun
     const action = body.action === "delete" ? "delete" : body.action === "clear" ? "clear" : ""
     if (!action) return NextResponse.json({ error: "Action must be clear or delete" }, { status: 400 })
     const result = await runBucketDangerAction({ account, bucketName: decodeURIComponent(bucket), action: action as BucketDangerAction, confirmation: body.confirmation ?? body.confirmBucketName })
+    if (action === "delete") {
+      await deleteBucketSettingsSnapshot(account.id, decodeURIComponent(bucket))
+    }
     await recordActivity({
       actorUserId: auth.user.id,
       action: action === "delete" ? "bucket.deleted" : "bucket.cleared",

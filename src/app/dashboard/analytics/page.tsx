@@ -216,7 +216,13 @@ function formatRefreshTime(value?: string | null): string {
   if (!value) return "Never"
   const date = new Date(value)
   if (!Number.isFinite(date.getTime())) return "Unknown"
-  return date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date)
 }
 
 function statusVariant(status: string): "default" | "secondary" | "destructive" | "outline" {
@@ -479,7 +485,7 @@ export default function DashboardPage() {
           <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground sm:text-sm">
             <span>Logical storage and file history</span>
             <span className="hidden md:inline">-</span>
-            <span>Last refreshed at {formatRefreshTime(data?.generatedAt)}</span>
+            <span>Last Synced At {formatRefreshTime(data?.activeAccount?.lastSyncedAt)}</span>
             {refreshing ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : null}
           </div>
         </div>

@@ -8,6 +8,7 @@ import {
   getEffectiveBucketMediaOrigins,
   updateAndSyncBucketDeliverySettings,
 } from "@/lib/bucket-delivery-settings-service"
+import { upsertBucketSettingsSnapshot } from "@/lib/bucket-settings-snapshot-store"
 import {
   deleteBucketCors,
   putBucketCors,
@@ -62,6 +63,7 @@ export async function GET(
       readBucketSettings(account, bucket),
       getBucketDeliverySettings(account.id, bucket),
     ])
+    await upsertBucketSettingsSnapshot(account.id, bucket, settings)
     return NextResponse.json({ settings, deliverySettings: await serializeDeliverySettings(deliverySettings) })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to load bucket settings") }, { status: 400 })
@@ -109,6 +111,10 @@ export async function PATCH(
       readBucketSettings(account, bucket),
       getBucketDeliverySettings(account.id, bucket),
     ])
+    // The provider verification above is authoritative. Write it through so
+    // the database-backed Buckets page reflects panel edits immediately rather
+    // than waiting for the next orchestrator cycle.
+    await upsertBucketSettingsSnapshot(account.id, bucket, settings)
     await recordActivity({
       actorUserId: auth.user.id,
       action: "bucket.settings_updated",
@@ -143,6 +149,7 @@ export async function DELETE(
     const before = await readBucketSettings(account, bucket)
     await deleteBucketCors(account, bucket)
     const settings = await readBucketSettings(account, bucket)
+    await upsertBucketSettingsSnapshot(account.id, bucket, settings)
     await recordActivity({
       actorUserId: auth.user.id,
       action: "bucket.cors_removed",

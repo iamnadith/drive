@@ -1,5 +1,5 @@
-import { DashboardPageSkeleton } from "@/components/dashboard/page-shell"
+import { BucketsPageSkeleton } from "@/components/dashboard/loading-skeletons"
 
 export default function Loading() {
-  return <DashboardPageSkeleton cards={4} rows={7} />
+  return <BucketsPageSkeleton />
 }

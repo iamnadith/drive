@@ -139,6 +139,30 @@ create unique index if not exists drive_bucket_stats_unique on drive_bucket_stat
 create index if not exists drive_bucket_stats_account_idx on drive_bucket_stats (account_id);
 create index if not exists drive_bucket_stats_status_idx on drive_bucket_stats (status);
 
+-- Provider-owned bucket inventory and settings cached by the Backend
+-- Orchestrator. Failed refreshes retain the last known good JSON values while
+-- recording the latest attempt and error separately.
+create table if not exists drive_bucket_settings_snapshots (
+  account_id uuid not null references drive_accounts(id) on delete cascade,
+  bucket_name text not null,
+  bucket_created_at timestamptz,
+  jurisdiction text not null default 'default',
+  location text,
+  storage_class text not null default 'Standard',
+  public_access jsonb not null default '{"enabled":false,"domain":null,"bucketId":null}'::jsonb,
+  cors_rules jsonb not null default '[]'::jsonb,
+  settings_status text not null default 'pending',
+  settings_error text,
+  settings_last_attempted_at timestamptz,
+  settings_last_synced_at timestamptz,
+  inventory_synced_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (account_id, bucket_name)
+);
+
+create index if not exists drive_bucket_settings_snapshots_account_idx
+  on drive_bucket_settings_snapshots (account_id);
+
 create table if not exists drive_projects (
   id uuid primary key default gen_random_uuid(),
   project_id text not null,

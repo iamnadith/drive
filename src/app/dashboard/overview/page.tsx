@@ -10,7 +10,6 @@ import {
   HardDrive,
   RefreshCw,
   Server,
-  X,
 } from "lucide-react"
 import {
   Bar,
@@ -28,6 +27,15 @@ import { Button } from "@/components/ui/button"
 import { Calendar } from "@/components/ui/calendar"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
+import {
   ChartConfig,
   ChartContainer,
   ChartTooltip,
@@ -43,6 +51,7 @@ import {
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -50,7 +59,6 @@ import {
 import { DashboardOverviewSkeleton } from "@/components/dashboard/loading-skeletons"
 import { useDashboardResource } from "@/hooks/use-dashboard-resource"
 import { cn } from "@/lib/utils"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useIsMobile } from "@/hooks/use-mobile"
 
@@ -137,6 +145,33 @@ const usageRangeDays: Record<Exclude<UsageRange, "all" | "custom">, number> = {
   "365d": 365,
 }
 
+const usageRangeLabels: Record<Exclude<UsageRange, "custom">, string> = {
+  "30d": "Last 1 month",
+  "90d": "Last 3 months",
+  "180d": "Last 6 months",
+  "365d": "Last 12 months",
+  all: "All time",
+}
+
+const usagePresetOptions: Array<{
+  value: Exclude<UsageRange, "all" | "custom">
+  days: number
+  shortLabel: string
+}> = [
+  { value: "30d", days: 30, shortLabel: "1M" },
+  { value: "90d", days: 90, shortLabel: "3M" },
+  { value: "180d", days: 180, shortLabel: "6M" },
+  { value: "365d", days: 365, shortLabel: "12M" },
+]
+
+function presetsForAvailableHistory(availableDays: number | null, includeOneMonth: boolean) {
+  const candidates = usagePresetOptions.filter((option) => includeOneMonth || option.value !== "30d")
+  if (!availableDays) return candidates
+
+  const coveringIndex = candidates.findIndex((option) => option.days >= availableDays)
+  return candidates.slice(0, coveringIndex < 0 ? candidates.length : coveringIndex + 1)
+}
+
 const DASHBOARD_ANALYTICS_CACHE_KEY = "dashboard-analytics:range=all"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -197,6 +232,32 @@ function toLocalDateKey(date: Date): string {
   return `${year}-${month}-${day}`
 }
 
+function matchingUsageRange(
+  from: string,
+  to: string,
+  historyBounds: { from: Date; to: Date } | undefined,
+): Exclude<UsageRange, "custom"> | null {
+  if (!historyBounds) return null
+
+  const fromTime = Date.parse(`${from}T00:00:00Z`)
+  const toTime = Date.parse(`${to}T00:00:00Z`)
+  if (!Number.isFinite(fromTime) || !Number.isFinite(toTime) || fromTime > toTime) return null
+
+  const historyFrom = historyBounds.from.toISOString().slice(0, 10)
+  const historyTo = historyBounds.to.toISOString().slice(0, 10)
+  const inclusiveDays = Math.floor((toTime - fromTime) / 86_400_000) + 1
+
+  if (to === historyTo) {
+    const preset = (Object.entries(usageRangeDays) as Array<[
+      Exclude<UsageRange, "all" | "custom">,
+      number,
+    ]>).find(([, days]) => days === inclusiveDays)
+    if (preset) return preset[0]
+  }
+
+  return from === historyFrom && to === historyTo ? "all" : null
+}
+
 function formatAction(value: string): string {
   return value
     .split(/[._-]/)
@@ -209,10 +270,13 @@ function formatRefreshTime(value?: string | null): string {
   if (!value) return "Never"
   const date = new Date(value)
   if (!Number.isFinite(date.getTime())) return "Unknown"
-  return date.toLocaleTimeString("en-US", {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
     hour: "numeric",
     minute: "2-digit",
-  })
+  }).format(date)
 }
 
 function outcomeVariant(outcome: RecentActivityItem["outcome"]): "default" | "secondary" | "destructive" | "outline" {
@@ -350,15 +414,41 @@ function StorageHistoryControls({
     }
   }, [historyBounds, visibleDateRange])
 
-  const rangeIndicatorPosition =
-    timeRange === "180d"
-      ? "translate-x-full"
-      : timeRange === "365d"
-        ? "translate-x-[200%]"
-        : timeRange === "all"
-          ? "translate-x-[300%]"
-          : "translate-x-0"
-  const rangeIndicatorVisible = timeRange !== "custom" && timeRange !== "30d"
+  const matchingDraftUsageRange = React.useMemo(() => {
+    if (!datePickerDraft?.from || !datePickerDraft.to) return null
+    const from = toLocalDateKey(datePickerDraft.from)
+    const to = toLocalDateKey(datePickerDraft.to)
+    return matchingUsageRange(from <= to ? from : to, from <= to ? to : from, historyBounds)
+  }, [datePickerDraft, historyBounds])
+
+  const availableHistoryDays = historyBounds
+    ? Math.floor((historyBounds.to.getTime() - historyBounds.from.getTime()) / 86_400_000) + 1
+    : null
+  const desktopRangeOptions = React.useMemo(
+    () => [
+      ...presetsForAvailableHistory(availableHistoryDays, false),
+      { value: "all" as const, shortLabel: "All" },
+    ],
+    [availableHistoryDays],
+  )
+  const mobileRangeOptions = React.useMemo(
+    () => [
+      ...presetsForAvailableHistory(availableHistoryDays, true),
+      { value: "all" as const, shortLabel: "All" },
+    ],
+    [availableHistoryDays],
+  )
+  const rangeIndicatorIndex = desktopRangeOptions.findIndex((option) => option.value === timeRange)
+  const rangeIndicatorVisible = rangeIndicatorIndex >= 0
+
+  React.useEffect(() => {
+    if (timeRange === "all" || timeRange === "custom") return
+    const visibleOptions = isMobile ? mobileRangeOptions : desktopRangeOptions
+    if (visibleOptions.some((option) => option.value === timeRange)) return
+
+    const fallback = visibleOptions.at(-2)
+    if (fallback) onTimeRangeChange(fallback.value)
+  }, [desktopRangeOptions, isMobile, mobileRangeOptions, onTimeRangeChange, timeRange])
 
   return (
     <div className="flex min-w-0 items-center gap-2">
@@ -370,49 +460,30 @@ function StorageHistoryControls({
         }}
         variant="outline"
         size="sm"
-        className="relative hidden w-56 grid-cols-4 overflow-hidden rounded-xl border bg-muted/20 p-1 @[767px]/card:grid @[767px]/card:h-10"
+        className="relative hidden w-56 overflow-hidden rounded-xl border bg-muted/20 p-1 @[767px]/card:grid @[767px]/card:h-10"
+        style={{ gridTemplateColumns: `repeat(${desktopRangeOptions.length}, minmax(0, 1fr))` }}
         aria-label="Select history range"
       >
         <span
           aria-hidden="true"
-          className={cn(
-            "pointer-events-none absolute inset-y-1 left-1 z-0 w-[calc(25%_-_0.125rem)] rounded-full bg-primary/10 transition-[transform,opacity] duration-300 ease-out motion-reduce:transition-none",
-            rangeIndicatorPosition,
-            !rangeIndicatorVisible && "opacity-0"
-          )}
+          className="pointer-events-none absolute inset-y-1 left-1 z-0 rounded-full bg-primary/10 transition-[transform,opacity,width] duration-300 ease-out will-change-transform motion-reduce:transition-none"
+          style={{
+            opacity: rangeIndicatorVisible ? 1 : 0,
+            transform: `translateX(${Math.max(0, rangeIndicatorIndex) * 100}%)`,
+            width: `calc((100% - 0.5rem) / ${desktopRangeOptions.length})`,
+          }}
         />
-        <ToggleGroupItem
-          value="90d"
-          aria-label="Last 3 months"
-          title="Last 3 months"
-          className="relative z-10 h-8 w-full min-w-0 !rounded-full !border-0 px-2 text-xs !shadow-none transition-[color,transform] duration-300 ease-out data-[state=on]:!bg-transparent"
-        >
-          3M
-        </ToggleGroupItem>
-        <ToggleGroupItem
-          value="180d"
-          aria-label="Last 6 months"
-          title="Last 6 months"
-          className="relative z-10 h-8 w-full min-w-0 !rounded-full !border-0 px-2 text-xs !shadow-none transition-[color,transform] duration-300 ease-out data-[state=on]:!bg-transparent"
-        >
-          6M
-        </ToggleGroupItem>
-        <ToggleGroupItem
-          value="365d"
-          aria-label="Last 12 months"
-          title="Last 12 months"
-          className="relative z-10 h-8 w-full min-w-0 !rounded-full !border-0 px-2 text-xs !shadow-none transition-[color,transform] duration-300 ease-out data-[state=on]:!bg-transparent"
-        >
-          12M
-        </ToggleGroupItem>
-        <ToggleGroupItem
-          value="all"
-          aria-label="All time"
-          title="All time"
-          className="relative z-10 h-8 w-full min-w-0 !rounded-full !border-0 px-2 text-xs !shadow-none transition-[color,transform] duration-300 ease-out data-[state=on]:!bg-transparent"
-        >
-          All
-        </ToggleGroupItem>
+        {desktopRangeOptions.map((option) => (
+          <ToggleGroupItem
+            key={option.value}
+            value={option.value}
+            aria-label={usageRangeLabels[option.value]}
+            title={usageRangeLabels[option.value]}
+            className="relative z-10 h-8 w-full min-w-0 !rounded-full !border-0 px-2 text-xs !shadow-none transition-[color,transform] duration-300 ease-out data-[state=on]:!bg-transparent"
+          >
+            {option.shortLabel}
+          </ToggleGroupItem>
+        ))}
       </ToggleGroup>
       <Select
         value={timeRange}
@@ -428,36 +499,28 @@ function StorageHistoryControls({
           <SelectValue placeholder="Last 3 months" />
         </SelectTrigger>
         <SelectContent className="rounded-xl">
-          <SelectItem value="30d" className="rounded-lg">
-            Last 1 month
-          </SelectItem>
-          <SelectItem value="90d" className="rounded-lg">
-            Last 3 months
-          </SelectItem>
-          <SelectItem value="180d" className="rounded-lg">
-            Last 6 months
-          </SelectItem>
-          <SelectItem value="365d" className="rounded-lg">
-            Last 12 months
-          </SelectItem>
-          <SelectItem value="all" className="rounded-lg">
-            All time
-          </SelectItem>
-          {timeRange === "custom" ? (
-            <SelectItem value="custom" className="rounded-lg">
-              Custom range
-            </SelectItem>
-          ) : null}
+          <SelectGroup>
+            {mobileRangeOptions.map((option) => (
+              <SelectItem key={option.value} value={option.value} className="rounded-lg">
+                {usageRangeLabels[option.value]}
+              </SelectItem>
+            ))}
+            {timeRange === "custom" ? (
+              <SelectItem value="custom" className="rounded-lg">
+                Custom range
+              </SelectItem>
+            ) : null}
+          </SelectGroup>
         </SelectContent>
       </Select>
-      <Popover
+      <Dialog
         open={datePickerOpen}
         onOpenChange={(open) => {
           onDatePickerOpenChange(open)
           if (open) onDatePickerDraftChange(currentDateRange)
         }}
       >
-        <PopoverTrigger asChild>
+        <DialogTrigger asChild>
           <Button
             variant="outline"
             size="sm"
@@ -468,31 +531,18 @@ function StorageHistoryControls({
             <CalendarDays data-icon="inline-start" />
             <span className="truncate">{visibleDateRangeLabel}</span>
           </Button>
-        </PopoverTrigger>
-        <PopoverContent
-          align={isMobile ? "center" : "end"}
-          side="bottom"
-          sideOffset={8}
-          collisionPadding={12}
-          className="w-[calc(100vw-2rem)] max-w-[40rem] overflow-hidden rounded-2xl p-0 shadow-xl"
+        </DialogTrigger>
+        <DialogContent
+          className="max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-[42rem] gap-0 overflow-hidden p-0 sm:max-h-[calc(100dvh-2rem)] sm:w-[calc(100vw-2rem)] sm:p-0"
         >
-          <div className="flex items-start justify-between gap-4 border-b px-4 py-3 sm:px-5">
-            <div className="min-w-0">
-              <p className="text-sm font-semibold">Choose a date range</p>
-              <p className="mt-0.5 text-xs text-muted-foreground">Select a start and end date.</p>
-            </div>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="shrink-0 rounded-lg"
-              aria-label="Close date picker"
-              onClick={() => onDatePickerOpenChange(false)}
-            >
-              <X data-icon="inline-start" aria-hidden="true" />
-            </Button>
-          </div>
-          <div className="overflow-x-auto">
+          <DialogHeader className="border-b px-4 py-4 sm:px-5">
+            <DialogTitle>Choose a date range</DialogTitle>
+            <DialogDescription>
+              Select a start and end date for the storage usage chart.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="min-w-0 overflow-y-auto px-2 py-2 sm:px-4 sm:py-3">
             <Calendar
               mode="range"
               selected={datePickerDraft}
@@ -506,23 +556,38 @@ function StorageHistoryControls({
               }
               onSelect={onDatePickerDraftChange}
               initialFocus
-              className="mx-auto p-3 sm:p-4"
+              className="mx-auto max-w-full p-1 [--cell-size:--spacing(7)] sm:p-2 sm:[--cell-size:--spacing(8)]"
+              classNames={{
+                root: "w-full max-w-full",
+                months: "flex w-full max-w-full flex-col gap-4 md:flex-row",
+                month: "flex min-w-0 flex-1 flex-col gap-4",
+              }}
             />
           </div>
-          <div className="flex flex-col gap-3 border-t bg-muted/20 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-4">
-            <p className="min-w-0 text-xs tabular-nums text-muted-foreground" aria-live="polite">
-              {datePickerDraft?.from && datePickerDraft.to
-                ? `${datePickerDraftDays} days selected`
-                : datePickerDraft?.from
-                  ? "Select an end date"
-                  : "Select start and end dates"}
-            </p>
+
+          <DialogFooter className="flex-col gap-3 border-t bg-muted/20 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+            <div className="min-w-0 text-left" aria-live="polite">
+              <p className="text-xs font-medium tabular-nums">
+                {datePickerDraft?.from && datePickerDraft.to
+                  ? `${datePickerDraftDays} days selected`
+                  : datePickerDraft?.from
+                    ? "Choose an end date"
+                    : "Choose a start and end date"}
+              </p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                {matchingDraftUsageRange
+                  ? `Matches ${usageRangeLabels[matchingDraftUsageRange]}`
+                  : datePickerDraft?.from && datePickerDraft.to
+                    ? "This will be saved as a custom range"
+                    : `Select at least ${minimumSelectableDays} days`}
+              </p>
+            </div>
             <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:shrink-0">
               <Button
                 type="button"
-                variant="ghost"
+                variant="outline"
                 size="sm"
-                className="h-8 w-full rounded-lg px-2.5 text-xs sm:w-auto"
+                className="w-full rounded-xl sm:w-auto"
                 onClick={() => {
                   onDatePickerDraftChange(currentDateRange)
                   onDatePickerOpenChange(false)
@@ -533,7 +598,7 @@ function StorageHistoryControls({
               <Button
                 type="button"
                 size="sm"
-                className="h-8 w-full rounded-lg px-3 text-xs sm:w-auto"
+                className="w-full rounded-xl sm:w-auto"
                 disabled={!datePickerDraftIsValid || !datePickerDraft?.from || !datePickerDraft.to}
                 onClick={() => {
                   if (!datePickerDraft?.from || !datePickerDraft.to || !datePickerDraftIsValid) return
@@ -541,12 +606,12 @@ function StorageHistoryControls({
                   onDatePickerOpenChange(false)
                 }}
               >
-                Apply
+                Apply range
               </Button>
             </div>
-          </div>
-        </PopoverContent>
-      </Popover>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -574,9 +639,18 @@ function PlatformUsageChart({
   } | null>(null)
   const chartInteractionRef = React.useRef<HTMLDivElement>(null)
   const touchGestureRef = React.useRef<{
+    axis?: "horizontal" | "vertical"
     distance?: number
+    startX?: number
+    startY?: number
     lastX?: number
   }>({})
+
+  const handleTimeRangeChange = React.useCallback((value: UsageRange) => {
+    setPendingDateRange(null)
+    setNavigatorSelection(null)
+    setTimeRange(value)
+  }, [])
 
   React.useEffect(() => {
     setTimeRange((current) => {
@@ -814,10 +888,13 @@ function PlatformUsageChart({
     if (!chart || !enableChartNavigation) return
 
     const handleWheel = (event: WheelEvent) => {
-      const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
-      if (delta === 0) return
+      const zooming = event.ctrlKey || event.metaKey
+      if (!zooming && Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return
+
+      const delta = zooming ? event.deltaY : event.deltaX
+      if (!delta) return
       event.preventDefault()
-      updateChartViewport(event.ctrlKey || event.metaKey ? "zoom" : "pan", delta)
+      updateChartViewport(zooming ? "zoom" : "pan", delta)
     }
 
     chart.addEventListener("wheel", handleWheel, { passive: false })
@@ -827,14 +904,14 @@ function PlatformUsageChart({
   return (
     <Card className="@container/card overflow-hidden gap-0 py-0">
       <CardHeader className="border-b px-4 py-3.5 sm:px-5">
-        <div className="flex flex-col gap-3 @[1120px]/card:flex-row @[1120px]/card:items-center @[1120px]/card:justify-between">
+        <div className="flex flex-col gap-3 @[900px]/card:flex-row @[900px]/card:items-center @[900px]/card:justify-between">
           <div className="flex min-h-10 min-w-0 flex-col justify-center">
             <CardTitle className="text-base leading-tight">Storage Usage</CardTitle>
             <CardDescription className="mt-1 leading-4">
-              Track storage and object totals across the selected date range.
+              Storage and objects over time.
             </CardDescription>
           </div>
-          <div className="flex min-w-0 flex-col gap-2 @[767px]/card:flex-row @[767px]/card:items-center">
+          <div className="flex min-w-0 flex-col gap-2 @[767px]/card:flex-row @[767px]/card:items-center @[900px]/card:self-center">
             <UsageMetricSelector
               value={usageMetric}
               onValueChange={setUsageMetric}
@@ -843,7 +920,7 @@ function PlatformUsageChart({
             />
             <StorageHistoryControls
               timeRange={timeRange}
-              onTimeRangeChange={setTimeRange}
+              onTimeRangeChange={handleTimeRangeChange}
               isMobile={isMobile}
               visibleDateRangeLabel={visibleDateRangeLabel}
               datePickerOpen={datePickerOpen}
@@ -859,12 +936,19 @@ function PlatformUsageChart({
                 if (!range.from || !range.to) return
                 const from = toLocalDateKey(range.from)
                 const to = toLocalDateKey(range.to)
-                setPendingDateRange({
+                const selectedRange = {
                   from: from <= to ? from : to,
                   to: from <= to ? to : from,
-                })
+                }
+                const matchingRange = matchingUsageRange(
+                  selectedRange.from,
+                  selectedRange.to,
+                  historyBounds,
+                )
+
+                setPendingDateRange(matchingRange ? null : selectedRange)
                 setNavigatorSelection(null)
-                setTimeRange("custom")
+                setTimeRange(matchingRange ?? "custom")
               }}
             />
           </div>
@@ -913,7 +997,12 @@ function PlatformUsageChart({
                     distance: Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY),
                   }
                 } else if (event.touches.length === 1) {
-                  touchGestureRef.current = { lastX: event.touches[0].clientX }
+                  const touch = event.touches[0]
+                  touchGestureRef.current = {
+                    startX: touch.clientX,
+                    startY: touch.clientY,
+                    lastX: touch.clientX,
+                  }
                 }
               }}
               onTouchMove={(event) => {
@@ -931,18 +1020,41 @@ function PlatformUsageChart({
                     touchGestureRef.current.distance = distance
                   }
                 } else if (event.touches.length === 1) {
-                  const currentX = event.touches[0].clientX
-                  const previousX = touchGestureRef.current.lastX
-                  if (previousX !== undefined && Math.abs(previousX - currentX) >= 10) {
+                  const touch = event.touches[0]
+                  const gesture = touchGestureRef.current
+                  const currentX = touch.clientX
+                  const currentY = touch.clientY
+
+                  if (!gesture.axis && gesture.startX !== undefined && gesture.startY !== undefined) {
+                    const horizontalDistance = Math.abs(currentX - gesture.startX)
+                    const verticalDistance = Math.abs(currentY - gesture.startY)
+                    if (Math.max(horizontalDistance, verticalDistance) < 10) return
+                    gesture.axis = horizontalDistance > verticalDistance * 1.35 ? "horizontal" : "vertical"
+                  }
+
+                  if (gesture.axis !== "horizontal") return
+                  event.preventDefault()
+
+                  const previousX = gesture.lastX
+                  if (previousX !== undefined && Math.abs(previousX - currentX) >= 12) {
                     updateChartViewport("pan", previousX - currentX)
-                    touchGestureRef.current.lastX = currentX
+                    gesture.lastX = currentX
                   }
                 }
               }}
               onTouchEnd={(event) => {
-                touchGestureRef.current =
-                  event.touches.length === 1 ? { lastX: event.touches[0].clientX } : {}
+                if (event.touches.length === 1) {
+                  const touch = event.touches[0]
+                  touchGestureRef.current = {
+                    startX: touch.clientX,
+                    startY: touch.clientY,
+                    lastX: touch.clientX,
+                  }
+                } else {
+                  touchGestureRef.current = {}
+                }
               }}
+              onTouchCancel={() => { touchGestureRef.current = {} }}
             >
               <ChartContainer
                 config={platformUsageChartConfig}
@@ -1133,7 +1245,7 @@ export default function OverviewPage() {
         <div className="-mt-1 min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
           <div className="mt-px flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground sm:text-sm">
-            <span>Last refreshed at {formatRefreshTime(data?.generatedAt)}</span>
+            <span>Last Synced At {formatRefreshTime(data?.activeAccount?.lastSyncedAt)}</span>
           </div>
         </div>
         <div className="flex justify-end gap-2 self-start">

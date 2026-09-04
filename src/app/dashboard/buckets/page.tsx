@@ -2,8 +2,9 @@
 
 import * as React from "react"
 import {
-  Braces,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Copy,
   Database,
   Globe2,
@@ -16,10 +17,11 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 
+import { BucketsPageSkeleton } from "@/components/dashboard/loading-skeletons"
 import { DashboardPage, DashboardPageHeader } from "@/components/dashboard/page-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
   Dialog,
@@ -34,6 +36,7 @@ import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { cn } from "@/lib/utils"
 
 type CorsRule = {
   id?: string
@@ -72,17 +75,23 @@ type BucketRecord = {
   statsStatus: string
   settings: BucketSettings | null
   deliverySettings: BucketDeliverySettings | null
+  settingsStatus: string
   settingsError: string | null
+  settingsLastAttemptedAt: string | null
+  settingsLastSyncedAt: string | null
+  inventorySyncedAt: string | null
 }
 
 type ApiResponse = {
   buckets: BucketRecord[]
-  activeAccount: { id: string; label: string; status: string }
+  activeAccount: { id: string; label: string; status: string; lastSyncedAt: string | null }
   summary: { totalBuckets: number; totalObjects: number; totalBytes: number; publicBuckets: number; corsPolicies: number }
   error?: string
 }
 
 const HTTP_METHODS = ["GET", "HEAD", "PUT", "POST", "DELETE"]
+const BUCKETS_CACHE_KEY = "dashboard:buckets:v1"
+const BUCKETS_PAGE_SIZE = 10
 const WILDCARD_RULE: CorsRule = {
   allowedOrigins: ["*"],
   allowedMethods: ["GET", "HEAD", "PUT", "POST"],
@@ -104,6 +113,16 @@ function formatBytes(value: number) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat().format(value)
+}
+
+function formatSyncedAt(value: string | null | undefined) {
+  if (!value) return "Waiting for first sync"
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return "Waiting for first sync"
+  return `Last Synced At ${new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date)}`
 }
 
 function splitList(value: string) {
@@ -168,14 +187,37 @@ function dangerUrl(bucket: BucketRecord) {
   return `/api/buckets/${encodeURIComponent(bucket.accountId)}/${encodeURIComponent(bucket.name)}/danger`
 }
 
+function readBucketsCache() {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = window.sessionStorage.getItem(BUCKETS_CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as ApiResponse
+    return Array.isArray(parsed?.buckets) && parsed?.summary ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function writeBucketsCache(data: ApiResponse) {
+  if (typeof window === "undefined") return
+  try {
+    window.sessionStorage.setItem(BUCKETS_CACHE_KEY, JSON.stringify(data))
+  } catch {
+    // Ignore cache write errors.
+  }
+}
+
 export default function BucketsPage() {
   const [data, setData] = React.useState<ApiResponse | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [refreshing, setRefreshing] = React.useState(false)
   const [search, setSearch] = React.useState("")
   const [selected, setSelected] = React.useState<BucketRecord | null>(null)
+  const [pageIndex, setPageIndex] = React.useState(0)
+  const didHydrateCacheRef = React.useRef(false)
 
-  const load = React.useCallback(async (quiet = false) => {
+  const load = React.useCallback(async (quiet = false, silent = false) => {
     if (quiet) setRefreshing(true)
     else setLoading(true)
     try {
@@ -183,18 +225,36 @@ export default function BucketsPage() {
       const payload = (await response.json()) as ApiResponse
       if (!response.ok) throw new Error(payload.error || "Unable to load buckets")
       setData(payload)
+      writeBucketsCache(payload)
       setSelected((current) => current
         ? payload.buckets.find((bucket) => bucket.id === current.id) ?? null
         : null)
     } catch (error: unknown) {
-      toast.error(error instanceof Error ? error.message : "Unable to load buckets")
+      if (!silent) {
+        toast.error(error instanceof Error ? error.message : "Unable to load buckets")
+      }
     } finally {
       setLoading(false)
       setRefreshing(false)
     }
   }, [])
 
-  React.useEffect(() => { void load() }, [load])
+  React.useEffect(() => {
+    if (didHydrateCacheRef.current) return
+    didHydrateCacheRef.current = true
+
+    const cached = readBucketsCache()
+    if (cached) {
+      setData(cached)
+      setLoading(false)
+    }
+
+    void load(Boolean(cached), true)
+  }, [load])
+
+  React.useEffect(() => {
+    if (data) writeBucketsCache(data)
+  }, [data])
 
   const buckets = React.useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -203,75 +263,196 @@ export default function BucketsPage() {
     })
   }, [data?.buckets, search])
 
+  const totalRows = buckets.length
+  const totalPages = Math.max(1, Math.ceil(totalRows / BUCKETS_PAGE_SIZE))
+  const currentPageIndex = Math.min(pageIndex, totalPages - 1)
+  const paginatedBuckets = buckets.slice(
+    currentPageIndex * BUCKETS_PAGE_SIZE,
+    currentPageIndex * BUCKETS_PAGE_SIZE + BUCKETS_PAGE_SIZE,
+  )
+  const mobilePageCount = Math.min(totalPages, 3)
+  const desktopPageCount = Math.min(totalPages, 5)
+  const mobileStart = Math.max(0, Math.min(currentPageIndex - 1, totalPages - mobilePageCount))
+  const desktopStart = Math.max(0, Math.min(currentPageIndex - 2, totalPages - desktopPageCount))
+  const mobilePages = Array.from({ length: mobilePageCount }, (_, index) => mobileStart + index)
+  const desktopPages = Array.from({ length: desktopPageCount }, (_, index) => desktopStart + index)
+
   if (loading && !data) {
-    return <div className="py-16 text-center text-sm text-muted-foreground">Loading buckets...</div>
+    return <BucketsPageSkeleton />
   }
 
   const summary = data?.summary ?? { totalBuckets: 0, totalObjects: 0, totalBytes: 0, publicBuckets: 0, corsPolicies: 0 }
   return (
-    <DashboardPage>
-      <DashboardPageHeader
-        title="Buckets"
-        description={`Review bucket usage and settings for the active account${data?.activeAccount?.label ? `, ${data.activeAccount.label}` : ""}.`}
-        actions={
-          <Button variant="outline" onClick={() => void load(true)} disabled={refreshing}>
-            <RefreshCw className={refreshing ? "animate-spin" : ""} /> Refresh
-          </Button>
-        }
-      />
-
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <Metric title="Buckets" value={formatNumber(summary.totalBuckets)} icon={Database} />
-        <Metric title="Stored objects" value={formatNumber(summary.totalObjects)} icon={Braces} />
-        <Metric title="Storage used" value={formatBytes(summary.totalBytes)} icon={Database} />
-        <Metric title="Public URLs" value={`${formatNumber(summary.publicBuckets)} enabled`} icon={Globe2} detail={`${summary.corsPolicies} CORS policies`} />
+    <DashboardPage className="dashboard-motion-stage">
+      <div className="dashboard-motion-item">
+        <DashboardPageHeader
+          title="Buckets"
+          description={data?.activeAccount
+            ? `${data.activeAccount.label} · ${formatSyncedAt(data.activeAccount.lastSyncedAt)}`
+            : "Usage and access settings for the active account"}
+          actions={
+            <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
+              <div className="relative h-9 min-w-0 flex-1 sm:w-[220px] sm:flex-none">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={search}
+                  onChange={(event) => {
+                    setSearch(event.target.value)
+                    setPageIndex(0)
+                  }}
+                  placeholder="Search buckets..."
+                  className="h-9 w-full pl-8"
+                />
+              </div>
+              <Button
+                variant="outline"
+                size="icon"
+                className="size-9 shrink-0 rounded-full sm:w-auto sm:px-3"
+                onClick={() => void load(true)}
+                disabled={refreshing}
+              >
+                <RefreshCw data-icon="inline-start" className={cn(refreshing && "animate-spin")} />
+                <span className="sr-only sm:not-sr-only">Refresh</span>
+              </Button>
+            </div>
+          }
+        />
       </div>
 
-      <Card>
-        <CardHeader className="gap-3 border-b pb-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <CardTitle className="text-base">All buckets</CardTitle>
-            <p className="mt-1 text-sm text-muted-foreground">{buckets.length} of {summary.totalBuckets} buckets</p>
-          </div>
-          <div className="w-full sm:w-64">
-            <div className="relative min-w-0 sm:w-64">
-              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search buckets" className="pl-9" />
+      <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-4">
+        <Metric title="Total Buckets" value={formatNumber(summary.totalBuckets)} detail={data?.activeAccount?.label ?? "Active account"} />
+        <Metric title="Stored Objects" value={formatNumber(summary.totalObjects)} detail="Across all buckets" />
+        <Metric title="Storage Used" value={formatBytes(summary.totalBytes)} detail="Current reported usage" />
+        <Metric title="Public URLs" value={formatNumber(summary.publicBuckets)} detail={`${formatNumber(summary.corsPolicies)} CORS policies`} />
+      </div>
+
+      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
+        <Table
+          className="min-w-[1060px] w-full"
+          containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full [-ms-overflow-style:none] [scrollbar-width:thin]"
+        >
+          <TableHeader>
+            <TableRow className="h-9 border-b">
+              {[
+                ["Bucket", "min-w-[240px]"],
+                ["Account", "min-w-[160px]"],
+                ["Usage", "min-w-[150px]"],
+                ["Public URL", "min-w-[125px]"],
+                ["Drive Delivery", "min-w-[145px]"],
+                ["CORS", "min-w-[110px]"],
+                ["Actions", "min-w-[90px]"],
+              ].map(([label, width], index, headers) => (
+                <TableHead
+                  key={label}
+                  className={cn(width, "relative px-2.5 text-center text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground")}
+                >
+                  {label}
+                  {index < headers.length - 1 ? <span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /> : null}
+                </TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {paginatedBuckets.map((bucket) => (
+              <TableRow key={bucket.id} className="h-[64px] border-b last:border-b-0 hover:bg-muted/30">
+                <BucketCell separator>
+                  <div className="flex min-h-[40px] items-center gap-1.5">
+                    <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border bg-background">
+                      <Database className="size-3 text-muted-foreground" />
+                    </span>
+                    <div className="min-w-0">
+                      <div className="truncate text-[13px] font-medium leading-4">{bucket.name}</div>
+                      <div className="text-[10px] font-mono leading-3.5 text-muted-foreground">
+                        {bucket.jurisdiction} / {bucket.storageClass}
+                      </div>
+                    </div>
+                  </div>
+                </BucketCell>
+                <BucketCell separator>
+                  <div className="flex min-h-[40px] w-full flex-col items-center justify-center gap-1 text-center">
+                    <span className="max-w-[145px] truncate text-[11px] leading-4 text-muted-foreground">{bucket.accountLabel}</span>
+                    <Badge variant={bucket.accountStatus === "active" ? "default" : bucket.accountStatus === "available" ? "outline" : "secondary"} className="capitalize">
+                      {bucket.accountStatus}
+                    </Badge>
+                  </div>
+                </BucketCell>
+                <BucketCell separator>
+                  <div className="flex min-h-[40px] w-full flex-col items-center justify-center gap-0.5 text-center">
+                    <div className="text-[13px] font-medium leading-4">{formatBytes(bucket.bytes)}</div>
+                    <div className="text-[10px] leading-4 text-muted-foreground">{formatNumber(bucket.objects)} objects</div>
+                  </div>
+                </BucketCell>
+                <BucketCell separator>
+                  <div className="flex min-h-[40px] items-center justify-center">
+                    {bucket.settings ? <Badge variant={bucket.settings.publicAccess.enabled ? "default" : bucket.settingsStatus === "error" ? "destructive" : "secondary"}>{bucket.settingsStatus === "error" ? "Stale" : bucket.settings.publicAccess.enabled ? "Enabled" : "Disabled"}</Badge> : <Badge variant="outline">Pending sync</Badge>}
+                  </div>
+                </BucketCell>
+                <BucketCell separator>
+                  <div className="flex min-h-[40px] items-center justify-center">
+                    {bucket.deliverySettings ? <Badge variant={bucket.deliverySettings.deliveryPublicAccessEnabled ? "default" : "secondary"}>{bucket.deliverySettings.deliveryPublicAccessEnabled ? "Enabled" : "API required"}</Badge> : <Badge variant="outline">Unavailable</Badge>}
+                  </div>
+                </BucketCell>
+                <BucketCell separator>
+                  <div className="flex min-h-[40px] items-center justify-center">
+                    {bucket.settings ? <Badge variant={bucket.settingsStatus === "error" ? "destructive" : bucket.settings.corsRules.length > 0 ? "outline" : "secondary"}>{bucket.settingsStatus === "error" ? "Stale" : bucket.settings.corsRules.length > 0 ? "Configured" : "Not set"}</Badge> : <span className="text-muted-foreground">Pending</span>}
+                  </div>
+                </BucketCell>
+                <BucketCell>
+                  <div className="flex min-h-[40px] items-center justify-center">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button variant="outline" size="icon" className="size-7 rounded-full" onClick={() => setSelected(bucket)}>
+                          <Settings2 />
+                          <span className="sr-only">Manage {bucket.name}</span>
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Manage settings</TooltipContent>
+                    </Tooltip>
+                  </div>
+                </BucketCell>
+              </TableRow>
+            ))}
+            {paginatedBuckets.length === 0 ? <TableRow><TableCell colSpan={7} className="h-24 text-center">No results.</TableCell></TableRow> : null}
+          </TableBody>
+        </Table>
+
+        <div className="border-t px-3 py-2 text-xs text-muted-foreground max-sm:-mb-2">
+          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+            <Button
+              variant="outline"
+              size="icon"
+              className="size-8 justify-self-start rounded-full sm:w-auto sm:px-2.5"
+              disabled={currentPageIndex === 0}
+              onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
+            >
+              <ChevronLeft data-icon="inline-start" />
+              <span className="sr-only sm:not-sr-only">Previous</span>
+            </Button>
+            <div className="flex items-center justify-center gap-1 justify-self-center">
+              <div className="flex items-center gap-1 sm:hidden">
+                {mobilePages.map((page) => <PageButton key={`mobile-${page}`} page={page} currentPage={currentPageIndex} onSelect={setPageIndex} />)}
+              </div>
+              <div className="hidden items-center gap-1 sm:flex">
+                {desktopPages.map((page) => <PageButton key={`desktop-${page}`} page={page} currentPage={currentPageIndex} onSelect={setPageIndex} />)}
+              </div>
             </div>
+            <Button
+              variant="outline"
+              size="icon"
+              className="size-8 justify-self-end rounded-full sm:w-auto sm:px-2.5"
+              disabled={currentPageIndex >= totalPages - 1 || totalRows === 0}
+              onClick={() => setPageIndex((current) => Math.min(totalPages - 1, current + 1))}
+            >
+              <ChevronRight data-icon="inline-end" />
+              <span className="sr-only sm:not-sr-only">Next</span>
+            </Button>
           </div>
-        </CardHeader>
-        <CardContent className="p-0">
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Bucket</TableHead><TableHead>Account</TableHead><TableHead>Usage</TableHead>
-                  <TableHead>Public URL</TableHead><TableHead>Drive delivery</TableHead><TableHead>CORS</TableHead><TableHead className="w-16"><span className="sr-only">Manage</span></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {buckets.map((bucket) => (
-                  <TableRow key={bucket.id}>
-                    <TableCell>
-                      <div className="font-medium">{bucket.name}</div>
-                      <div className="mt-0.5 text-xs text-muted-foreground">{bucket.jurisdiction} · {bucket.storageClass}</div>
-                    </TableCell>
-                    <TableCell><div>{bucket.accountLabel}</div><Badge variant="outline" className="mt-1 capitalize">{bucket.accountStatus}</Badge></TableCell>
-                    <TableCell><div>{formatBytes(bucket.bytes)}</div><div className="text-xs text-muted-foreground">{formatNumber(bucket.objects)} objects</div></TableCell>
-                    <TableCell>{bucket.settings ? <Badge variant={bucket.settings.publicAccess.enabled ? "default" : "secondary"}>{bucket.settings.publicAccess.enabled ? "Enabled" : "Disabled"}</Badge> : <Badge variant="destructive">Unavailable</Badge>}</TableCell>
-                    <TableCell>{bucket.deliverySettings ? <Badge variant={bucket.deliverySettings.deliveryPublicAccessEnabled ? "default" : "secondary"}>{bucket.deliverySettings.deliveryPublicAccessEnabled ? "Enabled" : "API required"}</Badge> : <Badge variant="outline">Unavailable</Badge>}</TableCell>
-                    <TableCell>{bucket.settings ? (bucket.settings.corsRules.length > 0 ? "Configured" : "Not set") : "-"}</TableCell>
-                    <TableCell>
-                      <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" onClick={() => setSelected(bucket)}><Settings2 /><span className="sr-only">Manage {bucket.name}</span></Button></TooltipTrigger><TooltipContent>Manage settings</TooltipContent></Tooltip>
-                    </TableCell>
-                  </TableRow>
-                ))}
-                {buckets.length === 0 ? <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No buckets match these filters.</TableCell></TableRow> : null}
-              </TableBody>
-            </Table>
-          </div>
-        </CardContent>
+        </div>
       </Card>
+
+      <div className="-mt-2 text-center text-xs text-muted-foreground">
+        Page {totalRows ? currentPageIndex + 1 : 0} of {totalRows ? totalPages : 0}
+      </div>
 
       <BucketSettingsDialog bucket={selected} onOpenChange={(open) => !open && setSelected(null)} onUpdated={(bucket) => {
         setData((current) => current ? { ...current, buckets: current.buckets.map((item) => item.id === bucket.id ? bucket : item), summary: {
@@ -298,8 +479,43 @@ export default function BucketsPage() {
   )
 }
 
-function Metric({ title, value, detail, icon: Icon }: { title: string; value: string; detail?: string; icon: React.ComponentType<{ className?: string }> }) {
-  return <Card><CardHeader className="flex-row items-center justify-between space-y-0 pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">{title}</CardTitle><Icon className="size-4 text-muted-foreground" /></CardHeader><CardContent><div className="text-2xl font-semibold">{value}</div>{detail ? <p className="mt-1 text-xs text-muted-foreground">{detail}</p> : null}</CardContent></Card>
+function Metric({ title, value, detail }: { title: string; value: string; detail: string }) {
+  return (
+    <Card className="gap-0 py-0">
+      <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+        <CardDescription className="text-[13px] leading-4">{title}</CardDescription>
+        <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{value}</CardTitle>
+      </CardHeader>
+      <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3">
+        <p className="truncate text-[11px] leading-4 text-muted-foreground">{detail}</p>
+      </CardContent>
+    </Card>
+  )
+}
+
+function BucketCell({ children, separator = false }: { children: React.ReactNode; separator?: boolean }) {
+  return (
+    <TableCell className="relative px-2.5 py-2 align-middle">
+      {children}
+      {separator ? <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" /> : null}
+    </TableCell>
+  )
+}
+
+function PageButton({ page, currentPage, onSelect }: { page: number; currentPage: number; onSelect: (page: number) => void }) {
+  const active = page === currentPage
+  return (
+    <Button
+      type="button"
+      variant={active ? "default" : "outline"}
+      size="icon"
+      className="size-[1.875rem] rounded-full text-[11px]"
+      onClick={() => onSelect(page)}
+      aria-current={active ? "page" : undefined}
+    >
+      {page + 1}
+    </Button>
+  )
 }
 
 function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { bucket: BucketRecord | null; onOpenChange: (open: boolean) => void; onUpdated: (bucket: BucketRecord) => void; onDeleted: (bucket: BucketRecord) => void }) {
@@ -330,7 +546,10 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
       ...bucket,
       settings: payload.settings,
       ...(payload.deliverySettings ? { deliverySettings: payload.deliverySettings } : {}),
+      settingsStatus: "completed",
       settingsError: null,
+      settingsLastAttemptedAt: new Date().toISOString(),
+      settingsLastSyncedAt: new Date().toISOString(),
     }
     onUpdated(updated)
     return updated

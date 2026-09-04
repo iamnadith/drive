@@ -2,9 +2,8 @@ import { NextResponse } from "next/server"
 
 import { getAllAccounts } from "@/lib/accounts-store"
 import { listBucketDeliverySettings, type BucketDeliverySettings } from "@/lib/bucket-delivery-settings-store"
-import { ensureBucketStatsRows, getBucketStatsMap } from "@/lib/bucket-stats-store"
-import { r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
-import { readBucketSettings } from "@/lib/r2-bucket-settings"
+import { listBucketSettingsSnapshots } from "@/lib/bucket-settings-snapshot-store"
+import { getBucketStatsMap, type DriveBucketStats } from "@/lib/bucket-stats-store"
 import { requireAdmin } from "@/lib/server-auth"
 import { mergeMediaAllowedOrigins } from "@/lib/project-media-origins.cjs"
 import { listAssignedProjectsForBuckets, type Project } from "@/lib/projects-store"
@@ -47,12 +46,16 @@ export async function GET() {
 
     const accounts = await getAllAccounts()
     const account = accounts.find((candidate) => candidate.status === "active")
-    if (!account?.cloudflareAccountId || !account.apiToken) {
-      return NextResponse.json({ error: "The active Cloudflare account is not configured", buckets: [] }, { status: 409 })
+    if (!account) {
+      return NextResponse.json({ error: "There is no active Cloudflare account", buckets: [] }, { status: 409 })
     }
 
-    const listed = await r2ListBuckets({ accountId: account.cloudflareAccountId, apiToken: account.apiToken })
-    const names = listed.map((bucket) => bucket.name)
+    const [snapshots, stats] = await Promise.all([
+      listBucketSettingsSnapshots(account.id),
+      getBucketStatsMap(account.id).catch(() => new Map<string, DriveBucketStats>()),
+    ])
+    const snapshotByName = new Map(snapshots.map((snapshot) => [snapshot.bucketName, snapshot]))
+    const names = Array.from(new Set([...snapshots.map((snapshot) => snapshot.bucketName), ...stats.keys()]))
     const [deliverySettings, assignedProjects] = await Promise.all([
       listBucketDeliverySettings(account.id, names),
       listAssignedProjectsForBuckets(names),
@@ -60,59 +63,43 @@ export async function GET() {
     const projectSettings = await listProjectDeliverySettings(
       Array.from(assignedProjects.values(), (project) => project.id)
     )
-    let stats = new Map<string, { objects: number; bytes: number; status: string; error?: string }>()
-    try {
-      await ensureBucketStatsRows(account.id, names)
-      stats = await getBucketStatsMap(account.id)
-    } catch {
-      // Bucket management remains available when cached usage stats are unavailable.
-    }
-
-    const buckets = (await Promise.all(
-      listed.map(async (bucket) => {
-        const cached = stats.get(bucket.name)
-        const base = {
-          id: `${account.id}:${bucket.name}`,
-          accountId: account.id,
-          accountLabel: account.label,
-          accountStatus: account.status,
-          name: bucket.name,
-          createdAt: bucket.creation_date ?? null,
-          jurisdiction: bucket.jurisdiction ?? "default",
-          storageClass: bucket.storage_class ?? "Standard",
-          objects: cached?.objects ?? bucket.objects ?? 0,
-          bytes: cached?.bytes ?? bucket.size ?? 0,
-          statsStatus: cached?.status ?? "pending",
-        }
-        try {
-          return {
-            ...base,
-            settings: await readBucketSettings(account, bucket.name),
-            deliverySettings: serializeDeliverySettings(
-              deliverySettings.get(bucket.name)!,
-              assignedProjects.get(bucket.name) ?? null,
-              projectSettings.get(assignedProjects.get(bucket.name)?.id ?? "") ?? null
-            ),
-            settingsError: null,
-          }
-        } catch (error: unknown) {
-          return {
-            ...base,
-            settings: null,
-            deliverySettings: serializeDeliverySettings(
-              deliverySettings.get(bucket.name)!,
-              assignedProjects.get(bucket.name) ?? null,
-              projectSettings.get(assignedProjects.get(bucket.name)?.id ?? "") ?? null
-            ),
-            settingsError: errorMessage(error, "Unable to load bucket settings"),
-          }
-        }
-      })
-    )).sort((a, b) => a.name.localeCompare(b.name))
+    const buckets = names.map((name) => {
+      const snapshot = snapshotByName.get(name)
+      const cached = stats.get(name)
+      return {
+        id: `${account.id}:${name}`,
+        accountId: account.id,
+        accountLabel: account.label,
+        accountStatus: account.status,
+        name,
+        createdAt: snapshot?.createdAt ?? null,
+        jurisdiction: snapshot?.jurisdiction ?? "default",
+        storageClass: snapshot?.storageClass ?? "Standard",
+        objects: cached?.objects ?? 0,
+        bytes: cached?.bytes ?? 0,
+        statsStatus: cached?.status ?? "pending",
+        settings: snapshot?.settings ?? null,
+        deliverySettings: serializeDeliverySettings(
+          deliverySettings.get(name)!,
+          assignedProjects.get(name) ?? null,
+          projectSettings.get(assignedProjects.get(name)?.id ?? "") ?? null
+        ),
+        settingsStatus: snapshot?.settingsStatus ?? "pending",
+        settingsError: snapshot?.settingsError ?? null,
+        settingsLastAttemptedAt: snapshot?.settingsLastAttemptedAt ?? null,
+        settingsLastSyncedAt: snapshot?.settingsLastSyncedAt ?? null,
+        inventorySyncedAt: snapshot?.inventorySyncedAt ?? null,
+      }
+    }).sort((a, b) => a.name.localeCompare(b.name))
 
     return NextResponse.json({
       buckets,
-      activeAccount: { id: account.id, label: account.label, status: account.status },
+      activeAccount: {
+        id: account.id,
+        label: account.label,
+        status: account.status,
+        lastSyncedAt: account.lastSyncedAt ?? null,
+      },
       summary: {
         totalBuckets: buckets.length,
         // A successful worker cycle publishes account aggregates atomically

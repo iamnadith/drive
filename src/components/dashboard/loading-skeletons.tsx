@@ -97,7 +97,7 @@ function OverviewUsageChartSkeleton() {
   return (
     <Card className="@container/card overflow-hidden gap-0 py-0">
       <CardHeader className="border-b px-4 py-3.5 sm:px-5">
-        <div className="flex flex-col gap-3 @[1120px]/card:flex-row @[1120px]/card:items-center @[1120px]/card:justify-between">
+        <div className="flex flex-col gap-3 @[900px]/card:flex-row @[900px]/card:items-center @[900px]/card:justify-between">
           <div className="flex min-w-0 flex-col gap-1.5">
             <Skeleton className="h-5 w-32" />
             <Skeleton className="h-3.5 w-[min(28rem,78vw)]" />
@@ -609,6 +609,67 @@ function DashboardActivitySkeleton() {
   )
 }
 
+function BucketsPageSkeleton() {
+  return (
+    <DashboardPage className="dashboard-motion-stage">
+      <div className="dashboard-motion-item flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 flex-col gap-2">
+          <Skeleton className="h-8 w-28" />
+          <Skeleton className="h-4 w-64" />
+        </div>
+        <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
+          <Skeleton className="h-9 min-w-0 flex-1 rounded-full sm:w-[220px] sm:flex-none" />
+          <Skeleton className="size-9 rounded-full sm:w-24" />
+        </div>
+      </div>
+
+      <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, index) => (
+          <Card key={index} className="gap-0 py-0">
+            <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+              <Skeleton className="h-4 w-20" />
+              <Skeleton className="h-7 w-20 sm:h-8" />
+            </CardHeader>
+            <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3">
+              <Skeleton className="h-3 w-28" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
+        <div className="min-w-[1060px]">
+          <div className="grid h-9 grid-cols-[240px_160px_150px_125px_145px_110px_90px] border-b">
+            {Array.from({ length: 7 }).map((_, index) => (
+              <div key={index} className="relative flex items-center justify-center px-2.5">
+                <Skeleton className="h-3 w-14" />
+                {index < 6 ? <span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /> : null}
+              </div>
+            ))}
+          </div>
+          {Array.from({ length: 7 }).map((_, rowIndex) => (
+            <div key={rowIndex} className="grid min-h-[64px] grid-cols-[240px_160px_150px_125px_145px_110px_90px] border-b last:border-b-0">
+              {Array.from({ length: 7 }).map((_, cellIndex) => (
+                <div key={cellIndex} className="relative flex items-center justify-center px-2.5 py-2">
+                  <Skeleton className={cellIndex === 0 ? "h-7 w-36" : cellIndex === 2 ? "h-8 w-20" : "h-6 w-16 rounded-full"} />
+                  {cellIndex < 6 ? <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" /> : null}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2 border-t px-3 py-2">
+          <Skeleton className="size-8 justify-self-start rounded-full sm:w-24" />
+          <div className="flex gap-1">
+            {Array.from({ length: 3 }).map((_, index) => <Skeleton key={index} className="size-[1.875rem] rounded-full" />)}
+          </div>
+          <Skeleton className="size-8 justify-self-end rounded-full sm:w-20" />
+        </div>
+      </Card>
+    </DashboardPage>
+  )
+}
+
 function AccountsPageSkeleton() {
   return (
     <DashboardPage className="space-y-4 md:space-y-5">
@@ -900,6 +961,7 @@ function DetailPageSkeleton() {
 
 export {
   AccountsPageSkeleton,
+  BucketsPageSkeleton,
   DashboardActivitySkeleton,
   DashboardAnalyticsSkeleton,
   DashboardOverviewSkeleton,
