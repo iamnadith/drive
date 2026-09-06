@@ -266,6 +266,24 @@ create table if not exists drive_project_bucket_assignments (
   primary key (project_id, bucket_name)
 );
 
+-- Existing installations have this table already, so CREATE TABLE IF NOT
+-- EXISTS cannot add the account scope. It must exist before its index or any
+-- account-scoped reconciliation query is created.
+alter table if exists public.drive_project_bucket_assignments
+  add column if not exists account_id uuid references public.drive_accounts(id) on delete cascade;
+
+update drive_project_bucket_assignments assignment
+set account_id = project.created_account_id
+from drive_projects project
+where assignment.project_id = project.id
+  and assignment.account_id is null
+  and project.created_account_id is not null;
+
+update drive_project_bucket_assignments assignment
+set account_id = active.id
+from (select id from drive_accounts where status = 'active' order by updated_at desc limit 1) active
+where assignment.account_id is null;
+
 alter table if exists public.drive_project_bucket_assignments
   drop column if exists media_allowed_origins;
 alter table if exists public.drive_project_bucket_assignments
@@ -298,21 +316,6 @@ create table if not exists drive_project_delivery_settings (
   media_allowed_origins text[],
   updated_at timestamptz not null default now()
 );
-
-alter table if exists public.drive_project_bucket_assignments
-  add column if not exists account_id uuid references public.drive_accounts(id) on delete cascade;
-
-update drive_project_bucket_assignments assignment
-set account_id = project.created_account_id
-from drive_projects project
-where assignment.project_id = project.id
-  and assignment.account_id is null
-  and project.created_account_id is not null;
-
-update drive_project_bucket_assignments assignment
-set account_id = active.id
-from (select id from drive_accounts where status = 'active' order by updated_at desc limit 1) active
-where assignment.account_id is null;
 
 create table if not exists drive_project_delivery_sync_state (
   account_id uuid not null references drive_accounts(id) on delete cascade,
