@@ -850,6 +850,63 @@ function AccountsPageSkeleton() {
   )
 }
 
+function ProjectTablePageSkeleton({
+  actions = 3,
+  columns = 6,
+  rows = 6,
+  titleWidth = "w-40",
+}: {
+  actions?: number
+  columns?: number
+  rows?: number
+  titleWidth?: string
+}) {
+  return (
+    <DashboardPage className="dashboard-motion-stage">
+      <div className="dashboard-motion-item">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 flex-col gap-2">
+            <Skeleton className={`h-7 ${titleWidth}`} />
+            <Skeleton className="h-4 w-[min(28rem,78vw)]" />
+          </div>
+          <div className="flex w-full items-center gap-2 sm:w-auto sm:justify-end">
+            {Array.from({ length: actions }).map((_, index) => (
+              <Skeleton key={index} className={index === actions - 1 ? "h-9 min-w-9 flex-1 rounded-full sm:w-28 sm:flex-none" : "size-9 rounded-full"} />
+            ))}
+          </div>
+        </div>
+      </div>
+      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
+        <div className="min-w-[760px]">
+          <div className="grid h-9 border-b" style={{ gridTemplateColumns: `repeat(${columns}, minmax(110px, 1fr))` }}>
+            {Array.from({ length: columns }).map((_, index) => (
+              <div key={index} className="relative flex items-center px-2.5">
+                <Skeleton className="h-2.5 w-16" />
+                {index < columns - 1 ? <span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /> : null}
+              </div>
+            ))}
+          </div>
+          {Array.from({ length: rows }).map((_, rowIndex) => (
+            <div key={rowIndex} className="grid h-[64px] border-b last:border-b-0" style={{ gridTemplateColumns: `repeat(${columns}, minmax(110px, 1fr))` }}>
+              {Array.from({ length: columns }).map((_, columnIndex) => (
+                <div key={columnIndex} className="relative flex items-center px-2.5">
+                  <Skeleton className={columnIndex === columns - 1 ? "ml-auto h-8 w-20 rounded-full" : "h-4 w-4/5"} />
+                  {columnIndex < columns - 1 ? <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" /> : null}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        <div className="flex h-12 items-center justify-between border-t px-3">
+          <Skeleton className="h-8 w-20 rounded-full" />
+          <Skeleton className="h-3 w-20" />
+          <Skeleton className="h-8 w-20 rounded-full" />
+        </div>
+      </Card>
+    </DashboardPage>
+  )
+}
+
 function DashboardTableSkeleton({
   actions = 2,
   cards = 0,
@@ -968,6 +1025,7 @@ export {
   DashboardTableSkeleton,
   DetailPageSkeleton,
   MetricCardsSkeleton,
+  ProjectTablePageSkeleton,
   StoragePageSkeleton,
   TableRowsSkeleton,
   WorkerPageSkeleton,

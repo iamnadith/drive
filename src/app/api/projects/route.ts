@@ -6,6 +6,7 @@ import {
   listProjects,
 } from "@/lib/projects-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { getActiveAccount } from "@/lib/accounts-store"
 
 function errorMessage(error: unknown, fallback: string) {
   const message =
@@ -44,10 +45,13 @@ export async function POST(request: Request) {
     }
 
     const projectId = generateProjectId()
+    const active = await getActiveAccount()
 
     const project = await createProjectRecord({
       name,
       projectId,
+      createdAccountId: active?.id,
+      createdAccountLabel: active?.label,
     })
 
     await recordActivity({

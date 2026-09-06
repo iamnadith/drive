@@ -5,7 +5,9 @@ const test = require("node:test")
 const {
   hasProjectBucketDeliveryPolicyMutation,
   mergeMediaAllowedOrigins,
+  mergeManyMediaAllowedOrigins,
   normalizeMediaAllowedOrigins,
+  resolveEffectiveMediaAllowedOrigins,
 } = require("../src/lib/project-media-origins.cjs")
 
 test("normalizes, de-duplicates, and permits localhost development origins", () => {
@@ -47,6 +49,78 @@ test("project origins are inherited as a de-duplicated union while manual bucket
 test("wildcard project or bucket origin dominates the effective union", () => {
   assert.deepEqual(mergeMediaAllowedOrigins(["https://panel.example.com"], ["*"]), ["*"])
   assert.deepEqual(mergeMediaAllowedOrigins(["*"], ["https://bucket.example.com"]), ["*"])
+})
+
+test("shared project policies merge once and wildcard makes additional origins redundant", () => {
+  assert.deepEqual(
+    mergeManyMediaAllowedOrigins([
+      ["https://one.example.com", "https://shared.example.com"],
+      ["https://two.example.com", "https://shared.example.com"],
+      ["https://bucket.example.com"],
+    ]),
+    [
+      "https://one.example.com",
+      "https://shared.example.com",
+      "https://two.example.com",
+      "https://bucket.example.com",
+    ]
+  )
+  assert.deepEqual(
+    mergeManyMediaAllowedOrigins([
+      ["https://one.example.com"],
+      ["*"],
+      ["https://bucket.example.com"],
+    ]),
+    ["*"]
+  )
+})
+
+test("combined project and bucket origins have a hard provider-safe limit", () => {
+  assert.throws(() => mergeManyMediaAllowedOrigins([
+    Array.from({ length: 101 }, (_, index) => `https://origin-${index}.example.com`),
+  ]), /combined bucket delivery policy/i)
+  assert.deepEqual(
+    mergeManyMediaAllowedOrigins([
+      Array.from({ length: 101 }, (_, index) => `https://origin-${index}.example.com`),
+      ["*"],
+    ]),
+    ["*"]
+  )
+})
+
+test("effective policy distinguishes inherited defaults from an explicit deny-all policy", () => {
+  const fallback = ["https://deployment.example.com"]
+  assert.deepEqual(
+    resolveEffectiveMediaAllowedOrigins({ inheritedPolicies: [null, null], manual: null, fallback }),
+    fallback
+  )
+  assert.deepEqual(
+    resolveEffectiveMediaAllowedOrigins({ inheritedPolicies: [[]], manual: null, fallback }),
+    []
+  )
+  assert.deepEqual(
+    resolveEffectiveMediaAllowedOrigins({
+      inheritedPolicies: [["https://project.example.com"]],
+      manual: ["https://bucket.example.com"],
+      fallback,
+    }),
+    ["https://project.example.com", "https://bucket.example.com"]
+  )
+})
+
+test("removing one shared project policy leaves the other project and bucket policies intact", () => {
+  const before = resolveEffectiveMediaAllowedOrigins({
+    inheritedPolicies: [["https://one.example.com"], ["https://two.example.com"]],
+    manual: ["https://bucket.example.com"],
+    fallback: [],
+  })
+  const after = resolveEffectiveMediaAllowedOrigins({
+    inheritedPolicies: [["https://two.example.com"]],
+    manual: ["https://bucket.example.com"],
+    fallback: [],
+  })
+  assert.deepEqual(before, ["https://one.example.com", "https://two.example.com", "https://bucket.example.com"])
+  assert.deepEqual(after, ["https://two.example.com", "https://bucket.example.com"])
 })
 
 test("project bucket assignment payloads cannot mutate delivery policy", () => {

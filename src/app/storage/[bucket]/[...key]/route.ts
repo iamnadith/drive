@@ -2,7 +2,7 @@ import { NextResponse } from "next/server"
 import { getAllAccounts } from "@/lib/accounts-store"
 import { getBucketDeliverySettings } from "@/lib/bucket-delivery-settings-store"
 import { getEffectiveBucketMediaOrigins } from "@/lib/bucket-delivery-settings-service"
-import { authorizeProjectRequest } from "@/lib/project-api-auth"
+import { authorizeProjectRequest, projectIdFromUrl } from "@/lib/project-api-auth"
 import { listProjectsUsingBucket } from "@/lib/projects-store"
 import { r2CreateSignedDownloadUrl, r2CreateSignedHeadUrl } from "@/lib/r2-s3"
 import {
@@ -36,7 +36,7 @@ async function redirectToStorageObject(
     return NextResponse.json({ error: "Active Cloudflare account is missing R2 credentials" }, { status: 400 })
   }
   const settings = await getBucketDeliverySettings(active.id, bucket)
-  const configuredOrigins = (await getEffectiveBucketMediaOrigins(bucket, settings)).effectiveMediaAllowedOrigins.join(",")
+  const configuredOrigins = (await getEffectiveBucketMediaOrigins(active.id, bucket, settings)).effectiveMediaAllowedOrigins.join(",")
   const origin = request.headers.get("origin")
   if (!isStorageDeliveryOriginAllowed(origin, configuredOrigins)) {
     const response = NextResponse.json(
@@ -49,10 +49,10 @@ async function redirectToStorageObject(
     return response
   }
   if (!settings.publicAccessEnabled) {
-    const assignedProjects = await listProjectsUsingBucket(bucket)
-    if (assignedProjects.length !== 1) {
+    const assignedProjects = await listProjectsUsingBucket(active.id, bucket)
+    if (assignedProjects.length === 0) {
       const response = NextResponse.json(
-        { error: "Private bucket delivery requires exactly one assigned project" },
+        { error: "Private bucket delivery requires an assigned project" },
         { status: 403 }
       )
       createStorageDeliveryHeaders(request.headers.get("origin"), configuredOrigins).forEach(
@@ -60,13 +60,34 @@ async function redirectToStorageObject(
       )
       return response
     }
-    const authorized = await authorizeProjectRequest(request, assignedProjects[0].id, "read")
-    const authResponse = "response" in authorized ? authorized.response : undefined
-    if (authResponse) {
+    const requestedProjectId = projectIdFromUrl(request)
+    const requestedProject = requestedProjectId
+      ? assignedProjects.find((project) => project.id === requestedProjectId || project.projectId === requestedProjectId)
+      : null
+    if (requestedProjectId && !requestedProject) {
+      const response = NextResponse.json({ error: "Requested project is not assigned to this bucket" }, { status: 403 })
       createStorageDeliveryHeaders(request.headers.get("origin"), configuredOrigins).forEach(
-        (value, name) => authResponse.headers.set(name, value)
+        (value, name) => response.headers.set(name, value)
       )
-      return authResponse
+      return response
+    }
+    const candidates = requestedProject ? [requestedProject] : assignedProjects
+    let authResponse: NextResponse | undefined
+    let authorized = false
+    for (const candidate of candidates) {
+      const result = await authorizeProjectRequest(request, candidate.projectId, "read")
+      if (!("response" in result)) {
+        authorized = true
+        break
+      }
+      authResponse = result.response
+    }
+    if (!authorized) {
+      const response = authResponse ?? NextResponse.json({ error: "Project authorization failed" }, { status: 401 })
+      createStorageDeliveryHeaders(request.headers.get("origin"), configuredOrigins).forEach(
+        (value, name) => response.headers.set(name, value)
+      )
+      return response
     }
   }
   const url = new URL(request.url)
@@ -119,7 +140,7 @@ export async function OPTIONS(
   const active = accounts.find((account) => account.status === "active")
   const settings = active ? await getBucketDeliverySettings(active.id, bucket) : null
   const configuredOrigins = settings
-    ? (await getEffectiveBucketMediaOrigins(bucket, settings)).effectiveMediaAllowedOrigins.join(",")
+    ? (await getEffectiveBucketMediaOrigins(active!.id, bucket, settings)).effectiveMediaAllowedOrigins.join(",")
     : undefined
   if (!isStorageDeliveryOriginAllowed(request.headers.get("origin"), configuredOrigins)) {
     return NextResponse.json({ error: "Request origin is not allowed for this bucket" }, { status: 403 })

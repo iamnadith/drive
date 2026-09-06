@@ -58,6 +58,7 @@ type BucketDeliverySettings = {
   manualMediaAllowedOrigins: string[] | null
   inheritedMediaAllowedOrigins: string[] | null
   inheritedProject: { id: string; projectId: string; name: string } | null
+  inheritedProjects?: { id: string; projectId: string; name: string }[]
   effectiveMediaAllowedOrigins: string[]
 }
 
@@ -98,6 +99,7 @@ const WILDCARD_RULE: CorsRule = {
   allowedHeaders: ["*"],
   exposeHeaders: ["ETag"],
 }
+const DRIVE_MANAGED_CORS_RULE_ID = "drive-media-delivery"
 
 function formatBytes(value: number) {
   if (!value) return "0 B"
@@ -158,12 +160,16 @@ type InheritedOrigin = { origin: string; projectId?: string; projectName?: strin
 
 function inheritedOrigins(settings: BucketDeliverySettings | null | undefined): InheritedOrigin[] {
   const records = settings?.inheritedMediaAllowedOrigins ?? []
-  const project = settings?.inheritedProject
+  const projects = settings?.inheritedProjects?.length
+    ? settings.inheritedProjects
+    : settings?.inheritedProject
+      ? [settings.inheritedProject]
+      : []
   return Array.isArray(records)
     ? records.filter((origin): origin is string => typeof origin === "string").map((origin) => ({
         origin,
-        projectId: project?.projectId ?? project?.id,
-        projectName: project?.name,
+        projectId: projects.length === 1 ? projects[0].projectId ?? projects[0].id : undefined,
+        projectName: projects.length > 1 ? `${projects.length} projects` : projects[0]?.name,
       }))
     : []
 }
@@ -288,7 +294,7 @@ export default function BucketsPage() {
         <DashboardPageHeader
           title="Buckets"
           description={data?.activeAccount
-            ? `${data.activeAccount.label} · ${formatSyncedAt(data.activeAccount.lastSyncedAt)}`
+            ? `${data.activeAccount.label} / ${formatSyncedAt(data.activeAccount.lastSyncedAt)}`
             : "Usage and access settings for the active account"}
           actions={
             <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
@@ -520,6 +526,7 @@ function PageButton({ page, currentPage, onSelect }: { page: number; currentPage
 
 function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { bucket: BucketRecord | null; onOpenChange: (open: boolean) => void; onUpdated: (bucket: BucketRecord) => void; onDeleted: (bucket: BucketRecord) => void }) {
   const [policy, setPolicy] = React.useState<CorsRule | null>(null)
+  const [appliedRules, setAppliedRules] = React.useState<CorsRule[]>([])
   const [savingCors, setSavingCors] = React.useState(false)
   const [savingPublic, setSavingPublic] = React.useState(false)
   const [savingDelivery, setSavingDelivery] = React.useState(false)
@@ -531,16 +538,38 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
   const [dangerBusy, setDangerBusy] = React.useState(false)
   const [dangerResult, setDangerResult] = React.useState<string | null>(null)
   React.useEffect(() => {
-    setPolicy(bucket?.settings?.corsRules[0] ? { ...bucket.settings.corsRules[0] } : null)
+    const editablePolicy = bucket?.settings?.corsRules.find((rule) => rule.id !== DRIVE_MANAGED_CORS_RULE_ID)
+    setPolicy(editablePolicy ? { ...editablePolicy } : null)
+    setAppliedRules(bucket?.settings?.corsRules ?? [])
     setDeliveryOrigins(manualOrigins(bucket?.deliverySettings))
     setDeliveryOriginInput("")
     setDeliveryOriginError(null)
   }, [bucket])
 
+  React.useEffect(() => {
+    if (!bucket) return
+    const controller = new AbortController()
+    void fetch(settingsUrl(bucket), { signal: controller.signal })
+      .then(async (response) => ({ response, payload: await response.json() as { settings?: BucketSettings } }))
+      .then(({ response, payload }) => {
+        if (response.ok && payload.settings) {
+          setAppliedRules(payload.settings.corsRules)
+          const editable = payload.settings.corsRules.find((rule) => rule.id !== DRIVE_MANAGED_CORS_RULE_ID)
+          setPolicy(editable ? { ...editable } : null)
+        }
+      })
+      .catch((error) => {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          toast.error("Unable to refresh live bucket CORS rules")
+        }
+      })
+    return () => controller.abort()
+  }, [bucket])
+
   async function patch(body: Record<string, unknown>) {
     if (!bucket) throw new Error("Bucket is not selected")
     const response = await fetch(settingsUrl(bucket), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
-    const payload = (await response.json()) as { settings?: BucketSettings; deliverySettings?: BucketDeliverySettings; error?: string }
+    const payload = (await response.json()) as { settings?: BucketSettings; deliverySettings?: BucketDeliverySettings; deliverySyncPending?: boolean; error?: string }
     if (!response.ok || !payload.settings) throw new Error(payload.error || "Unable to update settings")
     const updated = {
       ...bucket,
@@ -549,8 +578,10 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
       settingsStatus: "completed",
       settingsError: null,
       settingsLastAttemptedAt: new Date().toISOString(),
-      settingsLastSyncedAt: new Date().toISOString(),
+      settingsLastSyncedAt: payload.deliverySyncPending ? bucket.settingsLastSyncedAt : new Date().toISOString(),
+      deliverySyncPending: payload.deliverySyncPending === true,
     }
+    setAppliedRules(payload.settings.corsRules)
     onUpdated(updated)
     return updated
   }
@@ -564,7 +595,13 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
 
   async function saveCors() {
     setSavingCors(true)
-    try { const updated = await patch({ corsRules: policy ? [policy] : [] }); setPolicy(updated.settings?.corsRules[0] ?? null); toast.success("CORS policy saved") }
+    try {
+      const genericRules = appliedRules.filter((rule) => rule.id !== DRIVE_MANAGED_CORS_RULE_ID)
+      const nextGenericRules = policy ? [policy, ...genericRules.slice(1)] : genericRules.slice(1)
+      const updated = await patch({ corsRules: nextGenericRules })
+      setPolicy(updated.settings?.corsRules.find((rule) => rule.id !== DRIVE_MANAGED_CORS_RULE_ID) ?? null)
+      toast.success("CORS policy saved")
+    }
     catch (error: unknown) { toast.error(error instanceof Error ? error.message : "Unable to save CORS policy") }
     finally { setSavingCors(false) }
   }
@@ -597,7 +634,9 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
       const updated = await patch({
         manualMediaAllowedOrigins: deliveryOrigins,
       })
-      toast.success("Bucket media origins saved")
+      toast.success(updated.deliverySyncPending
+        ? "Bucket origins saved; worker synchronization queued"
+        : "Bucket media origins saved and synchronized")
       setDeliveryOrigins(manualOrigins(updated.deliverySettings))
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to save Drive delivery settings")
@@ -667,7 +706,7 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
   return (
     <Dialog open={Boolean(bucket)} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
-        <DialogHeader><DialogTitle>Bucket settings</DialogTitle><DialogDescription>{bucket ? `${bucket.name} · ${bucket.accountLabel}` : "Manage bucket settings"}</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>Bucket settings</DialogTitle><DialogDescription>{bucket ? `${bucket.name} / ${bucket.accountLabel}` : "Manage bucket settings"}</DialogDescription></DialogHeader>
         {bucket?.settings ? <div className="space-y-6">
           <section className="space-y-3 border-b pb-6">
             <div className="flex items-start justify-between gap-4">
@@ -769,8 +808,31 @@ function BucketSettingsDialog({ bucket, onOpenChange, onUpdated, onDeleted }: { 
               </div>
             </div>
           </section>
+          <section className="flex flex-col gap-3 rounded-md border bg-muted/20 p-4">
+            <div>
+              <Label className="text-sm font-medium">All applied R2 CORS rules</Label>
+              <p className="mt-1 text-sm text-muted-foreground">Live provider rules, including the single Drive-managed delivery rule and every unrelated rule preserved on this bucket.</p>
+            </div>
+            {appliedRules.length > 0 ? appliedRules.map((rule, index) => (
+              <div key={`${rule.id ?? "provider-rule"}-${index}`} className="flex flex-col gap-2 rounded-md border bg-background p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-mono text-xs">{rule.id || `Provider rule ${index + 1}`}</span>
+                  <Badge variant={rule.id === DRIVE_MANAGED_CORS_RULE_ID ? "default" : "outline"}>
+                    {rule.id === DRIVE_MANAGED_CORS_RULE_ID ? "Drive managed" : "Preserved provider rule"}
+                  </Badge>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {rule.allowedMethods.map((method) => <Badge key={`${index}-method-${method}`} variant="secondary">{method}</Badge>)}
+                  {rule.allowedOrigins.map((origin) => <Badge key={`${index}-origin-${origin}`} variant="outline" className="max-w-full font-mono"><span className="truncate">{origin}</span></Badge>)}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Allowed headers: {rule.allowedHeaders.length ? rule.allowedHeaders.join(", ") : "none"} / Exposed headers: {rule.exposeHeaders.length ? rule.exposeHeaders.join(", ") : "none"}
+                </p>
+              </div>
+            )) : <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">No R2 CORS rules are currently applied.</div>}
+          </section>
           <section className="space-y-4">
-            <div className="flex flex-wrap items-start justify-between gap-3"><div><Label className="text-sm font-medium">CORS policy</Label><p className="mt-1 text-sm text-muted-foreground">Control which origins and methods can access this bucket. CORS does not grant private API access.</p></div><div className="flex gap-2">{!policy ? <Button variant="outline" size="sm" onClick={() => setPolicy({ allowedOrigins: [""], allowedMethods: ["GET"], allowedHeaders: [], exposeHeaders: [] })}><Plus /> Add policy</Button> : null}<Button variant="outline" size="sm" onClick={() => setPolicy({ ...WILDCARD_RULE })}><Globe2 /> Any origin (*)</Button></div></div>
+            <div className="flex flex-wrap items-start justify-between gap-3"><div><Label className="text-sm font-medium">Bucket manual CORS policy</Label><p className="mt-1 text-sm text-muted-foreground">Edit one bucket-level provider rule. Other provider rules and the Drive-managed delivery rule remain intact.</p></div><div className="flex gap-2">{!policy ? <Button variant="outline" size="sm" onClick={() => setPolicy({ allowedOrigins: [""], allowedMethods: ["GET"], allowedHeaders: [], exposeHeaders: [] })}><Plus /> Add policy</Button> : null}<Button variant="outline" size="sm" onClick={() => setPolicy({ ...WILDCARD_RULE })}><Globe2 /> Any origin (*)</Button></div></div>
             {policy ? <CorsPolicyEditor policy={policy} onChange={setPolicy} onRemove={() => setPolicy(null)} /> : <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">No CORS policy configured.</div>}
           </section>
           <section className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 p-4">

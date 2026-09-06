@@ -3,10 +3,14 @@
 import * as React from "react"
 import Link from "next/link"
 import {
+  ChevronLeft,
+  ChevronRight,
   FolderPlus,
   KeyRound,
   MoreHorizontal,
   Plus,
+  RefreshCw,
+  Search,
   Settings2,
   Trash2,
 } from "lucide-react"
@@ -16,10 +20,6 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
 } from "@/components/ui/card"
 import {
   Dialog,
@@ -32,19 +32,30 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
 import {
   DashboardPage,
   DashboardPageHeader,
@@ -66,6 +77,15 @@ type Project = {
 
 type ProjectSettingsPayload = {
   deliverySettings?: { mediaAllowedOrigins?: string[] | null }
+}
+
+type ProjectBucketDeliveryRule = {
+  bucketName: string
+  projectCount: number
+  effectiveMediaAllowedOrigins: string[]
+  corsRules: Array<{ id?: string; allowedOrigins: string[]; allowedMethods: string[] }>
+  providerStatus: string
+  providerLastSyncedAt: string | null
 }
 
 async function readJson(res: Response) {
@@ -100,26 +120,6 @@ function readProjectOrigins(data: Record<string, unknown>) {
   return Array.isArray(origins) ? origins.filter((value): value is string => typeof value === "string") : []
 }
 
-function MetricCard({
-  title,
-  value,
-  description,
-}: {
-  title: string
-  value: string | number
-  description: string
-}) {
-  return (
-    <Card>
-      <CardHeader className="gap-1">
-        <CardDescription>{title}</CardDescription>
-        <CardTitle className="text-2xl">{value}</CardTitle>
-      </CardHeader>
-      <CardContent className="pt-0 text-sm text-muted-foreground">{description}</CardContent>
-    </Card>
-  )
-}
-
 export default function ProjectsPage() {
   const PAGE_SIZE = 8
   const [projects, setProjects] = React.useState<Project[]>([])
@@ -137,8 +137,10 @@ export default function ProjectsPage() {
   const [settingsOrigins, setSettingsOrigins] = React.useState<string[]>([])
   const [settingsOriginInput, setSettingsOriginInput] = React.useState("")
   const [settingsOriginError, setSettingsOriginError] = React.useState<string>()
+  const [settingsBucketRules, setSettingsBucketRules] = React.useState<ProjectBucketDeliveryRule[]>([])
   const [loadingSettings, setLoadingSettings] = React.useState(false)
   const [savingSettings, setSavingSettings] = React.useState(false)
+  const [syncingSettings, setSyncingSettings] = React.useState(false)
 
   const [deleteTarget, setDeleteTarget] = React.useState<Project | null>(null)
   const [deleteBucket, setDeleteBucket] = React.useState(false)
@@ -191,10 +193,6 @@ export default function ProjectsPage() {
     }
   }, [page, totalPages])
 
-  const totalKeys = projects.reduce((sum, project) => sum + (project.keyCount ?? 0), 0)
-  const activeProjects = projects.filter((project) => project.status === "active").length
-  const totalAssignedBuckets = projects.reduce((sum, project) => sum + (project.bucketCount ?? 0), 0)
-
   const openCreateDialog = () => {
     setProjectName("")
     setCreateOpen(true)
@@ -207,6 +205,7 @@ export default function ProjectsPage() {
     setSettingsOrigins([])
     setSettingsOriginInput("")
     setSettingsOriginError(undefined)
+    setSettingsBucketRules([])
     setLoadingSettings(true)
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}`)
@@ -214,11 +213,12 @@ export default function ProjectsPage() {
       if (!res.ok) throw new Error(String(data.error ?? "Unable to load project settings"))
       const loadedProject = data.project as Project | undefined
       if (loadedProject) {
-        setSettingsProject(loadedProject)
+        setSettingsProject((current) => ({ ...loadedProject, bucketCount: current?.bucketCount }))
         setSettingsName(loadedProject.name)
         setSettingsStatus(loadedProject.status)
       }
       setSettingsOrigins(readProjectOrigins(data))
+      setSettingsBucketRules(Array.isArray(data.bucketDeliveryRules) ? data.bucketDeliveryRules as ProjectBucketDeliveryRule[] : [])
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to load project settings")
     } finally {
@@ -292,13 +292,35 @@ export default function ProjectsPage() {
       })
       const data = await readJson(res)
       if (!res.ok) throw new Error(String(data.error ?? "Unable to update project"))
-      setSettingsProject(data.project as Project)
-      toast.success("Project and inherited media policy updated")
+      setSettingsProject((current) => ({ ...(data.project as Project), bucketCount: current?.bucketCount }))
+      toast.success(data.deliverySyncPending
+        ? "Project policy saved; the worker will finish provider synchronization"
+        : "Project delivery policy saved and synchronized")
       await loadProjects()
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to update project")
     } finally {
       setSavingSettings(false)
+    }
+  }
+
+  const syncSettingsPolicy = async () => {
+    if (!settingsProject) return
+    setSyncingSettings(true)
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(settingsProject.id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "syncDelivery" }),
+      })
+      const data = await readJson(res)
+      if (!res.ok) throw new Error(String(data.error ?? "Unable to synchronize delivery policy"))
+      const count = Number(data.synchronizedBuckets ?? 0)
+      toast.success(`Delivery policy verified on ${count} bucket${count === 1 ? "" : "s"}`)
+    } catch (error: unknown) {
+      toast.error(error instanceof Error ? error.message : "Unable to synchronize delivery policy")
+    } finally {
+      setSyncingSettings(false)
     }
   }
 
@@ -315,7 +337,12 @@ export default function ProjectsPage() {
       if (!res.ok) throw new Error(String(data.error ?? "Unable to delete project"))
       setDeleteTarget(null)
       setDeleteBucket(false)
-      toast.success(deleteBucket ? "Project and assigned buckets deleted" : "Project deleted")
+      const keptShared = Number(data.keptSharedBuckets ?? 0)
+      toast.success(
+        deleteBucket
+          ? `Project deleted${keptShared ? `; ${keptShared} shared bucket${keptShared === 1 ? " was" : "s were"} kept` : " with its unshared buckets"}`
+          : "Project deleted"
+      )
       await loadProjects()
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to delete project")
@@ -325,164 +352,165 @@ export default function ProjectsPage() {
   }
 
   return (
-    <DashboardPage>
-      <DashboardPageHeader
-        title="Projects"
-        description="Projects, buckets, and API access."
-        actions={
-          <>
-            <Input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search projects"
-              className="h-9 w-full sm:w-56"
-            />
-            <Button className="!h-8 !min-h-8 px-3 text-sm" variant="outline" loading={loading} onClick={() => void loadProjects()}>
-              Refresh
-            </Button>
-            <Button className="!h-8 !min-h-8 px-3 text-sm" onClick={openCreateDialog}>
-              <Plus className="mr-2 h-4 w-4" />
-              New project
-            </Button>
-          </>
-        }
-      />
-
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <MetricCard title="Projects" value={projects.length} description="Project records created in the workspace." />
-        <MetricCard title="Active" value={activeProjects} description="Projects currently available for use." />
-        <MetricCard title="Assigned Buckets" value={totalAssignedBuckets} description="Total buckets linked across all projects." />
-        <MetricCard title="API Keys" value={totalKeys} description="Keys remain managed on separate project access pages." />
-      </div>
-
-      <div className="space-y-3">
-        <div className="flex justify-end">
-          {filteredProjects.length > PAGE_SIZE ? (
-            <div className="text-xs text-muted-foreground">
-              Page {page} of {totalPages}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="space-y-3">
-          {loading ? (
-            Array.from({ length: 5 }).map((_, index) => <Skeleton key={index} className="h-24 w-full rounded-2xl" />)
-          ) : filteredProjects.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-border/70 bg-muted/20 px-6 py-10 text-center">
-              <div className="font-medium">{projects.length === 0 ? "No projects yet" : "No matching projects"}</div>
-              {projects.length === 0 ? (
-                <Button className="mt-4" onClick={openCreateDialog}>
-                  <Plus className="mr-2 h-4 w-4" />
-                  New project
-                </Button>
-              ) : null}
-            </div>
-          ) : (
-            paginatedProjects.map((project) => (
-              <div
-                key={project.id}
-                className={cn(
-                  "group rounded-2xl border p-3 transition-colors",
-                  project.status === "active"
-                    ? "border-primary/20 bg-card shadow-sm"
-                    : "border-border/60 bg-card shadow-sm"
-                )}
-              >
-                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-                  <div className="grid flex-1 gap-2.5 lg:grid-cols-[minmax(0,1.3fr)_minmax(210px,0.9fr)_minmax(140px,0.5fr)_minmax(140px,0.5fr)] xl:items-center">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-3">
-                        <div className="text-base font-semibold tracking-tight">{project.name}</div>
-                        <Badge variant={project.status === "active" ? "default" : "secondary"}>{project.status}</Badge>
-                      </div>
-                      <div className="mt-1 font-mono text-xs text-muted-foreground">{project.projectId}</div>
-                      <div className="mt-2 text-xs text-muted-foreground">{project.createdAccountLabel || "Project workspace"}</div>
-                    </div>
-
-                    <div className="rounded-xl border border-border/60 bg-muted/30 px-3 py-2">
-                      <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Primary bucket</div>
-                      <div className="mt-1 font-mono text-xs">{project.bucketName || "No primary bucket"}</div>
-                    </div>
-
-                    <div className="rounded-xl border border-border/60 bg-muted/30 px-3 py-2 text-center">
-                      <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Buckets</div>
-                      <div className="mt-1 text-lg font-semibold">{project.bucketCount ?? 0}</div>
-                    </div>
-                    <div className="rounded-xl border border-border/60 bg-muted/30 px-3 py-2 text-center">
-                      <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Keys</div>
-                      <div className="mt-1 text-lg font-semibold">{project.keyCount ?? 0}</div>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-2 xl:justify-end">
-                    <Button size="sm" variant="outline" asChild>
-                      <Link href={`/dashboard/projects/${encodeURIComponent(project.id)}/buckets`}>
-                        <FolderPlus className="mr-2 h-4 w-4" />
-                        Buckets
-                      </Link>
-                    </Button>
-                    <Button size="sm" variant="outline" asChild>
-                      <Link href={`/dashboard/projects/${encodeURIComponent(project.id)}/keys`}>
-                        <KeyRound className="mr-2 h-4 w-4" />
-                        API keys
-                      </Link>
-                    </Button>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" className="rounded-full">
-                          <MoreHorizontal className="h-4 w-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem onClick={() => void openSettingsDialog(project)}>
-                          <Settings2 className="mr-2 h-4 w-4" />
-                          Settings
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          className="text-destructive focus:text-destructive"
-                          onClick={() => setDeleteTarget(project)}
-                        >
-                          <Trash2 className="mr-2 h-4 w-4" />
-                          Delete
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </div>
-                </div>
+    <DashboardPage className="dashboard-motion-stage">
+      <div className="dashboard-motion-item">
+        <DashboardPageHeader
+          title="Projects"
+          description={`${projects.length} project${projects.length === 1 ? "" : "s"} connected to the active account.`}
+          actions={
+            <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
+              <div className="relative h-9 min-w-0 flex-1 sm:w-[220px] sm:flex-none">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search projects..."
+                  aria-label="Search projects"
+                  className="h-9 w-full pl-8"
+                />
               </div>
-            ))
-          )}
-        </div>
-
-        {filteredProjects.length > PAGE_SIZE ? (
-          <div className="flex items-center justify-between gap-3 border-t border-border/60 pt-3">
-            <div className="text-xs text-muted-foreground">
-              Showing {(page - 1) * PAGE_SIZE + 1}-{Math.min(page * PAGE_SIZE, filteredProjects.length)} of {filteredProjects.length}
-            </div>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page === 1}>
-                Previous
-              </Button>
               <Button
                 variant="outline"
-                size="sm"
-                onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
-                disabled={page === totalPages}
+                size="icon"
+                className="size-9 shrink-0 rounded-full"
+                loading={loading}
+                onClick={() => void loadProjects()}
+                aria-label="Refresh projects"
               >
-                Next
+                <RefreshCw />
+              </Button>
+              <Button
+                size="icon"
+                className="size-9 min-w-9 shrink-0 rounded-full sm:h-9 sm:w-auto sm:min-w-0 sm:px-3"
+                onClick={openCreateDialog}
+              >
+                <Plus data-icon="inline-start" />
+                <span className="sr-only sm:not-sr-only">New project</span>
               </Button>
             </div>
-          </div>
-        ) : null}
+          }
+        />
       </div>
 
+      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
+        <Table className="min-w-[930px] w-full" containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full">
+          <TableHeader>
+            <TableRow className="h-9 border-b">
+              {[
+                ["Project", "min-w-[240px]"],
+                ["Account", "min-w-[170px]"],
+                ["Primary bucket", "min-w-[220px]"],
+                ["Buckets", "min-w-[90px]"],
+                ["API keys", "min-w-[90px]"],
+                ["Status", "min-w-[110px]"],
+                ["Actions", "min-w-[170px]"],
+              ].map(([label, width], index, items) => (
+                <TableHead key={label} className={cn(width, "relative px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground", label === "Actions" && "text-right")}>
+                  {label}
+                  {index < items.length - 1 ? <span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /> : null}
+                </TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {loading && projects.length === 0 ? (
+              Array.from({ length: 6 }).map((_, index) => (
+                <TableRow key={index} className="h-[64px]">
+                  <TableCell colSpan={7}><Skeleton className="h-10 w-full rounded-xl" /></TableCell>
+                </TableRow>
+              ))
+            ) : paginatedProjects.length ? (
+              paginatedProjects.map((project) => (
+                <TableRow key={project.id} className="h-[64px] border-b last:border-b-0 hover:bg-muted/30">
+                  <TableCell className="relative px-2.5 py-2">
+                    <div className="max-w-[260px]">
+                      <div className="truncate font-medium">{project.name}</div>
+                      <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{project.projectId}</div>
+                    </div>
+                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
+                  </TableCell>
+                  <TableCell className="relative px-2.5 py-2 text-sm text-muted-foreground">
+                    <span className="block max-w-[180px] truncate">{project.createdAccountLabel || "Active account"}</span>
+                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
+                  </TableCell>
+                  <TableCell className="relative px-2.5 py-2 font-mono text-xs">
+                    <span className="block max-w-[230px] truncate">{project.bucketName || "Not assigned"}</span>
+                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
+                  </TableCell>
+                  <TableCell className="relative px-2.5 py-2 text-center font-medium">
+                    {project.bucketCount ?? 0}
+                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
+                  </TableCell>
+                  <TableCell className="relative px-2.5 py-2 text-center font-medium">
+                    {project.keyCount ?? 0}
+                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
+                  </TableCell>
+                  <TableCell className="relative px-2.5 py-2">
+                    <Badge variant={project.status === "active" ? "default" : "secondary"}>{project.status}</Badge>
+                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
+                  </TableCell>
+                  <TableCell className="px-2.5 py-2">
+                    <div className="flex items-center justify-end gap-1">
+                      <Button variant="ghost" size="icon-sm" className="rounded-full" asChild>
+                        <Link href={`/dashboard/projects/${encodeURIComponent(project.id)}/buckets`} aria-label={`Manage buckets for ${project.name}`}>
+                          <FolderPlus />
+                        </Link>
+                      </Button>
+                      <Button variant="ghost" size="icon-sm" className="rounded-full" asChild>
+                        <Link href={`/dashboard/projects/${encodeURIComponent(project.id)}/keys`} aria-label={`Manage API keys for ${project.name}`}>
+                          <KeyRound />
+                        </Link>
+                      </Button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="icon-sm" className="rounded-full" aria-label={`More actions for ${project.name}`}>
+                            <MoreHorizontal />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuGroup>
+                            <DropdownMenuItem onClick={() => void openSettingsDialog(project)}>
+                              <Settings2 /> Settings
+                            </DropdownMenuItem>
+                            <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget(project)}>
+                              <Trash2 /> Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuGroup>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))
+            ) : (
+              <TableRow>
+                <TableCell colSpan={7} className="h-28 text-center text-muted-foreground">
+                  {projects.length === 0 ? "No projects yet." : "No projects match your search."}
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+        <div className="border-t px-3 py-2 text-xs text-muted-foreground max-sm:-mb-2">
+          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+            <Button variant="outline" size="sm" className="justify-self-start rounded-full" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page === 1 || filteredProjects.length === 0}>
+              <ChevronLeft data-icon="inline-start" /> <span className="hidden sm:inline">Previous</span>
+            </Button>
+            <span className="justify-self-center">Page {filteredProjects.length ? page : 0} of {filteredProjects.length ? totalPages : 0}</span>
+            <Button variant="outline" size="sm" className="justify-self-end rounded-full" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={page === totalPages || filteredProjects.length === 0}>
+              <span className="hidden sm:inline">Next</span> <ChevronRight data-icon="inline-end" />
+            </Button>
+          </div>
+        </div>
+      </Card>
+
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent>
+        <DialogContent className="rounded-2xl sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Create project</DialogTitle>
             <DialogDescription>Only the project name is required. Buckets can be assigned after the project is created.</DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
+          <div className="flex flex-col gap-2 rounded-lg border bg-muted/40 p-4">
             <Label htmlFor="project-name">Project name</Label>
             <Input
               id="project-name"
@@ -503,16 +531,16 @@ export default function ProjectsPage() {
       </Dialog>
 
       <Dialog open={!!settingsProject} onOpenChange={(open) => !open && setSettingsProject(null)}>
-        <DialogContent className="sm:max-w-3xl">
+        <DialogContent className="max-h-[88vh] flex flex-col rounded-2xl sm:max-h-[94vh] sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>Project settings</DialogTitle>
             <DialogDescription>Update project identity and the inherited browser origins used by assigned media buckets. Bucket assignment remains on the dedicated buckets page.</DialogDescription>
           </DialogHeader>
 
           {settingsProject ? (
-            <div className="space-y-5">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
+            <div className="flex min-h-0 flex-col gap-5 overflow-y-auto pr-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              <div className="grid gap-4 rounded-lg border bg-muted/40 p-4 sm:grid-cols-2">
+                <div className="flex flex-col gap-2">
                   <Label htmlFor="settings-name">Project name</Label>
                   <Input
                     id="settings-name"
@@ -521,29 +549,31 @@ export default function ProjectsPage() {
                   />
                 </div>
 
-                <div className="space-y-2">
+                <div className="flex flex-col gap-2">
                   <Label>Status</Label>
                   <Select value={settingsStatus} onValueChange={(value) => setSettingsStatus(value as "active" | "disabled")}>
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="active">Active</SelectItem>
-                      <SelectItem value="disabled">Disabled</SelectItem>
+                      <SelectGroup>
+                        <SelectItem value="active">Active</SelectItem>
+                        <SelectItem value="disabled">Disabled</SelectItem>
+                      </SelectGroup>
                     </SelectContent>
                   </Select>
                 </div>
               </div>
 
-              <div className="rounded-lg border border-dashed border-border/70 bg-muted/20 p-3">
+              <div className="rounded-lg border bg-muted/40 p-4">
                 <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
                   <div>
-                    <div className="text-sm font-medium">Inherited media origins</div>
+                    <div className="text-sm font-medium">Delivery &amp; CORS policy</div>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      These project-level origins are inherited by assigned buckets and synchronized to Drive media responses and R2 CORS. Drive public access is still managed per bucket on the global Buckets dashboard.
+                      One managed policy, applied to every assigned bucket and updated in place. Existing non-Drive CORS rules are preserved.
                     </p>
                   </div>
-                  <Badge variant="outline">Project policy</Badge>
+                  <Badge variant={settingsOrigins.includes("*") ? "default" : "outline"}>{settingsOrigins.includes("*") ? "All origins" : `1 policy / ${settingsOrigins.length} origin${settingsOrigins.length === 1 ? "" : "s"}`}</Badge>
                 </div>
 
                 <div className="mt-3 flex flex-col gap-2 sm:flex-row">
@@ -564,7 +594,7 @@ export default function ProjectsPage() {
                     disabled={loadingSettings}
                   />
                   <Button type="button" variant="outline" className="sm:shrink-0" onClick={addSettingsOrigin} disabled={loadingSettings}>
-                    <Plus className="mr-2 h-4 w-4" />
+                    <Plus data-icon="inline-start" />
                     Add origin
                   </Button>
                   <Button
@@ -595,26 +625,70 @@ export default function ProjectsPage() {
                         aria-label={`Remove ${origin}`}
                         onClick={() => setSettingsOrigins((current) => current.filter((candidate) => candidate !== origin))}
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
+                        <Trash2 />
                       </Button>
                     </div>
                   )) : <p className="text-xs text-muted-foreground">No inherited browser origins configured.</p>}
                 </div>
                 <p className="mt-3 text-xs text-muted-foreground">
-                  Any origin (*) replaces the specific origins and affects CORS only; it does not bypass private Drive API authorization.
+                  Any origin (*) takes precedence across every project and bucket policy, so no additional origins are needed. It affects browser CORS only and never bypasses private Drive API authorization.
                 </p>
+                <div className="mt-4 flex flex-col gap-2 rounded-md border bg-background p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-mono text-xs">drive-media-delivery</span>
+                    <Badge variant="secondary">{settingsProject.bucketCount ?? 0} assigned bucket{(settingsProject.bucketCount ?? 0) === 1 ? "" : "s"}</Badge>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    <Badge variant="outline">GET</Badge>
+                    <Badge variant="outline">HEAD</Badge>
+                    {(settingsOrigins.length ? settingsOrigins : ["Deployment fallback origins"]).map((origin) => (
+                      <Badge key={origin} variant="outline" className="max-w-full font-mono"><span className="truncate">{origin}</span></Badge>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">This project owns one policy. Each bucket receives the union of this policy, other assigned project policies, and its bucket-manual origins; unrelated provider rules are never removed.</p>
+                </div>
+                <div className="mt-3 flex flex-col gap-2">
+                  <div className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">Rules on assigned buckets</div>
+                  {settingsBucketRules.length > 0 ? settingsBucketRules.map((bucket) => (
+                    <div key={bucket.bucketName} className="flex flex-col gap-2 rounded-md border bg-background p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-mono text-xs">{bucket.bucketName}</span>
+                        <div className="flex gap-1.5">
+                          {bucket.projectCount > 1 ? <Badge variant="outline">{bucket.projectCount} projects</Badge> : null}
+                          <Badge variant={bucket.providerStatus === "ok" || bucket.providerStatus === "completed" ? "secondary" : "outline"}>{bucket.providerStatus}</Badge>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {bucket.effectiveMediaAllowedOrigins.map((origin) => <Badge key={`${bucket.bucketName}-${origin}`} variant="outline" className="max-w-full font-mono"><span className="truncate">{origin}</span></Badge>)}
+                      </div>
+                      <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
+                        {bucket.corsRules.length ? bucket.corsRules.map((rule, index) => (
+                          <span key={`${bucket.bucketName}-${rule.id ?? index}`} className="rounded border px-2 py-1">
+                            {rule.id || `Provider rule ${index + 1}`}: {rule.allowedMethods.join(", ")} / {rule.allowedOrigins.join(", ")}
+                          </span>
+                        )) : <span>No provider CORS snapshot yet; the worker will verify it.</span>}
+                      </div>
+                    </div>
+                  )) : <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">No assigned bucket rules to display.</div>}
+                </div>
+                <div className="mt-4 flex flex-col gap-2 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-xs text-muted-foreground">Saving verifies the managed rule on every assigned bucket. Re-sync repairs provider-side drift without changing your policy.</p>
+                  <Button type="button" variant="outline" size="sm" className="sm:shrink-0" loading={syncingSettings} onClick={syncSettingsPolicy}>
+                    <RefreshCw data-icon="inline-start" /> Re-sync buckets
+                  </Button>
+                </div>
               </div>
 
-              <div className="flex gap-2">
+              <div className="grid gap-2 sm:grid-cols-2">
                 <Button variant="outline" className="flex-1" asChild>
                   <Link href={`/dashboard/projects/${encodeURIComponent(settingsProject.id)}/buckets`}>
-                    <FolderPlus className="mr-2 h-4 w-4" />
+                    <FolderPlus data-icon="inline-start" />
                     Open bucket page
                   </Link>
                 </Button>
                 <Button variant="outline" className="flex-1" asChild>
                   <Link href={`/dashboard/projects/${encodeURIComponent(settingsProject.id)}/keys`}>
-                    <KeyRound className="mr-2 h-4 w-4" />
+                    <KeyRound data-icon="inline-start" />
                     Manage API keys
                   </Link>
                 </Button>
@@ -634,34 +708,28 @@ export default function ProjectsPage() {
       </Dialog>
 
       <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <DialogContent>
+        <DialogContent className="rounded-2xl sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>Delete project</DialogTitle>
             <DialogDescription>Choose whether the project should be removed alone or along with every bucket currently assigned to it.</DialogDescription>
           </DialogHeader>
 
           {deleteTarget ? (
-            <div className="space-y-3">
-              <div className="rounded-md border bg-muted/50 p-3 text-sm">
+            <div className="flex flex-col gap-4">
+              <div className="rounded-lg border bg-muted/40 p-4 text-sm">
                 <div className="font-medium">{deleteTarget.name}</div>
-                <div className="font-mono text-xs text-muted-foreground">{deleteTarget.bucketName || "No primary bucket"}</div>
+                <div className="mt-1 font-mono text-xs text-muted-foreground">{deleteTarget.bucketName || "No primary bucket"}</div>
               </div>
-
-              <button
-                type="button"
-                className={`w-full rounded-md border p-3 text-left text-sm ${!deleteBucket ? "border-primary bg-primary/5" : ""}`}
-                onClick={() => setDeleteBucket(false)}
-              >
-                Keep all assigned buckets and only remove the project record, API keys, and project links.
-              </button>
-
-              <button
-                type="button"
-                className={`w-full rounded-md border p-3 text-left text-sm ${deleteBucket ? "border-destructive bg-destructive/5" : ""}`}
-                onClick={() => setDeleteBucket(true)}
-              >
-                Delete all assigned buckets and all objects from the active account too.
-              </button>
+              <RadioGroup value={deleteBucket ? "all" : "project"} onValueChange={(value) => setDeleteBucket(value === "all")} className="grid gap-2">
+                <Label htmlFor="delete-project-only" className="flex cursor-pointer items-start gap-3 rounded-xl border p-3.5 has-[[data-state=checked]]:border-primary has-[[data-state=checked]]:bg-primary/5">
+                  <RadioGroupItem id="delete-project-only" value="project" className="mt-0.5" />
+                  <span><span className="block font-medium">Keep assigned buckets</span><span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">Remove the project record, API keys, and project links only.</span></span>
+                </Label>
+                <Label htmlFor="delete-project-all" className="flex cursor-pointer items-start gap-3 rounded-xl border p-3.5 has-[[data-state=checked]]:border-destructive has-[[data-state=checked]]:bg-destructive/5">
+                  <RadioGroupItem id="delete-project-all" value="all" className="mt-0.5" />
+                  <span><span className="block font-medium">Delete project and unshared storage</span><span className="mt-1 block text-xs font-normal leading-relaxed text-muted-foreground">Permanently delete buckets used only by this project. Buckets shared with other projects are kept.</span></span>
+                </Label>
+              </RadioGroup>
             </div>
           ) : null}
 

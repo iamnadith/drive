@@ -1,5 +1,5 @@
 import { Pool } from "pg"
-import type { QueryResultRow } from "pg"
+import type { PoolClient, QueryResultRow } from "pg"
 
 declare global {
   var __drivePgPool: Pool | undefined
@@ -103,6 +103,36 @@ export async function queryDb<T extends QueryResultRow = QueryResultRow>(
     await existing?.end().catch(() => {})
 
     return attempt()
+  }
+}
+
+export async function withDbAdvisoryLock<T>(namespace: string, resource: string, operation: () => Promise<T>) {
+  const client = await getDbPool().connect()
+  let locked = false
+  try {
+    await client.query(`select pg_advisory_lock(hashtext($1), hashtext($2))`, [namespace, resource])
+    locked = true
+    return await operation()
+  } finally {
+    if (locked) {
+      await client.query(`select pg_advisory_unlock(hashtext($1), hashtext($2))`, [namespace, resource]).catch(() => undefined)
+    }
+    client.release()
+  }
+}
+
+export async function withDbTransaction<T>(operation: (client: PoolClient) => Promise<T>) {
+  const client = await getDbPool().connect()
+  try {
+    await client.query("begin")
+    const result = await operation(client)
+    await client.query("commit")
+    return result
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined)
+    throw error
+  } finally {
+    client.release()
   }
 }
 
@@ -509,22 +539,42 @@ export async function ensureDriveSchema(): Promise<void> {
           end loop;
         end $$;
       `)
+      await queryDb(`alter table if exists drive_projects drop constraint if exists drive_projects_bucket_name_key;`)
       await queryDb(`drop index if exists drive_projects_bucket_name_key;`)
       await queryDb(`create unique index if not exists drive_projects_project_id_key on drive_projects (project_id);`)
-      await queryDb(`create unique index if not exists drive_projects_bucket_name_key on drive_projects (bucket_name) where bucket_name <> '';`)
+      await queryDb(`create index if not exists drive_projects_bucket_name_idx on drive_projects (bucket_name) where bucket_name <> '';`)
       await queryDb(`create index if not exists drive_projects_status_idx on drive_projects (status);`)
       await queryDb(`
         create table if not exists drive_project_bucket_assignments (
           project_id uuid not null references drive_projects(id) on delete cascade,
+          account_id uuid references drive_accounts(id) on delete cascade,
           bucket_name text not null,
           is_primary boolean not null default false,
           created_at timestamptz not null default now(),
           primary key (project_id, bucket_name)
         );
       `)
+      await queryDb(`alter table public.drive_project_bucket_assignments add column if not exists account_id uuid references public.drive_accounts(id) on delete cascade;`)
+      await queryDb(`
+        update drive_project_bucket_assignments assignment
+        set account_id = project.created_account_id
+        from drive_projects project
+        where assignment.project_id = project.id
+          and assignment.account_id is null
+          and project.created_account_id is not null;
+      `)
+      await queryDb(`
+        update drive_project_bucket_assignments assignment
+        set account_id = active.id
+        from (select id from drive_accounts where status = 'active' order by updated_at desc limit 1) active
+        where assignment.account_id is null;
+      `)
       await queryDb(`alter table public.drive_project_bucket_assignments drop column if exists media_allowed_origins;`)
       await queryDb(`alter table public.drive_project_bucket_assignments drop column if exists public_access_enabled;`)
-      await queryDb(`create unique index if not exists drive_project_bucket_assignments_bucket_key on drive_project_bucket_assignments (bucket_name);`)
+      await queryDb(`alter table if exists drive_project_bucket_assignments drop constraint if exists drive_project_bucket_assignments_bucket_key;`)
+      await queryDb(`drop index if exists drive_project_bucket_assignments_bucket_key;`)
+      await queryDb(`drop index if exists drive_project_bucket_assignments_bucket_idx;`)
+      await queryDb(`create index if not exists drive_project_bucket_assignments_account_bucket_idx on drive_project_bucket_assignments (account_id, bucket_name);`)
       await queryDb(`create unique index if not exists drive_project_bucket_assignments_primary_idx on drive_project_bucket_assignments (project_id) where is_primary = true;`)
       await queryDb(`
         create table if not exists drive_bucket_delivery_settings (
@@ -545,8 +595,25 @@ export async function ensureDriveSchema(): Promise<void> {
         );
       `)
       await queryDb(`
-        insert into drive_project_bucket_assignments (project_id, bucket_name, is_primary)
-        select p.id, p.bucket_name, true
+        create table if not exists drive_project_delivery_sync_state (
+          account_id uuid not null references drive_accounts(id) on delete cascade,
+          bucket_name text not null,
+          status text not null default 'pending',
+          desired_origins text[] not null default '{}',
+          changed boolean not null default false,
+          last_checked_at timestamptz,
+          last_synced_at timestamptz,
+          failure_count integer not null default 0,
+          next_attempt_at timestamptz,
+          error text,
+          primary key (account_id, bucket_name)
+        );
+      `)
+      await queryDb(`alter table drive_project_delivery_sync_state add column if not exists failure_count integer not null default 0;`)
+      await queryDb(`alter table drive_project_delivery_sync_state add column if not exists next_attempt_at timestamptz;`)
+      await queryDb(`
+        insert into drive_project_bucket_assignments (project_id, account_id, bucket_name, is_primary)
+        select p.id, coalesce(p.created_account_id, (select id from drive_accounts where status = 'active' order by updated_at desc limit 1)), p.bucket_name, true
         from drive_projects p
         where p.bucket_name <> ''
           and not exists (

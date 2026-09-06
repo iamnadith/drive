@@ -5,21 +5,28 @@ import { listBucketDeliverySettings, type BucketDeliverySettings } from "@/lib/b
 import { listBucketSettingsSnapshots } from "@/lib/bucket-settings-snapshot-store"
 import { getBucketStatsMap, type DriveBucketStats } from "@/lib/bucket-stats-store"
 import { requireAdmin } from "@/lib/server-auth"
-import { mergeMediaAllowedOrigins } from "@/lib/project-media-origins.cjs"
+import { mergeManyMediaAllowedOrigins, resolveEffectiveMediaAllowedOrigins } from "@/lib/project-media-origins.cjs"
 import { listAssignedProjectsForBuckets, type Project } from "@/lib/projects-store"
 import { listProjectDeliverySettings, type ProjectDeliverySettings } from "@/lib/project-delivery-settings-store"
 import { allowedStorageCorsOrigins } from "@/lib/storage-delivery.cjs"
 
 function serializeDeliverySettings(
   settings: BucketDeliverySettings,
-  project: Project | null,
-  projectSettings: ProjectDeliverySettings | null
+  projects: Project[],
+  projectSettings: ProjectDeliverySettings[]
 ) {
-  const inherited = projectSettings?.mediaAllowedOrigins ?? null
+  const inheritedPolicies = projectSettings
+    .map((entry) => entry.mediaAllowedOrigins)
+    .filter((origins): origins is string[] => Array.isArray(origins))
+  const inherited = inheritedPolicies.length > 0
+    ? mergeManyMediaAllowedOrigins(inheritedPolicies)
+    : null
   const manual = settings.mediaAllowedOrigins
-  const effective = inherited === null && manual === null
-    ? allowedStorageCorsOrigins().filter((origin): origin is string => typeof origin === "string")
-    : mergeMediaAllowedOrigins(inherited, manual)
+  const effective = resolveEffectiveMediaAllowedOrigins({
+    inheritedPolicies,
+    manual,
+    fallback: allowedStorageCorsOrigins().filter((origin): origin is string => typeof origin === "string"),
+  })
   return {
     accountId: settings.accountId,
     bucketName: settings.bucketName,
@@ -27,9 +34,10 @@ function serializeDeliverySettings(
     manualMediaAllowedOrigins: settings.mediaAllowedOrigins,
     inheritedMediaAllowedOrigins: inherited,
     effectiveMediaAllowedOrigins: effective,
-    inheritedProject: project
-      ? { id: project.id, projectId: project.projectId, name: project.name }
+    inheritedProject: projects[0]
+      ? { id: projects[0].id, projectId: projects[0].projectId, name: projects[0].name }
       : null,
+    inheritedProjects: projects.map((project) => ({ id: project.id, projectId: project.projectId, name: project.name })),
     createdAt: settings.createdAt,
     updatedAt: settings.updatedAt,
   }
@@ -58,10 +66,10 @@ export async function GET() {
     const names = Array.from(new Set([...snapshots.map((snapshot) => snapshot.bucketName), ...stats.keys()]))
     const [deliverySettings, assignedProjects] = await Promise.all([
       listBucketDeliverySettings(account.id, names),
-      listAssignedProjectsForBuckets(names),
+      listAssignedProjectsForBuckets(account.id, names),
     ])
     const projectSettings = await listProjectDeliverySettings(
-      Array.from(assignedProjects.values(), (project) => project.id)
+      Array.from(assignedProjects.values()).flatMap((projects) => projects.map((project) => project.id))
     )
     const buckets = names.map((name) => {
       const snapshot = snapshotByName.get(name)
@@ -79,11 +87,17 @@ export async function GET() {
         bytes: cached?.bytes ?? 0,
         statsStatus: cached?.status ?? "pending",
         settings: snapshot?.settings ?? null,
-        deliverySettings: serializeDeliverySettings(
-          deliverySettings.get(name)!,
-          assignedProjects.get(name) ?? null,
-          projectSettings.get(assignedProjects.get(name)?.id ?? "") ?? null
-        ),
+        deliverySettings: (() => {
+          const projects = assignedProjects.get(name) ?? []
+          return serializeDeliverySettings(
+            deliverySettings.get(name)!,
+            projects,
+            projects.flatMap((project) => {
+              const settings = projectSettings.get(project.id)
+              return settings ? [settings] : []
+            })
+          )
+        })(),
         settingsStatus: snapshot?.settingsStatus ?? "pending",
         settingsError: snapshot?.settingsError ?? null,
         settingsLastAttemptedAt: snapshot?.settingsLastAttemptedAt ?? null,

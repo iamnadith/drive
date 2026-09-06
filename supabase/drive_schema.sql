@@ -250,12 +250,16 @@ alter table if exists public.drive_projects alter column name set not null;
 alter table if exists public.drive_projects alter column bucket_name set not null;
 
 create unique index if not exists drive_projects_project_id_key on drive_projects (project_id);
-create unique index if not exists drive_projects_bucket_name_key on drive_projects (bucket_name);
+alter table if exists drive_projects drop constraint if exists drive_projects_bucket_name_key;
+drop index if exists drive_projects_bucket_name_key;
+create index if not exists drive_projects_bucket_name_idx on drive_projects (bucket_name) where bucket_name <> '';
 create index if not exists drive_projects_status_idx on drive_projects (status);
 
--- A bucket belongs to at most one project.
+-- Buckets can be assigned to multiple projects. The pair remains unique so the
+-- same project cannot receive a duplicate assignment.
 create table if not exists drive_project_bucket_assignments (
   project_id uuid not null references drive_projects(id) on delete cascade,
+  account_id uuid references drive_accounts(id) on delete cascade,
   bucket_name text not null,
   is_primary boolean not null default false,
   created_at timestamptz not null default now(),
@@ -267,8 +271,11 @@ alter table if exists public.drive_project_bucket_assignments
 alter table if exists public.drive_project_bucket_assignments
   drop column if exists public_access_enabled;
 
-create unique index if not exists drive_project_bucket_assignments_bucket_key
-  on drive_project_bucket_assignments (bucket_name);
+alter table if exists drive_project_bucket_assignments drop constraint if exists drive_project_bucket_assignments_bucket_key;
+drop index if exists drive_project_bucket_assignments_bucket_key;
+drop index if exists drive_project_bucket_assignments_bucket_idx;
+create index if not exists drive_project_bucket_assignments_account_bucket_idx
+  on drive_project_bucket_assignments (account_id, bucket_name);
 create unique index if not exists drive_project_bucket_assignments_primary_idx
   on drive_project_bucket_assignments (project_id) where is_primary = true;
 
@@ -291,6 +298,40 @@ create table if not exists drive_project_delivery_settings (
   media_allowed_origins text[],
   updated_at timestamptz not null default now()
 );
+
+alter table if exists public.drive_project_bucket_assignments
+  add column if not exists account_id uuid references public.drive_accounts(id) on delete cascade;
+
+update drive_project_bucket_assignments assignment
+set account_id = project.created_account_id
+from drive_projects project
+where assignment.project_id = project.id
+  and assignment.account_id is null
+  and project.created_account_id is not null;
+
+update drive_project_bucket_assignments assignment
+set account_id = active.id
+from (select id from drive_accounts where status = 'active' order by updated_at desc limit 1) active
+where assignment.account_id is null;
+
+create table if not exists drive_project_delivery_sync_state (
+  account_id uuid not null references drive_accounts(id) on delete cascade,
+  bucket_name text not null,
+  status text not null default 'pending',
+  desired_origins text[] not null default '{}',
+  changed boolean not null default false,
+  last_checked_at timestamptz,
+  last_synced_at timestamptz,
+  failure_count integer not null default 0,
+  next_attempt_at timestamptz,
+  error text,
+  primary key (account_id, bucket_name)
+);
+
+alter table if exists drive_project_delivery_sync_state
+  add column if not exists failure_count integer not null default 0;
+alter table if exists drive_project_delivery_sync_state
+  add column if not exists next_attempt_at timestamptz;
 
 -- Existing bucket delivery origins remain bucket-manual. Their historical
 -- editor does not identify which values were intended to be project-wide, so

@@ -2,17 +2,26 @@ import { NextResponse } from "next/server"
 import { getActiveAccount } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import { getProjectDeliverySettings, updateProjectDeliverySettings } from "@/lib/project-delivery-settings-store"
-import { syncProjectDeliveryCors } from "@/lib/bucket-delivery-settings-service"
+import {
+  assertProjectDeliveryOriginsFitAssignedBuckets,
+  deleteBucketDeliveryCorsReconciliation,
+  getEffectiveBucketMediaOrigins,
+  queueBucketDeliveryCorsReconciliation,
+  syncProjectDeliveryCors,
+} from "@/lib/bucket-delivery-settings-service"
 import {
   deleteProjectRecord,
   getProjectByIdentifier,
   listProjectBuckets,
+  listProjectsUsingBucket,
   updateProjectRecord,
 } from "@/lib/projects-store"
 import { r2DeleteBucketAndContents } from "@/lib/r2-s3"
-import { getBucketDeliverySettings } from "@/lib/bucket-delivery-settings-store"
-import { syncBucketDeliveryCorsRule } from "@/lib/r2-bucket-settings"
+import { deleteBucketDeliverySettings, getBucketDeliverySettings } from "@/lib/bucket-delivery-settings-store"
+import { readBucketSettings, syncBucketDeliveryCorsRule } from "@/lib/r2-bucket-settings"
 import { allowedStorageCorsOrigins } from "@/lib/storage-delivery.cjs"
+import { resolveEffectiveMediaAllowedOrigins } from "@/lib/project-media-origins.cjs"
+import { deleteBucketSettingsSnapshot, listBucketSettingsSnapshots, upsertBucketSettingsSnapshot } from "@/lib/bucket-settings-snapshot-store"
 import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
@@ -35,7 +44,39 @@ export async function GET(
     const project = await getProjectByIdentifier(id)
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 })
     const deliverySettings = await getProjectDeliverySettings(project.id)
-    return NextResponse.json({ project, deliverySettings })
+    const active = await getActiveAccount()
+    const assignedBuckets = await listProjectBuckets(project.id)
+    const scopedBuckets = active
+      ? assignedBuckets.filter((bucket) => !bucket.accountId || bucket.accountId === active.id)
+      : []
+    const snapshots = active ? await listBucketSettingsSnapshots(active.id) : []
+    const snapshotByBucket = new Map(snapshots.map((snapshot) => [snapshot.bucketName, snapshot]))
+    const bucketDeliveryRules = active ? await Promise.all(scopedBuckets.map(async (bucket) => {
+      const settings = await getBucketDeliverySettings(active.id, bucket.bucketName)
+      const effective = await getEffectiveBucketMediaOrigins(active.id, bucket.bucketName, settings)
+      const snapshot = snapshotByBucket.get(bucket.bucketName)
+      const provider = await readBucketSettings(active, bucket.bucketName)
+        .then(async (live) => {
+          await upsertBucketSettingsSnapshot(active.id, bucket.bucketName, live)
+          return { corsRules: live.corsRules, status: "live", lastSyncedAt: new Date().toISOString() }
+        })
+        .catch(() => ({
+          corsRules: snapshot?.settings?.corsRules ?? [],
+          status: snapshot?.settingsStatus ?? "unavailable",
+          lastSyncedAt: snapshot?.settingsLastSyncedAt ?? null,
+        }))
+      return {
+        bucketName: bucket.bucketName,
+        projectCount: bucket.projectCount,
+        manualMediaAllowedOrigins: settings.mediaAllowedOrigins,
+        inheritedMediaAllowedOrigins: effective.inheritedMediaAllowedOrigins,
+        effectiveMediaAllowedOrigins: effective.effectiveMediaAllowedOrigins,
+        corsRules: provider.corsRules,
+        providerStatus: provider.status,
+        providerLastSyncedAt: provider.lastSyncedAt,
+      }
+    })) : []
+    return NextResponse.json({ project, deliverySettings, bucketDeliveryRules })
   } catch (error: unknown) {
     return NextResponse.json(
       { error: errorMessage(error, "Unable to load project") },
@@ -71,30 +112,34 @@ export async function PATCH(
       if (assignedBuckets.length > 0 && !active) {
         return NextResponse.json({ error: "No active Cloudflare account is configured" }, { status: 409 })
       }
+      if (active && assignedBuckets.some((bucket) => bucket.accountId && bucket.accountId !== active.id)) {
+        return NextResponse.json(
+          { error: "Switch to the Cloudflare account that owns every assigned bucket before updating delivery policy" },
+          { status: 409 }
+        )
+      }
       const beforeDelivery = await getProjectDeliverySettings(before.id)
+      await assertProjectDeliveryOriginsFitAssignedBuckets({
+        projectId: before.id,
+        mediaAllowedOrigins: body.mediaAllowedOrigins,
+      })
       const project = await updateProjectRecord(id, { name, status })
-      let deliverySettings
-      try {
-        deliverySettings = await updateProjectDeliverySettings({
-          projectId: project.id,
-          mediaAllowedOrigins: body.mediaAllowedOrigins,
-        })
-        if (active) {
+      if (active) {
+        await Promise.all(
+          assignedBuckets.map((bucket) => queueBucketDeliveryCorsReconciliation(active.id, bucket.bucketName))
+        )
+      }
+      const deliverySettings = await updateProjectDeliverySettings({
+        projectId: project.id,
+        mediaAllowedOrigins: body.mediaAllowedOrigins,
+      })
+      let deliverySyncPending = false
+      if (active) {
+        try {
           await syncProjectDeliveryCors({ account: active, projectIdentifier: project.id })
+        } catch {
+          deliverySyncPending = true
         }
-      } catch (error) {
-        await updateProjectDeliverySettings({
-          projectId: before.id,
-          mediaAllowedOrigins: beforeDelivery.mediaAllowedOrigins,
-        }).catch(() => undefined)
-        if (active) {
-          await syncProjectDeliveryCors({ account: active, projectIdentifier: before.id }).catch(() => undefined)
-        }
-        await updateProjectRecord(before.id, {
-          name: before.name,
-          status: before.status,
-        }).catch(() => undefined)
-        throw error
       }
 
       await recordActivity({
@@ -109,7 +154,7 @@ export async function PATCH(
         ...getRequestActivityContext(request),
       })
 
-      return NextResponse.json({ project, deliverySettings })
+      return NextResponse.json({ project, deliverySettings, deliverySyncPending })
     }
 
     const project = await updateProjectRecord(id, { name, status })
@@ -135,6 +180,49 @@ export async function PATCH(
   }
 }
 
+export async function POST(
+  request: Request,
+  context: { params: Promise<{ id: string }> }
+) {
+  try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+    const { id } = await context.params
+    const body = (await request.json().catch(() => ({}))) as { action?: unknown }
+    if (body.action !== "syncDelivery") {
+      return NextResponse.json({ error: "Unsupported project action" }, { status: 400 })
+    }
+    const project = await getProjectByIdentifier(id)
+    if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 })
+    const buckets = await listProjectBuckets(project.id)
+    if (buckets.length === 0) {
+      return NextResponse.json({ ok: true, synchronizedBuckets: 0 })
+    }
+    const active = await getActiveAccount()
+    if (!active) {
+      return NextResponse.json({ error: "No active Cloudflare account is configured" }, { status: 409 })
+    }
+    await syncProjectDeliveryCors({ account: active, projectIdentifier: project.id })
+    await recordActivity({
+      actorUserId: auth.user.id,
+      action: "project.delivery_policy_synchronized",
+      entityType: "project",
+      entityId: project.projectId,
+      entityLabel: project.name,
+      summary: `Synchronized delivery policy for ${project.name}`,
+      detail: `Verified the managed CORS rule on ${buckets.length} assigned bucket(s).`,
+      metadata: { bucketCount: buckets.length },
+      ...getRequestActivityContext(request),
+    })
+    return NextResponse.json({ ok: true, synchronizedBuckets: buckets.length })
+  } catch (error: unknown) {
+    return NextResponse.json(
+      { error: errorMessage(error, "Unable to synchronize project delivery policy") },
+      { status: 400 }
+    )
+  }
+}
+
 export async function DELETE(
   request: Request,
   context: { params: Promise<{ id: string }> }
@@ -149,9 +237,36 @@ export async function DELETE(
     const project = await getProjectByIdentifier(id)
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 })
     const assignedBuckets = await listProjectBuckets(project.id)
-
     const active = assignedBuckets.length > 0 ? await getActiveAccount() : null
-    if (deleteBucket) {
+    if (assignedBuckets.length > 0 && !active) {
+      return NextResponse.json({ error: "No active Cloudflare account is configured" }, { status: 409 })
+    }
+    const foreignAssignments = active
+      ? assignedBuckets.filter((bucket) => bucket.accountId && bucket.accountId !== active.id)
+      : []
+    if (foreignAssignments.length > 0) {
+      return NextResponse.json(
+        { error: "Switch to the Cloudflare account that owns every assigned bucket before deleting this project" },
+        { status: 409 }
+      )
+    }
+    const bucketProjects = new Map(
+      await Promise.all(
+        assignedBuckets.map(async (bucket) => [
+          bucket.bucketName,
+          await listProjectsUsingBucket(active!.id, bucket.bucketName),
+        ] as const)
+      )
+    )
+    const sharedBuckets = assignedBuckets.filter((bucket) =>
+      (bucketProjects.get(bucket.bucketName) ?? []).some((candidate) => candidate.id !== project.id)
+    )
+    const bucketsToDelete = deleteBucket
+      ? assignedBuckets.filter((bucket) => !sharedBuckets.some((shared) => shared.bucketName === bucket.bucketName))
+      : []
+    const bucketsToKeep = deleteBucket ? sharedBuckets : assignedBuckets
+
+    if (bucketsToDelete.length > 0) {
       if (
         !active?.cloudflareAccountId ||
         !active.r2AccessKeyId ||
@@ -162,7 +277,14 @@ export async function DELETE(
           { status: 400 }
         )
       }
-      for (const bucket of assignedBuckets) {
+      for (const bucket of bucketsToDelete) {
+        const currentProjects = await listProjectsUsingBucket(active.id, bucket.bucketName)
+        if (currentProjects.some((candidate) => candidate.id !== project.id)) {
+          return NextResponse.json(
+            { error: `Bucket ${bucket.bucketName} became shared while deletion was being prepared; no further buckets were deleted` },
+            { status: 409 }
+          )
+        }
         await r2DeleteBucketAndContents(
           {
             accountId: active.cloudflareAccountId,
@@ -171,8 +293,12 @@ export async function DELETE(
           },
           bucket.bucketName
         )
+        await deleteBucketDeliverySettings(active.id, bucket.bucketName)
+        await deleteBucketSettingsSnapshot(active.id, bucket.bucketName)
+        await deleteBucketDeliveryCorsReconciliation(active.id, bucket.bucketName)
       }
-    } else if (assignedBuckets.length > 0) {
+    }
+    if (bucketsToKeep.length > 0) {
       if (!active) {
         return NextResponse.json(
           { error: "No active Cloudflare account is configured" },
@@ -180,13 +306,27 @@ export async function DELETE(
         )
       }
       try {
-        for (const bucket of assignedBuckets) {
+        for (const bucket of bucketsToKeep) {
+          await queueBucketDeliveryCorsReconciliation(active.id, bucket.bucketName)
           const settings = await getBucketDeliverySettings(active.id, bucket.bucketName)
+          const remainingProjects = (bucketProjects.get(bucket.bucketName) ?? []).filter(
+            (candidate) => candidate.id !== project.id
+          )
+          const remainingPolicies = await Promise.all(
+            remainingProjects.map((candidate) => getProjectDeliverySettings(candidate.id))
+          )
+          const explicitInherited = remainingPolicies
+            .map((policy) => policy.mediaAllowedOrigins)
+            .filter((origins): origins is string[] => Array.isArray(origins))
+          const effective = resolveEffectiveMediaAllowedOrigins({
+            inheritedPolicies: explicitInherited,
+            manual: settings.mediaAllowedOrigins,
+            fallback: allowedStorageCorsOrigins(),
+          })
           await syncBucketDeliveryCorsRule(
             active,
             bucket.bucketName,
-            (settings.mediaAllowedOrigins ?? allowedStorageCorsOrigins())
-              .filter((origin): origin is string => typeof origin === "string")
+            effective.filter((origin): origin is string => typeof origin === "string")
           )
         }
       } catch (error) {
@@ -201,7 +341,7 @@ export async function DELETE(
     try {
       await deleteProjectRecord(project.id)
     } catch (error) {
-      if (!deleteBucket && active) {
+      if (active && bucketsToKeep.length > 0) {
         await syncProjectDeliveryCors({
           account: active,
           projectIdentifier: project.id,
@@ -217,17 +357,17 @@ export async function DELETE(
       entityId: project.projectId,
       entityLabel: project.name,
       summary: deleteBucket
-        ? `Deleted project ${project.name} and its buckets`
+        ? `Deleted project ${project.name} and its unshared buckets`
         : `Deleted project ${project.name}`,
       detail: deleteBucket
-        ? `Deleted ${assignedBuckets.length} assigned R2 bucket(s) from the active account.`
+        ? `Deleted ${bucketsToDelete.length} unshared R2 bucket(s) and kept ${sharedBuckets.length} bucket(s) used by other projects.`
         : `Kept ${assignedBuckets.length} assigned R2 bucket(s).`,
       before: { project },
       undoReason: "Projects and generated API key secrets cannot be restored automatically.",
       ...getRequestActivityContext(request),
     })
 
-    return NextResponse.json({ ok: true })
+    return NextResponse.json({ ok: true, deletedBuckets: bucketsToDelete.length, keptSharedBuckets: sharedBuckets.length })
   } catch (error: unknown) {
     return NextResponse.json(
       { error: errorMessage(error, "Unable to delete project") },

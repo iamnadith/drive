@@ -4,6 +4,8 @@ import { listProjectsUsingBucket, removeProjectBucket } from "./projects-store"
 import { assertProjectBucketHasNoActiveLocks } from "./project-operations-store"
 import { markTrackedBucketPrefixDeleted } from "./project-operations-store"
 import { assertExactBucketConfirmation } from "./bucket-danger-confirmation.cjs"
+import { deleteBucketDeliveryCorsReconciliation } from "./bucket-delivery-settings-service"
+import { deleteBucketSettingsSnapshot } from "./bucket-settings-snapshot-store"
 import { r2DeleteAllBucketContents, r2DeleteBucket, r2ListAllMultipartUploads, r2ListAllObjectVersions, r2ListAllObjects, type R2ClientConfig } from "./r2-s3"
 
 export type BucketDangerAction = "clear" | "delete"
@@ -28,7 +30,7 @@ export async function runBucketDangerAction(input: {
   assertExactBucketConfirmation(bucketName, input.confirmation)
   if (!input.account.cloudflareAccountId || !input.account.r2AccessKeyId || !input.account.r2SecretAccessKey) throw new Error("Account is missing R2 credentials")
   const config: R2ClientConfig = { accountId: input.account.cloudflareAccountId, accessKeyId: input.account.r2AccessKeyId, secretAccessKey: input.account.r2SecretAccessKey }
-  const assignedProjects = await listProjectsUsingBucket(bucketName)
+  const assignedProjects = await listProjectsUsingBucket(input.account.id, bucketName)
   for (const project of assignedProjects) await assertProjectBucketHasNoActiveLocks(project.id, bucketName)
   const cleared = await r2DeleteAllBucketContents(config, bucketName)
   await Promise.all(assignedProjects.map((project) => markTrackedBucketPrefixDeleted({ projectId: project.id, bucketName, prefix: "" }).catch(() => undefined)))
@@ -46,6 +48,8 @@ export async function runBucketDangerAction(input: {
       removedProjectAssignments += 1
     }
     await deleteBucketDeliverySettings(input.account.id, bucketName)
+    await deleteBucketSettingsSnapshot(input.account.id, bucketName)
+    await deleteBucketDeliveryCorsReconciliation(input.account.id, bucketName)
   }
   return { action: input.action, bucketName, deletedObjects: cleared.objects, deletedVersions: cleared.versions, abortedMultipartUploads: cleared.multipart, removedProjectAssignments }
 }

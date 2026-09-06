@@ -1,5 +1,5 @@
 import crypto from "crypto"
-import { isPostgresConfigured, queryDb } from "./db"
+import { isPostgresConfigured, queryDb, withDbTransaction } from "./db"
 
 declare global {
   var __driveProjectAuthCache:
@@ -11,6 +11,10 @@ declare global {
   var __driveProjectLastUsedQueue: Map<string, number> | undefined
   var __driveProjectLastUsedTimer: ReturnType<typeof setTimeout> | undefined
   var __driveProjectLastUsedFlushInflight: Promise<void> | undefined
+  var __driveProjectBucketAssignmentCache:
+    | Map<string, { expiresAt: number; bucketNames: string[] }>
+    | undefined
+  var __driveProjectBucketAssignmentInflight: Map<string, Promise<string[]>> | undefined
 }
 
 export const PROJECT_PERMISSION_KEYS = [
@@ -49,9 +53,11 @@ export type Project = {
 }
 
 export type ProjectBucketAssignment = {
+  accountId?: string
   bucketName: string
   isPrimary: boolean
   createdAt: string
+  projectCount: number
 }
 
 export type ProjectApiKey = {
@@ -105,9 +111,11 @@ type ProjectRow = {
 }
 
 type ProjectBucketAssignmentRow = {
+  account_id?: string | null
   bucket_name: string
   is_primary: boolean
   created_at: string
+  project_count?: string | number | null
 }
 
 type ApiKeyRow = {
@@ -193,9 +201,11 @@ function mapProject(row: ProjectRow): Project {
 
 function mapProjectBucketAssignment(row: ProjectBucketAssignmentRow): ProjectBucketAssignment {
   return {
+    accountId: row.account_id ?? undefined,
     bucketName: row.bucket_name,
     isPrimary: row.is_primary === true,
     createdAt: row.created_at,
+    projectCount: Number(row.project_count ?? 1),
   }
 }
 
@@ -334,6 +344,8 @@ export async function flushProjectApiKeyLastUsed() {
 
 export function clearProjectAuthCache() {
   getAuthCache().clear()
+  global.__driveProjectBucketAssignmentCache?.clear()
+  global.__driveProjectBucketAssignmentInflight?.clear()
 }
 
 export function generateProjectId() {
@@ -500,26 +512,46 @@ export async function ensureProjectSchema() {
       end loop;
     end $$;
   `)
+  await queryDb(`alter table if exists drive_projects drop constraint if exists drive_projects_bucket_name_key;`)
   await queryDb(`drop index if exists drive_projects_bucket_name_key;`)
   await queryDb(`create unique index if not exists drive_projects_project_id_key on drive_projects (project_id);`)
-  await queryDb(`create unique index if not exists drive_projects_bucket_name_key on drive_projects (bucket_name) where bucket_name <> '';`)
+  await queryDb(`create index if not exists drive_projects_bucket_name_idx on drive_projects (bucket_name) where bucket_name <> '';`)
   await queryDb(`create index if not exists drive_projects_status_idx on drive_projects (status);`)
   await queryDb(`
     create table if not exists drive_project_bucket_assignments (
       project_id uuid not null references drive_projects(id) on delete cascade,
+      account_id uuid references drive_accounts(id) on delete cascade,
       bucket_name text not null,
       is_primary boolean not null default false,
       created_at timestamptz not null default now(),
       primary key (project_id, bucket_name)
     );
   `)
+  await queryDb(`alter table public.drive_project_bucket_assignments add column if not exists account_id uuid references public.drive_accounts(id) on delete cascade;`)
+  await queryDb(`
+    update drive_project_bucket_assignments assignment
+    set account_id = project.created_account_id
+    from drive_projects project
+    where assignment.project_id = project.id
+      and assignment.account_id is null
+      and project.created_account_id is not null;
+  `)
+  await queryDb(`
+    update drive_project_bucket_assignments assignment
+    set account_id = active.id
+    from (select id from drive_accounts where status = 'active' order by updated_at desc limit 1) active
+    where assignment.account_id is null;
+  `)
   await queryDb(`alter table public.drive_project_bucket_assignments drop column if exists media_allowed_origins;`)
   await queryDb(`alter table public.drive_project_bucket_assignments drop column if exists public_access_enabled;`)
-  await queryDb(`create unique index if not exists drive_project_bucket_assignments_bucket_key on drive_project_bucket_assignments (bucket_name);`)
+  await queryDb(`alter table if exists drive_project_bucket_assignments drop constraint if exists drive_project_bucket_assignments_bucket_key;`)
+  await queryDb(`drop index if exists drive_project_bucket_assignments_bucket_key;`)
+  await queryDb(`drop index if exists drive_project_bucket_assignments_bucket_idx;`)
+  await queryDb(`create index if not exists drive_project_bucket_assignments_account_bucket_idx on drive_project_bucket_assignments (account_id, bucket_name);`)
   await queryDb(`create unique index if not exists drive_project_bucket_assignments_primary_idx on drive_project_bucket_assignments (project_id) where is_primary = true;`)
   await queryDb(`
-    insert into drive_project_bucket_assignments (project_id, bucket_name, is_primary)
-    select p.id, p.bucket_name, true
+    insert into drive_project_bucket_assignments (project_id, account_id, bucket_name, is_primary)
+    select p.id, coalesce(p.created_account_id, (select id from drive_accounts where status = 'active' order by updated_at desc limit 1)), p.bucket_name, true
     from drive_projects p
     where p.bucket_name <> ''
       and not exists (
@@ -709,10 +741,11 @@ export async function listProjectBuckets(projectIdentifier: string) {
   if (!project) throw new Error("Project not found")
   const { rows } = await queryDb<ProjectBucketAssignmentRow>(
     `
-      select bucket_name, is_primary, created_at
-      from drive_project_bucket_assignments
-      where project_id = $1
-      order by is_primary desc, created_at asc, bucket_name asc;
+      select a.account_id, a.bucket_name, a.is_primary, a.created_at,
+        (select count(*) from drive_project_bucket_assignments shared where shared.account_id = a.account_id and shared.bucket_name = a.bucket_name)::int as project_count
+      from drive_project_bucket_assignments a
+      where a.project_id = $1
+      order by a.is_primary desc, a.created_at asc, a.bucket_name asc;
     `,
     [project.id]
   )
@@ -728,9 +761,10 @@ export async function getProjectBucketAssignment(
   if (!project) throw new Error("Project not found")
   const { rows } = await queryDb<ProjectBucketAssignmentRow>(
     `
-      select bucket_name, is_primary, created_at
-      from drive_project_bucket_assignments
-      where project_id = $1 and bucket_name = $2
+      select a.account_id, a.bucket_name, a.is_primary, a.created_at,
+        (select count(*) from drive_project_bucket_assignments shared where shared.account_id = a.account_id and shared.bucket_name = a.bucket_name)::int as project_count
+      from drive_project_bucket_assignments a
+      where a.project_id = $1 and a.bucket_name = $2
       limit 1;
     `,
     [project.id, bucketName]
@@ -738,91 +772,84 @@ export async function getProjectBucketAssignment(
   return rows[0] ? mapProjectBucketAssignment(rows[0]) : null
 }
 
-export async function getAssignedProjectIdForBucket(bucketName: string): Promise<string | null> {
+export async function getAssignedProjectIdsForBucket(accountId: string, bucketName: string): Promise<string[]> {
   await ensureProjectSchema()
-  if (!isPostgresConfigured()) return null
+  if (!isPostgresConfigured()) return []
   const { rows } = await queryDb<{ project_id: string }>(
-    `select project_id from drive_project_bucket_assignments where bucket_name = $1 limit 1`,
-    [bucketName]
+    `
+      select assignment.project_id
+      from drive_project_bucket_assignments assignment
+      join drive_projects project on project.id = assignment.project_id
+      where assignment.account_id = $1 and assignment.bucket_name = $2 and project.status = 'active'
+      order by assignment.created_at asc, assignment.project_id asc
+    `,
+    [accountId, bucketName]
   )
-  return rows[0]?.project_id ?? null
+  return rows.map((row) => row.project_id)
 }
 
-export async function listAssignedProjectsForBuckets(bucketNames: string[]) {
+export async function listAssignedProjectsForBuckets(accountId: string, bucketNames: string[]) {
   await ensureProjectSchema()
   const names = Array.from(new Set(bucketNames.filter(Boolean)))
-  const projects = new Map<string, Project>()
+  const projects = new Map<string, Project[]>()
   if (!isPostgresConfigured() || names.length === 0) return projects
   const { rows } = await queryDb<ProjectRow & { assigned_bucket_name: string }>(
     `
       select p.*, a.bucket_name as assigned_bucket_name
       from drive_project_bucket_assignments a
       join drive_projects p on p.id = a.project_id
-      where a.bucket_name = any($1::text[]);
+      where a.account_id = $1 and a.bucket_name = any($2::text[]);
     `,
-    [names]
+    [accountId, names]
   )
-  for (const row of rows) projects.set(row.assigned_bucket_name, mapProject(row))
+  for (const row of rows) {
+    const bucketProjects = projects.get(row.assigned_bucket_name) ?? []
+    bucketProjects.push(mapProject(row))
+    projects.set(row.assigned_bucket_name, bucketProjects)
+  }
   return projects
-}
-
-async function syncProjectPrimaryBucket(projectId: string) {
-  const { rows } = await queryDb<{ bucket_name: string | null }>(
-    `
-      select bucket_name
-      from drive_project_bucket_assignments
-      where project_id = $1
-      order by is_primary desc, created_at asc, bucket_name asc
-      limit 1;
-    `,
-    [projectId]
-  )
-  const bucketName = rows[0]?.bucket_name ?? ""
-  await queryDb(
-    `
-      update drive_projects
-      set bucket_name = $2, updated_at = now()
-      where id = $1;
-    `,
-    [projectId, bucketName]
-  )
-  clearProjectAuthCache()
 }
 
 export async function assignProjectBucket(input: {
   projectIdentifier: string
+  accountId: string
   bucketName: string
   makePrimary?: boolean
 }) {
   await ensureProjectSchema()
   const project = await getProjectByIdentifier(input.projectIdentifier)
   if (!project) throw new Error("Project not found")
+  if (project.createdAccountId && project.createdAccountId !== input.accountId) {
+    throw new Error("Project belongs to a different Cloudflare account")
+  }
 
   const currentBuckets = await listProjectBuckets(project.id)
   const makePrimary = input.makePrimary === true || currentBuckets.length === 0
 
-  await queryDb(
-    `
-      insert into drive_project_bucket_assignments (project_id, bucket_name, is_primary)
-      values ($1, $2, $3)
-      on conflict (project_id, bucket_name)
-      do update set is_primary = excluded.is_primary;
-    `,
-    [project.id, input.bucketName, makePrimary]
-  )
-
-  if (makePrimary) {
-    await queryDb(
+  await withDbTransaction(async (client) => {
+    await client.query(
       `
-        update drive_project_bucket_assignments
-        set is_primary = (bucket_name = $2)
-        where project_id = $1;
+        insert into drive_project_bucket_assignments (project_id, account_id, bucket_name, is_primary)
+        values ($1, $2, $3, false)
+        on conflict (project_id, bucket_name)
+        do update set account_id = excluded.account_id;
       `,
-      [project.id, input.bucketName]
+      [project.id, input.accountId, input.bucketName]
     )
-  }
-
-  await syncProjectPrimaryBucket(project.id)
+    if (makePrimary) {
+      await client.query(`update drive_project_bucket_assignments set is_primary = false where project_id = $1;`, [project.id])
+      await client.query(
+        `update drive_project_bucket_assignments set is_primary = true where project_id = $1 and bucket_name = $2;`,
+        [project.id, input.bucketName]
+      )
+    }
+    const { rows } = await client.query<{ bucket_name: string }>(
+      `select bucket_name from drive_project_bucket_assignments where project_id = $1 order by is_primary desc, created_at asc, bucket_name asc limit 1;`,
+      [project.id]
+    )
+    await client.query(`update drive_projects set bucket_name = $2, updated_at = now() where id = $1;`, [project.id, rows[0]?.bucket_name ?? ""])
+  })
+  clearProjectAuthCache()
   return listProjectBuckets(project.id)
 }
 
@@ -831,18 +858,17 @@ export async function setProjectPrimaryBucket(projectIdentifier: string, bucketN
   const project = await getProjectByIdentifier(projectIdentifier)
   if (!project) throw new Error("Project not found")
 
-  const { rowCount } = await queryDb(
-    `
-      update drive_project_bucket_assignments
-      set is_primary = (bucket_name = $2)
-      where project_id = $1;
-    `,
-    [project.id, bucketName]
-  )
-
-  if (!rowCount) throw new Error("Bucket is not assigned to this project")
-
-  await syncProjectPrimaryBucket(project.id)
+  await withDbTransaction(async (client) => {
+    const target = await client.query(
+      `select 1 from drive_project_bucket_assignments where project_id = $1 and bucket_name = $2 for update;`,
+      [project.id, bucketName]
+    )
+    if (!target.rowCount) throw new Error("Bucket is not assigned to this project")
+    await client.query(`update drive_project_bucket_assignments set is_primary = false where project_id = $1;`, [project.id])
+    await client.query(`update drive_project_bucket_assignments set is_primary = true where project_id = $1 and bucket_name = $2;`, [project.id, bucketName])
+    await client.query(`update drive_projects set bucket_name = $2, updated_at = now() where id = $1;`, [project.id, bucketName])
+  })
+  clearProjectAuthCache()
   return listProjectBuckets(project.id)
 }
 
@@ -851,47 +877,37 @@ export async function removeProjectBucket(projectIdentifier: string, bucketName:
   const project = await getProjectByIdentifier(projectIdentifier)
   if (!project) throw new Error("Project not found")
 
-  const currentBuckets = await listProjectBuckets(project.id)
-  const removingPrimary = currentBuckets.some(
-    (bucket) => bucket.bucketName === bucketName && bucket.isPrimary
-  )
-
-  const { rowCount } = await queryDb(
-    `
-      delete from drive_project_bucket_assignments
-      where project_id = $1 and bucket_name = $2;
-    `,
-    [project.id, bucketName]
-  )
-  if (!rowCount) throw new Error("Bucket is not assigned to this project")
-
-  if (removingPrimary) {
-    await queryDb(
-      `
-        update drive_project_bucket_assignments
-        set is_primary = true
-        where project_id = $1
-          and bucket_name = (
-            select bucket_name
-            from drive_project_bucket_assignments
-            where project_id = $1
-            order by created_at asc, bucket_name asc
-            limit 1
-          );
-      `,
+  await withDbTransaction(async (client) => {
+    const { rows: targetRows } = await client.query<{ is_primary: boolean }>(
+      `select is_primary from drive_project_bucket_assignments where project_id = $1 and bucket_name = $2 for update;`,
+      [project.id, bucketName]
+    )
+    if (!targetRows[0]) throw new Error("Bucket is not assigned to this project")
+    await client.query(`delete from drive_project_bucket_assignments where project_id = $1 and bucket_name = $2;`, [project.id, bucketName])
+    if (targetRows[0].is_primary) {
+      const { rows } = await client.query<{ bucket_name: string }>(
+        `select bucket_name from drive_project_bucket_assignments where project_id = $1 order by created_at asc, bucket_name asc limit 1;`,
+        [project.id]
+      )
+      if (rows[0]) {
+        await client.query(`update drive_project_bucket_assignments set is_primary = true where project_id = $1 and bucket_name = $2;`, [project.id, rows[0].bucket_name])
+      }
+    }
+    const { rows } = await client.query<{ bucket_name: string }>(
+      `select bucket_name from drive_project_bucket_assignments where project_id = $1 order by is_primary desc, created_at asc, bucket_name asc limit 1;`,
       [project.id]
     )
-  }
-
-  await syncProjectPrimaryBucket(project.id)
+    await client.query(`update drive_projects set bucket_name = $2, updated_at = now() where id = $1;`, [project.id, rows[0]?.bucket_name ?? ""])
+  })
+  clearProjectAuthCache()
   return listProjectBuckets(project.id)
 }
 
-export async function listProjectsUsingBucket(bucketName: string) {
+export async function listProjectsUsingBucket(accountId: string, bucketName: string) {
   await ensureProjectSchema()
   const { rows } = await queryDb<ProjectRow>(
-    `select p.* from drive_projects p join drive_project_bucket_assignments a on a.project_id = p.id where a.bucket_name = $1`,
-    [bucketName]
+    `select p.* from drive_projects p join drive_project_bucket_assignments a on a.project_id = p.id where a.account_id = $1 and a.bucket_name = $2`,
+    [accountId, bucketName]
   )
   return rows.map(mapProject)
 }

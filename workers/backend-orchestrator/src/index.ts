@@ -56,7 +56,7 @@ type BucketSettings = {
 const BUCKET_BATCH_SIZE = 10
 const EXTERNAL_REQUEST_TIMEOUT_MS = 8_000
 const METRICS_CACHE_TTL_MS = 10_000
-const WORKER_BUILD = 20
+const WORKER_BUILD = 21
 const RETENTION_BATCH_SIZE = 250
 const metricsCache = new Map<string, { expiresAt: number; metrics: BucketMetric[] }>()
 
@@ -1037,7 +1037,7 @@ async function reconcilePanel(env: Env) {
     const response = await fetchWithTimeout(panelUrl(env, "/api/internal/backend-orchestrator/reconcile"), {
       method: "POST",
       headers: { Authorization: `Bearer ${env.PANEL_SHARED_SECRET}` },
-    })
+    }, 25_000)
     if (response.status === 403) return { ok: false, disabled: true }
     if (!response.ok) return { ok: false, error: `Panel reconciliation failed (${response.status})` }
     return response.json()
@@ -1071,7 +1071,10 @@ async function runCycle(env: Env, orchestratorUrl?: string) {
     await ensureProgressSchema(db)
     claimed = await claimCycle(db, orchestratorUrl)
     if (!claimed) return { ok: true, skipped: "Another Backend Orchestrator cycle is active" }
-    const panel = await reconcilePanel(env)
+    // This panel reconciliation also checks a durable batch of project/bucket
+    // delivery policies. The panel writes the single managed R2 CORS rule only
+    // when its verified provider state differs from the database policy.
+        const panel = await reconcilePanel(env)
     if (panel && typeof panel === "object" && "disabled" in panel && panel.disabled === true) {
       await setState(db, { status: "idle", result: { skipped: "Backend Orchestrator is disabled in the panel" }, completed: true })
       return { ok: true, skipped: "Backend Orchestrator is disabled in the panel" }
@@ -1080,18 +1083,23 @@ async function runCycle(env: Env, orchestratorUrl?: string) {
       update drive_bucket_scans set status='failed',error='Superseded by R2 analytics metrics sync',completed_at=now(),updated_at=now()
       where kind='orchestrator' and status='running'
     `)
-    const sync = await syncNextAccount(db, config)
+        const sync = await syncNextAccount(db, config)
+        const panelDegraded = Boolean(
+          panel && typeof panel === "object" && "ok" in panel && panel.ok === false
+        )
+        const panelError = panelDegraded ? "Panel delivery reconciliation reported errors" : null
     // Publish the synchronization result before optional retention work. If a
     // Worker invocation is terminated during maintenance, a successfully
     // synced account must not remain displayed as pending behind a stale lock.
-    await setState(db, {
-      status: "idle",
-      result: { sync, maintenance: { status: "pending" }, panel },
+        await setState(db, {
+          status: panelDegraded ? "error" : "idle",
+          error: panelError,
+          result: { sync, maintenance: { status: "pending" }, panel },
       completed: true,
     })
     const maintenance = await runRetention(db, config)
     const result = { sync, maintenance, panel }
-    await setState(db, { status: "idle", result, completed: true })
+        await setState(db, { status: panelDegraded ? "error" : "idle", error: panelError, result, completed: true })
     return { ok: true, result }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

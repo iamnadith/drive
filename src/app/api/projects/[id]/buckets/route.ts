@@ -2,7 +2,10 @@ import { NextResponse } from "next/server"
 
 import { getActiveAccount } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
-import { syncEffectiveBucketDeliveryCors } from "@/lib/bucket-delivery-settings-service"
+import {
+  queueBucketDeliveryCorsReconciliation,
+  syncEffectiveBucketDeliveryCors,
+} from "@/lib/bucket-delivery-settings-service"
 import { r2CreateBucketViaApi, r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
 import { resolveProjectBucketCandidate } from "@/lib/project-bucket-name"
 import {
@@ -22,12 +25,6 @@ function errorMessage(error: unknown, fallback: string) {
     typeof error === "object" && error !== null && "message" in error
       ? String((error as { message?: unknown }).message ?? fallback)
       : fallback
-  if (message.includes("drive_project_bucket_assignments_bucket_key")) {
-    return "That bucket is already assigned to another project"
-  }
-  if (message.includes("drive_projects_bucket_name_key")) {
-    return "That bucket is already assigned to another project"
-  }
   return message
 }
 
@@ -121,6 +118,14 @@ export async function POST(
     const { id } = await context.params
     const project = await getProjectByIdentifier(id)
     if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 })
+    const active = await getActiveAccount()
+    if (!active) return NextResponse.json({ error: "No active Cloudflare account is configured" }, { status: 409 })
+    if (project.createdAccountId && project.createdAccountId !== active.id) {
+      return NextResponse.json(
+        { error: "Switch to the Cloudflare account that owns this project before assigning buckets" },
+        { status: 409 }
+      )
+    }
 
     const body = (await request.json().catch(() => ({}))) as {
       action?: unknown
@@ -146,18 +151,16 @@ export async function POST(
 
     await assignProjectBucket({
       projectIdentifier: project.id,
+      accountId: active.id,
       bucketName,
       makePrimary: body.makePrimary === true,
     })
-    const active = await getActiveAccount()
+    await queueBucketDeliveryCorsReconciliation(active.id, bucketName)
+    let deliverySyncPending = false
     try {
-      if (active) await syncEffectiveBucketDeliveryCors({ account: active, bucketName })
-    } catch (error) {
-      await removeProjectBucket(project.id, bucketName).catch(() => undefined)
-      if (active) {
-        await syncEffectiveBucketDeliveryCors({ account: active, bucketName }).catch(() => undefined)
-      }
-      throw error
+      await syncEffectiveBucketDeliveryCors({ account: active, bucketName })
+    } catch {
+      deliverySyncPending = true
     }
     const buckets = await serializeProjectBuckets(project.id)
 
@@ -175,7 +178,7 @@ export async function POST(
       ...getRequestActivityContext(request),
     })
 
-    return NextResponse.json({ buckets })
+    return NextResponse.json({ buckets, deliverySyncPending })
   } catch (error: unknown) {
     return NextResponse.json(
       { error: errorMessage(error, "Unable to assign project bucket") },
@@ -266,20 +269,20 @@ export async function DELETE(
     if (!previous) {
       return NextResponse.json({ error: "Bucket is not assigned to this project" }, { status: 404 })
     }
-    await removeProjectBucket(project.id, bucketName)
     const active = await getActiveAccount()
+    if (!active || (previous.accountId && previous.accountId !== active.id)) {
+      return NextResponse.json(
+        { error: "Switch to the Cloudflare account that owns this bucket before removing it" },
+        { status: 409 }
+      )
+    }
+    await queueBucketDeliveryCorsReconciliation(active.id, bucketName)
+    await removeProjectBucket(project.id, bucketName)
+    let deliverySyncPending = false
     try {
-      if (active) await syncEffectiveBucketDeliveryCors({ account: active, bucketName })
-    } catch (error) {
-      await assignProjectBucket({
-        projectIdentifier: project.id,
-        bucketName,
-        makePrimary: previous.isPrimary,
-      }).catch(() => undefined)
-      if (active) {
-        await syncEffectiveBucketDeliveryCors({ account: active, bucketName }).catch(() => undefined)
-      }
-      throw error
+      await syncEffectiveBucketDeliveryCors({ account: active, bucketName })
+    } catch {
+      deliverySyncPending = true
     }
     const buckets = await serializeProjectBuckets(project.id)
 
@@ -294,7 +297,7 @@ export async function DELETE(
       ...getRequestActivityContext(request),
     })
 
-    return NextResponse.json({ buckets })
+    return NextResponse.json({ buckets, deliverySyncPending })
   } catch (error: unknown) {
     return NextResponse.json(
       { error: errorMessage(error, "Unable to remove project bucket") },

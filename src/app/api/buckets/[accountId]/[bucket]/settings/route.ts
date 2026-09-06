@@ -17,17 +17,15 @@ import {
 } from "@/lib/r2-bucket-settings"
 import { requireAdmin } from "@/lib/server-auth"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
-import { getProjectByIdentifier } from "@/lib/projects-store"
+import { listProjectsUsingBucket } from "@/lib/projects-store"
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
 }
 
 async function serializeDeliverySettings(settings: Awaited<ReturnType<typeof getBucketDeliverySettings>>) {
-  const effective = await getEffectiveBucketMediaOrigins(settings.bucketName, settings)
-  const project = effective.projectId
-    ? await getProjectByIdentifier(effective.projectId)
-    : null
+  const effective = await getEffectiveBucketMediaOrigins(settings.accountId, settings.bucketName, settings)
+  const projects = await listProjectsUsingBucket(settings.accountId, settings.bucketName)
   return {
     accountId: settings.accountId,
     bucketName: settings.bucketName,
@@ -35,9 +33,10 @@ async function serializeDeliverySettings(settings: Awaited<ReturnType<typeof get
     manualMediaAllowedOrigins: settings.mediaAllowedOrigins,
     inheritedMediaAllowedOrigins: effective.inheritedMediaAllowedOrigins,
     effectiveMediaAllowedOrigins: effective.effectiveMediaAllowedOrigins,
-    inheritedProject: project
-      ? { id: project.id, projectId: project.projectId, name: project.name }
+    inheritedProject: projects[0]
+      ? { id: projects[0].id, projectId: projects[0].projectId, name: projects[0].name }
       : null,
+    inheritedProjects: projects.map((project) => ({ id: project.id, projectId: project.projectId, name: project.name })),
     createdAt: settings.createdAt,
     updatedAt: settings.updatedAt,
   }
@@ -90,8 +89,9 @@ export async function PATCH(
     if ("corsRules" in body) await putBucketCors(account, bucket, body.corsRules)
     const hasDeliverySettingsChange =
       typeof body.deliveryPublicAccessEnabled === "boolean" || "manualMediaAllowedOrigins" in body
+    let deliverySyncPending = false
     if (hasDeliverySettingsChange) {
-      await updateAndSyncBucketDeliverySettings({
+      const deliveryUpdate = await updateAndSyncBucketDeliverySettings({
         account,
         bucketName: bucket,
         ...(typeof body.deliveryPublicAccessEnabled === "boolean"
@@ -99,6 +99,7 @@ export async function PATCH(
           : {}),
         ...("manualMediaAllowedOrigins" in body ? { mediaAllowedOrigins: body.manualMediaAllowedOrigins } : {}),
       })
+      deliverySyncPending = deliveryUpdate.deliverySyncPending
     }
     if (
       !("corsRules" in body) &&
@@ -129,7 +130,7 @@ export async function PATCH(
       undoReason: "Cloudflare bucket settings changes are applied immediately.",
       ...getRequestActivityContext(request),
     })
-    return NextResponse.json({ settings, deliverySettings: await serializeDeliverySettings(deliverySettings) })
+    return NextResponse.json({ settings, deliverySettings: await serializeDeliverySettings(deliverySettings), deliverySyncPending })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to update bucket settings") }, { status: 400 })
   }

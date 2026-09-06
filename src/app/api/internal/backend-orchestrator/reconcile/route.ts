@@ -4,6 +4,8 @@ import { runDatabaseMaintenance } from "@/lib/database-maintenance"
 import { listMigrations } from "@/lib/migrations-store"
 import { syncMigrationLiveState } from "@/lib/migration-live-state"
 import { reconcileRepairJobs } from "@/lib/repair-jobs-store"
+import { getAllAccounts } from "@/lib/accounts-store"
+import { reconcileAssignedProjectDeliveryCors } from "@/lib/bucket-delivery-settings-service"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -26,6 +28,28 @@ export async function POST(request: Request) {
     }
   }
   await reconcileRepairJobs().catch(() => undefined)
+  const accounts = await getAllAccounts().catch(() => [])
+  const deliveryByAccount = await Promise.all(accounts.map(async (account) => ({
+    accountId: account.id,
+    accountLabel: account.label,
+    result: await reconcileAssignedProjectDeliveryCors({ account, limit: 2 }).catch((error) => ({
+      checked: 0,
+      changed: 0,
+      unchanged: 0,
+      errors: [{ bucketName: "reconciliation", ok: false, error: error instanceof Error ? error.message : String(error) }],
+    })),
+  })))
+  const delivery = {
+    checked: deliveryByAccount.reduce((sum, entry) => sum + entry.result.checked, 0),
+    changed: deliveryByAccount.reduce((sum, entry) => sum + entry.result.changed, 0),
+    unchanged: deliveryByAccount.reduce((sum, entry) => sum + entry.result.unchanged, 0),
+    errors: deliveryByAccount.flatMap((entry) => entry.result.errors.map((error) => ({
+      accountId: entry.accountId,
+      accountLabel: entry.accountLabel,
+      ...error,
+    }))),
+    accounts: deliveryByAccount,
+  }
   const maintenance = await runDatabaseMaintenance().catch(() => ({ ran: false, deleted: {}, compactedMigrations: 0 }))
-  return NextResponse.json({ ok: true, migrations: results, maintenance })
+  return NextResponse.json({ ok: delivery.errors.length === 0, migrations: results, delivery, maintenance })
 }

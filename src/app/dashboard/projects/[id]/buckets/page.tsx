@@ -3,18 +3,13 @@
 import * as React from "react"
 import Link from "next/link"
 import { useParams } from "next/navigation"
-import { ArrowLeft, FolderPlus, KeyRound, Star, Trash2 } from "lucide-react"
+import { ArrowLeft, FolderPlus, KeyRound, MoreHorizontal, RefreshCw, Star, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
-  CardAction,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
 } from "@/components/ui/card"
 import {
   Dialog,
@@ -24,16 +19,32 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
 import { DashboardPage, DashboardPageHeader } from "@/components/dashboard/page-shell"
 import { validateProjectBucketCandidate } from "@/lib/project-bucket-name"
 
@@ -55,6 +66,7 @@ type ProjectBucket = {
   bucketName: string
   isPrimary: boolean
   createdAt: string
+  projectCount: number
 }
 
 type BucketMode = "create" | "link"
@@ -111,9 +123,6 @@ export default function ProjectBucketsPage() {
       setAvailableBuckets(Array.isArray(availableBucketsData.buckets) ? (availableBucketsData.buckets as Bucket[]) : [])
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to load bucket management")
-      setProject(null)
-      setProjectBuckets([])
-      setAvailableBuckets([])
     } finally {
       setLoading(false)
     }
@@ -154,7 +163,9 @@ export default function ProjectBucketsPage() {
       setProjectBuckets(Array.isArray(data.buckets) ? (data.buckets as ProjectBucket[]) : [])
       setBucketDraftName("")
       setAddBucketOpen(false)
-      toast.success(bucketMode === "create" ? "Bucket created and assigned" : "Bucket linked")
+      toast.success(data.deliverySyncPending
+        ? `${bucketMode === "create" ? "Bucket created and assigned" : "Bucket linked"}; worker synchronization queued`
+        : bucketMode === "create" ? "Bucket created and assigned" : "Bucket linked")
       await loadAll()
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to assign bucket")
@@ -196,7 +207,9 @@ export default function ProjectBucketsPage() {
       const data = await readJson(res)
       if (!res.ok) throw new Error(String(data.error ?? "Unable to remove bucket"))
       setProjectBuckets(Array.isArray(data.buckets) ? (data.buckets as ProjectBucket[]) : [])
-      toast.success("Bucket removed from project")
+      toast.success(data.deliverySyncPending
+        ? "Bucket removed; the worker will finish removing this project's managed origins"
+        : "Bucket removed from project and delivery rules synchronized")
       await loadAll()
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to remove bucket")
@@ -206,154 +219,128 @@ export default function ProjectBucketsPage() {
   }
 
   return (
-    <DashboardPage>
-      <DashboardPageHeader
-        title={project ? `${project.name} buckets` : "Project buckets"}
-        description="Bucket assignments for this project."
-        actions={
-          <>
-            <Button variant="outline" asChild>
-              <Link href="/dashboard/projects">
-                <ArrowLeft className="mr-2 h-4 w-4" />
-                Back to projects
-              </Link>
-            </Button>
-            {project ? (
-              <Button variant="outline" asChild>
-                <Link href={`/dashboard/projects/${encodeURIComponent(project.id)}/keys`}>
-                  <KeyRound className="mr-2 h-4 w-4" />
-                  API keys
-                </Link>
+    <DashboardPage className="dashboard-motion-stage">
+      <div className="dashboard-motion-item">
+        <DashboardPageHeader
+          title={project ? `${project.name} / Buckets` : "Project buckets"}
+          description={project ? `${projectBuckets.length} assigned / ${project.projectId}` : "Manage the storage assigned to this project."}
+          actions={
+            <div className="flex w-full items-center gap-2 sm:w-auto sm:justify-end">
+              <Button variant="outline" size="icon" className="size-9 rounded-full" asChild>
+                <Link href="/dashboard/projects" aria-label="Back to projects"><ArrowLeft /></Link>
               </Button>
-            ) : null}
-            <Button variant="outline" loading={loading} onClick={() => void loadAll()}>
-              Refresh
-            </Button>
-          </>
-        }
-      />
-
-      <Card className="border-border/60 shadow-sm">
-        <CardContent className="grid gap-2 p-3 md:grid-cols-3">
-          <div className="rounded-lg border border-border/60 px-3 py-2">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Primary bucket</div>
-            <div className="mt-1 font-mono text-xs">{project?.bucketName || "No primary bucket"}</div>
-          </div>
-          <div className="rounded-lg border border-border/60 px-3 py-2">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Assigned</div>
-            <div className="mt-1 text-base font-semibold">{projectBuckets.length}</div>
-          </div>
-          <div className="rounded-lg border border-border/60 px-3 py-2">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Status</div>
-            <div className="mt-1">{project ? <Badge variant={project.status === "active" ? "default" : "secondary"}>{project.status}</Badge> : "-"}</div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card className="border-border/60 shadow-sm">
-        <CardHeader className="py-3">
-          <CardTitle>Assigned buckets</CardTitle>
-          <CardDescription>Set primary, open in storage, or remove.</CardDescription>
-          <CardAction>
-            <Button
-              size="sm"
-              onClick={() => {
-                setBucketMode("create")
-                setBucketDraftName("")
-                setAddBucketOpen(true)
-              }}
-            >
-              <FolderPlus className="mr-2 h-4 w-4" />
-              Add bucket
-            </Button>
-          </CardAction>
-        </CardHeader>
-        <CardContent className="space-y-2 px-3 pb-3 sm:px-4 sm:pb-4">
-          {loading ? (
-            Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="h-16 w-full rounded-xl" />)
-          ) : projectBuckets.length === 0 ? (
-            <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
-              No buckets assigned yet.
+              {project ? (
+                <Button variant="outline" className="min-w-0 flex-1 sm:flex-none" asChild>
+                  <Link href={`/dashboard/projects/${encodeURIComponent(project.id)}/keys`}><KeyRound data-icon="inline-start" /> API keys</Link>
+                </Button>
+              ) : null}
+              <Button variant="outline" size="icon" className="size-9 rounded-full" loading={loading} onClick={() => void loadAll()} aria-label="Refresh buckets">
+                <RefreshCw />
+              </Button>
+              <Button
+                size="icon"
+                className="size-9 min-w-9 rounded-full sm:h-9 sm:w-auto sm:min-w-0 sm:px-3"
+                onClick={() => {
+                  setBucketMode("create")
+                  setBucketDraftName("")
+                  setAddBucketOpen(true)
+                }}
+                disabled={!project}
+              >
+                <FolderPlus data-icon="inline-start" />
+                <span className="sr-only sm:not-sr-only">Add bucket</span>
+              </Button>
             </div>
-          ) : (
-            projectBuckets.map((bucket) => (
-              <div key={bucket.bucketName} className="rounded-xl border border-border/60 bg-background px-3 py-2.5">
-                <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="grid flex-1 gap-2 md:grid-cols-[minmax(0,1.4fr)_130px_130px] md:items-center">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-sm">{bucket.bucketName}</span>
-                        {bucket.isPrimary ? <Badge>Primary</Badge> : null}
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">Assigned {formatDate(bucket.createdAt)}</div>
-                    </div>
-                    <div className="text-xs">
-                      <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Role</div>
-                      <div className="mt-1 text-muted-foreground">{bucket.isPrimary ? "Primary" : "Secondary"}</div>
-                    </div>
-                    <div className="text-xs">
-                      <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Storage</div>
-                      <div className="mt-1 text-muted-foreground">Direct view</div>
-                    </div>
-                  </div>
+          }
+        >
+          {project ? <div className="mt-2"><Badge variant={project.status === "active" ? "default" : "secondary"}>{project.status}</Badge></div> : null}
+        </DashboardPageHeader>
+      </div>
 
-                  <div className="flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" asChild>
-                      <Link href={`/dashboard/storage?bucket=${encodeURIComponent(bucket.bucketName)}`}>
-                        Open in storage
-                      </Link>
-                    </Button>
-                    {!bucket.isPrimary ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => void setPrimaryBucket(bucket.bucketName)}
-                        disabled={actingBucketName === bucket.bucketName}
-                      >
-                        <Star className="mr-2 h-4 w-4" />
-                        Set primary
+      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
+        <Table className="min-w-[760px] w-full" containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full">
+          <TableHeader>
+            <TableRow className="h-9 border-b">
+              <TableHead className="relative min-w-[280px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Bucket<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
+              <TableHead className="relative min-w-[130px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Role<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
+              <TableHead className="relative min-w-[200px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Assigned<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
+              <TableHead className="min-w-[160px] px-2.5 text-right text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {loading && projectBuckets.length === 0 ? (
+              Array.from({ length: 5 }).map((_, index) => <TableRow key={index} className="h-[64px]"><TableCell colSpan={4}><Skeleton className="h-10 w-full rounded-xl" /></TableCell></TableRow>)
+            ) : projectBuckets.length ? (
+              projectBuckets.map((bucket) => (
+                <TableRow key={bucket.bucketName} className="h-[64px] border-b last:border-b-0 hover:bg-muted/30">
+                  <TableCell className="relative px-2.5 py-2 font-mono text-sm">
+                    <span className="block max-w-[320px] truncate">{bucket.bucketName}</span>
+                    <span className="mt-1 block font-sans text-xs text-muted-foreground">{bucket.projectCount > 1 ? `Shared across ${bucket.projectCount} projects` : "Used only by this project"}</span>
+                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
+                  </TableCell>
+                  <TableCell className="relative px-2.5 py-2">
+                    <Badge variant={bucket.isPrimary ? "default" : "secondary"}>{bucket.isPrimary ? "Primary" : "Secondary"}</Badge>
+                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
+                  </TableCell>
+                  <TableCell className="relative px-2.5 py-2 text-xs text-muted-foreground">
+                    {formatDate(bucket.createdAt)}
+                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
+                  </TableCell>
+                  <TableCell className="px-2.5 py-2">
+                    <div className="flex items-center justify-end gap-1">
+                      <Button variant="ghost" size="sm" className="rounded-full" asChild>
+                        <Link href={`/dashboard/storage?bucket=${encodeURIComponent(bucket.bucketName)}`}>Open storage</Link>
                       </Button>
-                    ) : null}
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => void unlinkBucket(bucket.bucketName)}
-                      disabled={actingBucketName === bucket.bucketName}
-                    >
-                      <Trash2 className="mr-2 h-4 w-4" />
-                      Remove
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            ))
-          )}
-        </CardContent>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="icon-sm" className="rounded-full" aria-label={`Actions for ${bucket.bucketName}`}><MoreHorizontal /></Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuGroup>
+                            {!bucket.isPrimary ? <DropdownMenuItem onClick={() => void setPrimaryBucket(bucket.bucketName)} disabled={actingBucketName === bucket.bucketName}><Star /> Set as primary</DropdownMenuItem> : null}
+                            <DropdownMenuItem variant="destructive" onClick={() => void unlinkBucket(bucket.bucketName)} disabled={actingBucketName === bucket.bucketName}><Trash2 /> Remove from project</DropdownMenuItem>
+                          </DropdownMenuGroup>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))
+            ) : (
+              <TableRow><TableCell colSpan={4} className="h-28 text-center text-muted-foreground">No buckets are assigned to this project.</TableCell></TableRow>
+            )}
+          </TableBody>
+        </Table>
+        <div className="border-t px-3 py-2 text-center text-xs text-muted-foreground">
+          {project?.bucketName ? <>Primary bucket: <span className="font-mono text-foreground">{project.bucketName}</span></> : "Choose Add bucket to connect storage."}
+        </div>
       </Card>
 
       <Dialog open={addBucketOpen} onOpenChange={setAddBucketOpen}>
-        <DialogContent>
+        <DialogContent className="rounded-2xl sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Add bucket</DialogTitle>
             <DialogDescription>Create a new bucket with the exact entered name or assign an existing one from the active account.</DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4">
-            <div className="space-y-2">
+          <div className="flex flex-col gap-4 rounded-lg border bg-muted/40 p-4">
+            <div className="flex flex-col gap-2">
               <Label>Bucket action</Label>
               <Select value={bucketMode} onValueChange={(value) => setBucketMode(value as BucketMode)}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="create">Create new bucket</SelectItem>
-                  <SelectItem value="link">Assign existing bucket</SelectItem>
+                  <SelectGroup>
+                    <SelectItem value="create">Create new bucket</SelectItem>
+                    <SelectItem value="link">Assign existing bucket</SelectItem>
+                  </SelectGroup>
                 </SelectContent>
               </Select>
             </div>
 
             {bucketMode === "create" ? (
-              <div className="space-y-2">
+              <div className="flex flex-col gap-2">
                 <Label htmlFor="bucket-name">Bucket name</Label>
                 <Input
                   id="bucket-name"
@@ -370,18 +357,18 @@ export default function ProjectBucketsPage() {
                 )}
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="flex flex-col gap-2">
                 <Label>Existing bucket</Label>
                 <Select value={bucketDraftName} onValueChange={setBucketDraftName}>
                   <SelectTrigger>
                     <SelectValue placeholder={loading ? "Loading buckets..." : "Select a bucket"} />
                   </SelectTrigger>
                   <SelectContent>
-                    {availableBuckets.map((bucket) => (
-                      <SelectItem key={bucket.id || bucket.name} value={bucket.name}>
-                        {bucket.name}
-                      </SelectItem>
-                    ))}
+                    <SelectGroup>
+                      {availableBuckets.map((bucket) => (
+                        <SelectItem key={bucket.id || bucket.name} value={bucket.name}>{bucket.name}</SelectItem>
+                      ))}
+                    </SelectGroup>
                   </SelectContent>
                 </Select>
                 {validation.error ? <p className="text-sm text-destructive">{validation.error}</p> : null}

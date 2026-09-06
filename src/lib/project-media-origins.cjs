@@ -1,4 +1,5 @@
 const MAX_MEDIA_ALLOWED_ORIGINS = 20
+const MAX_EFFECTIVE_MEDIA_ALLOWED_ORIGINS = 100
 const MAX_ORIGIN_LENGTH = 2048
 
 function isLocalDevelopmentHost(hostname) {
@@ -47,12 +48,27 @@ function normalizeMediaAllowedOrigins(value) {
 }
 
 function mergeMediaAllowedOrigins(inherited, manual) {
-  const combined = [
-    ...(Array.isArray(inherited) ? inherited : []),
-    ...(Array.isArray(manual) ? manual : []),
-  ]
+  return mergeManyMediaAllowedOrigins([inherited, manual])
+}
+
+function mergeManyMediaAllowedOrigins(policies) {
+  const combined = (Array.isArray(policies) ? policies : [])
+    .flatMap((policy) => Array.isArray(policy) ? policy : [])
   if (combined.includes("*")) return ["*"]
-  return [...new Set(combined.filter((origin) => typeof origin === "string"))]
+  const merged = [...new Set(combined.filter((origin) => typeof origin === "string"))]
+  if (merged.length > MAX_EFFECTIVE_MEDIA_ALLOWED_ORIGINS) {
+    throw new Error(`The combined bucket delivery policy can have at most ${MAX_EFFECTIVE_MEDIA_ALLOWED_ORIGINS} origins`)
+  }
+  return merged
+}
+
+function resolveEffectiveMediaAllowedOrigins({ inheritedPolicies, manual, fallback }) {
+  const explicitInherited = (Array.isArray(inheritedPolicies) ? inheritedPolicies : [])
+    .filter((policy) => Array.isArray(policy))
+  if (explicitInherited.length === 0 && manual === null) {
+    return mergeManyMediaAllowedOrigins([fallback])
+  }
+  return mergeManyMediaAllowedOrigins([...explicitInherited, manual])
 }
 
 function hasProjectBucketDeliveryPolicyMutation(value) {
@@ -66,8 +82,11 @@ function hasProjectBucketDeliveryPolicyMutation(value) {
 
 module.exports = {
   MAX_MEDIA_ALLOWED_ORIGINS,
+  MAX_EFFECTIVE_MEDIA_ALLOWED_ORIGINS,
   normalizeMediaAllowedOrigin,
   normalizeMediaAllowedOrigins,
   mergeMediaAllowedOrigins,
+  mergeManyMediaAllowedOrigins,
+  resolveEffectiveMediaAllowedOrigins,
   hasProjectBucketDeliveryPolicyMutation,
 }

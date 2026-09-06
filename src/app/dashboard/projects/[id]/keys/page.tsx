@@ -3,14 +3,13 @@
 import * as React from "react"
 import Link from "next/link"
 import { useParams } from "next/navigation"
-import { ArrowLeft, BookOpen, Copy, MoreHorizontal, Plus } from "lucide-react"
+import { ArrowLeft, BookOpen, Copy, FolderPlus, MoreHorizontal, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
-  CardContent,
 } from "@/components/ui/card"
 import {
   Dialog,
@@ -23,6 +22,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
@@ -31,12 +31,21 @@ import { Label } from "@/components/ui/label"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Skeleton } from "@/components/ui/skeleton"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
 import { DashboardPage, DashboardPageHeader } from "@/components/dashboard/page-shell"
 
 const PERMISSION_KEYS = [
@@ -182,6 +191,8 @@ export default function ProjectKeysPage() {
   const [editPermissions, setEditPermissions] = React.useState<Permissions>(PRESETS["Read only"])
   const [savingKey, setSavingKey] = React.useState(false)
   const [docsOpen, setDocsOpen] = React.useState(false)
+  const [deleteKey, setDeleteKey] = React.useState<ApiKey | null>(null)
+  const [deletingKey, setDeletingKey] = React.useState(false)
 
   const loadAll = React.useCallback(async () => {
     if (!projectId) return
@@ -200,8 +211,6 @@ export default function ProjectKeysPage() {
       setKeys(Array.isArray(keysData.keys) ? (keysData.keys as ApiKey[]) : [])
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to load project access")
-      setProject(null)
-      setKeys([])
     } finally {
       setLoading(false)
     }
@@ -269,7 +278,7 @@ export default function ProjectKeysPage() {
 
   const removeKey = async (key: ApiKey) => {
     if (!project) return
-    if (!window.confirm(`Delete API key "${key.name}" from this project?`)) return
+    setDeletingKey(true)
     try {
       const res = await fetch(
         `/api/projects/${encodeURIComponent(project.id)}/keys/${encodeURIComponent(key.id)}`,
@@ -277,10 +286,13 @@ export default function ProjectKeysPage() {
       )
       const data = await readJson(res)
       if (!res.ok) throw new Error(String(data.error ?? "Unable to delete API key"))
+      setDeleteKey(null)
       toast.success("API key deleted")
       await loadAll()
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to delete API key")
+    } finally {
+      setDeletingKey(false)
     }
   }
 
@@ -293,133 +305,86 @@ export default function ProjectKeysPage() {
   const docsApiKey = "your_api_key"
 
   return (
-    <DashboardPage>
-      <DashboardPageHeader
-        title={project ? `${project.name} API keys` : "Project API keys"}
-        description="Project-scoped API keys."
-        actions={
-          <>
-            <Button variant="outline" asChild>
-              <Link href="/dashboard/projects">
-                <ArrowLeft className="mr-2 h-4 w-4" />
-                Back to projects
-              </Link>
-            </Button>
-            {project ? (
-              <Button variant="outline" asChild>
-                <Link href={`/dashboard/projects/${encodeURIComponent(project.id)}/buckets`}>
-                  Buckets
-                </Link>
+    <DashboardPage className="dashboard-motion-stage">
+      <div className="dashboard-motion-item">
+        <DashboardPageHeader
+          title={project ? `${project.name} / API keys` : "Project API keys"}
+          description={project ? `${keys.length} issued / ${project.projectId}` : "Manage scoped credentials for this project."}
+          actions={
+            <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
+              <Button variant="outline" size="icon" className="size-9 rounded-full" asChild>
+                <Link href="/dashboard/projects" aria-label="Back to projects"><ArrowLeft /></Link>
               </Button>
-            ) : null}
-            <Button variant="outline" onClick={() => setDocsOpen(true)}>
-              <BookOpen className="mr-2 h-4 w-4" />
-              API docs
-            </Button>
-            <Button variant="outline" loading={loading} onClick={() => void loadAll()}>
-              Refresh
-            </Button>
-          </>
-        }
-      />
-
-      <Card className="border-border/60 shadow-sm">
-        <CardContent className="grid gap-2 p-3 md:grid-cols-3">
-          <div className="rounded-lg border border-border/60 px-3 py-2">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Project ID</div>
-            <div className="mt-1 font-mono text-xs">{project?.projectId ?? "-"}</div>
-          </div>
-          <div className="rounded-lg border border-border/60 px-3 py-2">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Primary bucket</div>
-            <div className="mt-1 font-mono text-xs">{project?.bucketName || "No primary bucket"}</div>
-          </div>
-          <div className="rounded-lg border border-border/60 px-3 py-2">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Status</div>
-            <div className="mt-1 flex items-center gap-2">
-              {project ? <Badge variant={project.status === "active" ? "default" : "secondary"}>{project.status}</Badge> : "-"}
-              <span className="text-xs text-muted-foreground">{formatDate(project?.createdAt)}</span>
+              {project ? (
+                <Button variant="outline" className="min-w-0 flex-1 sm:flex-none" asChild>
+                  <Link href={`/dashboard/projects/${encodeURIComponent(project.id)}/buckets`}><FolderPlus data-icon="inline-start" /> Buckets</Link>
+                </Button>
+              ) : null}
+              <Button variant="outline" size="icon" className="size-9 rounded-full" onClick={() => setDocsOpen(true)} aria-label="Open API documentation"><BookOpen /></Button>
+              <Button variant="outline" size="icon" className="size-9 rounded-full" loading={loading} onClick={() => void loadAll()} aria-label="Refresh API keys"><RefreshCw /></Button>
+              <Button size="icon" className="size-9 min-w-9 rounded-full sm:h-9 sm:w-auto sm:min-w-0 sm:px-3" onClick={() => setCreateKeyOpen(true)} disabled={!project}>
+                <Plus data-icon="inline-start" /><span className="sr-only sm:not-sr-only">New key</span>
+              </Button>
             </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="space-y-3">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <div className="text-base font-semibold">Issued keys</div>
-            <div className="text-sm text-muted-foreground">Create, disable, or edit keys.</div>
-          </div>
-          <Button size="sm" onClick={() => setCreateKeyOpen(true)} disabled={!project}>
-            <Plus className="mr-2 h-4 w-4" />
-            New key
-          </Button>
-        </div>
-
-        <div className="space-y-2">
-          {loading ? (
-            Array.from({ length: 5 }).map((_, index) => <Skeleton key={index} className="h-16 w-full rounded-xl" />)
-          ) : keys.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-border/70 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
-              No API keys for this project.
-            </div>
-          ) : (
-            keys.map((key) => (
-              <div key={key.id} className="rounded-xl border border-border/60 bg-background px-3 py-2.5">
-                <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="grid flex-1 gap-2 md:grid-cols-[minmax(0,1.35fr)_130px_150px_150px] md:items-center">
-                    <div className="min-w-0">
-                      <div className="text-sm font-semibold">{key.name}</div>
-                      <div className="mt-1 font-mono text-xs text-muted-foreground">{key.keyPrefix}...</div>
-                    </div>
-                    <div className="text-xs">
-                      <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Status</div>
-                      <div className="mt-1">
-                        <Badge variant={key.status === "active" ? "default" : "secondary"}>{key.status}</Badge>
-                      </div>
-                    </div>
-                    <div className="text-xs">
-                      <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Last used</div>
-                      <div className="mt-1 text-muted-foreground">{formatDate(key.lastUsedAt)}</div>
-                    </div>
-                    <div className="text-xs">
-                      <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Created</div>
-                      <div className="mt-1 text-muted-foreground">{formatDate(key.createdAt)}</div>
-                    </div>
-                  </div>
-
-                  <div className="flex justify-end">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" className="rounded-full">
-                          <MoreHorizontal className="h-4 w-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem onClick={() => openEditKey(key)}>Edit access</DropdownMenuItem>
-                        <DropdownMenuItem
-                          className="text-destructive focus:text-destructive"
-                          onClick={() => void removeKey(key)}
-                        >
-                          Delete
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </div>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
+          }
+        >
+          {project ? <div className="mt-2 flex flex-wrap items-center gap-2"><Badge variant={project.status === "active" ? "default" : "secondary"}>{project.status}</Badge><span className="font-mono text-xs text-muted-foreground">{project.bucketName || "No primary bucket"}</span></div> : null}
+        </DashboardPageHeader>
       </div>
 
+      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
+        <Table className="min-w-[820px] w-full" containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full">
+          <TableHeader>
+            <TableRow className="h-9 border-b">
+              <TableHead className="relative min-w-[250px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">API key<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
+              <TableHead className="relative min-w-[120px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Status<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
+              <TableHead className="relative min-w-[190px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Last used<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
+              <TableHead className="relative min-w-[190px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Created<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
+              <TableHead className="min-w-[100px] px-2.5 text-right text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {loading && keys.length === 0 ? (
+              Array.from({ length: 6 }).map((_, index) => <TableRow key={index} className="h-[64px]"><TableCell colSpan={5}><Skeleton className="h-10 w-full rounded-xl" /></TableCell></TableRow>)
+            ) : keys.length ? (
+              keys.map((key) => (
+                <TableRow key={key.id} className="h-[64px] border-b last:border-b-0 hover:bg-muted/30">
+                  <TableCell className="relative px-2.5 py-2">
+                    <div className="max-w-[280px]"><div className="truncate font-medium">{key.name}</div><div className="mt-1 truncate font-mono text-xs text-muted-foreground">{key.keyPrefix}********</div></div>
+                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
+                  </TableCell>
+                  <TableCell className="relative px-2.5 py-2"><Badge variant={key.status === "active" ? "default" : "secondary"}>{key.status}</Badge><span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" /></TableCell>
+                  <TableCell className="relative px-2.5 py-2 text-xs text-muted-foreground">{formatDate(key.lastUsedAt)}<span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" /></TableCell>
+                  <TableCell className="relative px-2.5 py-2 text-xs text-muted-foreground">{formatDate(key.createdAt)}<span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" /></TableCell>
+                  <TableCell className="px-2.5 py-2">
+                    <div className="flex justify-end">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="rounded-full" aria-label={`Actions for ${key.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger>
+                        <DropdownMenuContent align="end"><DropdownMenuGroup>
+                          <DropdownMenuItem onClick={() => openEditKey(key)}><Settings2 /> Edit access</DropdownMenuItem>
+                          <DropdownMenuItem variant="destructive" onClick={() => setDeleteKey(key)}><Trash2 /> Delete</DropdownMenuItem>
+                        </DropdownMenuGroup></DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))
+            ) : (
+              <TableRow><TableCell colSpan={5} className="h-28 text-center text-muted-foreground">No API keys have been issued for this project.</TableCell></TableRow>
+            )}
+          </TableBody>
+        </Table>
+        <div className="border-t px-3 py-2 text-center text-xs text-muted-foreground">{keys.length} key{keys.length === 1 ? "" : "s"} / secrets are shown only once</div>
+      </Card>
+
       <Dialog open={createKeyOpen} onOpenChange={setCreateKeyOpen}>
-        <DialogContent>
+        <DialogContent className="rounded-2xl sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Create API key</DialogTitle>
             <DialogDescription>The secret is shown once. Save it before closing the confirmation dialog.</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
+          <div className="flex flex-col gap-4 rounded-lg border bg-muted/40 p-4">
+            <div className="flex flex-col gap-2">
               <Label htmlFor="key-name">Key name</Label>
               <Input
                 id="key-name"
@@ -428,18 +393,18 @@ export default function ProjectKeysPage() {
                 placeholder="Production app"
               />
             </div>
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <Label>Preset</Label>
               <Select value={keyPreset} onValueChange={setKeyPreset}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {Object.keys(PRESETS).map((preset) => (
-                    <SelectItem key={preset} value={preset}>
-                      {preset}
-                    </SelectItem>
-                  ))}
+                  <SelectGroup>
+                    {Object.keys(PRESETS).map((preset) => (
+                      <SelectItem key={preset} value={preset}>{preset}</SelectItem>
+                    ))}
+                  </SelectGroup>
                 </SelectContent>
               </Select>
             </div>
@@ -456,22 +421,26 @@ export default function ProjectKeysPage() {
       </Dialog>
 
       <Dialog open={!!secret} onOpenChange={(open) => !open && setSecret(null)}>
-        <DialogContent>
+        <DialogContent className="rounded-2xl sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>API key generated</DialogTitle>
             <DialogDescription>This value is stored as a hash and cannot be shown again.</DialogDescription>
           </DialogHeader>
-          <div className="rounded-md border bg-muted p-3 font-mono text-xs break-all">{secret}</div>
+          <div className="break-all rounded-lg border bg-muted/40 p-4 font-mono text-xs leading-relaxed">{secret}</div>
           <DialogFooter>
             <Button
               variant="outline"
               onClick={async () => {
                 if (!secret) return
-                await navigator.clipboard.writeText(secret)
-                toast.success("API key copied")
+                try {
+                  await navigator.clipboard.writeText(secret)
+                  toast.success("API key copied")
+                } catch {
+                  toast.error("Clipboard access was denied. Copy the key manually.")
+                }
               }}
             >
-              <Copy className="mr-2 h-4 w-4" />
+              <Copy data-icon="inline-start" />
               Copy
             </Button>
             <Button onClick={() => setSecret(null)}>Done</Button>
@@ -480,15 +449,15 @@ export default function ProjectKeysPage() {
       </Dialog>
 
       <Dialog open={!!editingKey} onOpenChange={(open) => !open && setEditingKey(null)}>
-        <DialogContent className="sm:max-w-2xl">
+        <DialogContent className="max-h-[88vh] flex flex-col rounded-2xl sm:max-h-[94vh] sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Edit API key access</DialogTitle>
             <DialogDescription>Permissions apply only to this project assignment.</DialogDescription>
           </DialogHeader>
           {editingKey ? (
-            <div className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-[1fr_160px]">
-                <div className="space-y-2">
+            <div className="flex min-h-0 flex-col gap-4 overflow-y-auto pr-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              <div className="grid gap-3 rounded-lg border bg-muted/40 p-4 sm:grid-cols-[1fr_160px]">
+                <div className="flex flex-col gap-2">
                   <Label htmlFor="edit-key-name">Name</Label>
                   <Input
                     id="edit-key-name"
@@ -498,7 +467,7 @@ export default function ProjectKeysPage() {
                     }
                   />
                 </div>
-                <div className="space-y-2">
+                <div className="flex flex-col gap-2">
                   <Label>Status</Label>
                   <Select
                     value={editingKey.status}
@@ -512,16 +481,18 @@ export default function ProjectKeysPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="active">Active</SelectItem>
-                      <SelectItem value="disabled">Disabled</SelectItem>
+                      <SelectGroup>
+                        <SelectItem value="active">Active</SelectItem>
+                        <SelectItem value="disabled">Disabled</SelectItem>
+                      </SelectGroup>
                     </SelectContent>
                   </Select>
                 </div>
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-2 rounded-lg border bg-muted/40 p-4 sm:grid-cols-2">
                 {PERMISSION_KEYS.map((permission) => (
-                  <div key={permission} className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
+                  <div key={permission} className="flex items-center justify-between gap-3 rounded-lg border bg-background/60 px-3 py-2">
                     <Label htmlFor={`perm-${permission}`} className="text-sm">
                       {permissionLabels[permission]}
                     </Label>
@@ -551,8 +522,22 @@ export default function ProjectKeysPage() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={!!deleteKey} onOpenChange={(open) => !open && setDeleteKey(null)}>
+        <DialogContent className="rounded-2xl sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete API key</DialogTitle>
+            <DialogDescription>This permanently revokes the key. Applications using it will lose access immediately.</DialogDescription>
+          </DialogHeader>
+          {deleteKey ? <div className="rounded-lg border bg-muted/40 p-4"><div className="font-medium">{deleteKey.name}</div><div className="mt-1 font-mono text-xs text-muted-foreground">{deleteKey.keyPrefix}********</div></div> : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteKey(null)} disabled={deletingKey}>Cancel</Button>
+            <Button variant="destructive" loading={deletingKey} onClick={() => deleteKey ? void removeKey(deleteKey) : undefined}>Delete key</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={docsOpen} onOpenChange={setDocsOpen}>
-        <DialogContent className="flex max-h-[85vh] w-full max-w-3xl flex-col overflow-x-hidden overflow-y-hidden sm:max-w-3xl">
+        <DialogContent className="flex max-h-[88vh] w-full max-w-3xl flex-col overflow-x-hidden overflow-y-hidden rounded-2xl sm:max-h-[94vh] sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>Projects API documentation</DialogTitle>
             <DialogDescription>Use a project API key to manage files in the project&apos;s primary bucket from another app.</DialogDescription>
@@ -560,7 +545,7 @@ export default function ProjectKeysPage() {
 
           <div className="min-h-0 overflow-x-hidden overflow-y-auto pr-1">
             <div className="grid gap-6 text-sm">
-            <section className="space-y-3">
+            <section className="flex flex-col gap-3">
               <h3 className="font-semibold">Core model</h3>
               <p className="text-muted-foreground">
                 Every tracked object now gets a permanent `fileId`. Use `fileId` for stable references across renames,
@@ -573,7 +558,7 @@ export default function ProjectKeysPage() {
 }`}</CodeExample>
             </section>
 
-            <section className="space-y-3">
+            <section className="flex flex-col gap-3">
               <h3 className="font-semibold">Authentication</h3>
               <p className="text-muted-foreground">
                 Send the API key in the authorization header and target the project with its project ID. If the project has multiple assigned buckets, send `bucket` in the query string or `X-Drive-Bucket` to target a non-primary bucket.
@@ -584,7 +569,7 @@ X-Drive-Project: ${docsProjectId}
 X-Drive-Bucket: uploads-archive`}</CodeExample>
             </section>
 
-            <section className="space-y-3">
+            <section className="flex flex-col gap-3">
               <h3 className="font-semibold">List files</h3>
               <CodeExample>{`curl -X GET "/api/v1/files?projectId=${docsProjectId}&bucket=uploads-archive&prefix=uploads/&limit=100" \
   -H "Authorization: Bearer ${docsApiKey}"`}</CodeExample>
@@ -593,7 +578,7 @@ X-Drive-Bucket: uploads-archive`}</CodeExample>
               </p>
             </section>
 
-            <section className="space-y-3">
+            <section className="flex flex-col gap-3">
               <h3 className="font-semibold">Single upload flow</h3>
               <p className="text-muted-foreground">
                 Uploads are direct-to-R2. First request a signed upload URL, then upload bytes directly to R2, then call
@@ -637,7 +622,7 @@ X-Drive-Bucket: uploads-archive`}</CodeExample>
 }`}</CodeExample>
             </section>
 
-            <section className="space-y-3">
+            <section className="flex flex-col gap-3">
               <h3 className="font-semibold">Multipart upload flow</h3>
               <p className="text-muted-foreground">
                 Use multipart for large files. Start the multipart upload, upload parts directly to R2, then complete the
@@ -677,7 +662,7 @@ X-Drive-Bucket: uploads-archive`}</CodeExample>
   }'`}</CodeExample>
             </section>
 
-            <section className="space-y-3">
+            <section className="flex flex-col gap-3">
               <h3 className="font-semibold">Read or download by fileId</h3>
               <p className="text-muted-foreground">
                 Prefer `fileId` for app records. Drive resolves the current bucket and key internally, then issues a short-lived direct R2 download URL.
@@ -688,7 +673,7 @@ X-Drive-Bucket: uploads-archive`}</CodeExample>
   -H "Authorization: Bearer ${docsApiKey}"`}</CodeExample>
             </section>
 
-            <section className="space-y-3">
+            <section className="flex flex-col gap-3">
               <h3 className="font-semibold">Metadata and writes by fileId</h3>
               <CodeExample>{`curl -X GET "/api/v1/files/metadata?projectId=${docsProjectId}&fileId=8a3f2f01e7e29c0b0b0f5d7a" \
   -H "Authorization: Bearer ${docsApiKey}"`}</CodeExample>
@@ -703,7 +688,7 @@ X-Drive-Bucket: uploads-archive`}</CodeExample>
   }'`}</CodeExample>
             </section>
 
-            <section className="space-y-3">
+            <section className="flex flex-col gap-3">
               <h3 className="font-semibold">Rename and delete by fileId</h3>
               <p className="text-muted-foreground">
                 Renames preserve the same `fileId`. Deletes mark that tracked file as deleted, so later access by the same `fileId` returns not found.
@@ -725,7 +710,7 @@ X-Drive-Bucket: uploads-archive`}</CodeExample>
   }'`}</CodeExample>
             </section>
 
-            <section className="space-y-3">
+            <section className="flex flex-col gap-3">
               <h3 className="font-semibold">Generate links</h3>
               <p className="text-muted-foreground">
                 Permanent links now store the tracked `fileId` when available, so they keep resolving after renames.
@@ -741,7 +726,7 @@ X-Drive-Bucket: uploads-archive`}</CodeExample>
   }'`}</CodeExample>
             </section>
 
-            <section className="space-y-3">
+            <section className="flex flex-col gap-3">
               <h3 className="font-semibold">Behavior guarantees</h3>
               <CodeExample>{`- fileId is permanent for the tracked object
 - rename keeps the same fileId

@@ -1,6 +1,7 @@
 import type { CORSRule } from "@aws-sdk/client-s3"
 
 import type { CloudflareAccount } from "./accounts-store"
+import { withDbAdvisoryLock } from "./db"
 import { cloudflareFetchJson } from "./cloudflare-api"
 import {
   r2DeleteBucketCors,
@@ -198,9 +199,14 @@ async function writeBucketCors(account: CloudflareAccount, bucket: string, rules
   } else {
     await r2PutBucketCors(accountR2Config(account), bucket, toAwsCorsRules(rules))
   }
-  const verified = await getBucketCors(account, bucket)
-  if (!corsRulesEqual(verified, rules)) throw new Error("CORS changes could not be verified")
-  return verified
+  const verificationDelays = [0, 250, 750]
+  let verified: BucketCorsRule[] = []
+  for (const delayMs of verificationDelays) {
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+    verified = await getBucketCors(account, bucket)
+    if (corsRulesEqual(verified, rules)) return verified
+  }
+  throw new Error("CORS change is pending provider propagation and will be verified again by the worker")
 }
 
 export async function syncBucketDeliveryCorsRule(
@@ -208,8 +214,20 @@ export async function syncBucketDeliveryCorsRule(
   bucket: string,
   origins: string[]
 ) {
-  const current = await getBucketCors(account, bucket)
-  return writeBucketCors(account, bucket, mergeManagedMediaCorsRule(current, origins))
+  return (await reconcileBucketDeliveryCorsRule(account, bucket, origins)).rules
+}
+
+export async function reconcileBucketDeliveryCorsRule(
+  account: CloudflareAccount,
+  bucket: string,
+  origins: string[]
+) {
+  return withDbAdvisoryLock("r2-cors", `${account.id}:${bucket}`, async () => {
+    const current = await getBucketCors(account, bucket)
+    const desired = mergeManagedMediaCorsRule(current, origins)
+    if (corsRulesEqual(current, desired)) return { changed: false, rules: current }
+    return { changed: true, rules: await writeBucketCors(account, bucket, desired) }
+  })
 }
 
 export async function putBucketCors(
@@ -218,13 +236,15 @@ export async function putBucketCors(
   value: unknown
 ): Promise<BucketCorsRule[]> {
   const requested = normalizeCorsRules(value)
-  const current = await getBucketCors(account, bucket)
-  const managed = current.filter((rule) => rule.id === MANAGED_MEDIA_CORS_RULE_ID)
-  return writeBucketCors(
-    account,
-    bucket,
-    [...requested.filter((rule) => rule.id !== MANAGED_MEDIA_CORS_RULE_ID), ...managed]
-  )
+  return withDbAdvisoryLock("r2-cors", `${account.id}:${bucket}`, async () => {
+    const current = await getBucketCors(account, bucket)
+    const managed = current.find((rule) => rule.id === MANAGED_MEDIA_CORS_RULE_ID)
+    return writeBucketCors(
+      account,
+      bucket,
+      [...requested.filter((rule) => rule.id !== MANAGED_MEDIA_CORS_RULE_ID), ...(managed ? [managed] : [])]
+    )
+  })
 }
 
 // Migration settings must be copied exactly. Manual bucket edits intentionally
@@ -237,16 +257,18 @@ export async function replaceBucketCors(
   value: unknown
 ): Promise<BucketCorsRule[]> {
   const requested = normalizeCorsRules(value)
-  return writeBucketCors(account, bucket, requested)
+  return withDbAdvisoryLock("r2-cors", `${account.id}:${bucket}`, () => writeBucketCors(account, bucket, requested))
 }
 
 export async function deleteBucketCors(account: CloudflareAccount, bucket: string): Promise<void> {
-  const current = await getBucketCors(account, bucket)
-  await writeBucketCors(
-    account,
-    bucket,
-    current.filter((rule) => rule.id === MANAGED_MEDIA_CORS_RULE_ID)
-  )
+  await withDbAdvisoryLock("r2-cors", `${account.id}:${bucket}`, async () => {
+    const current = await getBucketCors(account, bucket)
+    await writeBucketCors(
+      account,
+      bucket,
+      current.filter((rule) => rule.id === MANAGED_MEDIA_CORS_RULE_ID).slice(0, 1)
+    )
+  })
 }
 
 export async function readBucketSettings(account: CloudflareAccount, bucket: string): Promise<BucketSettings> {

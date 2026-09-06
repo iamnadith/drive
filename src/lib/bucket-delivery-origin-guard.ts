@@ -25,7 +25,7 @@ export async function rejectDisallowedBucketDeliveryOrigin(
     return NextResponse.json({ error: "No active Cloudflare account is configured" }, { status: 409 })
   }
   const settings = await getBucketDeliverySettings(account.id, bucketName)
-  const effective = await getEffectiveBucketMediaOrigins(bucketName, settings)
+  const effective = await getEffectiveBucketMediaOrigins(account.id, bucketName, settings)
   const configuredOrigins = effective.effectiveMediaAllowedOrigins.join(",")
   if (isStorageDeliveryOriginAllowed(origin, configuredOrigins)) return null
 
