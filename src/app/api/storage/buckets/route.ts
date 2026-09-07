@@ -2,7 +2,7 @@ import { NextResponse } from "next/server"
 import { getAllAccounts } from "@/lib/accounts-store"
 import { r2CreateBucket } from "@/lib/r2-s3"
 import { requireAdmin } from "@/lib/server-auth"
-import { listBucketStats } from "@/lib/bucket-stats-store"
+import { ensureBucketStatsRows, listBucketStats } from "@/lib/bucket-stats-store"
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
@@ -53,6 +53,7 @@ export async function GET() {
     const bucketBytes = results.reduce((sum: number, b: { bytes: number }) => sum + (b.bytes ?? 0), 0)
     const totalBytes = active.syncStatus === "ok" ? active.totalBytes : bucketBytes
     return NextResponse.json({
+      activeAccount: { id: active.id, label: active.label, email: active.email },
       buckets: results,
       totalBytes,
       totalObjects: active.syncStatus === "ok"
@@ -124,6 +125,11 @@ export async function POST(request: Request) {
       )
     }
 
+    const expectedAccountId = new URL(request.url).searchParams.get("accountId")
+    if (expectedAccountId && expectedAccountId !== active.id) {
+      return NextResponse.json({ error: "The active account changed. Refresh Storage before continuing." }, { status: 409 })
+    }
+
     try {
       await r2CreateBucket(
         {
@@ -146,7 +152,15 @@ export async function POST(request: Request) {
       )
     }
 
-    return NextResponse.json({ ok: true, name: safeName })
+    // Creation is authoritative even if the statistics projection is unavailable.
+    let warning: string | undefined
+    try {
+      await ensureBucketStatsRows(active.id, [safeName])
+    } catch (error) {
+      console.error("Unable to register created drive statistics:", errorMessage(error, "Unknown error"))
+      warning = "Drive created. Its usage will appear after the next account sync."
+    }
+    return NextResponse.json({ ok: true, name: safeName, warning })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to create bucket")
     return NextResponse.json({ error: message }, { status: 500 })

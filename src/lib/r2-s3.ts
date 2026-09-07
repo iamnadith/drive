@@ -626,7 +626,7 @@ export async function r2DeleteObjects(config: R2ClientConfig, bucket: string, ke
   for (let i = 0; i < uniqueKeys.length; i += 1000) {
     const chunk = uniqueKeys.slice(i, i + 1000)
     if (!chunk.length) continue
-    await client.send(
+    const result = await client.send(
       new DeleteObjectsCommand({
         Bucket: bucket,
         Delete: {
@@ -635,6 +635,9 @@ export async function r2DeleteObjects(config: R2ClientConfig, bucket: string, ke
         },
       })
     )
+    if (result.Errors?.length) {
+      throw new Error(`Unable to delete ${result.Errors.length} items (${result.Errors[0].Code ?? "storage error"}). Some items may have been deleted; refresh the folder before retrying.`)
+    }
   }
 }
 

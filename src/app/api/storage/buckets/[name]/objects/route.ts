@@ -25,9 +25,13 @@ function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
 }
 
-async function getActiveAccount() {
+async function getActiveAccount(request: Request) {
   const accounts = await getAllAccounts()
   const active = accounts.find((a) => a.status === "active")
+  const expectedAccountId = new URL(request.url).searchParams.get("accountId")
+  if (expectedAccountId && expectedAccountId !== active?.id) {
+    return { error: "The active account changed. Refresh Storage before continuing.", status: 409 }
+  }
   if (!active) {
     return { error: "No active Cloudflare account" as const }
   }
@@ -49,11 +53,11 @@ export async function GET(
     if (!auth.ok) return auth.response
 
     const { name } = await context.params
-    const { active, error } = await getActiveAccount()
+    const { active, error, status } = await getActiveAccount(request)
     if (!active) {
       return NextResponse.json(
         { error, objects: [] },
-        { status: 404 }
+        { status: status ?? 404 }
       )
     }
 
@@ -72,8 +76,8 @@ export async function GET(
     const maxKeysParam = url.searchParams.get("maxKeys")
     const maxKeys = maxKeysParam ? Number(maxKeysParam) : 1000
 
-    if (key && (action === "preview-url" || action === "download-url")) {
-      const preview = action === "preview-url"
+    if (key && ["preview-url", "download-url", "open", "download"].includes(action ?? "")) {
+      const preview = action === "preview-url" || action === "open"
       const signedUrl = await r2CreateSignedDownloadUrl(
         {
           accountId: active.cloudflareAccountId,
@@ -88,7 +92,10 @@ export async function GET(
         }
       )
 
-      return NextResponse.json({ url: signedUrl, key, expiresAt: Date.now() + 900_000 })
+      if (action === "open" || action === "download") {
+        return new Response(null, { status: 307, headers: { Location: signedUrl, "Cache-Control": "private, no-store" } })
+      }
+      return NextResponse.json({ url: signedUrl, key, expiresAt: Date.now() + 900_000 }, { headers: { "Cache-Control": "private, no-store" } })
     }
 
     const page = await r2ListObjectsPageWithDelimiter(
@@ -150,9 +157,9 @@ export async function POST(
     if (!auth.ok) return auth.response
 
     const { name } = await context.params
-    const { active, error } = await getActiveAccount()
+    const { active, error, status } = await getActiveAccount(request)
     if (!active) {
-      return NextResponse.json({ error }, { status: 400 })
+      return NextResponse.json({ error }, { status: status ?? 400 })
     }
 
     if (!active.r2AccessKeyId || !active.r2SecretAccessKey) {
@@ -204,6 +211,10 @@ export async function POST(
           },
           bucketName: name,
           key,
+        }).catch((error) => {
+          // The upload has committed. A projection failure must not ask the
+          // browser to upload the same file again.
+          console.error("Uploaded object tracking deferred:", errorMessage(error, "Unknown error"))
         })
       } catch (err: unknown) {
         const message = errorMessage(err, "R2 upload failed")
@@ -249,7 +260,8 @@ export async function POST(
         },
         name,
         key,
-        body
+        body,
+        { ifNoneMatch: "*" }
       )
       await syncTrackedBucketObject({
         config: {
@@ -259,9 +271,14 @@ export async function POST(
         },
         bucketName: name,
         key,
+      }).catch((error) => {
+        console.error("Created object tracking deferred:", errorMessage(error, "Unknown error"))
       })
     } catch (err: unknown) {
       const message = errorMessage(err, "R2 create object failed")
+      if (err instanceof Error && (err.name === "PreconditionFailed" || err.name === "ConditionalRequestConflict")) {
+        return NextResponse.json({ error: "An item with this name already exists. Choose another name." }, { status: 409 })
+      }
       console.error("R2 create object failed:", message)
       return NextResponse.json(
         { error: "Unable to create object", details: message },
@@ -285,9 +302,9 @@ export async function DELETE(
     if (!auth.ok) return auth.response
 
     const { name } = await context.params
-    const { active, error } = await getActiveAccount()
+    const { active, error, status } = await getActiveAccount(request)
     if (!active) {
-      return NextResponse.json({ error }, { status: 400 })
+      return NextResponse.json({ error }, { status: status ?? 400 })
     }
 
     if (!active.r2AccessKeyId || !active.r2SecretAccessKey) {
@@ -314,6 +331,9 @@ export async function DELETE(
         prefix,
         maxObjects: 200_000,
       })
+      if (objects.length >= 200_000) {
+        return NextResponse.json({ error: "This folder is too large to delete in one request. No files were deleted." }, { status: 409 })
+      }
       const keys = objects.map((obj) => obj.key)
       keys.push(prefix)
       await r2DeleteObjects(config, name, keys)
