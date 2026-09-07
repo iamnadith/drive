@@ -31,11 +31,7 @@ import {
   X,
 } from "lucide-react"
 import { toast } from "sonner"
-import {
-  DashboardPage,
-  DashboardPageHeader,
-  DashboardPanel,
-} from "@/components/dashboard/page-shell"
+import { DashboardPage } from "@/components/dashboard/page-shell"
 import { StoragePageSkeleton } from "@/components/dashboard/loading-skeletons"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -790,75 +786,6 @@ export default function StoragePage() {
 
   return (
     <DashboardPage className="dashboard-motion-stage">
-      <DashboardPageHeader
-        className="dashboard-motion-item"
-        title="Storage"
-        description={
-          snapshot
-            ? (snapshot.activeAccount.label || snapshot.activeAccount.email) +
-              " · " +
-              snapshot.buckets.length +
-              " drives · " +
-              formatBytes(snapshot.totalBytes) +
-              " used"
-            : "Your drives, folders and files in one place."
-        }
-        actions={
-          <>
-            <Button
-              variant="outline"
-              onClick={() => refresh()}
-              disabled={busy || drivesLoading || objectsLoading}
-            >
-              <RefreshCw data-icon="inline-start" />
-              Refresh
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button disabled={!accountId || busy || Boolean(drivesError)}>
-                  <Plus data-icon="inline-start" />
-                  New
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuGroup>
-                  <DropdownMenuItem onSelect={() => openCreate("drive")}>
-                    <HardDrive />
-                    New drive
-                  </DropdownMenuItem>
-                  {!isRoot && (
-                    <>
-                      <DropdownMenuItem onSelect={() => openCreate("folder")}>
-                        <FolderPlus />
-                        New folder
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onSelect={() => openCreate("file")}>
-                        <File />
-                        New file
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onSelect={() => fileInput.current?.click()}
-                      >
-                        <Upload />
-                        Upload files
-                      </DropdownMenuItem>
-                    </>
-                  )}
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            {!isRoot && (
-              <Button
-                disabled={busy || Boolean(drivesError)}
-                onClick={() => fileInput.current?.click()}
-              >
-                <Upload data-icon="inline-start" />
-                Upload files
-              </Button>
-            )}
-          </>
-        }
-      />
       <input
         ref={fileInput}
         type="file"
@@ -870,81 +797,140 @@ export default function StoragePage() {
           void uploadFiles(files)
         }}
       />
-      <DashboardPanel className="dashboard-motion-item dashboard-motion-delay-1">
-        <div className="flex min-w-0 flex-col gap-3 p-3 sm:p-4 lg:flex-row lg:items-center">
-          <div className="flex min-w-0 flex-1 items-center gap-2">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Up one level"
-              title="Up one level"
-              disabled={isRoot || busy}
-              onClick={() => navigate(prefix ? driveName : "", parentPrefix)}
-            >
-              <ArrowUp />
-            </Button>
-            <Breadcrumb className="min-w-0 overflow-x-auto">
-              <BreadcrumbList className="flex-nowrap whitespace-nowrap">
-                <BreadcrumbItem>
-                  {isRoot ? (
-                    <BreadcrumbPage>My drives</BreadcrumbPage>
-                  ) : (
-                    <BreadcrumbLink asChild>
-                      <button disabled={busy} onClick={() => navigate()}>
-                        My drives
-                      </button>
-                    </BreadcrumbLink>
-                  )}
-                </BreadcrumbItem>
-                {!isRoot && (
-                  <>
-                    <BreadcrumbSeparator />
-                    <BreadcrumbItem>
-                      {!prefix ? (
-                        <BreadcrumbPage>{driveName}</BreadcrumbPage>
-                      ) : (
-                        <BreadcrumbLink asChild>
-                          <button
-                            disabled={busy}
-                            onClick={() => navigate(driveName)}
-                          >
-                            {driveName}
-                          </button>
-                        </BreadcrumbLink>
-                      )}
-                    </BreadcrumbItem>
-                  </>
-                )}
-                {!isRoot &&
-                  prefix &&
-                  pathParts.map((part, index) => (
-                    <React.Fragment key={index}>
+      <section
+        aria-label="Storage workspace"
+        className="dashboard-motion-item dashboard-motion-delay-1 flex min-h-0 min-w-0 flex-col"
+      >
+        <div className="flex min-w-0 flex-col gap-3 p-3 sm:gap-4 sm:p-4">
+          <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Up one level"
+                title="Up one level"
+                disabled={isRoot || busy}
+                onClick={() => navigate(prefix ? driveName : "", parentPrefix)}
+              >
+                <ArrowUp />
+              </Button>
+              <Breadcrumb className="min-w-0 overflow-x-auto">
+                <BreadcrumbList className="flex-nowrap whitespace-nowrap">
+                  <BreadcrumbItem>
+                    {isRoot ? (
+                      <BreadcrumbPage>My drives</BreadcrumbPage>
+                    ) : (
+                      <BreadcrumbLink asChild>
+                        <button disabled={busy} onClick={() => navigate()}>
+                          My drives
+                        </button>
+                      </BreadcrumbLink>
+                    )}
+                  </BreadcrumbItem>
+                  {!isRoot && (
+                    <>
                       <BreadcrumbSeparator />
                       <BreadcrumbItem>
-                        {index === pathParts.length - 1 ? (
-                          <BreadcrumbPage>
-                            {part || "(unnamed folder)"}
-                          </BreadcrumbPage>
+                        {!prefix ? (
+                          <BreadcrumbPage>{driveName}</BreadcrumbPage>
                         ) : (
                           <BreadcrumbLink asChild>
                             <button
                               disabled={busy}
-                              onClick={() =>
-                                navigate(
-                                  driveName,
-                                  pathParts.slice(0, index + 1).join("/") + "/"
-                                )
-                              }
+                              onClick={() => navigate(driveName)}
                             >
-                              {part || "(unnamed folder)"}
+                              {driveName}
                             </button>
                           </BreadcrumbLink>
                         )}
                       </BreadcrumbItem>
-                    </React.Fragment>
-                  ))}
-              </BreadcrumbList>
-            </Breadcrumb>
+                    </>
+                  )}
+                  {!isRoot &&
+                    prefix &&
+                    pathParts.map((part, index) => (
+                      <React.Fragment key={index}>
+                        <BreadcrumbSeparator />
+                        <BreadcrumbItem>
+                          {index === pathParts.length - 1 ? (
+                            <BreadcrumbPage>
+                              {part || "(unnamed folder)"}
+                            </BreadcrumbPage>
+                          ) : (
+                            <BreadcrumbLink asChild>
+                              <button
+                                disabled={busy}
+                                onClick={() =>
+                                  navigate(
+                                    driveName,
+                                    pathParts.slice(0, index + 1).join("/") +
+                                      "/"
+                                  )
+                                }
+                              >
+                                {part || "(unnamed folder)"}
+                              </button>
+                            </BreadcrumbLink>
+                          )}
+                        </BreadcrumbItem>
+                      </React.Fragment>
+                    ))}
+                </BreadcrumbList>
+              </Breadcrumb>
+            </div>
+            <div className="flex shrink-0 items-center gap-2 lg:justify-end">
+              <Button
+                variant="outline"
+                onClick={() => void refresh()}
+                disabled={busy || drivesLoading || objectsLoading}
+              >
+                <RefreshCw data-icon="inline-start" />
+                Refresh
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button disabled={!accountId || busy || Boolean(drivesError)}>
+                    <Plus data-icon="inline-start" />
+                    New
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem onSelect={() => openCreate("drive")}>
+                      <HardDrive />
+                      New drive
+                    </DropdownMenuItem>
+                    {!isRoot && (
+                      <>
+                        <DropdownMenuItem onSelect={() => openCreate("folder")}>
+                          <FolderPlus />
+                          New folder
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => openCreate("file")}>
+                          <File />
+                          New file
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onSelect={() => fileInput.current?.click()}
+                        >
+                          <Upload />
+                          Upload files
+                        </DropdownMenuItem>
+                      </>
+                    )}
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              {!isRoot && (
+                <Button
+                  disabled={busy || Boolean(drivesError)}
+                  onClick={() => fileInput.current?.click()}
+                >
+                  <Upload data-icon="inline-start" />
+                  Upload files
+                </Button>
+              )}
+            </div>
           </div>
           <div className="flex w-full items-center gap-2 lg:w-auto">
             <InputGroup className="min-w-0 flex-1 lg:w-64">
@@ -1477,7 +1463,7 @@ export default function StoragePage() {
             </Button>
           </div>
         </div>
-      </DashboardPanel>
+      </section>
       <Dialog
         open={Boolean(create)}
         onOpenChange={(open) => {
