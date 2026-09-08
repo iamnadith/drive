@@ -476,51 +476,39 @@ export default function DashboardSettingsPage() {
         </CardFooter>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Migration Orchestrator</CardTitle>
-          <CardDescription>
-            The Cloudflare scheduler materializes shared object-shard jobs, requeues stale workers, and reconciles the worker pool. It only processes migrations explicitly created with the migration worker engine.
-          </CardDescription>
-          <CardAction>
-            <Badge variant={migrationOrchestratorEnabled ? "default" : "secondary"}>
-              {!migrationOrchestratorLoaded ? "Loading..." : migrationOrchestratorEnabled ? "Enabled" : "Disabled"}
-            </Badge>
-          </CardAction>
-        </CardHeader>
-        <CardContent className="grid gap-4 lg:grid-cols-2">
-          <div className="space-y-2">
-            <Label htmlFor="migration-orchestrator-url">Orchestrator URL</Label>
-            <Input id="migration-orchestrator-url" value={migrationOrchestratorUrl} disabled={!migrationOrchestratorLoaded} onChange={(event) => setMigrationOrchestratorUrl(event.target.value)} placeholder="https://migration-orchestrator.example.workers.dev" />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="file-scanner-url">File Scanner URL</Label>
-            <Input id="file-scanner-url" value={fileScannerUrl} disabled={!migrationOrchestratorLoaded} onChange={(event) => setFileScannerUrl(event.target.value)} placeholder="https://file-scanner.example.workers.dev" />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="migration-orchestrator-secret">Migration Orchestrator secret</Label>
-            <Input id="migration-orchestrator-secret" type="text" value={migrationOrchestratorSecret} disabled={!migrationOrchestratorLoaded} onChange={(event) => setMigrationOrchestratorSecret(event.target.value)} placeholder="At least 24 characters" />
-            <p className="text-xs text-muted-foreground">
-              This admin-only page displays the saved secret. Both Workers receive their database configuration at deploy time and operate independently from the panel.
-            </p>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="file-scanner-secret">File Scanner secret</Label>
-            <Input id="file-scanner-secret" type="text" value={fileScannerSecret} disabled={!migrationOrchestratorLoaded} onChange={(event) => setFileScannerSecret(event.target.value)} placeholder="At least 24 characters" />
-            <p className="text-xs text-muted-foreground">Used to authenticate the File Scanner endpoint and loaded from PostgreSQL.</p>
-          </div>
-          {migrationOrchestratorMessage ? <p className="text-sm lg:col-span-2">{migrationOrchestratorMessage}</p> : null}
-        </CardContent>
-        <CardFooter className="flex flex-wrap gap-2">
-          <Button onClick={saveMigrationOrchestratorSettings} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded}>Save connection</Button>
-          <Button variant="outline" onClick={testMigrationOrchestrator} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || migrationOrchestratorDirty || !migrationOrchestratorSecretConfigured}>Test connection</Button>
-          <Button variant={migrationOrchestratorEnabled ? "destructive" : "secondary"} onClick={() => void setMigrationOrchestratorActive(!migrationOrchestratorEnabled)} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || (!migrationOrchestratorEnabled && (!migrationOrchestratorUrl || !fileScannerUrl || !migrationOrchestratorSecretConfigured || !fileScannerSecretConfigured))}>
-            {migrationOrchestratorEnabled ? "Disable" : "Enable"}
-          </Button>
-          <Button variant="outline" onClick={runMigrationOrchestratorNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !migrationOrchestratorEnabled}>Run now</Button>
-          <Button variant="outline" onClick={runFileScannerNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !migrationOrchestratorEnabled}>Run File Scanner</Button>
-        </CardFooter>
-      </Card>
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Migration Orchestrator</CardTitle>
+            <CardDescription>Cloudflare worker that schedules migration jobs and coordinates the worker pool.</CardDescription>
+            <CardAction><Badge variant={migrationOrchestratorEnabled ? "default" : "secondary"}>{!migrationOrchestratorLoaded ? "Loading..." : migrationOrchestratorEnabled ? "Enabled" : "Disabled"}</Badge></CardAction>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2"><Label htmlFor="migration-orchestrator-url">Worker URL</Label><Input id="migration-orchestrator-url" value={migrationOrchestratorUrl} disabled={!migrationOrchestratorLoaded} onChange={(event) => setMigrationOrchestratorUrl(event.target.value)} placeholder="https://migration-orchestrator.example.workers.dev" /></div>
+            <div className="space-y-2"><Label htmlFor="migration-orchestrator-secret">Worker secret</Label><Input id="migration-orchestrator-secret" type="text" value={migrationOrchestratorSecret} disabled={!migrationOrchestratorLoaded} onChange={(event) => setMigrationOrchestratorSecret(event.target.value)} placeholder="At least 24 characters" /></div>
+            {migrationOrchestratorMessage ? <p className="text-sm">{migrationOrchestratorMessage}</p> : null}
+          </CardContent>
+          <CardFooter className="flex flex-wrap gap-2">
+            <Button onClick={saveMigrationOrchestratorSettings} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded}>Save connection</Button>
+            <Button variant="outline" onClick={testMigrationOrchestrator} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || migrationOrchestratorDirty || !migrationOrchestratorSecretConfigured}>Test both workers</Button>
+            <Button variant={migrationOrchestratorEnabled ? "destructive" : "secondary"} onClick={() => void setMigrationOrchestratorActive(!migrationOrchestratorEnabled)} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || (!migrationOrchestratorEnabled && (!migrationOrchestratorUrl || !fileScannerUrl || !migrationOrchestratorSecretConfigured || !fileScannerSecretConfigured))}>{migrationOrchestratorEnabled ? "Disable" : "Enable"}</Button>
+            <Button variant="outline" onClick={runMigrationOrchestratorNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !migrationOrchestratorEnabled}>Run now</Button>
+          </CardFooter>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle>File Scanner</CardTitle><CardDescription>Cloudflare worker that scans source and destination buckets for migration verification.</CardDescription></CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2"><Label htmlFor="file-scanner-url">Worker URL</Label><Input id="file-scanner-url" value={fileScannerUrl} disabled={!migrationOrchestratorLoaded} onChange={(event) => setFileScannerUrl(event.target.value)} placeholder="https://file-scanner.example.workers.dev" /></div>
+            <div className="space-y-2"><Label htmlFor="file-scanner-secret">Worker secret</Label><Input id="file-scanner-secret" type="text" value={fileScannerSecret} disabled={!migrationOrchestratorLoaded} onChange={(event) => setFileScannerSecret(event.target.value)} placeholder="At least 24 characters" /></div>
+            {migrationOrchestratorMessage ? <p className="text-sm">{migrationOrchestratorMessage}</p> : null}
+          </CardContent>
+          <CardFooter className="flex flex-wrap gap-2">
+            <Button onClick={saveMigrationOrchestratorSettings} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded}>Save connection</Button>
+            <Button variant="outline" onClick={runFileScannerNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !migrationOrchestratorEnabled}>Run now</Button>
+          </CardFooter>
+        </Card>
+      </div>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(18rem,22rem)_minmax(0,1fr)]">
         <Card className="h-full">
