@@ -53,8 +53,11 @@ async function getWorkerMarker(repo: Repo, token: string): Promise<{ workflow?: 
 type WorkflowFile = { id: string; name: string; path: string; state?: string; content: string }
 class WorkerWorkflowPendingError extends Error {}
 function isWorkerWorkflow(content: string): boolean {
+  const hasBootstrap = /^\s*POSTGRES_URL\s*:/m.test(content) ||
+    ["server_url", "agent_token"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content))
   return /^\s*workflow_dispatch\s*:/m.test(content) &&
-    ["migration_id", "repair_job_id", "agent_id", "server_url", "agent_token"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content)) &&
+    ["migration_id", "repair_job_id", "agent_id"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content)) &&
+    hasBootstrap &&
     content.includes(WORKFLOW_DIRECTORY)
 }
 
@@ -206,7 +209,7 @@ export async function advanceWorkerSetup(token: string, cursor?: string, selecte
     }
     if (workflow.state !== "active") throw new Error(`Worker workflow ${workflow.path} is disabled. Enable it in GitHub Actions and retry.`)
   } catch (error) {
-    if ((error instanceof GitHubApiError && (error.status === 404 || error.status === 409)) || (state.forkRequested && error instanceof WorkerWorkflowPendingError)) {
+    if ((error instanceof GitHubApiError && (error.status === 404 || error.status === 409)) || error instanceof WorkerWorkflowPendingError) {
       return pending("Waiting for worker files and workflow. If this persists, update the fork from upstream and retry.")
     }
     throw error

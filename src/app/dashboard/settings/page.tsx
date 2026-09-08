@@ -42,6 +42,7 @@ export default function DashboardSettingsPage() {
   const [orchestratorUrl, setOrchestratorUrl] = React.useState("")
   const [savedOrchestratorUrl, setSavedOrchestratorUrl] = React.useState("")
   const [orchestratorSecret, setOrchestratorSecret] = React.useState("")
+  const [savedOrchestratorSecret, setSavedOrchestratorSecret] = React.useState("")
   const [orchestratorEnabled, setOrchestratorEnabled] = React.useState(false)
   const [orchestratorSecretConfigured, setOrchestratorSecretConfigured] = React.useState(false)
   const [orchestratorUpdatedAt, setOrchestratorUpdatedAt] = React.useState("")
@@ -59,9 +60,15 @@ export default function DashboardSettingsPage() {
   const [workerSecretMessage, setWorkerSecretMessage] = React.useState("")
   const [migrationOrchestratorUrl, setMigrationOrchestratorUrl] = React.useState("")
   const [migrationOrchestratorSavedUrl, setMigrationOrchestratorSavedUrl] = React.useState("")
+  const [fileScannerUrl, setFileScannerUrl] = React.useState("")
+  const [fileScannerSavedUrl, setFileScannerSavedUrl] = React.useState("")
   const [migrationOrchestratorSecret, setMigrationOrchestratorSecret] = React.useState("")
+  const [migrationOrchestratorSavedSecret, setMigrationOrchestratorSavedSecret] = React.useState("")
+  const [fileScannerSecret, setFileScannerSecret] = React.useState("")
+  const [fileScannerSavedSecret, setFileScannerSavedSecret] = React.useState("")
   const [migrationOrchestratorEnabled, setMigrationOrchestratorEnabled] = React.useState(false)
   const [migrationOrchestratorSecretConfigured, setMigrationOrchestratorSecretConfigured] = React.useState(false)
+  const [fileScannerSecretConfigured, setFileScannerSecretConfigured] = React.useState(false)
   const [migrationOrchestratorLoaded, setMigrationOrchestratorLoaded] = React.useState(false)
   const [migrationOrchestratorBusy, setMigrationOrchestratorBusy] = React.useState(false)
   const [migrationOrchestratorMessage, setMigrationOrchestratorMessage] = React.useState("")
@@ -69,7 +76,7 @@ export default function DashboardSettingsPage() {
   const loadOrchestratorSettings = React.useCallback(async () => {
     const response = await fetch("/api/settings/backend-orchestrator", { cache: "no-store" })
     const payload = await response.json().catch(() => ({})) as {
-      settings?: { enabled?: boolean; orchestratorUrl?: string; secretConfigured?: boolean; updatedAt?: string }
+      settings?: { enabled?: boolean; orchestratorUrl?: string; sharedSecret?: string; secretConfigured?: boolean; updatedAt?: string }
       state?: Record<string, unknown> | null
       worker?: Record<string, unknown> | null
       error?: string
@@ -80,6 +87,8 @@ export default function DashboardSettingsPage() {
     setOrchestratorUrl(savedUrl)
     setSavedOrchestratorUrl(savedUrl)
     setOrchestratorSecretConfigured(payload.settings?.secretConfigured === true)
+    setOrchestratorSecret(payload.settings?.sharedSecret ?? "")
+    setSavedOrchestratorSecret(payload.settings?.sharedSecret ?? "")
     setOrchestratorUpdatedAt(payload.settings?.updatedAt ?? "")
     const persistedState = payload.state ?? null
     setOrchestratorState(persistedState)
@@ -99,9 +108,10 @@ export default function DashboardSettingsPage() {
 
   const loadMigrationWorkerSettings = React.useCallback(async () => {
     const response = await fetch("/api/settings/migration-workers", { cache: "no-store" })
-    const payload = await response.json().catch(() => ({})) as { settings?: { secretConfigured?: boolean; updatedAt?: string }; error?: string }
+    const payload = await response.json().catch(() => ({})) as { settings?: { sharedSecret?: string; secretConfigured?: boolean; updatedAt?: string }; error?: string }
     if (!response.ok) throw new Error(payload.error || "Unable to load Migration Worker settings")
     setWorkerSecretConfigured(payload.settings?.secretConfigured === true)
+    setWorkerSecret(payload.settings?.sharedSecret ?? "")
     setWorkerSecretUpdatedAt(payload.settings?.updatedAt ?? "")
     setWorkerSecretLoaded(true)
   }, [])
@@ -109,15 +119,23 @@ export default function DashboardSettingsPage() {
   const loadMigrationOrchestratorSettings = React.useCallback(async () => {
     const response = await fetch("/api/settings/migration-orchestrator", { cache: "no-store" })
     const payload = await response.json().catch(() => ({})) as {
-      settings?: { enabled?: boolean; orchestratorUrl?: string; secretConfigured?: boolean }
+      settings?: { enabled?: boolean; orchestratorUrl?: string; fileScannerUrl?: string; sharedSecret?: string; fileScannerSecret?: string; secretConfigured?: boolean; fileScannerSecretConfigured?: boolean }
       error?: string
     }
     if (!response.ok) throw new Error(payload.error || "Unable to load Migration Orchestrator settings")
     const savedUrl = payload.settings?.orchestratorUrl ?? ""
     setMigrationOrchestratorUrl(savedUrl)
     setMigrationOrchestratorSavedUrl(savedUrl)
+    const savedFileUrl = payload.settings?.fileScannerUrl ?? ""
+    setFileScannerUrl(savedFileUrl)
+    setFileScannerSavedUrl(savedFileUrl)
     setMigrationOrchestratorEnabled(payload.settings?.enabled === true)
     setMigrationOrchestratorSecretConfigured(payload.settings?.secretConfigured === true)
+    setFileScannerSecretConfigured(payload.settings?.fileScannerSecretConfigured === true)
+    setMigrationOrchestratorSecret(payload.settings?.sharedSecret ?? "")
+    setMigrationOrchestratorSavedSecret(payload.settings?.sharedSecret ?? "")
+    setFileScannerSecret(payload.settings?.fileScannerSecret ?? "")
+    setFileScannerSavedSecret(payload.settings?.fileScannerSecret ?? "")
     setMigrationOrchestratorLoaded(true)
   }, [])
 
@@ -160,7 +178,7 @@ export default function DashboardSettingsPage() {
       const response = await fetch("/api/settings/migration-orchestrator", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orchestratorUrl: migrationOrchestratorUrl, sharedSecret: migrationOrchestratorSecret }),
+        body: JSON.stringify({ orchestratorUrl: migrationOrchestratorUrl, fileScannerUrl, sharedSecret: migrationOrchestratorSecret, fileScannerSecret }),
       })
       const payload = await response.json().catch(() => ({})) as { error?: string }
       if (!response.ok) throw new Error(payload.error || "Unable to save Migration Orchestrator settings")
@@ -209,6 +227,22 @@ export default function DashboardSettingsPage() {
     }
   }
 
+  const runFileScannerNow = async () => {
+    setMigrationOrchestratorBusy(true)
+    setMigrationOrchestratorMessage("")
+    try {
+      const response = await fetch("/api/settings/migration-orchestrator", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "run_file" }),
+      })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || "File Scanner run failed")
+      await loadMigrationOrchestratorSettings()
+      setMigrationOrchestratorMessage("File Scanner cycle completed successfully.")
+    } catch (error) {
+      setMigrationOrchestratorMessage(error instanceof Error ? error.message : String(error))
+    } finally { setMigrationOrchestratorBusy(false) }
+  }
+
   const setMigrationOrchestratorActive = async (enabled: boolean) => {
     setMigrationOrchestratorBusy(true)
     setMigrationOrchestratorMessage("")
@@ -225,7 +259,7 @@ export default function DashboardSettingsPage() {
     }
   }
 
-  const migrationOrchestratorDirty = migrationOrchestratorUrl.trim().replace(/\/$/, "") !== migrationOrchestratorSavedUrl || migrationOrchestratorSecret.length > 0
+  const migrationOrchestratorDirty = migrationOrchestratorUrl.trim().replace(/\/$/, "") !== migrationOrchestratorSavedUrl || fileScannerUrl.trim().replace(/\/$/, "") !== fileScannerSavedUrl || migrationOrchestratorSecret !== migrationOrchestratorSavedSecret || fileScannerSecret !== fileScannerSavedSecret
 
   const saveOrchestratorSettings = async () => {
     setOrchestratorBusy(true)
@@ -328,7 +362,7 @@ export default function DashboardSettingsPage() {
     themes[0]
 
   const orchestratorConnectionDirty =
-    orchestratorUrl.trim().replace(/\/$/, "") !== savedOrchestratorUrl || orchestratorSecret.length > 0
+    orchestratorUrl.trim().replace(/\/$/, "") !== savedOrchestratorUrl || orchestratorSecret !== savedOrchestratorSecret
 
   if (!selectedTheme) {
     return null
@@ -376,9 +410,9 @@ export default function DashboardSettingsPage() {
                 {!orchestratorLoaded ? "Loading..." : orchestratorSecretConfigured ? "Secret saved" : "Secret required"}
               </Badge>
             </div>
-            <Input id="orchestrator-secret" type="password" value={orchestratorSecret} disabled={!orchestratorLoaded} onChange={(event) => setOrchestratorSecret(event.target.value)} placeholder={orchestratorSecretConfigured ? "Saved securely - enter only to replace" : "At least 24 characters"} />
+            <Input id="orchestrator-secret" type="text" value={orchestratorSecret} disabled={!orchestratorLoaded} onChange={(event) => setOrchestratorSecret(event.target.value)} placeholder="At least 24 characters" />
             <p className="text-xs text-muted-foreground">
-              For security, a saved secret is never displayed again. A blank field keeps the stored secret.
+              This admin-only page displays the saved secret so it can be copied into the Worker deployment.
             </p>
           </div>
           <div className="rounded-2xl border p-4 text-sm lg:col-span-2">
@@ -421,11 +455,11 @@ export default function DashboardSettingsPage() {
           <Label htmlFor="migration-worker-secret">Shared worker secret</Label>
           <Input
             id="migration-worker-secret"
-            type="password"
+            type="text"
             value={workerSecret}
             disabled={!workerSecretLoaded}
             onChange={(event) => setWorkerSecret(event.target.value)}
-            placeholder={workerSecretConfigured ? "Saved securely - enter only to replace" : "At least 24 characters"}
+            placeholder="At least 24 characters"
           />
           <p className="text-xs text-muted-foreground">
             The panel never displays a saved secret. GitHub dispatch synchronizes it as `DRIVE_WORKER_SHARED_SECRET` and passes only the worker id at runtime.
@@ -458,21 +492,31 @@ export default function DashboardSettingsPage() {
             <Input id="migration-orchestrator-url" value={migrationOrchestratorUrl} disabled={!migrationOrchestratorLoaded} onChange={(event) => setMigrationOrchestratorUrl(event.target.value)} placeholder="https://migration-orchestrator.example.workers.dev" />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="migration-orchestrator-secret">Panel shared secret</Label>
-            <Input id="migration-orchestrator-secret" type="password" value={migrationOrchestratorSecret} disabled={!migrationOrchestratorLoaded} onChange={(event) => setMigrationOrchestratorSecret(event.target.value)} placeholder={migrationOrchestratorSecretConfigured ? "Saved securely - enter only to replace" : "At least 24 characters"} />
+            <Label htmlFor="file-scanner-url">File Scanner URL</Label>
+            <Input id="file-scanner-url" value={fileScannerUrl} disabled={!migrationOrchestratorLoaded} onChange={(event) => setFileScannerUrl(event.target.value)} placeholder="https://file-scanner.example.workers.dev" />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="migration-orchestrator-secret">Migration Orchestrator secret</Label>
+            <Input id="migration-orchestrator-secret" type="text" value={migrationOrchestratorSecret} disabled={!migrationOrchestratorLoaded} onChange={(event) => setMigrationOrchestratorSecret(event.target.value)} placeholder="At least 24 characters" />
             <p className="text-xs text-muted-foreground">
-              A blank field keeps the saved secret. The orchestrator only receives authenticated tick requests and processes the migration worker pool.
+              This admin-only page displays the saved secret. Both Workers receive their database configuration at deploy time and operate independently from the panel.
             </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="file-scanner-secret">File Scanner secret</Label>
+            <Input id="file-scanner-secret" type="text" value={fileScannerSecret} disabled={!migrationOrchestratorLoaded} onChange={(event) => setFileScannerSecret(event.target.value)} placeholder="At least 24 characters" />
+            <p className="text-xs text-muted-foreground">Used to authenticate the File Scanner endpoint and loaded from PostgreSQL.</p>
           </div>
           {migrationOrchestratorMessage ? <p className="text-sm lg:col-span-2">{migrationOrchestratorMessage}</p> : null}
         </CardContent>
         <CardFooter className="flex flex-wrap gap-2">
           <Button onClick={saveMigrationOrchestratorSettings} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded}>Save connection</Button>
           <Button variant="outline" onClick={testMigrationOrchestrator} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || migrationOrchestratorDirty || !migrationOrchestratorSecretConfigured}>Test connection</Button>
-          <Button variant={migrationOrchestratorEnabled ? "destructive" : "secondary"} onClick={() => void setMigrationOrchestratorActive(!migrationOrchestratorEnabled)} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || (!migrationOrchestratorEnabled && (!migrationOrchestratorUrl || !migrationOrchestratorSecretConfigured))}>
+          <Button variant={migrationOrchestratorEnabled ? "destructive" : "secondary"} onClick={() => void setMigrationOrchestratorActive(!migrationOrchestratorEnabled)} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || (!migrationOrchestratorEnabled && (!migrationOrchestratorUrl || !fileScannerUrl || !migrationOrchestratorSecretConfigured || !fileScannerSecretConfigured))}>
             {migrationOrchestratorEnabled ? "Disable" : "Enable"}
           </Button>
           <Button variant="outline" onClick={runMigrationOrchestratorNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !migrationOrchestratorEnabled}>Run now</Button>
+          <Button variant="outline" onClick={runFileScannerNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !migrationOrchestratorEnabled}>Run File Scanner</Button>
         </CardFooter>
       </Card>
 

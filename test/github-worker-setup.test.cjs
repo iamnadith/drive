@@ -211,17 +211,16 @@ test('dashboard workflow picker has no repository-independent fallback item', ()
 test('migration worker workflow exposes the dispatch contract used by the panel', () => {
   const workflowFile = fs.readFileSync(path.resolve('.github/workflows/migration-worker.yml'), 'utf8')
   assert.match(workflowFile, /workflow_dispatch:/)
-  for (const input of ['migration_id', 'repair_job_id', 'agent_id', 'server_url', 'agent_token']) {
+  for (const input of ['migration_id', 'repair_job_id', 'agent_id']) {
     assert.match(workflowFile, new RegExp(`^      ${input}:`, 'm'))
   }
   assert.match(workflowFile, /working-directory: workers\/migration-worker/)
   assert.match(workflowFile, /cache-dependency-path: workers\/migration-worker\/package-lock\.json/)
   assert.match(workflowFile, /run: npm ci/)
   assert.match(workflowFile, /run: npm start/)
-  assert.match(workflowFile, /SERVER_URL:/)
   assert.match(workflowFile, /AGENT_ID:/)
-  assert.match(workflowFile, /TOKEN:/)
-  assert.match(workflowFile, /secrets\.DRIVE_WORKER_SHARED_SECRET/)
+  assert.match(workflowFile, /POSTGRES_URL: \$\{\{ secrets\.POSTGRES_URL \}\}/)
+  assert.doesNotMatch(workflowFile, /^\s+TOKEN:/m)
 })
 
 test('migration UI exposes both engines while preserving Super Slurper as the default', () => {
@@ -240,6 +239,27 @@ test('migration worker pool documentation and schema keep the shared queue contr
   assert.match(schema, /create table if not exists drive_app_settings/)
   assert.match(orchestratorReadme, /shared\s+object-shard jobs spanning every migration bucket/)
   assert.match(orchestratorReadme, /migration_workers/)
+})
+
+test('migration and file orchestrators operate through durable shared state without runtime panel callbacks', () => {
+  const migration = fs.readFileSync(path.resolve('workers/migration-orchestrator/src/index.ts'), 'utf8')
+  const file = fs.readFileSync(path.resolve('workers/file-scanner/src/index.ts'), 'utf8')
+  const worker = fs.readFileSync(path.resolve('workers/migration-worker/migration-worker.mjs'), 'utf8')
+  const liveState = fs.readFileSync(path.resolve('src/lib/migration-live-state.ts'), 'utf8')
+  assert.match(migration, /POSTGRES_URL/)
+  assert.match(migration, /drive_migration_verification_state/)
+  assert.match(migration, /verifyStrictDestination/)
+  assert.match(migration, /Migration worker retries exhausted/)
+  assert.doesNotMatch(migration, /api\/internal\/migration-orchestrator\/tick/)
+  assert.match(file, /drive_bucket_scan_objects/)
+  assert.match(file, /for update of v skip locked/)
+  assert.match(file, /claimGenericScan/)
+  assert.match(file, /R2 returned a truncated page without a forward cursor/)
+  assert.match(worker, /claimJobDirect/)
+  assert.match(worker, /for update skip locked/)
+  assert.match(worker, /claim_token=gen_random_uuid/)
+  assert.match(worker, /loadRuntimeConfiguration/)
+  assert.match(liveState, /requireIndependentVerification !== false/)
 })
 
 test('lost fork response is reconciled using the stable destination without another POST', async () => {

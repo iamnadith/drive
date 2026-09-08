@@ -166,7 +166,7 @@ export async function listGitHubRepos(token: string): Promise<Array<{
     }))
 }
 
-export async function listGitHubWorkflows(token: string, owner: string, repo: string, ref?: string): Promise<Array<{
+export async function listGitHubWorkflows(token: string, owner: string, repo: string, ref?: string, compatibleOnly = false): Promise<Array<{
   id: string
   name: string
   path: string
@@ -205,11 +205,18 @@ export async function listGitHubWorkflows(token: string, owner: string, repo: st
         if (!workflow.path.startsWith(".github/workflows/") || !/\.ya?ml$/i.test(workflow.path)) return null
         const contentPath = workflow.path.split("/").map(encodeURIComponent).join("/")
         try {
-          const file = await githubApi<{ type?: string; path?: string }>(
+          const file = await githubApi<{ type?: string; path?: string; encoding?: string; content?: string }>(
             `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${contentPath}${ref ? `?ref=${encodeURIComponent(ref)}` : ""}`,
             token
           )
           if (file.type !== "file" || (typeof file.path === "string" && file.path !== workflow.path)) return null
+          if (compatibleOnly) {
+            if (file.encoding !== "base64" || !file.content) return null
+            const content = Buffer.from(file.content, "base64").toString("utf8")
+            const hasInputs = ["migration_id", "repair_job_id", "agent_id"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content))
+            const hasBootstrap = /^\s*POSTGRES_URL\s*:/m.test(content) || ["server_url", "agent_token"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content))
+            if (!/^\s*workflow_dispatch\s*:/m.test(content) || !hasInputs || !hasBootstrap || !content.includes("workers/migration-worker")) return null
+          }
           return workflow
         } catch (error) {
           if (error instanceof GitHubApiError && (error.status === 404 || error.status === 409)) return null

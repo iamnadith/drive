@@ -7,13 +7,15 @@ const MAX_SECRET_LENGTH = 512
 export type MigrationOrchestratorSettings = {
   enabled: boolean
   orchestratorUrl: string
+  fileScannerUrl: string
   sharedSecret: string
+  fileScannerSecret: string
   updatedAt?: string
 }
 
 type SettingsRow = { value: unknown; updated_at: string | null }
 
-const DEFAULTS: MigrationOrchestratorSettings = { enabled: false, orchestratorUrl: "", sharedSecret: "" }
+const DEFAULTS: MigrationOrchestratorSettings = { enabled: false, orchestratorUrl: "", fileScannerUrl: "", sharedSecret: "", fileScannerSecret: "" }
 
 function normalizeUrl(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) return ""
@@ -32,7 +34,9 @@ function normalize(value: unknown, updatedAt?: string | null): MigrationOrchestr
   return {
     enabled: row.enabled === true,
     orchestratorUrl: normalizeUrl(row.orchestratorUrl),
+    fileScannerUrl: normalizeUrl(row.fileScannerUrl ?? row.fileOrchestratorUrl),
     sharedSecret: typeof row.sharedSecret === "string" ? row.sharedSecret.trim() : "",
+    fileScannerSecret: typeof row.fileScannerSecret === "string" ? row.fileScannerSecret.trim() : "",
     updatedAt: updatedAt ?? undefined,
   }
 }
@@ -49,22 +53,30 @@ export async function getMigrationOrchestratorSettings(): Promise<MigrationOrche
 export async function saveMigrationOrchestratorSettings(input: {
   enabled?: unknown
   orchestratorUrl?: unknown
+  fileScannerUrl?: unknown
   sharedSecret?: unknown
+  fileScannerSecret?: unknown
 }): Promise<MigrationOrchestratorSettings> {
   const current = await getMigrationOrchestratorSettings()
   const secret = typeof input.sharedSecret === "string" && input.sharedSecret.trim()
     ? input.sharedSecret.trim()
     : current.sharedSecret
+  const scannerSecret = typeof input.fileScannerSecret === "string" && input.fileScannerSecret.trim()
+    ? input.fileScannerSecret.trim()
+    : current.fileScannerSecret
   const next = normalize({
     enabled: typeof input.enabled === "boolean" ? input.enabled : current.enabled,
     orchestratorUrl: input.orchestratorUrl === undefined ? current.orchestratorUrl : input.orchestratorUrl,
+    fileScannerUrl: input.fileScannerUrl === undefined ? current.fileScannerUrl : input.fileScannerUrl,
     sharedSecret: secret,
+    fileScannerSecret: scannerSecret,
   })
   if (next.sharedSecret.length > MAX_SECRET_LENGTH) {
     throw new Error(`Migration Orchestrator shared secret must be at most ${MAX_SECRET_LENGTH} characters`)
   }
-  if (next.enabled && (!next.orchestratorUrl || next.sharedSecret.length < MIN_SECRET_LENGTH)) {
-    throw new Error(`Enabled Migration Orchestrator requires its URL and a shared secret of at least ${MIN_SECRET_LENGTH} characters`)
+  if (next.fileScannerSecret.length > MAX_SECRET_LENGTH) throw new Error(`File Scanner secret must be at most ${MAX_SECRET_LENGTH} characters`)
+  if (next.enabled && (!next.orchestratorUrl || !next.fileScannerUrl || next.sharedSecret.length < MIN_SECRET_LENGTH || next.fileScannerSecret.length < MIN_SECRET_LENGTH)) {
+    throw new Error(`Enabled orchestration requires both Worker URLs and separate secrets of at least ${MIN_SECRET_LENGTH} characters`)
   }
   const { rows } = await queryDb<SettingsRow>(
     `
@@ -82,7 +94,11 @@ export function publicMigrationOrchestratorSettings(settings: MigrationOrchestra
   return {
     enabled: settings.enabled,
     orchestratorUrl: settings.orchestratorUrl,
+    fileScannerUrl: settings.fileScannerUrl,
+    sharedSecret: settings.sharedSecret,
+    fileScannerSecret: settings.fileScannerSecret,
     secretConfigured: settings.sharedSecret.length >= MIN_SECRET_LENGTH && settings.sharedSecret.length <= MAX_SECRET_LENGTH,
+    fileScannerSecretConfigured: settings.fileScannerSecret.length >= MIN_SECRET_LENGTH && settings.fileScannerSecret.length <= MAX_SECRET_LENGTH,
     updatedAt: settings.updatedAt,
   }
 }

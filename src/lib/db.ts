@@ -599,6 +599,10 @@ export async function ensureDriveSchema(): Promise<void> {
           account_id uuid not null references drive_accounts(id) on delete cascade,
           bucket_name text not null,
           status text not null default 'pending',
+          cursor text,
+          lease_owner text,
+          lease_expires_at timestamptz,
+          attempt_count integer not null default 0,
           desired_origins text[] not null default '{}',
           changed boolean not null default false,
           last_checked_at timestamptz,
@@ -1022,6 +1026,7 @@ export async function ensureDriveSchema(): Promise<void> {
           migration_id uuid not null references drive_migrations(id) on delete cascade,
           requested_by_agent_id uuid references drive_agents(id) on delete set null,
           claimed_by_agent_id uuid references drive_agents(id) on delete set null,
+          claim_token uuid,
           status text not null default 'pending',
           mode text not null default 'repair_and_verify',
           work_key text,
@@ -1043,6 +1048,7 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(`create index if not exists drive_repair_jobs_migration_idx on drive_repair_jobs (migration_id, created_at desc);`)
       await queryDb(`create index if not exists drive_repair_jobs_claimed_idx on drive_repair_jobs (claimed_by_agent_id, status);`)
       await queryDb(`alter table if exists drive_repair_jobs add column if not exists work_key text;`)
+      await queryDb(`alter table if exists drive_repair_jobs add column if not exists claim_token uuid;`)
       await queryDb(`create unique index if not exists drive_repair_jobs_work_key_unique on drive_repair_jobs (work_key) where work_key is not null;`)
 
       await queryDb(`
@@ -1053,6 +1059,121 @@ export async function ensureDriveSchema(): Promise<void> {
           updated_at timestamptz not null default now()
         );
       `)
+      await queryDb(`
+        create table if not exists drive_bucket_scans (
+          id uuid primary key,
+          account_id uuid not null references drive_accounts(id) on delete cascade,
+          bucket_name text not null,
+          kind text not null default 'source',
+          migration_id uuid references drive_migrations(id) on delete cascade,
+          migration_item_id uuid references drive_migration_items(id) on delete cascade,
+          prefix text,
+          status text not null default 'pending',
+          last_key text,
+          objects bigint not null default 0,
+          bytes bigint not null default 0,
+          error text,
+          started_at timestamptz,
+          completed_at timestamptz,
+          updated_at timestamptz not null default now()
+        );
+      `)
+      await queryDb(`create index if not exists drive_bucket_scans_account_bucket_idx on drive_bucket_scans (account_id, bucket_name);`)
+      await queryDb(`alter table if exists drive_bucket_scans add column if not exists cursor text;`)
+      await queryDb(`alter table if exists drive_bucket_scans add column if not exists lease_owner text;`)
+      await queryDb(`alter table if exists drive_bucket_scans add column if not exists lease_expires_at timestamptz;`)
+      await queryDb(`alter table if exists drive_bucket_scans add column if not exists attempt_count integer not null default 0;`)
+      await queryDb(`create index if not exists drive_bucket_scans_migration_idx on drive_bucket_scans (migration_id);`)
+      await queryDb(`create index if not exists drive_bucket_scans_item_idx on drive_bucket_scans (migration_item_id);`)
+      await queryDb(`create index if not exists drive_bucket_scans_status_idx on drive_bucket_scans (status);`)
+      await queryDb(`
+        create table if not exists drive_bucket_scan_objects (
+          scan_id uuid not null references drive_bucket_scans(id) on delete cascade,
+          key text not null,
+          size bigint not null default 0,
+          is_dir_marker boolean not null default false,
+          etag text,
+          last_modified timestamptz,
+          created_at timestamptz not null default now(),
+          primary key (scan_id, key)
+        );
+      `)
+      await queryDb(`create index if not exists drive_bucket_scan_objects_key_idx on drive_bucket_scan_objects (scan_id, key);`)
+      await queryDb(`
+        create table if not exists drive_bucket_verify_diffs (
+          id uuid primary key,
+          migration_item_id uuid not null references drive_migration_items(id) on delete cascade,
+          source_scan_id uuid not null references drive_bucket_scans(id) on delete cascade,
+          dest_scan_id uuid not null references drive_bucket_scans(id) on delete cascade,
+          kind text not null,
+          key text not null,
+          source_size bigint,
+          dest_size bigint,
+          created_at timestamptz not null default now()
+        );
+      `)
+      await queryDb(`create index if not exists drive_bucket_verify_diffs_item_idx on drive_bucket_verify_diffs (migration_item_id);`)
+      await queryDb(`create index if not exists drive_bucket_verify_diffs_kind_idx on drive_bucket_verify_diffs (kind);`)
+      await queryDb(`
+        create table if not exists drive_migration_orchestrator_state (
+          id boolean primary key default true check (id),
+          status text not null default 'idle',
+          lease_owner text,
+          orchestrator_url text,
+          last_started_at timestamptz,
+          last_completed_at timestamptz,
+          last_error text,
+          last_migration_id uuid references drive_migrations(id) on delete set null,
+          last_result jsonb not null default '{}'::jsonb,
+          cycle_count bigint not null default 0,
+          updated_at timestamptz not null default now()
+        );
+      `)
+      await queryDb(`alter table if exists drive_migration_orchestrator_state add column if not exists lease_owner text;`)
+      await queryDb(`
+        create table if not exists drive_migration_verification_state (
+          migration_item_id uuid primary key references drive_migration_items(id) on delete cascade,
+          migration_id uuid not null references drive_migrations(id) on delete cascade,
+          generation integer not null default 1,
+          source_scan_id uuid references drive_bucket_scans(id) on delete set null,
+          destination_scan_id uuid references drive_bucket_scans(id) on delete set null,
+          phase text not null default 'source',
+          status text not null default 'pending',
+          source_cursor text,
+          destination_cursor text,
+          source_objects bigint not null default 0,
+          source_bytes bigint not null default 0,
+          destination_objects bigint not null default 0,
+          destination_bytes bigint not null default 0,
+          missing_objects bigint not null default 0,
+          mismatched_objects bigint not null default 0,
+          extra_objects bigint not null default 0,
+          attempt_count integer not null default 0,
+          last_error text,
+          lease_owner text,
+          lease_expires_at timestamptz,
+          completed_at timestamptz,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+      `)
+      await queryDb(`create index if not exists drive_migration_verification_state_queue_idx on drive_migration_verification_state (status, updated_at);`)
+      await queryDb(`create index if not exists drive_migration_verification_state_migration_idx on drive_migration_verification_state (migration_id, generation);`)
+      await queryDb(`
+        create table if not exists drive_file_scanner_state (
+          id boolean primary key default true check (id),
+          status text not null default 'idle',
+          lease_owner text,
+          last_started_at timestamptz,
+          last_completed_at timestamptz,
+          last_error text,
+          last_migration_item_id uuid references drive_migration_items(id) on delete set null,
+          last_result jsonb not null default '{}'::jsonb,
+          cycle_count bigint not null default 0,
+          updated_at timestamptz not null default now()
+        );
+      `)
+      await queryDb(`alter table if exists drive_file_scanner_state add column if not exists lease_owner text;`)
     })()
   }
 

@@ -7,11 +7,15 @@
     "check": "tsc --noEmit",
     "build": "npm run check && wrangler deploy --dry-run",
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "node scripts/deploy.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260825.1",
     "typescript": "^5.9.2",
+    "@types/pg": "^8.15.5",
     "wrangler": "^4.126.0"
   }
 }

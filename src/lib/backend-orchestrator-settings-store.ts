@@ -88,6 +88,7 @@ export function publicBackendOrchestratorSettings(settings: BackendOrchestratorS
   return {
     enabled: settings.enabled,
     orchestratorUrl: settings.orchestratorUrl,
+    sharedSecret: settings.sharedSecret,
     secretConfigured: settings.sharedSecret.length >= 24,
     syncIntervalMinutes: settings.syncIntervalMinutes,
     updatedAt: settings.updatedAt,

@@ -389,6 +389,19 @@ export async function syncMigrationLiveState(
       lastSyncedAt: now,
     }).catch(() => undefined)
   } else if (allCompleted) {
+    if (
+      migration.options.executionMode === "migration_workers" &&
+      migration.options.requireIndependentVerification !== false
+    ) {
+      await updateMigration(migrationId, {
+        status: "verifying",
+        syncStatus: "ok",
+        syncMessage: "Object migration completed; File Scanner verification pending",
+        completedAt: null,
+        lastSyncedAt: now,
+      }).catch(() => undefined)
+      return
+    }
     if (options?.runSettingsSync !== true) {
       if (settingsSyncRunning || settingsSyncFailures.length > 0 || settingsSyncCompleted) return
       await updateMigration(migrationId, {

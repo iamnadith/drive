@@ -10,6 +10,7 @@ import {
 } from "@aws-sdk/client-s3"
 import { Upload } from "@aws-sdk/lib-storage"
 import { createClient as createSupabaseClient } from "@supabase/supabase-js"
+import { Client as PostgresClient } from "pg"
 import os from "os"
 import { Transform } from "stream"
 
@@ -19,16 +20,16 @@ function getArg(name, fallback = "") {
   return process.env[name.toUpperCase().replace(/-/g, "_")] || fallback
 }
 
-const SERVER_URL = String(getArg("server-url", "")).replace(/\/+$/, "")
+let SERVER_URL = String(getArg("server-url", "")).replace(/\/+$/, "")
 const AGENT_ID = String(getArg("agent-id", ""))
-const AGENT_TOKEN = String(getArg("token", ""))
+let AGENT_TOKEN = String(getArg("token", ""))
 const MIGRATION_ID = String(getArg("migration-id", process.env.DRIVE_MIGRATION_ID || process.env.MIGRATION_ID || ""))
 const REPAIR_JOB_ID = String(getArg("repair-job-id", process.env.DRIVE_REPAIR_JOB_ID || ""))
 const POOL_MODE = Boolean(MIGRATION_ID && !REPAIR_JOB_ID)
 const GITHUB_RUN_ID = String(process.env.GITHUB_RUN_ID || "")
 const POLL_MS = Math.max(5_000, Number(getArg("poll-ms", "15000")) || 15_000)
 const HEARTBEAT_MS = Math.max(10_000, Number(getArg("heartbeat-ms", "20000")) || 20_000)
-const MAX_OBJECTS = Math.max(1, Math.min(500_000, Number(getArg("max-objects", "200000")) || 200_000))
+const MAX_OBJECTS = Math.max(1, Math.min(10_000_000, Number(getArg("max-objects", "2000000")) || 2_000_000))
 const API_TIMEOUT_MS = Math.max(5_000, Number(getArg("api-timeout-ms", "30000")) || 30_000)
 const API_RETRIES = Math.max(1, Math.min(6, Number(getArg("api-retries", "3")) || 3))
 const S3_RETRIES = Math.max(1, Math.min(6, Number(getArg("s3-retries", "3")) || 3))
@@ -56,6 +57,7 @@ const EXIT_AFTER_JOB = ["1", "true", "yes"].includes(
 )
 const SUPABASE_URL = String(getArg("supabase-url", process.env.NEXT_PUBLIC_SUPABASE_URL || ""))
 const SUPABASE_SERVICE_ROLE_KEY = String(getArg("supabase-service-role-key", ""))
+const POSTGRES_URL = String(getArg("postgres-url", ""))
 const supabase =
   SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
     ? createSupabaseClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
@@ -64,10 +66,33 @@ const migrationItemProgressCache = new Map()
 const repairJobProgressCache = new Map()
 const jobAbortControllers = new Map()
 const jobUpdateQueues = new Map()
+const jobClaimTokens = new Map()
+let runtimeConfigurationLoadedAt = 0
 
-if (!SERVER_URL || !AGENT_ID || !AGENT_TOKEN) {
-  console.error("Missing required configuration. Use --server-url, --agent-id, and --token.")
+if (!AGENT_ID || (!POSTGRES_URL && !supabase)) {
+  console.error("Missing required configuration. Provide --agent-id and POSTGRES_URL.")
   process.exit(1)
+}
+
+async function postgres(operation) {
+  if (!POSTGRES_URL) throw new Error("POSTGRES_URL is not configured")
+  const hostname = new URL(POSTGRES_URL).hostname
+  const client = new PostgresClient({ connectionString: POSTGRES_URL, ssl: ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false }, connectionTimeoutMillis: 10_000 })
+  await client.connect()
+  try { return await operation(client) } finally { await client.end().catch(() => undefined) }
+}
+
+async function loadRuntimeConfiguration(force = false) {
+  if (!force && runtimeConfigurationLoadedAt > Date.now() - 60_000) return
+  if (POSTGRES_URL) {
+    const settings = await postgres((db) => db.query(`select key,value from drive_app_settings where key in('migration-workers','orchestration-panel-origin')`))
+    const worker = settings.rows.find((row) => row.key === "migration-workers")?.value || {}
+    const origin = settings.rows.find((row) => row.key === "orchestration-panel-origin")?.value || {}
+    AGENT_TOKEN = String(worker.sharedSecret || AGENT_TOKEN || "")
+    SERVER_URL = String(origin.panelOrigin || SERVER_URL || "").replace(/\/+$/, "")
+  }
+  if (AGENT_TOKEN.length < 24) throw new Error("PostgreSQL does not contain the migration worker secret")
+  runtimeConfigurationLoadedAt = Date.now()
 }
 
 function sleep(ms) {
@@ -280,17 +305,36 @@ async function api(path, body, options = {}) {
 }
 
 async function heartbeat(extra = {}) {
-  const response = await api(
-    `/api/workers/${encodeURIComponent(AGENT_ID)}/heartbeat`,
-    {
-      token: AGENT_TOKEN,
-      host: os.hostname(),
-      version: "worker-v1",
-      capabilities: ["scan", "verify", "repair", "bulk_migrate", "diagnostics"],
-      metadata: extra,
-    },
-    { timeoutMs: HEARTBEAT_TIMEOUT_MS, retries: HEARTBEAT_RETRIES }
-  )
+  let response = null
+  let directRequired = Boolean(POSTGRES_URL)
+  if (!directRequired) {
+    try {
+      response = await api(
+        `/api/workers/${encodeURIComponent(AGENT_ID)}/heartbeat`,
+        { token: AGENT_TOKEN, host: os.hostname(), version: "worker-v2", capabilities: ["scan", "verify", "repair", "bulk_migrate", "diagnostics"], metadata: extra },
+        { timeoutMs: HEARTBEAT_TIMEOUT_MS, retries: HEARTBEAT_RETRIES }
+      )
+    } catch (error) {
+      if ((!POSTGRES_URL && !supabase) || !isRetryableError(error)) throw error
+      directRequired = true
+      console.warn("Panel heartbeat unavailable; syncing directly through the orchestration database")
+    }
+  }
+
+  if (directRequired && POSTGRES_URL) {
+    await loadRuntimeConfiguration()
+    await postgres(async (db) => {
+      const auth = await db.query(`select a.id,a.status,s.value->>'sharedSecret' secret from drive_agents a left join drive_app_settings s on s.key='migration-workers' where a.id=$1 limit 1`, [AGENT_ID])
+      const row = auth.rows[0]
+      if (!row || row.status === "disabled" || row.secret !== AGENT_TOKEN) throw new Error("Worker is missing, disabled, or has an invalid shared secret")
+      await db.query(`update drive_agents set status='online',last_heartbeat_at=now(),last_seen_host=$2,last_seen_version='worker-v2',metadata=coalesce(metadata,'{}'::jsonb)||$3::jsonb,updated_at=now() where id=$1 and status<>'disabled'`, [AGENT_ID, os.hostname(), JSON.stringify(extra)])
+      if (currentJobId) {
+        const renewed = await db.query(`update drive_repair_jobs set last_heartbeat_at=now(),updated_at=now() where id=$1 and claimed_by_agent_id=$2 and ($3::uuid is null or claim_token=$3::uuid) and status in('claimed','running') returning id`, [currentJobId, AGENT_ID, jobClaimTokens.get(currentJobId) || null])
+        if (!renewed.rowCount) throw new Error("This job lease is no longer owned by this worker")
+      }
+    })
+    return { ok: true, direct: true }
+  }
 
   if (supabase) {
     const currentAgent = await withTimeout(
@@ -301,7 +345,7 @@ async function heartbeat(extra = {}) {
       ? currentAgent.data[0]
       : null
     const currentMetadata = isRecord(currentAgentRow?.metadata) ? currentAgentRow.metadata : {}
-    await withTimeout(
+    const heartbeatResult = await withTimeout(
       "supabase worker heartbeat",
       supabase
         .from("drive_agents")
@@ -309,24 +353,147 @@ async function heartbeat(extra = {}) {
           status: "online",
           last_heartbeat_at: new Date().toISOString(),
           last_seen_host: os.hostname(),
-          last_seen_version: "worker-v1",
+          last_seen_version: "worker-v2",
           metadata: { ...currentMetadata, ...extra },
           updated_at: new Date().toISOString(),
         })
         .eq("id", AGENT_ID)
-    ).catch(() => undefined)
+    ).catch((error) => ({ error }))
+    if (directRequired && heartbeatResult?.error) {
+      throw new Error(heartbeatResult.error?.message || "Direct worker heartbeat failed")
+    }
   }
-  return response
+  return response || { ok: true, direct: true }
 }
 
 async function claimJob() {
-  return api(`/api/workers/${encodeURIComponent(AGENT_ID)}/claim-job`, {
-    token: AGENT_TOKEN,
-    ...(MIGRATION_ID ? { migrationId: MIGRATION_ID } : {}),
-    ...(POOL_MODE ? { pool: true } : {}),
-    ...(REPAIR_JOB_ID ? { jobId: REPAIR_JOB_ID } : {}),
-    ...(GITHUB_RUN_ID ? { githubRunId: GITHUB_RUN_ID } : {}),
+  await loadRuntimeConfiguration()
+  if (POSTGRES_URL) return claimJobDirectPostgres()
+  try {
+    return await api(`/api/workers/${encodeURIComponent(AGENT_ID)}/claim-job`, {
+      token: AGENT_TOKEN,
+      ...(MIGRATION_ID ? { migrationId: MIGRATION_ID } : {}),
+      ...(POOL_MODE ? { pool: true } : {}),
+      ...(REPAIR_JOB_ID ? { jobId: REPAIR_JOB_ID } : {}),
+      ...(GITHUB_RUN_ID ? { githubRunId: GITHUB_RUN_ID } : {}),
+    })
+  } catch (error) {
+    if ((!POSTGRES_URL && !supabase) || !isRetryableError(error)) throw error
+    console.warn("Panel claim unavailable; claiming a fenced shard directly from the orchestration database")
+    return POSTGRES_URL ? claimJobDirectPostgres() : claimJobDirect()
+  }
+}
+
+async function claimJobDirectPostgres() {
+  if (!MIGRATION_ID) throw new Error("Direct autonomous claim requires migrationId")
+  return postgres(async (db) => {
+    const auth = await db.query(`
+      select a.status agent_status,a.capabilities,m.*,m.status migration_status,s.value->>'sharedSecret' worker_secret,
+        jsonb_build_object('cloudflare_account_id',sa.cloudflare_account_id,'r2_access_key_id',sa.r2_access_key_id,'r2_secret_access_key',sa.r2_secret_access_key) source_account,
+        jsonb_build_object('cloudflare_account_id',ta.cloudflare_account_id,'r2_access_key_id',ta.r2_access_key_id,'r2_secret_access_key',ta.r2_secret_access_key) target_account
+      from drive_agents a cross join drive_migrations m
+      join drive_accounts sa on sa.id=m.source_account_id join drive_accounts ta on ta.id=m.target_account_id
+      left join drive_app_settings s on s.key='migration-workers'
+      where a.id=$1 and m.id=$2 limit 1
+    `, [AGENT_ID, MIGRATION_ID])
+    const migration = auth.rows[0]
+    if (!migration || migration.agent_status === "disabled" || migration.worker_secret !== AGENT_TOKEN) throw new Error("Worker is missing, disabled, or has an invalid shared secret")
+    if (!Array.isArray(migration.capabilities) || !migration.capabilities.includes("bulk_migrate")) throw new Error("Worker is not registered for bulk migrations")
+    if (migration.options?.executionMode !== "migration_workers") throw new Error("Direct claim requires a migration worker migration")
+    if (["completed", "failed", "canceled"].includes(migration.migration_status)) return { ok: true, job: null, poolComplete: true, poolStatus: migration.migration_status }
+    const generation = Math.max(1, Math.trunc(Number(migration.options?.workerGeneration) || 1))
+    const claimed = await db.query(`
+      with candidate as (
+        select id from drive_repair_jobs where migration_id=$1 and status='pending' and claimed_by_agent_id is null
+          and work_key like $2 order by created_at for update skip locked limit 1
+      )
+      update drive_repair_jobs j set status='running',claimed_by_agent_id=$3,claim_token=gen_random_uuid(),claimed_at=now(),started_at=coalesce(started_at,now()),last_heartbeat_at=now(),summary='Claimed directly through PostgreSQL',updated_at=now()
+      from candidate c where j.id=c.id returning j.*
+    `, [MIGRATION_ID, `migration:${MIGRATION_ID}:generation:${generation}:shard:%`, AGENT_ID])
+    const job = claimed.rows[0]
+    if (!job) return { ok: true, job: null }
+    jobClaimTokens.set(job.id, String(job.claim_token || ""))
+    const items = await db.query(`select * from drive_migration_items where migration_id=$1 order by created_at`, [MIGRATION_ID])
+    const requested = new Set(Array.isArray(job.payload?.itemIds) ? job.payload.itemIds : [])
+    const selected = requested.size ? items.rows.filter((item) => requested.has(item.id)) : items.rows
+    const source = migration.source_account; const target = migration.target_account
+    const payload = {
+      job: { id: job.id, mode: job.mode, migrationId: MIGRATION_ID, verifyAllBuckets: true, strictCompletion: true, kind: job.payload?.kind },
+      ...(isRecord(job.payload?.workerShard) ? { workerShard: job.payload.workerShard } : {}),
+      ...(typeof job.payload?.workerGeneration === "number" ? { workerGeneration: job.payload.workerGeneration } : {}),
+      migration: { id: MIGRATION_ID, options: migration.options || {}, pathPrefix: migration.options?.pathPrefix || null },
+      source: { accountId: source.cloudflare_account_id, accessKeyId: source.r2_access_key_id, secretAccessKey: source.r2_secret_access_key },
+      target: { accountId: target.cloudflare_account_id, accessKeyId: target.r2_access_key_id, secretAccessKey: target.r2_secret_access_key },
+      items: selected.map((item) => ({ id: item.id, sourceBucket: item.source_bucket, targetBucket: item.target_bucket, sourceObjects: Number(item.source_objects || 0), sourceBytes: Number(item.source_bytes || 0), slurperStatus: item.slurper_status, progress: item.progress || {} })),
+    }
+    return { ok: true, job: { id: job.id, migrationId: MIGRATION_ID, mode: job.mode, payload: job.payload || {} }, payload, direct: true }
   })
+}
+
+async function supabaseRows(label, query) {
+  const result = await withTimeout(label, query)
+  if (result?.error) throw new Error(result.error.message || `${label} failed`)
+  return Array.isArray(result?.data) ? result.data : []
+}
+
+async function authenticateDirectWorker() {
+  const [agents, settings] = await Promise.all([
+    supabaseRows("load direct worker", supabase.from("drive_agents").select("*").eq("id", AGENT_ID).limit(1)),
+    supabaseRows("load shared worker secret", supabase.from("drive_app_settings").select("value").eq("key", "migration-workers").limit(1)),
+  ])
+  const agent = agents[0]
+  const configuredSecret = String(settings[0]?.value?.sharedSecret || "")
+  if (!agent || agent.status === "disabled") throw new Error("Worker is missing or disabled")
+  if (configuredSecret.length < 24 || configuredSecret.length > 512 || configuredSecret !== AGENT_TOKEN) throw new Error("Invalid shared worker secret")
+  if (!Array.isArray(agent.capabilities) || !agent.capabilities.includes("bulk_migrate")) throw new Error("Worker is not registered for bulk migrations")
+  return agent
+}
+
+async function claimJobDirect() {
+  await authenticateDirectWorker()
+  if (!MIGRATION_ID) throw new Error("Direct autonomous claim requires migrationId")
+  const migrations = await supabaseRows("load direct migration", supabase.from("drive_migrations").select("*").eq("id", MIGRATION_ID).limit(1))
+  const migration = migrations[0]
+  if (!migration || migration.options?.executionMode !== "migration_workers") throw new Error("Direct claim requires a migration worker migration")
+  if (["completed", "failed", "canceled"].includes(migration.status)) return { ok: true, job: null, poolComplete: true, poolStatus: migration.status }
+
+  const candidates = await supabaseRows(
+    "find pending autonomous shard",
+    supabase.from("drive_repair_jobs").select("*").eq("migration_id", MIGRATION_ID).eq("status", "pending").order("created_at", { ascending: true }).limit(8)
+  )
+  let job = null
+  for (const candidate of candidates) {
+    if (!String(candidate.work_key || "").startsWith(`migration:${MIGRATION_ID}:generation:`)) continue
+    const claimed = await supabaseRows(
+      `claim autonomous shard ${candidate.id}`,
+      supabase.from("drive_repair_jobs").update({
+        status: "running", claimed_by_agent_id: AGENT_ID, claimed_at: new Date().toISOString(), started_at: new Date().toISOString(),
+        last_heartbeat_at: new Date().toISOString(), summary: "Claimed directly through orchestration database", updated_at: new Date().toISOString(),
+      }).eq("id", candidate.id).eq("status", "pending").is("claimed_by_agent_id", null).select("*")
+    )
+    if (claimed[0]) { job = claimed[0]; break }
+  }
+  if (!job) return { ok: true, job: null }
+
+  const requested = new Set(Array.isArray(job.payload?.itemIds) ? job.payload.itemIds : [])
+  const [items, sourceAccounts, targetAccounts] = await Promise.all([
+    supabaseRows("load direct migration items", supabase.from("drive_migration_items").select("*").eq("migration_id", MIGRATION_ID).order("created_at", { ascending: true })),
+    supabaseRows("load direct source account", supabase.from("drive_accounts").select("*").eq("id", migration.source_account_id).limit(1)),
+    supabaseRows("load direct target account", supabase.from("drive_accounts").select("*").eq("id", migration.target_account_id).limit(1)),
+  ])
+  const source = sourceAccounts[0]; const target = targetAccounts[0]
+  if (!source?.cloudflare_account_id || !target?.cloudflare_account_id) throw new Error("Source or target account is incomplete")
+  const selectedItems = requested.size ? items.filter((item) => requested.has(item.id)) : items
+  const payload = {
+    job: { id: job.id, mode: job.mode, migrationId: MIGRATION_ID, verifyAllBuckets: true, strictCompletion: true, kind: job.payload?.kind },
+    ...(isRecord(job.payload?.workerShard) ? { workerShard: job.payload.workerShard } : {}),
+    ...(typeof job.payload?.workerGeneration === "number" ? { workerGeneration: job.payload.workerGeneration } : {}),
+    migration: { id: MIGRATION_ID, options: migration.options || {}, pathPrefix: migration.options?.pathPrefix || null },
+    source: { accountId: source.cloudflare_account_id, accessKeyId: source.r2_access_key_id, secretAccessKey: source.r2_secret_access_key },
+    target: { accountId: target.cloudflare_account_id, accessKeyId: target.r2_access_key_id, secretAccessKey: target.r2_secret_access_key },
+    items: selectedItems.map((item) => ({ id: item.id, sourceBucket: item.source_bucket, targetBucket: item.target_bucket, sourceObjects: Number(item.source_objects || 0), sourceBytes: Number(item.source_bytes || 0), slurperStatus: item.slurper_status, progress: item.progress || {} })),
+  }
+  return { ok: true, job: { id: job.id, migrationId: MIGRATION_ID, mode: job.mode, payload: job.payload || {} }, payload, direct: true }
 }
 
 async function updateMigrationItemLocal(migrationId, repairJobId, itemUpdate) {
@@ -555,6 +722,25 @@ async function updateMigrationLocal(migrationId, body) {
 async function updateJob(jobId, body, options = {}) {
   const allowOffline = options?.allowOffline === true
   let persistLocally = null
+  const persistPostgres = POSTGRES_URL
+    ? async () => postgres(async (db) => {
+        const status = typeof body.status === "string" ? body.status : null
+        const completed = ["completed", "failed", "canceled"].includes(status)
+        const result = await db.query(`
+          update drive_repair_jobs set
+            status=coalesce($3,status),progress=coalesce(progress,'{}'::jsonb)||$4::jsonb,result=coalesce(result,'{}'::jsonb)||$5::jsonb,
+            summary=case when $6::text is null then summary else $6 end,error=case when $7::text is null then error else $7 end,
+            last_heartbeat_at=now(),completed_at=case when $8::boolean then now() else completed_at end,updated_at=now()
+          where id=$1 and claimed_by_agent_id=$2 and ($9::uuid is null or claim_token=$9::uuid) and status in('claimed','running') returning id
+        `, [jobId, AGENT_ID, status, JSON.stringify(isRecord(body.progress) ? body.progress : {}), JSON.stringify(isRecord(body.result) ? body.result : {}), typeof body.summary === "string" ? body.summary : null, typeof body.error === "string" ? body.error : null, completed, jobClaimTokens.get(jobId) || null])
+        if (!result.rowCount) throw new Error("This job lease is no longer owned by this worker")
+      })
+    : null
+  if (jobClaimTokens.has(jobId) && persistPostgres) {
+    await persistPostgres()
+    if (["completed", "failed", "canceled"].includes(String(body.status || ""))) jobClaimTokens.delete(jobId)
+    return { ok: true, direct: true }
+  }
   if (supabase) {
     const status = typeof body.status === "string" ? body.status : undefined
     const progress = body.progress && typeof body.progress === "object" ? body.progress : undefined
@@ -634,7 +820,9 @@ async function updateJob(jobId, body, options = {}) {
     })
   } catch (error) {
     if (allowOffline && !(error instanceof JobAbortedError) && isRetryableError(error)) {
-      if (persistLocally) await persistLocally().catch(() => undefined)
+      if (persistPostgres) await persistPostgres()
+      else if (persistLocally) await persistLocally()
+      else throw error
       return { offline: true, error: error instanceof Error ? error.message : String(error) }
     }
     throw error
@@ -762,7 +950,7 @@ async function listAllObjects(client, bucket, prefix, onProgress) {
       if (seenKeys.has(key)) continue
       seenKeys.add(key)
       const size = typeof object?.Size === "number" ? object.Size : 0
-      objects.push({ key, size })
+      objects.push({ key, size, etag: typeof object?.ETag === "string" ? object.ETag.replace(/^\"|\"$/g, "") : null })
       if (typeof onProgress === "function") onProgress({ count: objects.length, key, size })
       if (objects.length > MAX_OBJECTS) {
         throw new Error(
@@ -785,15 +973,18 @@ async function listAllObjects(client, bucket, prefix, onProgress) {
 }
 
 function diffObjects(sourceObjects, destObjects) {
-  const destinationMap = new Map(destObjects.map((object) => [object.key, object.size]))
+  const destinationMap = new Map(destObjects.map((object) => [object.key, object]))
   const missing = []
   const mismatched = []
   for (const sourceObject of sourceObjects) {
-    const destSize = destinationMap.get(sourceObject.key)
-    if (typeof destSize === "undefined") {
+    const destination = destinationMap.get(sourceObject.key)
+    if (!destination) {
       missing.push(sourceObject)
-    } else if (destSize !== sourceObject.size) {
-      mismatched.push({ ...sourceObject, destinationSize: destSize })
+    } else if (
+      destination.size !== sourceObject.size ||
+      (sourceObject.etag && destination.etag && !sourceObject.etag.includes("-") && !destination.etag.includes("-") && sourceObject.etag !== destination.etag)
+    ) {
+      mismatched.push({ ...sourceObject, destinationSize: destination.size, destinationEtag: destination.etag })
     }
   }
   return { missing, mismatched }
@@ -1316,6 +1507,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
     const sourceObjects = filterObjectsForShard(allSourceObjects, item.sourceBucket, workerShard)
     const destinationObjects = filterObjectsForShard(allDestinationObjects, item.sourceBucket, workerShard)
     const sourceBytes = allSourceObjects.reduce((sum, object) => sum + Number(object?.size || 0), 0)
+    const shardSourceBytes = sourceObjects.reduce((sum, object) => sum + Number(object?.size || 0), 0)
     const sourceObjectCount = allSourceObjects.length
     const shardObjectCount = sourceObjects.length
     const initialDiff = diffObjectsByListing(sourceObjects, destinationObjects, ({ checked, key, size, missing, mismatched }) => {
@@ -1406,7 +1598,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
           return
         }
         const latestTargetSize = await getTargetObjectSize(targetClient, item.targetBucket, object.key)
-        if (latestTargetSize === objectSize) {
+        if (!isMismatch && latestTargetSize === objectSize) {
           skipped += 1
           upsertFileEvent(state, {
             itemId: item.id,
@@ -1884,6 +2076,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
                   }
                 : {}),
               sourceBytes,
+              shardSourceBytes,
               destinationObjectCountBefore: destinationObjects.length,
               destinationObjectCountAfter: finalDestinationObjects.length,
               finalMissing,
@@ -1924,6 +2117,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
       sourceObjectCount,
       shardObjectCount,
       sourceBytes,
+      shardSourceBytes,
       destinationObjectCountBefore: destinationObjects.length,
       destinationObjectCountAfter: finalDestinationObjects.length,
       transferred,
@@ -2210,6 +2404,7 @@ async function main() {
 async function runWorkerForever() {
   while (true) {
     try {
+      await loadRuntimeConfiguration()
       await main()
       return
     } catch (error) {

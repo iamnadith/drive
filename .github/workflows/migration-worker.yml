@@ -13,6 +13,10 @@ run-name: >-
 permissions:
   contents: read
 
+concurrency:
+  group: drive-migration-worker-${{ inputs.agent_id || github.event.client_payload.agent_id || github.run_id }}
+  cancel-in-progress: true
+
 on:
   workflow_dispatch:
     inputs:
@@ -24,12 +28,6 @@ on:
         required: false
       agent_id:
         description: Agent id requesting dispatch
-        required: false
-      server_url:
-        description: Drive server URL
-        required: false
-      agent_token:
-        description: Legacy per-agent token (optional; shared secret is preferred)
         required: false
   repository_dispatch:
     types: [drive-migration-worker]
@@ -57,19 +55,16 @@ jobs:
 
       - name: Run migration worker
         env:
-          SERVER_URL: ${{ inputs.server_url || github.event.client_payload.server_url || secrets.DRIVE_SERVER_URL || secrets.SERVER_URL || vars.DRIVE_SERVER_URL || vars.SERVER_URL }}
           AGENT_ID: ${{ inputs.agent_id || github.event.client_payload.agent_id || secrets.DRIVE_AGENT_ID || secrets.AGENT_ID || vars.DRIVE_AGENT_ID || vars.AGENT_ID }}
           # A migration id is always scoped to this dispatch. Do not fall back
           # to a repository-wide variable: that can restart an old pool when a
           # workflow is run manually and can make concurrent workers collide.
           DRIVE_MIGRATION_ID: ${{ inputs.migration_id || github.event.client_payload.migration_id || '' }}
           DRIVE_REPAIR_JOB_ID: ${{ inputs.repair_job_id || github.event.client_payload.repair_job_id || '' }}
-          TOKEN: ${{ secrets.DRIVE_WORKER_SHARED_SECRET || inputs.agent_token || github.event.client_payload.agent_token || secrets.DRIVE_AGENT_TOKEN || secrets.AGENT_TOKEN || vars.DRIVE_AGENT_TOKEN || vars.AGENT_TOKEN }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL || secrets.NEXT_PUBLIC_SUPABASE_URL || secrets.DRIVE_SUPABASE_URL || vars.SUPABASE_URL || vars.NEXT_PUBLIC_SUPABASE_URL || vars.DRIVE_SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_SECRET_KEY || vars.SUPABASE_SERVICE_ROLE_KEY || vars.SUPABASE_SECRET_KEY }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
           POLL_MS: ${{ vars.POLL_MS || '15000' }}
           HEARTBEAT_MS: ${{ vars.HEARTBEAT_MS || '20000' }}
-          MAX_OBJECTS: ${{ vars.MAX_OBJECTS || '200000' }}
+          MAX_OBJECTS: ${{ vars.MAX_OBJECTS || '2000000' }}
           API_TIMEOUT_MS: ${{ vars.API_TIMEOUT_MS || '30000' }}
           API_RETRIES: ${{ vars.API_RETRIES || '3' }}
           S3_RETRIES: ${{ vars.S3_RETRIES || '3' }}

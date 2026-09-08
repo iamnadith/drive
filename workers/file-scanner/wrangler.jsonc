@@ -1,0 +1,9 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "file-scanner",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-04",
+  "compatibility_flags": ["nodejs_compat_v2"],
+  "triggers": { "crons": ["* * * * *"] },
+  "observability": { "enabled": true }
+}

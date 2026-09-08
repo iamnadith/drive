@@ -10,8 +10,12 @@
     "start": "node migration-worker.mjs"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.948.0",
-    "@aws-sdk/lib-storage": "^3.948.0",
-    "@supabase/supabase-js": "^2.87.1"
+    "@aws-sdk/client-s3": "^3.1127.0",
+    "@aws-sdk/lib-storage": "^3.1127.0",
+    "@supabase/supabase-js": "^2.87.1",
+    "pg": "^8.16.3"
+  },
+  "overrides": {
+    "ws": "^8.21.3"
   }
 }

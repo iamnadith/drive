@@ -73,6 +73,7 @@ export async function saveMigrationWorkerSettings(input: { sharedSecret?: unknow
 
 export function publicMigrationWorkerSettings(settings: MigrationWorkerSettings) {
   return {
+    sharedSecret: settings.sharedSecret,
     secretConfigured: settings.sharedSecret.length >= MIN_SECRET_LENGTH && settings.sharedSecret.length <= MAX_SECRET_LENGTH,
     updatedAt: settings.updatedAt,
   }

@@ -27,7 +27,7 @@ export async function GET(request: Request) {
     if (!owner || !repo) return NextResponse.json({ error: "owner and repo are required" }, { status: 400 })
     if (ref && (ref.length > 256 || /[\r\n]/.test(ref))) return NextResponse.json({ error: "ref is invalid" }, { status: 400 })
 
-    const workflows = await listGitHubWorkflows(token, owner, repo, ref)
+    const workflows = await listGitHubWorkflows(token, owner, repo, ref, true)
     return NextResponse.json({ workflows })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to load GitHub workflows") }, { status: errorStatus(error) })

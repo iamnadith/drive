@@ -1000,8 +1000,10 @@ export async function finalizeCompletedMigrationWorkerShards(
       const current = shardMetrics.get(raw.itemId) ?? { transferred: 0, skipped: 0, sourceObjects: 0, sourceBytes: 0 }
       current.transferred += count(raw.transferred)
       current.skipped += count(raw.skipped)
-      current.sourceObjects = Math.max(current.sourceObjects, count(raw.sourceObjectCount))
-      current.sourceBytes = Math.max(current.sourceBytes, count(raw.sourceBytes))
+      // Each shard owns a disjoint object-key partition, so terminal shard
+      // totals must be added. Taking the maximum under-counted migrations.
+      current.sourceObjects += count(raw.shardObjectCount ?? raw.sourceObjectCount)
+      current.sourceBytes += count(raw.shardSourceBytes ?? raw.sourceBytes)
       shardMetrics.set(raw.itemId, current)
     }
   }

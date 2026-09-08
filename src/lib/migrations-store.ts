@@ -1,6 +1,7 @@
 import crypto from "crypto"
 import { getSupabaseServerClient } from "./supabase"
 import { compactPreviousMigrationDetails } from "./database-maintenance"
+import { queryDb } from "./db"
 
 export type MigrationStatus = "draft" | "running" | "verifying" | "completed" | "failed" | "canceled"
 export type MigrationSyncStatus = "idle" | "syncing" | "ok" | "error"
@@ -12,6 +13,12 @@ export type MigrationOptions = {
   workerGeneration?: number
   /** Number of deterministic object shards shared by the worker pool. */
   workerShardCount?: number
+  /** GitHub workers enrolled in this pool; the autonomous orchestrator keeps them running. */
+  workerAgentIds?: string[]
+  /** Automatic repair generations started after independent verification finds drift. */
+  workerVerificationRepairAttempts?: number
+  /** Require the independent Cloudflare verifier before account activation. */
+  requireIndependentVerification?: boolean
   overwrite?: boolean
   concurrency?: number
   includeBuckets?: string[]
@@ -466,6 +473,31 @@ export async function updateMigration(
     })
   }
   return migration
+}
+
+export async function enrollMigrationWorkerAgent(migrationId: string, agentId: string): Promise<void> {
+  await queryDb(
+    `
+      update drive_migrations
+      set options = jsonb_set(
+        jsonb_set(
+          coalesce(options, '{}'::jsonb),
+          '{workerAgentIds}',
+          case
+            when jsonb_typeof(coalesce(options->'workerAgentIds', '[]'::jsonb)) <> 'array' then jsonb_build_array($2::text)
+            when coalesce(options->'workerAgentIds', '[]'::jsonb) @> jsonb_build_array($2::text) then coalesce(options->'workerAgentIds', '[]'::jsonb)
+            else coalesce(options->'workerAgentIds', '[]'::jsonb) || jsonb_build_array($2::text)
+          end,
+          true
+        ),
+        '{requireIndependentVerification}',
+        coalesce(options->'requireIndependentVerification', 'true'::jsonb),
+        true
+      ), updated_at = now()
+      where id = $1
+    `,
+    [migrationId, agentId]
+  )
 }
 
 export async function claimMigrationSyncLock(input: {

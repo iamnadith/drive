@@ -3,7 +3,8 @@ import { NextResponse } from "next/server"
 import { createAgentRun, getAgentById, getAgentGithubToken, listAgentRunsByAgentId, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { abortRepairJob, createRepairJob, ensureMigrationWorkerJobs, findActiveRepairJobForDispatch, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
 import { GITHUB_TOKEN_COOKIE, listGitHubWorkflowRuns, setGitHubActionsSecret } from "@/lib/github-oauth"
-import { getMigration, listMigrationItems } from "@/lib/migrations-store"
+import { enrollMigrationWorkerAgent, getMigration, listMigrationItems } from "@/lib/migrations-store"
+import { queryDb } from "@/lib/db"
 import { getMigrationWorkerSharedSecret } from "@/lib/migration-worker-settings-store"
 import { requireAdmin } from "@/lib/server-auth"
 
@@ -240,6 +241,17 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     const serverUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || new URL(request.url).origin).replace(/\/+$/, "")
+    const postgresUrl = (process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL || "").trim()
+    if (!postgresUrl) {
+      return NextResponse.json(
+        { error: "PostgreSQL URL is required for autonomous worker recovery" },
+        { status: 503 }
+      )
+    }
+    await queryDb(
+      `insert into drive_app_settings(key,value,updated_at) values('orchestration-panel-origin',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`,
+      [JSON.stringify({ panelOrigin: serverUrl })]
+    )
     const dispatchRequestedAt = new Date().toISOString()
     const runsBeforeDispatch = await listGitHubWorkflowRuns({
       token: githubToken,
@@ -253,15 +265,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const runIdsBeforeDispatch = new Set(runsBeforeDispatch.map((candidate) => candidate.id))
     let secretSyncError: string | null = null
     try {
-      await syncGitHubWorkerSecrets({
-        token: githubToken,
-        owner: githubRepoOwner,
-        repo: githubRepoName,
-        serverUrl,
-        sharedSecret,
-        agentId: id,
-        includeLegacyAgentId: !workflowSupportsRuntimeInputs,
-      })
+      if (!workflowSupportsRuntimeInputs) {
+        await syncGitHubWorkerSecrets({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, sharedSecret, agentId: id, includeLegacyAgentId: true })
+      }
+      await setGitHubActionsSecret({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, name: "POSTGRES_URL", value: postgresUrl })
     } catch (error: unknown) {
       secretSyncError = errorMessage(error, "Unable to sync GitHub worker secrets")
     }
@@ -331,13 +338,18 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           },
           body: JSON.stringify({
             ref: agent.githubRef || "main",
-            inputs: {
-              migration_id: migrationId,
-              ...(job?.id ? { repair_job_id: job.id } : {}),
-              agent_id: id,
-              ...(includeRuntimeInputs ? { server_url: serverUrl } : {}),
-              ...Object.fromEntries(Object.entries(dispatchInputs).filter(([key]) => key !== "agent_token" && key !== "repair_job_id" && key !== "agent_id")),
-            },
+            inputs: includeRuntimeInputs
+              ? {
+                  migration_id: migrationId,
+                  ...(job?.id ? { repair_job_id: job.id } : {}),
+                  agent_id: id,
+                  ...Object.fromEntries(
+                    Object.entries(dispatchInputs).filter(
+                      ([key]) => !["agent_token", "repair_job_id", "agent_id", "server_url"].includes(key)
+                    )
+                  ),
+                }
+              : {},
           }),
         }
       )
@@ -350,6 +362,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         const firstBody = await response.text().catch(() => "")
         if (isUnexpectedWorkflowInputsError(response.status, firstBody)) {
           usedRuntimeInputs = false
+          await syncGitHubWorkerSecrets({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, sharedSecret, agentId: id, includeLegacyAgentId: true })
           response = await dispatchWorkflow(false)
         } else {
           response = new Response(firstBody, { status: response.status, statusText: response.statusText, headers: response.headers })
@@ -387,6 +400,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       )
     }
 
+    if (pool) await enrollMigrationWorkerAgent(migrationId, id)
     let matchedRun: Awaited<ReturnType<typeof listGitHubWorkflowRuns>>[number] | undefined
     for (let attempt = 0; attempt < 8 && !matchedRun; attempt += 1) {
       if (attempt > 0) await sleep(1_000)

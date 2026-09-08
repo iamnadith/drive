@@ -15,15 +15,16 @@ function safeEqual(left: string, right: string): boolean {
   return a.length === b.length && crypto.timingSafeEqual(a, b)
 }
 
-export async function authenticateMigrationOrchestrator(request: Request) {
+export async function authenticateMigrationOrchestrator(request: Request, target: "migration" | "file" = "migration") {
   const settings = await getMigrationOrchestratorSettings()
   const token = tokenFromRequest(request)
+  const expected = target === "file" ? settings.fileScannerSecret : settings.sharedSecret
   return {
     ok:
-      settings.sharedSecret.length >= 24 &&
-      settings.sharedSecret.length <= MAX_SECRET_LENGTH &&
+      expected.length >= 24 &&
+      expected.length <= MAX_SECRET_LENGTH &&
       token.length <= MAX_SECRET_LENGTH &&
-      safeEqual(token, settings.sharedSecret),
+      safeEqual(token, expected),
     settings,
   }
 }
