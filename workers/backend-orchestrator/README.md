@@ -15,7 +15,7 @@ Deploy command: npm run deploy
 Add these build variables/secrets:
 
 - `PANEL_URL`: canonical Drive panel URL, for example `https://drive.example.com`
-- `PANEL_SHARED_SECRET`: a random secret containing at least 24 characters
+- `BACKEND_ORCHESTRATOR_SECRET`: a random secret containing at least 24 characters
 
 The panel may set `DISABLE_POSTGRES_SSL=true` when its PostgreSQL provider requires plaintext connections. The Worker disables SSL by default for Supabase hosts; all other providers use SSL unless this panel variable is explicitly true.
 

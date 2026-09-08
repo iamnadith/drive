@@ -6,7 +6,7 @@ It only selects migrations whose execution mode is `migration_workers`. It never
 
 ## Deploy
 
-Set `PANEL_URL` and `PANEL_SHARED_SECRET` as build environment variables, then run:
+Set `PANEL_URL` and `MIGRATION_ORCHESTRATOR_SECRET` as build environment variables, then run:
 
 ```bash
 npm ci

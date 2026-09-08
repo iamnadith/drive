@@ -12,7 +12,7 @@ if (!response.ok || config?.version !== 1 || !config?.postgresUrl) throw new Err
 const url = new URL(String(config.postgresUrl)); if (url.hostname.endsWith(".pooler.supabase.com") && url.port === "6543") url.port = "5432"
 const directory = mkdtempSync(join(tmpdir(), "drive-file-scanner-")); const secrets = join(directory, "secrets.json")
 try {
-  writeFileSync(secrets, JSON.stringify({ POSTGRES_URL: url.toString(), WORKER_SECRET: sharedSecret, PANEL_URL: panelUrl }), { mode: 0o600 })
+  writeFileSync(secrets, JSON.stringify({ POSTGRES_URL: url.toString(), FILE_SCANNER_SECRET: sharedSecret, PANEL_URL: panelUrl }), { mode: 0o600 })
   const result = spawnSync(process.platform === "win32" ? "npx.cmd" : "npx", ["wrangler", "deploy", "--secrets-file", secrets], { stdio: "inherit", shell: false })
   if (result.status !== 0) process.exit(result.status ?? 1)
 } finally { rmSync(directory, { recursive: true, force: true }) }

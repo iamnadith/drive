@@ -2,7 +2,7 @@ import { Client } from "pg"
 
 type Env = {
   PANEL_URL: string
-  PANEL_SHARED_SECRET: string
+  BACKEND_ORCHESTRATOR_SECRET: string
   POSTGRES_URL: string
   SYNC_INTERVAL_MINUTES: string
   API_EVENTS_RETENTION_DAYS: string
@@ -83,7 +83,7 @@ function panelUrl(env: Env, path: string) {
 
 function authorized(request: Request, env: Env) {
   const header = request.headers.get("authorization") ?? ""
-  return header.startsWith("Bearer ") && header.slice(7).trim() === env.PANEL_SHARED_SECRET.trim()
+  return header.startsWith("Bearer ") && header.slice(7).trim() === env.BACKEND_ORCHESTRATOR_SECRET.trim()
 }
 
 function boundedInteger(value: string, fallback: number, minimum: number, maximum: number) {
@@ -1054,7 +1054,7 @@ async function reconcilePanel(env: Env) {
   try {
     const response = await fetchWithTimeout(panelUrl(env, "/api/internal/backend-orchestrator/reconcile"), {
       method: "POST",
-      headers: { Authorization: `Bearer ${env.PANEL_SHARED_SECRET}` },
+      headers: { Authorization: `Bearer ${env.BACKEND_ORCHESTRATOR_SECRET}` },
     }, 25_000)
     if (response.status === 403) return { ok: false, disabled: true }
     if (!response.ok) return { ok: false, error: `Panel reconciliation failed (${response.status})` }
@@ -1174,7 +1174,7 @@ export default {
     ctx.waitUntil(
       loopback.fetch(new Request("https://internal-backend-orchestrator/run", {
         method: "POST",
-        headers: { Authorization: `Bearer ${env.PANEL_SHARED_SECRET.trim()}` },
+      headers: { Authorization: `Bearer ${env.BACKEND_ORCHESTRATOR_SECRET.trim()}` },
       })).then(async (response) => {
         if (!response.ok) console.error(`Scheduled Backend Orchestrator dispatch failed (${response.status})`)
       }).catch((error) => {

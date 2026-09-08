@@ -4,9 +4,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const panelUrl = String(process.env.PANEL_URL || "").trim().replace(/\/$/, "")
-const sharedSecret = String(process.env.PANEL_SHARED_SECRET || "").trim()
+const sharedSecret = String(process.env.BACKEND_ORCHESTRATOR_SECRET || process.env.PANEL_SHARED_SECRET || "").trim()
 if (!panelUrl || !sharedSecret) {
-  throw new Error("PANEL_URL and PANEL_SHARED_SECRET are required build variables")
+  throw new Error("PANEL_URL and BACKEND_ORCHESTRATOR_SECRET are required build variables")
 }
 if (!/^https:\/\//i.test(panelUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(panelUrl)) {
   throw new Error("PANEL_URL must use HTTPS")
@@ -32,7 +32,7 @@ if (![1, 2].includes(config?.version) || typeof config?.postgresUrl !== "string"
 
 const deployedBindings = {
   PANEL_URL: panelUrl,
-  PANEL_SHARED_SECRET: sharedSecret,
+  BACKEND_ORCHESTRATOR_SECRET: sharedSecret,
   POSTGRES_URL: workerDatabaseUrl(config.postgresUrl),
   SYNC_INTERVAL_MINUTES: String(config.syncIntervalMinutes ?? 1),
   API_EVENTS_RETENTION_DAYS: String(config.retention?.apiEventsDays ?? 7),
