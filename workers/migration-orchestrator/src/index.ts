@@ -261,9 +261,9 @@ async function dispatchWorkers(db: Client, migration: Row) {
 async function wakeFileScanner(db: Client) {
   const result = await db.query(`select value from drive_app_settings where key='migration-orchestrator' limit 1`)
   const settings = result.rows[0]?.value || {}
-  if (!settings.fileScannerUrl || !settings.sharedSecret) return "not_configured"
+  if (!settings.fileScannerUrl || !settings.fileScannerSecret) return "not_configured"
   try {
-    const response = await fetch(`${String(settings.fileScannerUrl).replace(/\/+$/, "")}/run`, { method: "POST", headers: { Authorization: `Bearer ${settings.sharedSecret}` }, signal: AbortSignal.timeout(8_000) })
+    const response = await fetch(`${String(settings.fileScannerUrl).replace(/\/+$/, "")}/run`, { method: "POST", headers: { Authorization: `Bearer ${settings.fileScannerSecret}` }, signal: AbortSignal.timeout(8_000) })
     return response.ok ? "signaled" : `http_${response.status}`
   } catch { return "deferred_to_cron" }
 }

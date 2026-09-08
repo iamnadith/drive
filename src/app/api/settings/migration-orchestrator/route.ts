@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic"
 
 async function callWorker(settings: Awaited<ReturnType<typeof getMigrationOrchestratorSettings>>, worker: "migration" | "file", path: string, method: "GET" | "POST") {
   const baseUrl = worker === "migration" ? settings.orchestratorUrl : settings.fileScannerUrl
-  const workerSecret = settings.sharedSecret
+  const workerSecret = worker === "migration" ? settings.sharedSecret : settings.fileScannerSecret
   if (!baseUrl || workerSecret.length < 24 || workerSecret.length > 512) {
     throw new Error(`Save the ${worker === "migration" ? "Migration Orchestrator" : "File Scanner"} URL and secret first`)
   }
@@ -32,7 +32,7 @@ export async function GET() {
   const settings = await getMigrationOrchestratorSettings()
   const [worker, fileScanner] = await Promise.all([
     settings.orchestratorUrl && settings.sharedSecret.length >= 24 ? callWorker(settings, "migration", "/status", "GET").catch(() => null) : null,
-    settings.fileScannerUrl && settings.sharedSecret.length >= 24 ? callWorker(settings, "file", "/status", "GET").catch(() => null) : null,
+    settings.fileScannerUrl && settings.fileScannerSecret.length >= 24 ? callWorker(settings, "file", "/status", "GET").catch(() => null) : null,
   ])
   return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings), worker, fileScanner }, { headers: { "Cache-Control": "no-store, max-age=0" } })
 }
@@ -41,9 +41,8 @@ export async function PUT(request: Request) {
   const auth = await requireAdmin()
   if (!auth.ok) return auth.response
   try {
-    const body = await request.json().catch(() => ({})) as { orchestratorUrl?: unknown; fileScannerUrl?: unknown; sharedSecret?: unknown }
-    // Saving connection details must not implicitly disable an already-enabled setup.
-    const settings = await saveMigrationOrchestratorSettings({ orchestratorUrl: body.orchestratorUrl, fileScannerUrl: body.fileScannerUrl, sharedSecret: body.sharedSecret })
+    const body = await request.json().catch(() => ({})) as { orchestratorUrl?: unknown; fileScannerUrl?: unknown; sharedSecret?: unknown; fileScannerSecret?: unknown }
+    const settings = await saveMigrationOrchestratorSettings({ enabled: false, orchestratorUrl: body.orchestratorUrl, fileScannerUrl: body.fileScannerUrl, sharedSecret: body.sharedSecret, fileScannerSecret: body.fileScannerSecret })
     return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings) })
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 })

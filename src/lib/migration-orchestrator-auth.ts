@@ -18,7 +18,7 @@ function safeEqual(left: string, right: string): boolean {
 export async function authenticateMigrationOrchestrator(request: Request, target: "migration" | "file" = "migration") {
   const settings = await getMigrationOrchestratorSettings()
   const token = tokenFromRequest(request)
-  const expected = settings.sharedSecret
+  const expected = target === "file" ? settings.fileScannerSecret : settings.sharedSecret
   return {
     ok:
       expected.length >= 24 &&

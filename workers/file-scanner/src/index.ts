@@ -19,7 +19,7 @@ async function authorized(request: Request, env: Env) {
   const supplied = value.slice(7).trim()
   if (authCache && authCache.expiresAt > Date.now()) return safeEqual(supplied, authCache.value)
   return database(env, async (db) => {
-    const result = await db.query(`select coalesce(value->>'sharedSecret',value->>'fileScannerSecret') secret from drive_app_settings where key='migration-orchestrator' limit 1`)
+    const result = await db.query(`select value->>'fileScannerSecret' secret from drive_app_settings where key='migration-orchestrator' limit 1`)
     const expected = String(result.rows[0]?.secret || "")
     if (expected.length >= 24 && expected.length <= MAX_SECRET_LENGTH) authCache = { value: expected, expiresAt: Date.now() + 30_000 }
     return expected.length >= 24 && expected.length <= MAX_SECRET_LENGTH && safeEqual(supplied, expected)
