@@ -1,6 +1,6 @@
 import { Client } from "pg"
 
-type Env = { POSTGRES_URL?: string }
+type Env = { POSTGRES_URL?: string; WORKER_SECRET?: string; PANEL_URL?: string }
 type Row = Record<string, any>
 const BUILD = 3
 const MAX_SECRET_LENGTH = 512
@@ -20,7 +20,7 @@ async function authorized(request: Request, env: Env) {
   if (authCache && authCache.expiresAt > Date.now()) return safeEqual(supplied, authCache.value)
   return database(env, async (db) => {
     const result = await db.query(`select value->>'sharedSecret' secret from drive_app_settings where key='migration-orchestrator' limit 1`)
-    const expected = String(result.rows[0]?.secret || "")
+    const expected = String(env.WORKER_SECRET || result.rows[0]?.secret || "")
     if (expected.length >= 24 && expected.length <= MAX_SECRET_LENGTH) authCache = { value: expected, expiresAt: Date.now() + 30_000 }
     return expected.length >= 24 && expected.length <= MAX_SECRET_LENGTH && safeEqual(supplied, expected)
   }).catch(() => false)
@@ -349,7 +349,7 @@ async function cycle(env: Env) {
     let migrationId: string | null = null
     try {
       const setting = await db.query(`select value from drive_app_settings where key='migration-orchestrator' limit 1`)
-      if (setting.rows[0]?.value?.enabled !== true) return complete(db, owner, null, { ok: true, skipped: "disabled" })
+      if (setting.rows[0]?.value?.migrationEnabled !== true && setting.rows[0]?.value?.enabled !== true) return complete(db, owner, null, { ok: true, skipped: "disabled" })
       const migration = await selectMigration(db)
       if (!migration) return complete(db, owner, null, { ok: true, idle: true })
       migrationId = migration.id

@@ -67,6 +67,7 @@ export default function DashboardSettingsPage() {
   const [fileScannerSecret, setFileScannerSecret] = React.useState("")
   const [fileScannerSavedSecret, setFileScannerSavedSecret] = React.useState("")
   const [migrationOrchestratorEnabled, setMigrationOrchestratorEnabled] = React.useState(false)
+  const [fileScannerEnabled, setFileScannerEnabled] = React.useState(false)
   const [migrationOrchestratorSecretConfigured, setMigrationOrchestratorSecretConfigured] = React.useState(false)
   const [fileScannerSecretConfigured, setFileScannerSecretConfigured] = React.useState(false)
   const [migrationOrchestratorLoaded, setMigrationOrchestratorLoaded] = React.useState(false)
@@ -119,7 +120,7 @@ export default function DashboardSettingsPage() {
   const loadMigrationOrchestratorSettings = React.useCallback(async () => {
     const response = await fetch("/api/settings/migration-orchestrator", { cache: "no-store" })
     const payload = await response.json().catch(() => ({})) as {
-      settings?: { enabled?: boolean; orchestratorUrl?: string; fileScannerUrl?: string; sharedSecret?: string; fileScannerSecret?: string; secretConfigured?: boolean; fileScannerSecretConfigured?: boolean }
+      settings?: { enabled?: boolean; migrationEnabled?: boolean; fileScannerEnabled?: boolean; orchestratorUrl?: string; fileScannerUrl?: string; sharedSecret?: string; fileScannerSecret?: string; secretConfigured?: boolean; fileScannerSecretConfigured?: boolean }
       error?: string
     }
     if (!response.ok) throw new Error(payload.error || "Unable to load Migration Orchestrator settings")
@@ -129,7 +130,8 @@ export default function DashboardSettingsPage() {
     const savedFileUrl = payload.settings?.fileScannerUrl ?? ""
     setFileScannerUrl(savedFileUrl)
     setFileScannerSavedUrl(savedFileUrl)
-    setMigrationOrchestratorEnabled(payload.settings?.enabled === true)
+    setMigrationOrchestratorEnabled(payload.settings?.migrationEnabled === true)
+    setFileScannerEnabled(payload.settings?.fileScannerEnabled === true)
     setMigrationOrchestratorSecretConfigured(payload.settings?.secretConfigured === true)
     setFileScannerSecretConfigured(payload.settings?.fileScannerSecretConfigured === true)
     setMigrationOrchestratorSecret(payload.settings?.sharedSecret ?? "")
@@ -243,15 +245,17 @@ export default function DashboardSettingsPage() {
     } finally { setMigrationOrchestratorBusy(false) }
   }
 
-  const setMigrationOrchestratorActive = async (enabled: boolean) => {
+  const setMigrationOrchestratorActive = async (worker: "migration" | "file", enabled: boolean) => {
     setMigrationOrchestratorBusy(true)
     setMigrationOrchestratorMessage("")
     try {
-      const response = await fetch("/api/settings/migration-orchestrator", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) })
+      const response = await fetch("/api/settings/migration-orchestrator", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ worker, enabled }) })
       const payload = await response.json().catch(() => ({})) as { error?: string }
       if (!response.ok) throw new Error(payload.error || `Unable to ${enabled ? "enable" : "disable"} Migration Orchestrator`)
       await loadMigrationOrchestratorSettings()
-      setMigrationOrchestratorMessage(`Migration Orchestrator ${enabled ? "enabled" : "disabled"}.`)
+      if (worker === "migration") setMigrationOrchestratorEnabled(enabled)
+      else setFileScannerEnabled(enabled)
+      setMigrationOrchestratorMessage(`${worker === "migration" ? "Migration Orchestrator" : "File Scanner"} ${enabled ? "enabled" : "disabled"}.`)
     } catch (error) {
       setMigrationOrchestratorMessage(error instanceof Error ? error.message : String(error))
     } finally {
@@ -492,13 +496,13 @@ export default function DashboardSettingsPage() {
           <CardFooter className="flex flex-wrap gap-2">
             <Button onClick={() => void saveMigrationOrchestratorSettings("migration")} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded}>Save connection</Button>
             <Button variant="outline" onClick={() => void testMigrationOrchestrator("migration")} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || migrationWorkerDirty || !migrationOrchestratorSecretConfigured}>Test worker</Button>
-            <Button variant={migrationOrchestratorEnabled ? "destructive" : "secondary"} onClick={() => void setMigrationOrchestratorActive(!migrationOrchestratorEnabled)} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || (!migrationOrchestratorEnabled && (!migrationOrchestratorUrl || !fileScannerUrl || !migrationOrchestratorSecretConfigured || !fileScannerSecretConfigured))}>{migrationOrchestratorEnabled ? "Disable" : "Enable"}</Button>
+            <Button variant={migrationOrchestratorEnabled ? "destructive" : "secondary"} onClick={() => void setMigrationOrchestratorActive("migration", !migrationOrchestratorEnabled)} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || (!migrationOrchestratorEnabled && (!migrationOrchestratorUrl || !migrationOrchestratorSecretConfigured))}>{migrationOrchestratorEnabled ? "Disable" : "Enable"}</Button>
             <Button variant="outline" onClick={runMigrationOrchestratorNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !migrationOrchestratorEnabled}>Run now</Button>
           </CardFooter>
         </Card>
 
         <Card>
-          <CardHeader><CardTitle>File Scanner</CardTitle><CardDescription>Cloudflare worker that scans source and destination buckets for migration verification.</CardDescription></CardHeader>
+          <CardHeader><CardTitle>File Scanner</CardTitle><CardDescription>Cloudflare worker that scans source and destination buckets for migration verification.</CardDescription><CardAction><Badge variant={fileScannerEnabled ? "default" : "secondary"}>{!migrationOrchestratorLoaded ? "Loading..." : fileScannerEnabled ? "Enabled" : "Disabled"}</Badge></CardAction></CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2"><Label htmlFor="file-scanner-url">Worker URL</Label><Input id="file-scanner-url" value={fileScannerUrl} disabled={!migrationOrchestratorLoaded} onChange={(event) => setFileScannerUrl(event.target.value)} placeholder="https://file-scanner.example.workers.dev" /></div>
             <div className="space-y-2"><Label htmlFor="file-scanner-secret">Worker secret</Label><Input id="file-scanner-secret" type="text" value={fileScannerSecret} disabled={!migrationOrchestratorLoaded} onChange={(event) => setFileScannerSecret(event.target.value)} placeholder="At least 24 characters" /></div>
@@ -507,7 +511,8 @@ export default function DashboardSettingsPage() {
           <CardFooter className="flex flex-wrap gap-2">
             <Button onClick={() => void saveMigrationOrchestratorSettings("file")} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded}>Save connection</Button>
             <Button variant="outline" onClick={() => void testMigrationOrchestrator("file")} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || fileScannerDirty || !fileScannerSecretConfigured}>Test worker</Button>
-            <Button variant="outline" onClick={runFileScannerNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !migrationOrchestratorEnabled}>Run now</Button>
+            <Button variant={fileScannerEnabled ? "destructive" : "secondary"} onClick={() => void setMigrationOrchestratorActive("file", !fileScannerEnabled)} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || (!fileScannerEnabled && (!fileScannerUrl || !fileScannerSecretConfigured))}>{fileScannerEnabled ? "Disable" : "Enable"}</Button>
+            <Button variant="outline" onClick={runFileScannerNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !fileScannerEnabled}>Run now</Button>
           </CardFooter>
         </Card>
       </div>
