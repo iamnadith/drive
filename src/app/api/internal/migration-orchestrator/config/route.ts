@@ -8,6 +8,11 @@ export const dynamic = "force-dynamic"
 function postgresUrl() {
   return (process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL || "").trim()
 }
+function disablePostgresSsl() {
+  const ssl = String(process.env.POSTGRES_SSL || "").trim().toLowerCase()
+  const disabled = String(process.env.DISABLE_POSTGRES_SSL || "").trim().toLowerCase()
+  return ssl === "0" || ssl === "false" || disabled === "1" || disabled === "true"
+}
 
 export async function GET(request: Request) {
   const auth = await authenticateMigrationOrchestrator(request)
@@ -22,6 +27,6 @@ export async function GET(request: Request) {
   return NextResponse.json({
     version: 1,
     postgresUrl: database,
-    disablePostgresSsl: ["1", "true"].includes(String(process.env.DISABLE_POSTGRES_SSL || "").toLowerCase()),
+    disablePostgresSsl: disablePostgresSsl(),
   }, { headers: { "Cache-Control": "no-store, max-age=0" } })
 }

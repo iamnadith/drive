@@ -4,6 +4,12 @@ import { authenticateBackendOrchestrator } from "@/lib/backend-orchestrator-auth
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
+function disablePostgresSsl() {
+  const ssl = String(process.env.POSTGRES_SSL ?? "").trim().toLowerCase()
+  const disabled = String(process.env.DISABLE_POSTGRES_SSL ?? "").trim().toLowerCase()
+  return ssl === "0" || ssl === "false" || disabled === "1" || disabled === "true"
+}
+
 function databaseUrl() {
   return (
     process.env.POSTGRES_URL_NON_POOLING ||
@@ -13,10 +19,6 @@ function databaseUrl() {
   ).trim()
 }
 
-function disablePostgresSsl() {
-  const value = String(process.env.DISABLE_POSTGRES_SSL ?? "").trim().toLowerCase()
-  return value === "1" || value === "true"
-}
 
 export async function GET(request: Request) {
   const auth = await authenticateBackendOrchestrator(request)
