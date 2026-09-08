@@ -53,9 +53,9 @@ async function getWorkerMarker(repo: Repo, token: string): Promise<{ workflow?: 
 type WorkflowFile = { id: string; name: string; path: string; state?: string; content: string }
 class WorkerWorkflowPendingError extends Error {}
 export function isWorkerWorkflow(content: string): boolean {
-  const hasBootstrap = content.includes("DRIVE_MIGRATION_ORCHESTRATOR_URL") && content.includes("secrets[inputs.worker_secret_name]")
+  const hasBootstrap = content.includes("DRIVE_MIGRATION_ORCHESTRATOR_URL") && content.includes("DRIVE_WORKER_SHARED_SECRET")
   return /^\s*workflow_dispatch\s*:/m.test(content) &&
-    ["migration_id", "repair_job_id", "agent_id", "worker_secret_name"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content)) &&
+    ["migration_id", "repair_job_id", "agent_id"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content)) &&
     hasBootstrap &&
     content.includes(WORKFLOW_DIRECTORY)
 }

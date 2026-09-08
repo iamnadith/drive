@@ -241,7 +241,7 @@ async function dispatchWorkers(db: Client, migration: Row) {
     try {
       response = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/workflows/${encodeURIComponent(agent.github_workflow_file || ".github/workflows/migration-worker.yml")}/dispatches`, {
         method: "POST", headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" },
-        body: JSON.stringify({ ref: agent.github_ref || "main", inputs: { migration_id: migration.id, agent_id: agent.id, worker_secret_name: `DRIVE_AGENT_TOKEN_${String(agent.id).replace(/-/g, "").toUpperCase()}` } }), signal: AbortSignal.timeout(20_000),
+        body: JSON.stringify({ ref: agent.github_ref || "main", inputs: { migration_id: migration.id, agent_id: agent.id } }), signal: AbortSignal.timeout(20_000),
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -274,12 +274,12 @@ async function complete(db: Client, owner: string, migrationId: string | null, r
 
 async function workerAuthorized(db: Client, agentId: string, token: unknown): Promise<Row | null> {
   if (typeof token !== "string" || token.length < 24 || token.length > MAX_SECRET_LENGTH) return null
-  const result = await db.query(`select id,name,status,capabilities,registration_token_hash from drive_agents where id=$1 limit 1`, [agentId])
+  const result = await db.query(`select id,name,status,capabilities from drive_agents where id=$1 limit 1`, [agentId])
   const agent = result.rows[0]
-  if (!agent || agent.status === "disabled" || !agent.registration_token_hash) return null
-  const bytes = new TextEncoder().encode(token)
-  const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))).map((value) => value.toString(16).padStart(2, "0")).join("")
-  return safeEqual(hash, String(agent.registration_token_hash)) ? agent : null
+  if (!agent || agent.status === "disabled") return null
+  const settings = await db.query(`select value->>'sharedSecret' secret from drive_app_settings where key='migration-workers' limit 1`)
+  const expected = String(settings.rows[0]?.secret || "")
+  return expected.length >= 24 && expected.length <= MAX_SECRET_LENGTH && safeEqual(token, expected) ? agent : null
 }
 
 async function workerPayload(db: Client, job: Row) {

@@ -220,15 +220,15 @@ test('migration worker workflow exposes the dispatch contract used by the panel'
   assert.match(workflowFile, /run: npm start/)
   assert.match(workflowFile, /AGENT_ID:/)
   assert.match(workflowFile, /SERVER_URL: \$\{\{ secrets\.DRIVE_MIGRATION_ORCHESTRATOR_URL \}\}/)
-  assert.match(workflowFile, /TOKEN: \$\{\{ secrets\[inputs\.worker_secret_name\] \}\}/)
+  assert.match(workflowFile, /TOKEN: \$\{\{ secrets\.DRIVE_WORKER_SHARED_SECRET \}\}/)
   assert.doesNotMatch(workflowFile, /^\s+POSTGRES_URL:/m)
 })
 
-test('workflow compatibility requires the orchestrator URL and per-worker secret contract', () => {
+test('workflow compatibility requires the orchestrator URL and shared worker secret contract', () => {
   const f = fixture([])
   const current = fs.readFileSync(path.resolve('.github/workflows/migration-worker.yml'), 'utf8')
   assert.equal(f.isWorkerWorkflow(current), true)
-  assert.equal(f.isWorkerWorkflow(current.replace('worker_secret_name', 'unrelated_secret_name')), false)
+  assert.equal(f.isWorkerWorkflow(current.replace('DRIVE_WORKER_SHARED_SECRET', 'UNRELATED_SECRET')), false)
   assert.equal(f.isWorkerWorkflow('name: unrelated\non:\n  workflow_dispatch:\n'), false)
 })
 

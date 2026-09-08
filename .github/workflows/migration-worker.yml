@@ -29,9 +29,6 @@ on:
       agent_id:
         description: Agent id requesting dispatch
         required: false
-      worker_secret_name:
-        description: Per-worker GitHub Actions secret name
-        required: false
   repository_dispatch:
     types: [drive-migration-worker]
 
@@ -65,7 +62,7 @@ jobs:
           # workflow is run manually and can make concurrent workers collide.
           DRIVE_MIGRATION_ID: ${{ inputs.migration_id || github.event.client_payload.migration_id || '' }}
           DRIVE_REPAIR_JOB_ID: ${{ inputs.repair_job_id || github.event.client_payload.repair_job_id || '' }}
-          TOKEN: ${{ secrets[inputs.worker_secret_name] }}
+          TOKEN: ${{ secrets.DRIVE_WORKER_SHARED_SECRET }}
           POLL_MS: ${{ vars.POLL_MS || '15000' }}
           HEARTBEAT_MS: ${{ vars.HEARTBEAT_MS || '20000' }}
           MAX_OBJECTS: ${{ vars.MAX_OBJECTS || '2000000' }}

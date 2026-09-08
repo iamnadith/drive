@@ -1,10 +1,11 @@
 import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
-import { createAgentRun, ensureAgentRegistrationToken, getAgentById, getAgentGithubToken, listAgentRunsByAgentId, updateAgent, updateAgentRun } from "@/lib/agents-store"
+import { createAgentRun, getAgentById, getAgentGithubToken, listAgentRunsByAgentId, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { abortRepairJob, createRepairJob, ensureMigrationWorkerJobs, findActiveRepairJobForDispatch, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
 import { GITHUB_TOKEN_COOKIE, listGitHubWorkflowRuns, setGitHubActionsSecret } from "@/lib/github-oauth"
 import { assertWorkerWorkflow } from "@/lib/github-worker-setup"
 import { enrollMigrationWorkerAgent, getMigration, listMigrationItems } from "@/lib/migrations-store"
+import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
 import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
 import { requireAdmin } from "@/lib/server-auth"
 
@@ -38,8 +39,7 @@ async function syncGitHubWorkerSecrets(input: {
   owner: string
   repo: string
   serverUrl: string
-  workerSecret: string
-  workerSecretName: string
+  sharedSecret: string
   agentId?: string
   includeLegacyAgentId?: boolean
 }) {
@@ -55,8 +55,8 @@ async function syncGitHubWorkerSecrets(input: {
       token: input.token,
       owner: input.owner,
       repo: input.repo,
-      name: input.workerSecretName,
-      value: input.workerSecret,
+      name: "DRIVE_WORKER_SHARED_SECRET",
+      value: input.sharedSecret,
     }),
   ]
   if (input.includeLegacyAgentId && input.agentId) {
@@ -69,12 +69,6 @@ async function syncGitHubWorkerSecrets(input: {
     }))
   }
   await Promise.all(writes)
-}
-
-function workerSecretName(agentId: string): string {
-  const compact = agentId.replace(/-/g, "").toUpperCase()
-  if (!/^[0-9A-F]{32}$/.test(compact)) throw new Error("Worker id is invalid")
-  return `DRIVE_AGENT_TOKEN_${compact}`
 }
 
 function sleep(ms: number) {
@@ -235,8 +229,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       )
     }
 
-    const workerSecret = await ensureAgentRegistrationToken(id)
-    const secretName = workerSecretName(id)
+    const sharedSecret = (await getMigrationWorkerSettings()).sharedSecret
+    if (sharedSecret.length < 24 || sharedSecret.length > 512) {
+      return NextResponse.json({ error: "Configure the Migration Worker secret in Settings before dispatching a GitHub worker." }, { status: 409 })
+    }
     const serverUrl = (await getMigrationOrchestratorSettings()).orchestratorUrl
     if (!serverUrl) {
       return NextResponse.json(
@@ -258,7 +254,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const runIdsBeforeDispatch = new Set(runsBeforeDispatch.map((candidate) => candidate.id))
     let secretSyncError: string | null = null
     try {
-      await syncGitHubWorkerSecrets({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, workerSecret, workerSecretName: secretName, agentId: id, includeLegacyAgentId: !workflowSupportsRuntimeInputs })
+      await syncGitHubWorkerSecrets({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, sharedSecret, agentId: id, includeLegacyAgentId: !workflowSupportsRuntimeInputs })
     } catch (error: unknown) {
       secretSyncError = errorMessage(error, "Unable to sync GitHub worker secrets")
     }
@@ -333,10 +329,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
                   migration_id: migrationId,
                   ...(job?.id ? { repair_job_id: job.id } : {}),
                   agent_id: id,
-                  worker_secret_name: secretName,
                   ...Object.fromEntries(
                     Object.entries(dispatchInputs).filter(
-                      ([key]) => !["agent_token", "repair_job_id", "agent_id", "server_url", "worker_secret_name"].includes(key)
+                      ([key]) => !["agent_token", "repair_job_id", "agent_id", "server_url"].includes(key)
                     )
                   ),
                 }
