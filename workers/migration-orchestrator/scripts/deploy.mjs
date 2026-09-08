@@ -12,7 +12,7 @@ if (!response.ok || config?.version !== 1 || !config?.postgresUrl) throw new Err
 const url = new URL(String(config.postgresUrl))
 const directory = mkdtempSync(join(tmpdir(), "drive-migration-orchestrator-")); const secrets = join(directory, "secrets.json")
 try {
-  writeFileSync(secrets, JSON.stringify({ POSTGRES_URL: url.toString(), MIGRATION_ORCHESTRATOR_SECRET: sharedSecret, PANEL_URL: panelUrl }), { mode: 0o600 })
+  writeFileSync(secrets, JSON.stringify({ POSTGRES_URL: url.toString(), MIGRATION_ORCHESTRATOR_SECRET: sharedSecret, PANEL_URL: panelUrl, DISABLE_POSTGRES_SSL: config.disablePostgresSsl === true ? "1" : "0" }), { mode: 0o600 })
   const result = spawnSync(process.platform === "win32" ? "npx.cmd" : "npx", ["wrangler", "deploy", "--secrets-file", secrets], { stdio: "inherit", shell: false })
   if (result.status !== 0) process.exit(result.status ?? 1)
 } finally { rmSync(directory, { recursive: true, force: true }) }
