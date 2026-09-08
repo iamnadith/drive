@@ -11,7 +11,10 @@ import {
 import { Upload } from "@aws-sdk/lib-storage"
 import { createClient as createSupabaseClient } from "@supabase/supabase-js"
 import { Client as PostgresClient } from "pg"
+import { randomUUID } from "crypto"
+import { mkdir, readFile, rename, writeFile } from "fs/promises"
 import os from "os"
+import path from "path"
 import { Transform } from "stream"
 
 function getArg(name, fallback = "") {
@@ -21,7 +24,7 @@ function getArg(name, fallback = "") {
 }
 
 let SERVER_URL = String(getArg("server-url", "")).replace(/\/+$/, "")
-const AGENT_ID = String(getArg("agent-id", ""))
+let AGENT_ID = String(getArg("agent-id", "")).trim()
 let AGENT_TOKEN = String(getArg("token", ""))
 const MIGRATION_ID = String(getArg("migration-id", process.env.DRIVE_MIGRATION_ID || process.env.MIGRATION_ID || ""))
 const REPAIR_JOB_ID = String(getArg("repair-job-id", process.env.DRIVE_REPAIR_JOB_ID || ""))
@@ -68,9 +71,11 @@ const jobAbortControllers = new Map()
 const jobUpdateQueues = new Map()
 const jobClaimTokens = new Map()
 let runtimeConfigurationLoadedAt = 0
+const WORKER_STATE_DIR = path.resolve(String(getArg("state-dir", path.join(process.cwd(), ".drive-worker"))))
+const WORKER_IDENTITY_PATH = path.join(WORKER_STATE_DIR, "identity.json")
 
-if (!AGENT_ID || (!POSTGRES_URL && !supabase)) {
-  console.error("Missing required configuration. Provide --agent-id and POSTGRES_URL.")
+if (!SERVER_URL || AGENT_TOKEN.length < 24) {
+  console.error("Missing required configuration. Provide SERVER_URL and TOKEN (the common Migration Worker secret).")
   process.exit(1)
 }
 
@@ -84,15 +89,76 @@ async function postgres(operation) {
 
 async function loadRuntimeConfiguration(force = false) {
   if (!force && runtimeConfigurationLoadedAt > Date.now() - 60_000) return
-  if (POSTGRES_URL) {
-    const settings = await postgres((db) => db.query(`select key,value from drive_app_settings where key in('migration-workers','orchestration-panel-origin')`))
-    const worker = settings.rows.find((row) => row.key === "migration-workers")?.value || {}
-    const origin = settings.rows.find((row) => row.key === "orchestration-panel-origin")?.value || {}
-    AGENT_TOKEN = String(worker.sharedSecret || AGENT_TOKEN || "")
-    SERVER_URL = String(origin.panelOrigin || SERVER_URL || "").replace(/\/+$/, "")
-  }
-  if (AGENT_TOKEN.length < 24) throw new Error("PostgreSQL does not contain the migration worker secret")
+  if (!SERVER_URL || AGENT_TOKEN.length < 24) throw new Error("SERVER_URL and the common Migration Worker secret are required")
   runtimeConfigurationLoadedAt = Date.now()
+}
+
+function validUuid(value) {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+}
+
+async function readIdentity() {
+  try {
+    const parsed = JSON.parse(await readFile(WORKER_IDENTITY_PATH, "utf8"))
+    if (!validUuid(parsed?.instanceId)) return null
+    return { instanceId: parsed.instanceId, agentId: validUuid(parsed.agentId) ? parsed.agentId : "" }
+  } catch {
+    return null
+  }
+}
+
+async function getOrCreateIdentity() {
+  const existing = await readIdentity()
+  if (existing) return existing
+  await mkdir(WORKER_STATE_DIR, { recursive: true, mode: 0o700 })
+  const identity = { instanceId: randomUUID(), agentId: "" }
+  try {
+    // Exclusive creation makes concurrent starts in one state directory share
+    // one durable instance identity instead of creating duplicate workers.
+    await writeFile(WORKER_IDENTITY_PATH, `${JSON.stringify(identity, null, 2)}\n`, { flag: "wx", mode: 0o600 })
+    return identity
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error
+    const winner = await readIdentity()
+    if (!winner) throw new Error(`Worker identity at ${WORKER_IDENTITY_PATH} is invalid`)
+    return winner
+  }
+}
+
+async function persistIdentity(identity) {
+  await mkdir(WORKER_STATE_DIR, { recursive: true, mode: 0o700 })
+  const temporary = `${WORKER_IDENTITY_PATH}.${process.pid}.${randomUUID()}.tmp`
+  await writeFile(temporary, `${JSON.stringify(identity, null, 2)}\n`, { mode: 0o600 })
+  await rename(temporary, WORKER_IDENTITY_PATH)
+}
+
+async function ensureWorkerIdentity() {
+  if (AGENT_ID) return
+  const identity = await getOrCreateIdentity()
+  const response = await withRetries(
+    "register worker instance",
+    () => fetch(`${SERVER_URL}/workers/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        token: AGENT_TOKEN,
+        instanceId: identity.instanceId,
+        agentId: identity.agentId || undefined,
+        name: `${os.hostname()} migration worker`,
+        host: os.hostname(),
+        version: "worker-v3",
+        capabilities: ["scan", "verify", "repair", "bulk_migrate", "diagnostics"],
+      }),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    }),
+    API_RETRIES
+  )
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok || !validUuid(payload?.agentId)) {
+    throw new Error(payload?.error || `Worker registration failed with HTTP ${response.status}`)
+  }
+  AGENT_ID = payload.agentId
+  if (identity.agentId !== AGENT_ID) await persistIdentity({ ...identity, agentId: AGENT_ID })
 }
 
 function sleep(ms) {
@@ -310,7 +376,7 @@ async function heartbeat(extra = {}) {
   if (!directRequired) {
     try {
       response = await api(
-        `/api/workers/${encodeURIComponent(AGENT_ID)}/heartbeat`,
+        `/workers/${encodeURIComponent(AGENT_ID)}/heartbeat`,
         { token: AGENT_TOKEN, host: os.hostname(), version: "worker-v2", capabilities: ["scan", "verify", "repair", "bulk_migrate", "diagnostics"], metadata: extra },
         { timeoutMs: HEARTBEAT_TIMEOUT_MS, retries: HEARTBEAT_RETRIES }
       )
@@ -370,7 +436,7 @@ async function claimJob() {
   await loadRuntimeConfiguration()
   if (POSTGRES_URL) return claimJobDirectPostgres()
   try {
-    return await api(`/api/workers/${encodeURIComponent(AGENT_ID)}/claim-job`, {
+    return await api(`/workers/${encodeURIComponent(AGENT_ID)}/claim-job`, {
       token: AGENT_TOKEN,
       ...(MIGRATION_ID ? { migrationId: MIGRATION_ID } : {}),
       ...(POOL_MODE ? { pool: true } : {}),
@@ -814,7 +880,7 @@ async function updateJob(jobId, body, options = {}) {
   }
   let response
   try {
-    response = await api(`/api/workers/${encodeURIComponent(AGENT_ID)}/jobs/${encodeURIComponent(jobId)}`, {
+    response = await api(`/workers/${encodeURIComponent(AGENT_ID)}/jobs/${encodeURIComponent(jobId)}`, {
       token: AGENT_TOKEN,
       ...body,
     })
@@ -2405,6 +2471,7 @@ async function runWorkerForever() {
   while (true) {
     try {
       await loadRuntimeConfiguration()
+      await ensureWorkerIdentity()
       await main()
       return
     } catch (error) {

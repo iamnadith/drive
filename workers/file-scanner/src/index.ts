@@ -79,7 +79,9 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
         and v.status in('pending','running') and (v.lease_expires_at is null or v.lease_expires_at<now())
       order by v.updated_at for update of v skip locked limit 1
     )
-    update drive_migration_verification_state v set status='running',lease_owner=$1,lease_expires_at=now()+interval '90 seconds',updated_at=now()
+    update drive_migration_verification_state v set status='running',lease_owner=$1,lease_expires_at=now()+interval '90 seconds',
+      attempt_count=case when v.attempt_generation<>v.generation then 0 else v.attempt_count end,
+      attempt_generation=v.generation,last_error=case when v.attempt_generation<>v.generation then null else v.last_error end,updated_at=now()
     from candidate c where v.migration_item_id=c.migration_item_id
     returning v.*,c.source_bucket,c.target_bucket,c.source_jurisdiction,c.source_account_id,c.target_account_id,c.source_account,c.target_account
   `, [owner])
@@ -88,8 +90,9 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
 async function claimGenericScan(db: Client, owner: string): Promise<Row | null> {
   const result = await db.query(`
     with candidate as (
-      select s.id,s.account_id,s.bucket_name,s.prefix,s.cursor,a.cloudflare_account_id,a.api_token
+      select s.id,s.account_id,s.bucket_name,s.prefix,s.cursor,a.cloudflare_account_id,a.api_token,coalesce(bs.jurisdiction,'default') jurisdiction
       from drive_bucket_scans s join drive_accounts a on a.id=s.account_id
+      left join drive_bucket_settings_snapshots bs on bs.account_id=s.account_id and bs.bucket_name=s.bucket_name
       where s.migration_item_id is null and s.status in('pending','running')
         and (s.lease_expires_at is null or s.lease_expires_at<now())
       order by s.updated_at for update of s skip locked limit 1
@@ -106,14 +109,20 @@ async function ensureScan(db: Client, task: Row, phase: "source" | "destination"
   const id = crypto.randomUUID()
   const accountId = phase === "source" ? task.source_account_id : task.target_account_id
   const bucket = phase === "source" ? task.source_bucket : task.target_bucket
-  await db.query("begin")
-  try {
-    await db.query(`insert into drive_bucket_scans(id,account_id,bucket_name,kind,migration_id,migration_item_id,status,started_at,updated_at) values($1,$2,$3,$4,$5,$6,'running',now(),now())`, [id, accountId, bucket, phase === "source" ? "source" : "dest", task.migration_id, task.migration_item_id])
-    const attached = await db.query(`update drive_migration_verification_state set ${column}=$2,updated_at=now() where migration_item_id=$1 and generation=$3 and lease_owner=$4`, [task.migration_item_id, id, task.generation, task.lease_owner])
-    if (!attached.rowCount) throw new Error("File Scanner task lease was lost")
-    await db.query("commit")
-  } catch (error) { await db.query("rollback"); throw error }
-  return id
+  const attached = await db.query(`
+    with eligible as (
+      select migration_item_id from drive_migration_verification_state
+      where migration_item_id=$6 and generation=$7 and lease_owner=$8 for update
+    ), created as (
+      insert into drive_bucket_scans(id,account_id,bucket_name,kind,migration_id,migration_item_id,status,started_at,updated_at)
+      select $1,$2,$3,$4,$5,$6,'running',now(),now() from eligible returning id
+    ), attached as (
+      update drive_migration_verification_state v set ${column}=c.id,updated_at=now()
+      from created c where v.migration_item_id=$6 and v.generation=$7 and v.lease_owner=$8 returning c.id
+    ) select id from attached
+  `, [id, accountId, bucket, phase === "source" ? "source" : "dest", task.migration_id, task.migration_item_id, task.generation, task.lease_owner])
+  if (!attached.rowCount) throw new Error("File Scanner task lease was lost")
+  return attached.rows[0].id
 }
 async function storePage(db: Client, scanId: string, objects: Row[]) {
   if (!objects.length) return
@@ -125,25 +134,54 @@ async function storePage(db: Client, scanId: string, objects: Row[]) {
   `, [scanId, JSON.stringify(objects)])
 }
 async function compare(db: Client, task: Row) {
-  await db.query(`delete from drive_bucket_verify_diffs where migration_item_id=$1`, [task.migration_item_id])
-  await db.query(`
-    insert into drive_bucket_verify_diffs(id,migration_item_id,source_scan_id,dest_scan_id,kind,key,source_size,dest_size)
-    select gen_random_uuid(),$1,$2,$3,case when d.key is null then 'missing' else 'size_mismatch' end,s.key,s.size,d.size
-    from drive_bucket_scan_objects s left join drive_bucket_scan_objects d on d.scan_id=$3 and d.key=s.key
-    where s.scan_id=$2 and (
-      d.key is null or d.size<>s.size or
-      (trim(both '"' from coalesce(s.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from coalesce(d.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from s.etag)<>trim(both '"' from d.etag))
-    );
-    insert into drive_bucket_verify_diffs(id,migration_item_id,source_scan_id,dest_scan_id,kind,key,source_size,dest_size)
-    select gen_random_uuid(),$1,$2,$3,'extra',d.key,null,d.size from drive_bucket_scan_objects d
-    left join drive_bucket_scan_objects s on s.scan_id=$2 and s.key=d.key where d.scan_id=$3 and s.key is null;
-  `, [task.migration_item_id, task.source_scan_id, task.destination_scan_id])
-  const counts = await db.query(`select count(*) filter(where kind='missing')::int missing,count(*) filter(where kind='size_mismatch')::int mismatched,count(*) filter(where kind='extra')::int extra from drive_bucket_verify_diffs where migration_item_id=$1`, [task.migration_item_id])
-  const value = counts.rows[0]
-  const completed = await db.query(`update drive_migration_verification_state set status='completed',phase='complete',missing_objects=$2,mismatched_objects=$3,extra_objects=$4,lease_owner=null,lease_expires_at=null,completed_at=now(),updated_at=now() where migration_item_id=$1 and generation=$5 and lease_owner=$6`, [task.migration_item_id, value.missing, value.mismatched, value.extra, task.generation, task.lease_owner])
-  if (!completed.rowCount) throw new Error("File Scanner task lease was lost")
-  await db.query(`update drive_migration_items set source_objects=$2,source_bytes=$3,last_progress_at=now(),updated_at=now(),progress=jsonb_set(jsonb_set(coalesce(progress,'{}'::jsonb),'{fileVerification}',jsonb_build_object('status','completed','missing',$4::int,'mismatched',$5::int,'extra',$6::int,'generation',$7::int,'completedAt',now())), '{stage}','"file_verification_completed"'::jsonb) where id=$1`, [task.migration_item_id, task.source_objects, task.source_bytes, value.missing, value.mismatched, value.extra, task.generation])
-  return { missing: Number(value.missing), mismatched: Number(value.mismatched), extra: Number(value.extra) }
+  await db.query("begin")
+  try {
+    const locked = await db.query(`
+      with guard as (
+        select migration_item_id from drive_migration_verification_state
+        where migration_item_id=$1 and generation=$2 and lease_owner=$3 for update
+      ), deleted as (
+        delete from drive_bucket_verify_diffs d using guard g where d.migration_item_id=g.migration_item_id returning d.id
+      ) select exists(select 1 from guard) acquired
+    `, [task.migration_item_id, task.generation, task.lease_owner])
+    if (locked.rows[0]?.acquired !== true) throw new Error("File Scanner task lease was lost")
+    const completed = await db.query(`
+      with source_diffs as (
+        insert into drive_bucket_verify_diffs(id,migration_item_id,source_scan_id,dest_scan_id,kind,key,source_size,dest_size)
+        select gen_random_uuid(),$1,$2,$3,case when d.key is null then 'missing' else 'size_mismatch' end,s.key,s.size,d.size
+        from drive_bucket_scan_objects s left join drive_bucket_scan_objects d on d.scan_id=$3 and d.key=s.key
+        where s.scan_id=$2 and (
+          d.key is null or d.size<>s.size or
+          (trim(both '"' from coalesce(s.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from coalesce(d.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from s.etag)<>trim(both '"' from d.etag))
+        ) returning kind
+      ), extra_diffs as (
+        insert into drive_bucket_verify_diffs(id,migration_item_id,source_scan_id,dest_scan_id,kind,key,source_size,dest_size)
+        select gen_random_uuid(),$1,$2,$3,'extra',d.key,null,d.size from drive_bucket_scan_objects d
+        left join drive_bucket_scan_objects s on s.scan_id=$2 and s.key=d.key where d.scan_id=$3 and s.key is null
+        returning kind
+      ), counts as (
+        select count(*) filter(where kind='missing')::int missing,
+          count(*) filter(where kind='size_mismatch')::int mismatched,
+          count(*) filter(where kind='extra')::int extra
+        from (select kind from source_diffs union all select kind from extra_diffs) all_diffs
+      ), state_done as (
+        update drive_migration_verification_state v set status='completed',phase='complete',missing_objects=c.missing,
+          mismatched_objects=c.mismatched,extra_objects=c.extra,lease_owner=null,lease_expires_at=null,completed_at=now(),updated_at=now()
+        from counts c where v.migration_item_id=$1 and v.generation=$4 and v.lease_owner=$5
+        returning c.missing,c.mismatched,c.extra
+      ), item_done as (
+        update drive_migration_items i set source_objects=$6,source_bytes=$7,last_progress_at=now(),updated_at=now(),
+          progress=jsonb_set(jsonb_set(coalesce(i.progress,'{}'::jsonb),'{fileVerification}',jsonb_build_object(
+            'status','completed','missing',s.missing,'mismatched',s.mismatched,'extra',s.extra,'generation',$4::int,'completedAt',now()
+          )), '{stage}','"file_verification_completed"'::jsonb)
+        from state_done s where i.id=$1 returning i.id
+      ) select missing,mismatched,extra from state_done
+    `, [task.migration_item_id, task.source_scan_id, task.destination_scan_id, task.generation, task.lease_owner, task.source_objects, task.source_bytes])
+    if (!completed.rowCount) throw new Error("File Scanner task lease was lost")
+    await db.query("commit")
+    const value = completed.rows[0]
+    return { missing: Number(value.missing), mismatched: Number(value.mismatched), extra: Number(value.extra) }
+  } catch (error) { await db.query("rollback"); throw error }
 }
 async function wakeMigrationOrchestrator(db: Client) {
   const result = await db.query(`select value from drive_app_settings where key='migration-orchestrator' limit 1`)

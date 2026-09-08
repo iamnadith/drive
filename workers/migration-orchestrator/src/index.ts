@@ -2,7 +2,7 @@ import { Client } from "pg"
 
 type Env = { POSTGRES_URL?: string }
 type Row = Record<string, any>
-const BUILD = 2
+const BUILD = 3
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string; expiresAt: number } | null = null
 
@@ -37,10 +37,12 @@ async function ensureSchema(db: Client) {
   await db.query(`
     create table if not exists drive_migration_orchestrator_state (
       id boolean primary key default true check (id), status text not null default 'idle', orchestrator_url text,
-      last_started_at timestamptz, last_completed_at timestamptz, last_error text,
+      lease_owner text, lease_expires_at timestamptz, last_started_at timestamptz, last_completed_at timestamptz, last_error text,
       last_migration_id uuid references drive_migrations(id) on delete set null,
       last_result jsonb not null default '{}'::jsonb, cycle_count bigint not null default 0, updated_at timestamptz not null default now()
     );
+    alter table if exists drive_migration_orchestrator_state add column if not exists lease_owner text;
+    alter table if exists drive_migration_orchestrator_state add column if not exists lease_expires_at timestamptz;
     create table if not exists drive_migration_verification_state (
       migration_item_id uuid primary key references drive_migration_items(id) on delete cascade,
       migration_id uuid not null references drive_migrations(id) on delete cascade, generation integer not null default 1,
@@ -59,13 +61,17 @@ function integer(value: unknown, fallback: number, min: number, max: number) {
 }
 async function acquire(db: Client, owner: string) {
   const result = await db.query(`
-    insert into drive_migration_orchestrator_state(id,status,lease_owner,last_started_at,last_error,updated_at)
-    values(true,'running',$1,now(),null,now())
-    on conflict(id) do update set status='running',lease_owner=$1,last_started_at=now(),last_error=null,updated_at=now()
-      where drive_migration_orchestrator_state.status<>'running' or drive_migration_orchestrator_state.last_started_at<now()-interval '150 seconds'
+    insert into drive_migration_orchestrator_state(id,status,lease_owner,lease_expires_at,last_started_at,last_error,updated_at)
+    values(true,'running',$1,now()+interval '150 seconds',now(),null,now())
+    on conflict(id) do update set status='running',lease_owner=$1,lease_expires_at=now()+interval '150 seconds',last_started_at=now(),last_error=null,updated_at=now()
+      where drive_migration_orchestrator_state.status<>'running' or drive_migration_orchestrator_state.lease_expires_at is null or drive_migration_orchestrator_state.lease_expires_at<now()
     returning id
   `, [owner])
   return result.rowCount === 1
+}
+async function renew(db: Client, owner: string) {
+  const result = await db.query(`update drive_migration_orchestrator_state set lease_expires_at=now()+interval '150 seconds',updated_at=now() where id=true and status='running' and lease_owner=$1 returning id`, [owner])
+  if (result.rowCount !== 1) throw new Error("Migration Orchestrator lease was lost")
 }
 async function selectMigration(db: Client): Promise<Row | null> {
   const result = await db.query(`select * from drive_migrations where status in ('running','verifying') and options->>'executionMode'='migration_workers' order by coalesce(last_synced_at,created_at),created_at limit 1`)
@@ -235,7 +241,7 @@ async function dispatchWorkers(db: Client, migration: Row) {
     try {
       response = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/workflows/${encodeURIComponent(agent.github_workflow_file || ".github/workflows/migration-worker.yml")}/dispatches`, {
         method: "POST", headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" },
-        body: JSON.stringify({ ref: agent.github_ref || "main", inputs: { migration_id: migration.id, agent_id: agent.id } }), signal: AbortSignal.timeout(20_000),
+        body: JSON.stringify({ ref: agent.github_ref || "main", inputs: { migration_id: migration.id, agent_id: agent.id, worker_secret_name: `DRIVE_AGENT_TOKEN_${String(agent.id).replace(/-/g, "").toUpperCase()}` } }), signal: AbortSignal.timeout(20_000),
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -262,8 +268,79 @@ async function wakeFileScanner(db: Client) {
   } catch { return "deferred_to_cron" }
 }
 async function complete(db: Client, owner: string, migrationId: string | null, result: Row) {
-  await db.query(`update drive_migration_orchestrator_state set status='idle',lease_owner=null,last_completed_at=now(),last_error=null,last_migration_id=$1,last_result=$2::jsonb,cycle_count=cycle_count+1,updated_at=now() where id=true and lease_owner=$3`, [migrationId, JSON.stringify(result), owner])
+  await db.query(`update drive_migration_orchestrator_state set status='idle',lease_owner=null,lease_expires_at=null,last_completed_at=now(),last_error=null,last_migration_id=$1,last_result=$2::jsonb,cycle_count=cycle_count+1,updated_at=now() where id=true and lease_owner=$3`, [migrationId, JSON.stringify(result), owner])
   return result
+}
+
+async function workerAuthorized(db: Client, agentId: string, token: unknown): Promise<Row | null> {
+  if (typeof token !== "string" || token.length < 24 || token.length > MAX_SECRET_LENGTH) return null
+  const result = await db.query(`select id,name,status,capabilities,registration_token_hash from drive_agents where id=$1 limit 1`, [agentId])
+  const agent = result.rows[0]
+  if (!agent || agent.status === "disabled" || !agent.registration_token_hash) return null
+  const bytes = new TextEncoder().encode(token)
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))).map((value) => value.toString(16).padStart(2, "0")).join("")
+  return safeEqual(hash, String(agent.registration_token_hash)) ? agent : null
+}
+
+async function workerPayload(db: Client, job: Row) {
+  const migrationResult = await db.query(`select * from drive_migrations where id=$1 limit 1`, [job.migration_id])
+  const migration = migrationResult.rows[0]
+  if (!migration) throw new Error("Migration not found")
+  const accounts = await db.query(`select id,cloudflare_account_id,r2_access_key_id,r2_secret_access_key from drive_accounts where id in($1,$2)`, [migration.source_account_id, migration.target_account_id])
+  const source = accounts.rows.find((row) => row.id === migration.source_account_id)
+  const target = accounts.rows.find((row) => row.id === migration.target_account_id)
+  if (!source?.cloudflare_account_id || !target?.cloudflare_account_id) throw new Error("Migration accounts are incomplete")
+  const items = await db.query(`select * from drive_migration_items where migration_id=$1 order by created_at`, [migration.id])
+  const requested = new Set(Array.isArray(job.payload?.itemIds) ? job.payload.itemIds : [])
+  const selected = requested.size ? items.rows.filter((item) => requested.has(item.id)) : items.rows
+  return {
+    job: { id: job.id, mode: job.mode, migrationId: migration.id, verifyAllBuckets: true, strictCompletion: true, kind: job.payload?.kind },
+    ...(job.payload?.workerShard ? { workerShard: job.payload.workerShard } : {}),
+    ...(typeof job.payload?.workerGeneration === "number" ? { workerGeneration: job.payload.workerGeneration } : {}),
+    migration: { id: migration.id, options: migration.options || {}, pathPrefix: migration.options?.pathPrefix || null },
+    source: { accountId: source.cloudflare_account_id, accessKeyId: source.r2_access_key_id, secretAccessKey: source.r2_secret_access_key },
+    target: { accountId: target.cloudflare_account_id, accessKeyId: target.r2_access_key_id, secretAccessKey: target.r2_secret_access_key },
+    items: selected.map((item) => ({ id: item.id, sourceBucket: item.source_bucket, targetBucket: item.target_bucket, sourceObjects: Number(item.source_objects || 0), sourceBytes: Number(item.source_bytes || 0), slurperStatus: item.slurper_status, progress: item.progress || {} })),
+  }
+}
+
+async function workerRequest(request: Request, env: Env, path: string) {
+  const body = await request.json().catch(() => ({})) as Row
+  const match = /^\/workers\/([0-9a-f-]{36})(?:\/(heartbeat|claim-job|jobs\/([0-9a-f-]{36})))?$/i.exec(path)
+  if (!match) return json({ error: "Not found" }, 404)
+  return database(env, async (db) => {
+    const agent = await workerAuthorized(db, match[1], body.token)
+    if (!agent) return json({ error: "Invalid worker secret" }, 401)
+    const action = match[2] || "register"
+    const now = new Date().toISOString()
+    if (action === "register" || action === "heartbeat") {
+      await db.query(`update drive_agents set status='online',last_heartbeat_at=now(),last_seen_host=$2,last_seen_version=$3,capabilities=case when jsonb_array_length($4::jsonb)>0 then $4::jsonb else capabilities end,metadata=coalesce(metadata,'{}'::jsonb)||$5::jsonb,updated_at=now(),last_error=null where id=$1 and status<>'disabled'`, [agent.id, String(body.host || "").slice(0, 255) || null, String(body.version || "").slice(0, 80) || null, JSON.stringify(Array.isArray(body.capabilities) ? body.capabilities : []), JSON.stringify(body.metadata && typeof body.metadata === "object" ? body.metadata : {})])
+      return json({ ok: true, agentId: agent.id })
+    }
+    if (action === "claim-job") {
+      const migrationId = typeof body.migrationId === "string" ? body.migrationId : ""
+      if (!migrationId || body.pool !== true) return json({ error: "Migration worker claims require a pool migration id" }, 409)
+      if (!Array.isArray(agent.capabilities) || !agent.capabilities.includes("bulk_migrate")) return json({ error: "Worker is not registered for bulk migrations" }, 409)
+      await db.query("begin")
+      try {
+        const candidate = await db.query(`select * from drive_repair_jobs where migration_id=$1 and status='pending' and work_key like 'migration:%:generation:%:shard:%' order by created_at for update skip locked limit 1`, [migrationId])
+        const job = candidate.rows[0]
+        if (!job) { await db.query("commit"); return json({ ok: true, job: null }) }
+        const claimed = await db.query(`update drive_repair_jobs set status='running',claimed_by_agent_id=$2,claim_token=gen_random_uuid(),claimed_at=now(),started_at=coalesce(started_at,now()),last_heartbeat_at=now(),summary=$3,updated_at=now() where id=$1 returning *`, [job.id, agent.id, `Claimed by ${agent.name}`])
+        await db.query("commit")
+        const claimedJob = claimed.rows[0]
+        return json({ ok: true, job: { id: claimedJob.id, migrationId, mode: claimedJob.mode, payload: claimedJob.payload || {} }, payload: await workerPayload(db, claimedJob) })
+      } catch (error) { await db.query("rollback").catch(() => undefined); throw error }
+    }
+    const jobId = match[3]
+    const current = (await db.query(`select * from drive_repair_jobs where id=$1 and claimed_by_agent_id=$2 limit 1`, [jobId, agent.id])).rows[0]
+    if (!current) return json({ error: "This job is no longer owned by this worker" }, 409)
+    if (current.status === "canceled") return json({ ok: true, canceled: true, job: current })
+    const status = ["pending", "claimed", "running", "completed", "failed", "canceled"].includes(String(body.status)) ? String(body.status) : current.status
+    const updated = await db.query(`update drive_repair_jobs set status=$3,progress=coalesce(progress,'{}'::jsonb)||$4::jsonb,result=coalesce(result,'{}'::jsonb)||$5::jsonb,summary=coalesce($6,summary),error=coalesce($7,error),last_heartbeat_at=now(),completed_at=case when $3 in ('completed','failed','canceled') then now() else completed_at end,updated_at=now() where id=$1 and claimed_by_agent_id=$2 returning *`, [jobId, agent.id, status, JSON.stringify(body.progress && typeof body.progress === "object" ? body.progress : {}), JSON.stringify(body.result && typeof body.result === "object" ? body.result : {}), typeof body.summary === "string" ? body.summary.slice(0, 2000) : null, typeof body.error === "string" ? body.error.slice(0, 4000) : null])
+    await db.query(`update drive_agents set last_heartbeat_at=now(),status=case when $2 in ('completed','failed','canceled') then 'offline' else 'online' end,updated_at=now() where id=$1`, [agent.id, status])
+    return json({ ok: true, job: updated.rows[0] })
+  })
 }
 async function cycle(env: Env) {
   return database(env, async (db) => {
@@ -278,10 +355,12 @@ async function cycle(env: Env) {
       migrationId = migration.id
       const shards = await ensureShards(db, migration)
       const recovered = await recoverJobs(db, migration.id, shards.generation, shards.shardCount)
+      await renew(db, owner)
       const finalized = shards.terminalFailure
         ? { complete: false, terminalFailure: true, jobs: {} }
         : await finalizeShards(db, migration, shards.generation, shards.shardCount)
       const verification = finalized.complete ? await finishOrRepair(db, migration, shards.generation) : { verification: "waiting_for_shards" }
+      await renew(db, owner)
       const fileScanner = finalized.complete && verification.verification === "pending" ? await wakeFileScanner(db) : "not_needed"
       const current = (await db.query(`select * from drive_migrations where id=$1`, [migration.id])).rows[0]
       const dispatched = current?.status === "running" ? await dispatchWorkers(db, current) : 0
@@ -289,7 +368,7 @@ async function cycle(env: Env) {
       return complete(db, owner, migration.id, { ok: true, migrationId, ...shards, recovered, finalized, ...verification, fileScanner, dispatched })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      await db.query(`update drive_migration_orchestrator_state set status='error',lease_owner=null,last_completed_at=now(),last_error=$1,last_migration_id=$2,last_result=$3::jsonb,updated_at=now() where id=true and lease_owner=$4`, [message, migrationId, JSON.stringify({ ok: false, error: message }), owner]).catch(() => undefined)
+      await db.query(`update drive_migration_orchestrator_state set status='error',lease_owner=null,lease_expires_at=null,last_completed_at=now(),last_error=$1,last_migration_id=$2,last_result=$3::jsonb,updated_at=now() where id=true and lease_owner=$4`, [message, migrationId, JSON.stringify({ ok: false, error: message }), owner]).catch(() => undefined)
       throw error
     }
   })
@@ -298,6 +377,9 @@ async function cycle(env: Env) {
 export default {
   async fetch(request: Request, env: Env) {
     const url = new URL(request.url)
+    if (url.pathname.startsWith("/workers/") && request.method === "POST") {
+      try { return await workerRequest(request, env, url.pathname) } catch (error) { return json({ error: error instanceof Error ? error.message : String(error) }, 503) }
+    }
     if (url.pathname === "/" || url.pathname === "/health") {
       return json({ ok: true, service: "migration-orchestrator", build: BUILD })
     }

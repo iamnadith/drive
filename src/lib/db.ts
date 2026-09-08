@@ -979,6 +979,7 @@ export async function ensureDriveSchema(): Promise<void> {
           github_repository_id text,
           github_token text,
           notes text,
+          runtime_instance_id text,
           registration_token text,
           registration_token_hash text,
           last_heartbeat_at timestamptz,
@@ -995,6 +996,11 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(`create index if not exists drive_agents_status_idx on drive_agents (status);`)
       await queryDb(`create index if not exists drive_agents_provider_idx on drive_agents (provider);`)
       await queryDb(`create index if not exists drive_agents_category_idx on drive_agents (category);`)
+      // `create table if not exists` does not evolve existing installations.
+      // The runtime identity is how an autonomous worker recovers its durable
+      // registration without creating another dashboard worker after a restart.
+      await queryDb(`alter table if exists drive_agents add column if not exists runtime_instance_id text;`)
+      await queryDb(`create unique index if not exists drive_agents_runtime_instance_unique on drive_agents (runtime_instance_id) where runtime_instance_id is not null;`)
       await queryDb(`
         update drive_agents
         set github_workflow_file = '.github/workflows/migration-worker.yml', updated_at = now()
@@ -1119,6 +1125,7 @@ export async function ensureDriveSchema(): Promise<void> {
           id boolean primary key default true check (id),
           status text not null default 'idle',
           lease_owner text,
+          lease_expires_at timestamptz,
           orchestrator_url text,
           last_started_at timestamptz,
           last_completed_at timestamptz,
@@ -1130,6 +1137,7 @@ export async function ensureDriveSchema(): Promise<void> {
         );
       `)
       await queryDb(`alter table if exists drive_migration_orchestrator_state add column if not exists lease_owner text;`)
+      await queryDb(`alter table if exists drive_migration_orchestrator_state add column if not exists lease_expires_at timestamptz;`)
       await queryDb(`
         create table if not exists drive_migration_verification_state (
           migration_item_id uuid primary key references drive_migration_items(id) on delete cascade,

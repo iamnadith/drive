@@ -1,11 +1,11 @@
 import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
-import { createAgentRun, getAgentById, getAgentGithubToken, listAgentRunsByAgentId, updateAgent, updateAgentRun } from "@/lib/agents-store"
+import { createAgentRun, ensureAgentRegistrationToken, getAgentById, getAgentGithubToken, listAgentRunsByAgentId, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { abortRepairJob, createRepairJob, ensureMigrationWorkerJobs, findActiveRepairJobForDispatch, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
 import { GITHUB_TOKEN_COOKIE, listGitHubWorkflowRuns, setGitHubActionsSecret } from "@/lib/github-oauth"
+import { assertWorkerWorkflow } from "@/lib/github-worker-setup"
 import { enrollMigrationWorkerAgent, getMigration, listMigrationItems } from "@/lib/migrations-store"
-import { queryDb } from "@/lib/db"
-import { getMigrationWorkerSharedSecret } from "@/lib/migration-worker-settings-store"
+import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
 import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
@@ -38,7 +38,8 @@ async function syncGitHubWorkerSecrets(input: {
   owner: string
   repo: string
   serverUrl: string
-  sharedSecret: string
+  workerSecret: string
+  workerSecretName: string
   agentId?: string
   includeLegacyAgentId?: boolean
 }) {
@@ -47,15 +48,15 @@ async function syncGitHubWorkerSecrets(input: {
       token: input.token,
       owner: input.owner,
       repo: input.repo,
-      name: "DRIVE_SERVER_URL",
+      name: "DRIVE_MIGRATION_ORCHESTRATOR_URL",
       value: input.serverUrl,
     }),
     setGitHubActionsSecret({
       token: input.token,
       owner: input.owner,
       repo: input.repo,
-      name: "DRIVE_WORKER_SHARED_SECRET",
-      value: input.sharedSecret,
+      name: input.workerSecretName,
+      value: input.workerSecret,
     }),
   ]
   if (input.includeLegacyAgentId && input.agentId) {
@@ -70,8 +71,10 @@ async function syncGitHubWorkerSecrets(input: {
   await Promise.all(writes)
 }
 
-function isUnexpectedWorkflowInputsError(status: number, text: string): boolean {
-  return status === 422 && /unexpected inputs provided/i.test(text)
+function workerSecretName(agentId: string): string {
+  const compact = agentId.replace(/-/g, "").toUpperCase()
+  if (!/^[0-9A-F]{32}$/.test(compact)) throw new Error("Worker id is invalid")
+  return `DRIVE_AGENT_TOKEN_${compact}`
 }
 
 function sleep(ms: number) {
@@ -232,26 +235,16 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       )
     }
 
-    const sharedSecret = await getMigrationWorkerSharedSecret()
-    if (sharedSecret.length < 24 || sharedSecret.length > 512) {
+    const workerSecret = await ensureAgentRegistrationToken(id)
+    const secretName = workerSecretName(id)
+    const serverUrl = (await getMigrationOrchestratorSettings()).orchestratorUrl
+    if (!serverUrl) {
       return NextResponse.json(
-        { error: "Configure a Migration Worker shared secret between 24 and 512 characters in Settings before dispatching a GitHub worker." },
+        { error: "Configure the Migration Orchestrator URL in Settings before dispatching a GitHub worker." },
         { status: 409 }
       )
     }
-
-    const serverUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || new URL(request.url).origin).replace(/\/+$/, "")
-    const postgresUrl = (process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL || "").trim()
-    if (!postgresUrl) {
-      return NextResponse.json(
-        { error: "PostgreSQL URL is required for autonomous worker recovery" },
-        { status: 503 }
-      )
-    }
-    await queryDb(
-      `insert into drive_app_settings(key,value,updated_at) values('orchestration-panel-origin',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`,
-      [JSON.stringify({ panelOrigin: serverUrl })]
-    )
+    await assertWorkerWorkflow({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, ref: agent.githubRef || "main", workflow: githubWorkflowFile })
     const dispatchRequestedAt = new Date().toISOString()
     const runsBeforeDispatch = await listGitHubWorkflowRuns({
       token: githubToken,
@@ -265,10 +258,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const runIdsBeforeDispatch = new Set(runsBeforeDispatch.map((candidate) => candidate.id))
     let secretSyncError: string | null = null
     try {
-      if (!workflowSupportsRuntimeInputs) {
-        await syncGitHubWorkerSecrets({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, sharedSecret, agentId: id, includeLegacyAgentId: true })
-      }
-      await setGitHubActionsSecret({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, name: "POSTGRES_URL", value: postgresUrl })
+      await syncGitHubWorkerSecrets({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, workerSecret, workerSecretName: secretName, agentId: id, includeLegacyAgentId: !workflowSupportsRuntimeInputs })
     } catch (error: unknown) {
       secretSyncError = errorMessage(error, "Unable to sync GitHub worker secrets")
     }
@@ -343,9 +333,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
                   migration_id: migrationId,
                   ...(job?.id ? { repair_job_id: job.id } : {}),
                   agent_id: id,
+                  worker_secret_name: secretName,
                   ...Object.fromEntries(
                     Object.entries(dispatchInputs).filter(
-                      ([key]) => !["agent_token", "repair_job_id", "agent_id", "server_url"].includes(key)
+                      ([key]) => !["agent_token", "repair_job_id", "agent_id", "server_url", "worker_secret_name"].includes(key)
                     )
                   ),
                 }
@@ -360,13 +351,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       response = await dispatchWorkflow(workflowSupportsRuntimeInputs)
       if (!response.ok && workflowSupportsRuntimeInputs) {
         const firstBody = await response.text().catch(() => "")
-        if (isUnexpectedWorkflowInputsError(response.status, firstBody)) {
-          usedRuntimeInputs = false
-          await syncGitHubWorkerSecrets({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, sharedSecret, agentId: id, includeLegacyAgentId: true })
-          response = await dispatchWorkflow(false)
-        } else {
-          response = new Response(firstBody, { status: response.status, statusText: response.statusText, headers: response.headers })
-        }
+        // An older workflow cannot safely receive a per-worker credential:
+        // retrying without inputs would start it with no identity or secret.
+        response = new Response(firstBody, { status: response.status, statusText: response.statusText, headers: response.headers })
       }
     } catch (error: unknown) {
       if (job?.id) await abortRepairJob(job.id).catch(() => undefined)

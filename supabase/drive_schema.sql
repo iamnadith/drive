@@ -860,6 +860,7 @@ create table if not exists drive_agents (
   github_repository_id text,
   github_token text,
   notes text,
+  runtime_instance_id text,
   registration_token text,
   registration_token_hash text,
   last_heartbeat_at timestamptz,
@@ -875,6 +876,8 @@ create table if not exists drive_agents (
 create index if not exists drive_agents_status_idx on drive_agents (status);
 create index if not exists drive_agents_provider_idx on drive_agents (provider);
 create index if not exists drive_agents_category_idx on drive_agents (category);
+create unique index if not exists drive_agents_runtime_instance_unique
+  on drive_agents (runtime_instance_id) where runtime_instance_id is not null;
 
 update drive_agents
 set github_workflow_file = '.github/workflows/migration-worker.yml', updated_at = now()

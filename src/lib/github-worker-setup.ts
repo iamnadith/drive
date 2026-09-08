@@ -52,13 +52,23 @@ async function getWorkerMarker(repo: Repo, token: string): Promise<{ workflow?: 
 
 type WorkflowFile = { id: string; name: string; path: string; state?: string; content: string }
 class WorkerWorkflowPendingError extends Error {}
-function isWorkerWorkflow(content: string): boolean {
-  const hasBootstrap = /^\s*POSTGRES_URL\s*:/m.test(content) ||
-    ["server_url", "agent_token"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content))
+export function isWorkerWorkflow(content: string): boolean {
+  const hasBootstrap = content.includes("DRIVE_MIGRATION_ORCHESTRATOR_URL") && content.includes("secrets[inputs.worker_secret_name]")
   return /^\s*workflow_dispatch\s*:/m.test(content) &&
-    ["migration_id", "repair_job_id", "agent_id"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content)) &&
+    ["migration_id", "repair_job_id", "agent_id", "worker_secret_name"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content)) &&
     hasBootstrap &&
     content.includes(WORKFLOW_DIRECTORY)
+}
+
+export async function assertWorkerWorkflow(input: { token: string; owner: string; repo: string; ref: string; workflow: string }) {
+  if (!/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(input.workflow)) throw new Error("Select a valid GitHub Actions workflow file")
+  const file = await githubApi<{ type?: string; encoding?: string; content?: string }>(
+    `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/contents/${contentPath(input.workflow)}?ref=${encodeURIComponent(input.ref)}`,
+    input.token
+  )
+  if (file.type !== "file" || file.encoding !== "base64" || !file.content) throw new Error("Selected migration worker workflow is missing or unreadable")
+  const content = Buffer.from(file.content, "base64").toString("utf8")
+  if (!isWorkerWorkflow(content)) throw new Error("Selected workflow is not a compatible Drive Migration Worker workflow")
 }
 
 async function detectWorkerWorkflow(repo: Repo, token: string): Promise<WorkflowFile> {

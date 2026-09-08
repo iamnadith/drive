@@ -29,6 +29,9 @@ on:
       agent_id:
         description: Agent id requesting dispatch
         required: false
+      worker_secret_name:
+        description: Per-worker GitHub Actions secret name
+        required: false
   repository_dispatch:
     types: [drive-migration-worker]
 
@@ -55,13 +58,14 @@ jobs:
 
       - name: Run migration worker
         env:
+          SERVER_URL: ${{ secrets.DRIVE_MIGRATION_ORCHESTRATOR_URL }}
           AGENT_ID: ${{ inputs.agent_id || github.event.client_payload.agent_id || secrets.DRIVE_AGENT_ID || secrets.AGENT_ID || vars.DRIVE_AGENT_ID || vars.AGENT_ID }}
           # A migration id is always scoped to this dispatch. Do not fall back
           # to a repository-wide variable: that can restart an old pool when a
           # workflow is run manually and can make concurrent workers collide.
           DRIVE_MIGRATION_ID: ${{ inputs.migration_id || github.event.client_payload.migration_id || '' }}
           DRIVE_REPAIR_JOB_ID: ${{ inputs.repair_job_id || github.event.client_payload.repair_job_id || '' }}
-          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          TOKEN: ${{ secrets[inputs.worker_secret_name] }}
           POLL_MS: ${{ vars.POLL_MS || '15000' }}
           HEARTBEAT_MS: ${{ vars.HEARTBEAT_MS || '20000' }}
           MAX_OBJECTS: ${{ vars.MAX_OBJECTS || '2000000' }}
