@@ -9,6 +9,7 @@ export type MigrationOrchestratorSettings = {
   orchestratorUrl: string
   fileScannerUrl: string
   sharedSecret: string
+  /** Legacy field retained in the API shape; it always mirrors sharedSecret. */
   fileScannerSecret: string
   updatedAt?: string
 }
@@ -31,12 +32,14 @@ function normalizeUrl(value: unknown): string {
 
 function normalize(value: unknown, updatedAt?: string | null): MigrationOrchestratorSettings {
   const row = value && typeof value === "object" ? (value as Record<string, unknown>) : {}
+  const legacySecret = typeof row.fileScannerSecret === "string" ? row.fileScannerSecret.trim() : ""
+  const sharedSecret = typeof row.sharedSecret === "string" && row.sharedSecret.trim() ? row.sharedSecret.trim() : legacySecret
   return {
     enabled: row.enabled === true,
     orchestratorUrl: normalizeUrl(row.orchestratorUrl),
     fileScannerUrl: normalizeUrl(row.fileScannerUrl ?? row.fileOrchestratorUrl),
-    sharedSecret: typeof row.sharedSecret === "string" ? row.sharedSecret.trim() : "",
-    fileScannerSecret: typeof row.fileScannerSecret === "string" ? row.fileScannerSecret.trim() : "",
+    sharedSecret,
+    fileScannerSecret: sharedSecret,
     updatedAt: updatedAt ?? undefined,
   }
 }
@@ -61,9 +64,8 @@ export async function saveMigrationOrchestratorSettings(input: {
   const secret = typeof input.sharedSecret === "string" && input.sharedSecret.trim()
     ? input.sharedSecret.trim()
     : current.sharedSecret
-  const scannerSecret = typeof input.fileScannerSecret === "string" && input.fileScannerSecret.trim()
-    ? input.fileScannerSecret.trim()
-    : current.fileScannerSecret
+  // Both Cloudflare workers use the same panel-configured migration secret.
+  const scannerSecret = secret || current.sharedSecret
   const next = normalize({
     enabled: typeof input.enabled === "boolean" ? input.enabled : current.enabled,
     orchestratorUrl: input.orchestratorUrl === undefined ? current.orchestratorUrl : input.orchestratorUrl,
@@ -74,9 +76,8 @@ export async function saveMigrationOrchestratorSettings(input: {
   if (next.sharedSecret.length > MAX_SECRET_LENGTH) {
     throw new Error(`Migration Orchestrator shared secret must be at most ${MAX_SECRET_LENGTH} characters`)
   }
-  if (next.fileScannerSecret.length > MAX_SECRET_LENGTH) throw new Error(`File Scanner secret must be at most ${MAX_SECRET_LENGTH} characters`)
-  if (next.enabled && (!next.orchestratorUrl || !next.fileScannerUrl || next.sharedSecret.length < MIN_SECRET_LENGTH || next.fileScannerSecret.length < MIN_SECRET_LENGTH)) {
-    throw new Error(`Enabled orchestration requires both Worker URLs and separate secrets of at least ${MIN_SECRET_LENGTH} characters`)
+  if (next.enabled && (!next.orchestratorUrl || !next.fileScannerUrl || next.sharedSecret.length < MIN_SECRET_LENGTH)) {
+    throw new Error(`Enabled orchestration requires both Worker URLs and one secret of at least ${MIN_SECRET_LENGTH} characters`)
   }
   const { rows } = await queryDb<SettingsRow>(
     `

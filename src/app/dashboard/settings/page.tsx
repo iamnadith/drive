@@ -178,7 +178,7 @@ export default function DashboardSettingsPage() {
       const response = await fetch("/api/settings/migration-orchestrator", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orchestratorUrl: migrationOrchestratorUrl, fileScannerUrl, sharedSecret: migrationOrchestratorSecret, fileScannerSecret }),
+        body: JSON.stringify({ orchestratorUrl: migrationOrchestratorUrl, fileScannerUrl, sharedSecret: migrationOrchestratorSecret }),
       })
       const payload = await response.json().catch(() => ({})) as { error?: string }
       if (!response.ok) throw new Error(payload.error || "Unable to save Migration Orchestrator settings")
@@ -497,24 +497,19 @@ export default function DashboardSettingsPage() {
             <Label htmlFor="file-scanner-url">File Scanner URL</Label>
             <Input id="file-scanner-url" value={fileScannerUrl} disabled={!migrationOrchestratorLoaded} onChange={(event) => setFileScannerUrl(event.target.value)} placeholder="https://file-scanner.example.workers.dev" />
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="migration-orchestrator-secret">Migration Orchestrator secret</Label>
+          <div className="space-y-2 lg:col-span-2">
+            <Label htmlFor="migration-orchestrator-secret">Common migration secret</Label>
             <Input id="migration-orchestrator-secret" type="text" value={migrationOrchestratorSecret} disabled={!migrationOrchestratorLoaded} onChange={(event) => setMigrationOrchestratorSecret(event.target.value)} placeholder="At least 24 characters" />
             <p className="text-xs text-muted-foreground">
-              This admin-only page displays the saved secret. Both Workers receive their database configuration at deploy time and operate independently from the panel.
+              The same secret authenticates the Migration Orchestrator and File Scanner. Configure this one value in both Worker deployments.
             </p>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="file-scanner-secret">File Scanner secret</Label>
-            <Input id="file-scanner-secret" type="text" value={fileScannerSecret} disabled={!migrationOrchestratorLoaded} onChange={(event) => setFileScannerSecret(event.target.value)} placeholder="At least 24 characters" />
-            <p className="text-xs text-muted-foreground">Used to authenticate the File Scanner endpoint and loaded from PostgreSQL.</p>
           </div>
           {migrationOrchestratorMessage ? <p className="text-sm lg:col-span-2">{migrationOrchestratorMessage}</p> : null}
         </CardContent>
         <CardFooter className="flex flex-wrap gap-2">
           <Button onClick={saveMigrationOrchestratorSettings} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded}>Save connection</Button>
           <Button variant="outline" onClick={testMigrationOrchestrator} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || migrationOrchestratorDirty || !migrationOrchestratorSecretConfigured}>Test connection</Button>
-          <Button variant={migrationOrchestratorEnabled ? "destructive" : "secondary"} onClick={() => void setMigrationOrchestratorActive(!migrationOrchestratorEnabled)} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || (!migrationOrchestratorEnabled && (!migrationOrchestratorUrl || !fileScannerUrl || !migrationOrchestratorSecretConfigured || !fileScannerSecretConfigured))}>
+          <Button variant={migrationOrchestratorEnabled ? "destructive" : "secondary"} onClick={() => void setMigrationOrchestratorActive(!migrationOrchestratorEnabled)} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || (!migrationOrchestratorEnabled && (!migrationOrchestratorUrl || !fileScannerUrl || !migrationOrchestratorSecretConfigured))}>
             {migrationOrchestratorEnabled ? "Disable" : "Enable"}
           </Button>
           <Button variant="outline" onClick={runMigrationOrchestratorNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !migrationOrchestratorEnabled}>Run now</Button>
