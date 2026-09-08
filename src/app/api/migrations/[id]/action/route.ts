@@ -127,7 +127,7 @@ async function abortRepairJobsForMigration(migrationId: string): Promise<{
   abortedJobs: number
   blockedJobs: Array<{ jobId: string; reason: string }>
 }> {
-  const repairJobs = await listRepairJobsByMigration(migrationId, 50).catch(() => [])
+  const repairJobs = await listRepairJobsByMigration(migrationId, 500).catch(() => [])
   const activeJobs = repairJobs.filter((job) => ["pending", "claimed", "running"].includes(String(job.status)))
   const blockedJobs: Array<{ jobId: string; reason: string }> = []
   let abortedJobs = 0
@@ -254,6 +254,16 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const readOnly = getMigrationReadOnlyState(migration)
     if (readOnly.readOnly) {
       return NextResponse.json({ error: `Migration history is read-only: ${readOnly.reason}` }, { status: 409 })
+    }
+
+    if (
+      migration.options.executionMode === "migration_workers" &&
+      (action === "pause_all" || action === "resume_all")
+    ) {
+      return NextResponse.json(
+        { error: "Shared worker migrations do not pause individual buckets. Stop the worker workflows or cancel the migration, then retry it when ready." },
+        { status: 409 }
+      )
     }
 
     const items = await listMigrationItems(id)
@@ -519,6 +529,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     if (action === "retry_migration") {
+      const workerMode = migration.options.executionMode === "migration_workers"
+      if (workerMode) {
+        const activeWorkerJobs = (await listRepairJobsByMigration(id, 500).catch(() => []))
+          .filter((job) => ["pending", "claimed", "running"].includes(job.status))
+        await Promise.all(activeWorkerJobs.map((job) => abortRepairJob(job.id).catch(() => undefined)))
+      }
       const candidates = items.filter((item) => {
         const s = normalizeStatus(item.slurperStatus)
         const verifyStatus = readVerifyStatus(
@@ -559,6 +575,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
             verify: null,
             verifySamples: null,
             destScanId: null,
+            ...(workerMode ? { repairWorker: null, live: null } : {}),
             lastAction: { action, at: now },
           },
           lastProgressAt: now,
@@ -574,7 +591,19 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
             ? `Retry queued for ${candidates.length} bucket(s) with overwrite disabled`
             : "No buckets require retry",
         lastSyncedAt: now,
-        options: { ...migration.options, manualCompleted: false, targetActivatedAt: undefined },
+        options: {
+          ...migration.options,
+          manualCompleted: false,
+          targetActivatedAt: undefined,
+          ...(workerMode
+            ? {
+                workerGeneration:
+                  (typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
+                    ? Math.max(1, Math.floor(migration.options.workerGeneration))
+                    : 1) + 1,
+              }
+            : {}),
+        },
       })
 
       return NextResponse.json({ ok: true, retried: candidates.length }, { status: 200 })

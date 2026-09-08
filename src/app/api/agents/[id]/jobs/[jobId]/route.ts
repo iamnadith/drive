@@ -8,7 +8,7 @@ import {
 } from "@/lib/agents-store"
 import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun } from "@/lib/github-oauth"
 import { syncMigrationLiveState } from "@/lib/migration-live-state"
-import { applyRepairJobItemUpdate, getRepairJob, updateRepairJob, type RepairJobStatus } from "@/lib/repair-jobs-store"
+import { applyRepairJobItemUpdate, finalizeCompletedMigrationWorkerShards, getRepairJob, updateRepairJob, type RepairJobStatus } from "@/lib/repair-jobs-store"
 import { updateMigration } from "@/lib/migrations-store"
 
 function asStatus(value: unknown): RepairJobStatus | undefined {
@@ -42,13 +42,13 @@ export async function POST(
     const { id, jobId } = await context.params
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
     const token = typeof body.token === "string" ? body.token.trim() : ""
-    if (!token) return NextResponse.json({ error: "Registration token is required" }, { status: 400 })
+    if (!token) return NextResponse.json({ error: "Worker secret is required" }, { status: 400 })
     const agent = await authenticateAgent({ agentId: id, token })
 
     const job = await getRepairJob(jobId)
     if (!job) return NextResponse.json({ error: "Repair job not found" }, { status: 404 })
-    if (job.claimedByAgentId && job.claimedByAgentId !== id) {
-      return NextResponse.json({ error: "This job is claimed by another agent" }, { status: 409 })
+    if (job.claimedByAgentId !== id) {
+      return NextResponse.json({ error: "This job is no longer owned by this worker" }, { status: 409 })
     }
     if (job.status === "canceled") {
       return NextResponse.json({ ok: true, canceled: true, job })
@@ -79,6 +79,7 @@ export async function POST(
           transferred: typeof item.transferred === "number" ? item.transferred : undefined,
           failed: typeof item.failed === "number" ? item.failed : undefined,
           skipped: typeof item.skipped === "number" ? item.skipped : undefined,
+          expectedAgentId: id,
         })
       }
     }
@@ -119,11 +120,25 @@ export async function POST(
       ...(errorMessage !== undefined ? { error: errorMessage } : activeWorkerUpdate && hasStaleOfflineMessage ? { error: null } : {}),
       lastHeartbeatAt: now,
       ...(effectiveStatus === "completed" || effectiveStatus === "failed" || effectiveStatus === "canceled" ? { completedAt: now } : {}),
+      expectedAgentId: id,
     })
 
     if (effectiveStatus === "completed" || effectiveStatus === "failed" || effectiveStatus === "canceled") {
       const linkedRun = await getLatestAgentRunByJobReference(jobId).catch(() => null)
+      // A GitHub pool workflow is a long-lived dispatcher. Its run is linked
+      // to the shard currently being processed only so the next claim can be
+      // scoped to the same run. Completing one shard must release that link
+      // and keep the workflow alive for the next shard; treating it like a
+      // one-job repair run would cancel the workflow after the first shard.
+      const keepPoolRunAlive =
+        effectiveStatus !== "canceled" &&
+        job.payload?.kind === "migration_shard" &&
+        typeof job.workKey === "string" &&
+        job.workKey.includes(":shard:") &&
+        linkedRun?.payload?.pool === true
+
       if (
+        !keepPoolRunAlive &&
         agent.provider === "github_actions" &&
         linkedRun?.externalRunId &&
         agent.githubRepoOwner &&
@@ -147,35 +162,59 @@ export async function POST(
       }
 
       if (linkedRun) {
-        await updateAgentRun(linkedRun.id, {
-          status: effectiveStatus === "completed" ? "completed" : effectiveStatus === "failed" ? "failed" : "canceled",
-          completedAt: now,
-          summary:
-            summary ??
-            (effectiveStatus === "completed"
-              ? "GitHub workflow completed successfully"
-              : effectiveStatus === "failed"
-                ? errorMessage ?? "GitHub workflow failed"
-                : "GitHub workflow was aborted"),
-          payload: {
-            ...(linkedRun.payload ?? {}),
-            githubStatus: effectiveStatus === "completed" ? "completed" : effectiveStatus === "canceled" ? "completed" : linkedRun.payload?.githubStatus ?? null,
-            githubConclusion:
-              effectiveStatus === "completed" ? "success" : effectiveStatus === "canceled" ? "cancelled" : linkedRun.payload?.githubConclusion ?? null,
-            githubUpdatedAt: now,
-          },
-        }).catch(() => undefined)
+        if (keepPoolRunAlive) {
+          await updateAgentRun(linkedRun.id, {
+            status: "running",
+            jobReference: null,
+            completedAt: null,
+            summary: `Worker pool shard ${effectiveStatus}; waiting for the next shard`,
+            payload: {
+              ...(linkedRun.payload ?? {}),
+              pool: true,
+              githubStatus: "in_progress",
+              githubConclusion: null,
+              githubUpdatedAt: now,
+            },
+          }).catch(() => undefined)
+        } else {
+          await updateAgentRun(linkedRun.id, {
+            status: effectiveStatus === "completed" ? "completed" : effectiveStatus === "failed" ? "failed" : "canceled",
+            completedAt: now,
+            summary:
+              summary ??
+              (effectiveStatus === "completed"
+                ? "GitHub workflow completed successfully"
+                : effectiveStatus === "failed"
+                  ? errorMessage ?? "GitHub workflow failed"
+                  : "GitHub workflow was aborted"),
+            payload: {
+              ...(linkedRun.payload ?? {}),
+              githubStatus: effectiveStatus === "completed" ? "completed" : effectiveStatus === "canceled" ? "completed" : linkedRun.payload?.githubStatus ?? null,
+              githubConclusion:
+                effectiveStatus === "completed" ? "success" : effectiveStatus === "canceled" ? "cancelled" : linkedRun.payload?.githubConclusion ?? null,
+              githubUpdatedAt: now,
+            },
+          }).catch(() => undefined)
+        }
       }
 
       await updateAgent(id, {
-        status: agent.provider === "github_actions" ? "offline" : agent.provider === "self_hosted" || agent.provider === "local" ? "online" : "offline",
+        status: keepPoolRunAlive
+          ? "online"
+          : agent.provider === "github_actions"
+            ? "offline"
+            : agent.provider === "self_hosted" || agent.provider === "local"
+              ? "online"
+              : "offline",
         lastError: effectiveStatus === "failed" ? errorMessage ?? summary ?? "Worker reconciliation failed" : null,
         metadata: {
           ...(agent.metadata ?? {}),
           activeRepairJobId: null,
-          githubRunStatus: agent.provider === "github_actions" ? "completed" : (agent.metadata ?? {}).githubRunStatus ?? null,
+          githubRunStatus: keepPoolRunAlive ? "in_progress" : agent.provider === "github_actions" ? "completed" : (agent.metadata ?? {}).githubRunStatus ?? null,
           githubRunConclusion:
-            agent.provider === "github_actions"
+            keepPoolRunAlive
+              ? null
+              : agent.provider === "github_actions"
               ? effectiveStatus === "completed"
                 ? "success"
                 : effectiveStatus === "canceled"
@@ -207,6 +246,13 @@ export async function POST(
       }).catch(() => undefined)
     }
 
+    if (effectiveStatus === "completed" && job.workKey?.includes(":shard:")) {
+      // The cron orchestrator is the recovery backstop, but the final shard
+      // update should complete a migration immediately when all peers are
+      // already terminal. This keeps the worker lane flowing even when the
+      // scheduler is temporarily disabled or delayed.
+      await finalizeCompletedMigrationWorkerShards(job.migrationId).catch(() => undefined)
+    }
     await syncMigrationLiveState(job.migrationId).catch(() => undefined)
     if (effectiveStatus === "completed") {
       after(async () => {

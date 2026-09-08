@@ -16,6 +16,7 @@ export type RepairJobMode = "verify_only" | "repair_only" | "repair_and_verify"
 export type DriveRepairJob = {
   id: string
   migrationId: string
+  workKey?: string
   requestedByAgentId?: string
   claimedByAgentId?: string
   status: RepairJobStatus
@@ -36,6 +37,7 @@ export type DriveRepairJob = {
 type DriveRepairJobRow = {
   id: string
   migration_id: string
+  work_key: string | null
   requested_by_agent_id: string | null
   claimed_by_agent_id: string | null
   status: string
@@ -54,15 +56,59 @@ type DriveRepairJobRow = {
 }
 
 const REPAIR_JOBS_TABLE = "drive_repair_jobs"
+const DEFAULT_WORKER_SHARD_COUNT = 32
+const MAX_WORKER_SHARD_COUNT = 128
+const MAX_WORKER_REQUEUE_ATTEMPTS = 3
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
+}
+
+function parseWorkerShardWorkKey(value: unknown): {
+  migrationId: string
+  generation: number
+  index: number
+  count: number
+} | null {
+  if (typeof value !== "string") return null
+  const match = value.match(/^migration:([^:]+):generation:(\d+):shard:(\d+)\/(\d+)$/)
+  if (!match) return null
+  const generation = Number(match[2])
+  const index = Number(match[3])
+  const count = Number(match[4])
+  if (
+    !match[1] ||
+    !Number.isInteger(generation) ||
+    generation < 1 ||
+    !Number.isInteger(index) ||
+    !Number.isInteger(count) ||
+    count < 1 ||
+    count > MAX_WORKER_SHARD_COUNT ||
+    index < 0 ||
+    index >= count
+  ) {
+    return null
+  }
+  return { migrationId: match[1], generation, index, count }
+}
+
+function workerGenerationAndShardCount(migration: { options?: Record<string, unknown> } | null | undefined) {
+  const generation =
+    typeof migration?.options?.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
+      ? Math.max(1, Math.floor(migration.options.workerGeneration))
+      : 1
+  const shardCount =
+    typeof migration?.options?.workerShardCount === "number" && Number.isFinite(migration.options.workerShardCount)
+      ? Math.max(1, Math.min(MAX_WORKER_SHARD_COUNT, Math.floor(migration.options.workerShardCount)))
+      : DEFAULT_WORKER_SHARD_COUNT
+  return { generation, shardCount }
 }
 
 function mapJobRow(row: DriveRepairJobRow): DriveRepairJob {
   return {
     id: row.id,
     migrationId: row.migration_id,
+    workKey: row.work_key ?? undefined,
     requestedByAgentId: row.requested_by_agent_id ?? undefined,
     claimedByAgentId: row.claimed_by_agent_id ?? undefined,
     status: (["pending", "claimed", "running", "completed", "failed", "canceled"].includes(row.status)
@@ -184,7 +230,8 @@ function buildGitHubRunDiagnostics(
 function matchGithubRunToDispatch(
   runs: Awaited<ReturnType<typeof listGitHubWorkflowRuns>>,
   dispatchRequestedAt: unknown,
-  excludedRunIds: unknown
+  excludedRunIds: unknown,
+  identityHints: string[] = []
 ) {
   if (!Array.isArray(runs) || runs.length === 0) return null
 
@@ -194,14 +241,25 @@ function matchGithubRunToDispatch(
   if (!Number.isFinite(requestedAt)) return null
   const excluded = new Set(Array.isArray(excludedRunIds) ? excludedRunIds.filter((value): value is string => typeof value === "string") : [])
 
-  return (
-    runs.find((candidate) => {
+  const candidates = runs.filter((candidate) => {
       if (excluded.has(candidate.id)) return false
       const createdAt = Date.parse(candidate.createdAt || "")
       if (!Number.isFinite(createdAt)) return false
       return createdAt >= requestedAt - 10_000
-    }) ?? null
-  )
+    })
+  if (candidates.length === 0) return null
+  const hints = identityHints.filter((value) => typeof value === "string" && value.length > 0)
+  const identified = hints.length > 0
+    ? candidates.filter((candidate) => {
+        const identity = `${candidate.displayTitle ?? ""} ${candidate.name ?? ""}`
+        return hints.some((hint) => identity.includes(hint))
+      })
+    : []
+  if (identified.length === 1) return identified[0]
+  // If GitHub has not indexed the new run-name format yet, only accept an
+  // unambiguous timestamp match. Never bind one worker to another worker's
+  // run when several dispatches share a repository.
+  return candidates.length === 1 ? candidates[0] : null
 }
 
 async function getRepairJobRaw(id: string): Promise<DriveRepairJob | null> {
@@ -270,7 +328,8 @@ export async function reconcileRepairJobs(input?: { jobId?: string; migrationId?
         githubRun = matchGithubRunToDispatch(
           runs,
           (latestRun.payload ?? {}).dispatchRequestedAt,
-          (latestRun.payload ?? {}).githubRunIdsBeforeDispatch
+          (latestRun.payload ?? {}).githubRunIdsBeforeDispatch,
+          [agent.id, latestRun.jobReference ?? ""]
         )
       }
 
@@ -410,7 +469,11 @@ export async function reconcileRepairJobs(input?: { jobId?: string; migrationId?
 
     const refreshedAgents = await listAgents()
     const activeAgentById = new Map(refreshedAgents.map((agent) => [agent.id, agent]))
-    const activeJobs = await listRepairJobsRaw(100)
+    // A worker migration can have up to MAX_WORKER_SHARD_COUNT active shard
+    // records. Reconcile the full bounded queue so a larger pool is never
+    // partially treated as healthy simply because the newest 100 rows were
+    // selected.
+    const activeJobs = await listRepairJobsRaw(500)
 
     for (const job of activeJobs) {
       if (!job.claimedByAgentId) continue
@@ -490,6 +553,24 @@ async function listRepairJobsByMigrationRaw(migrationId: string, limit = 20): Pr
   return (Array.isArray(data) ? (data as DriveRepairJobRow[]) : []).map(mapJobRow)
 }
 
+async function listWorkerShardJobsByMigrationRaw(
+  migrationId: string,
+  generation: number,
+  limit = MAX_WORKER_SHARD_COUNT
+): Promise<DriveRepairJob[]> {
+  const supabase = getSupabaseServerClient()
+  const prefix = `migration:${migrationId}:generation:${generation}:shard:`
+  const { data, error } = await supabase
+    .from(REPAIR_JOBS_TABLE)
+    .select("*")
+    .eq("migration_id", migrationId)
+    .like("work_key", `${prefix}%`)
+    .order("created_at", { ascending: false })
+    .limit(Math.max(1, Math.min(MAX_WORKER_SHARD_COUNT, limit)))
+  if (error) throw normalizeSupabaseError(error)
+  return (Array.isArray(data) ? (data as DriveRepairJobRow[]) : []).map(mapJobRow)
+}
+
 export async function listRepairJobs(limit = 50): Promise<DriveRepairJob[]> {
   await reconcileRepairJobs().catch(() => undefined)
   return listRepairJobsRaw(limit)
@@ -528,6 +609,7 @@ export async function createRepairJob(input: {
   mode?: RepairJobMode
   requestedByAgentId?: string
   payload?: Record<string, unknown>
+  workKey?: string
 }): Promise<DriveRepairJob> {
   const migration = await getMigration(input.migrationId)
   if (!migration) throw new Error("Migration not found")
@@ -536,6 +618,7 @@ export async function createRepairJob(input: {
   const row = {
     id: crypto.randomUUID(),
     migration_id: input.migrationId,
+    work_key: input.workKey?.trim() || null,
     requested_by_agent_id: input.requestedByAgentId ?? null,
     status: "pending",
     mode: input.mode ?? "repair_and_verify",
@@ -545,7 +628,21 @@ export async function createRepairJob(input: {
   }
 
   const { data, error } = await supabase.from(REPAIR_JOBS_TABLE).insert(row).select("*").single()
-  if (error) throw normalizeSupabaseError(error)
+  if (error) {
+    // Shard jobs are idempotent. Concurrent orchestrator ticks can race here;
+    // the unique work_key index makes one row win and the loser reuses it.
+    if (input.workKey && /duplicate|unique constraint|already exists/i.test(String(error.message ?? ""))) {
+      const existing = await supabase
+        .from(REPAIR_JOBS_TABLE)
+        .select("*")
+        .eq("work_key", input.workKey.trim())
+        .limit(1)
+      if (!existing.error && Array.isArray(existing.data) && existing.data[0]) {
+        return mapJobRow(existing.data[0] as DriveRepairJobRow)
+      }
+    }
+    throw normalizeSupabaseError(error)
+  }
 
   await updateMigration(input.migrationId, {
     syncStatus: "ok",
@@ -556,19 +653,53 @@ export async function createRepairJob(input: {
   return mapJobRow(data as DriveRepairJobRow)
 }
 
-export async function claimRepairJob(agentId: string, requestedJobId?: string): Promise<DriveRepairJob | null> {
+export async function claimRepairJob(
+  agentId: string,
+  requestedJobId?: string,
+  migrationId?: string,
+  poolOnly = false
+): Promise<DriveRepairJob | null> {
   const supabase = getSupabaseServerClient()
+  const poolMigration = poolOnly && migrationId ? await getMigration(migrationId) : null
+  if (
+    poolOnly &&
+    (!poolMigration ||
+      poolMigration.options.executionMode !== "migration_workers" ||
+      !["running", "verifying"].includes(poolMigration.status))
+  ) return null
+  const poolCoordinates = poolMigration ? workerGenerationAndShardCount(poolMigration) : null
   let pendingQuery = supabase
     .from(REPAIR_JOBS_TABLE)
     .select("*")
     .eq("status", "pending")
     .or(`requested_by_agent_id.is.null,requested_by_agent_id.eq.${agentId}`)
     .order("created_at", { ascending: true })
-    .limit(1)
+    // A pool worker may only claim durable shard records. Without this filter
+    // an older/manual repair row in the same migration could be claimed first
+    // and make the worker process the whole migration again.
+    .limit(poolOnly ? 100 : 1)
   if (requestedJobId) pendingQuery = pendingQuery.eq("id", requestedJobId)
+  if (migrationId) pendingQuery = pendingQuery.eq("migration_id", migrationId)
+  if (poolOnly && migrationId && poolCoordinates) {
+    pendingQuery = pendingQuery.like(
+      "work_key",
+      `migration:${migrationId}:generation:${poolCoordinates.generation}:shard:%`
+    )
+  }
   const { data: pendingRows, error: listError } = await pendingQuery
   if (listError) throw normalizeSupabaseError(listError)
-  const candidate = Array.isArray(pendingRows) ? (pendingRows[0] as DriveRepairJobRow | undefined) : undefined
+  const candidate = Array.isArray(pendingRows)
+    ? ((pendingRows.find((row) => {
+        if (!poolOnly) return true
+        const key = parseWorkerShardWorkKey(typeof row === "object" && row !== null ? (row as DriveRepairJobRow).work_key : null)
+        return Boolean(
+          key &&
+            key.migrationId === migrationId &&
+            key.generation === poolCoordinates?.generation &&
+            key.count === poolCoordinates?.shardCount
+        )
+      }) ?? undefined) as DriveRepairJobRow | undefined)
+    : undefined
   if (!candidate) return null
 
   const now = new Date().toISOString()
@@ -660,6 +791,8 @@ export async function updateRepairJob(
     summary?: string | null
     error?: string | null
     claimedByAgentId?: string | null
+    /** Require the current active lease to still belong to this agent. */
+    expectedAgentId?: string
     startedAt?: string | null
     completedAt?: string | null
     lastHeartbeatAt?: string | null
@@ -677,15 +810,474 @@ export async function updateRepairJob(
   if (updates.completedAt !== undefined) dbUpdates.completed_at = updates.completedAt ?? null
   if (updates.lastHeartbeatAt !== undefined) dbUpdates.last_heartbeat_at = updates.lastHeartbeatAt ?? null
 
-  const { data, error } = await supabase.from(REPAIR_JOBS_TABLE).update(dbUpdates).eq("id", id).select("*").single()
+  let query = supabase.from(REPAIR_JOBS_TABLE).update(dbUpdates).eq("id", id)
+  if (updates.expectedAgentId) {
+    query = query.eq("claimed_by_agent_id", updates.expectedAgentId).in("status", ["claimed", "running"])
+  }
+  const { data, error } = await query.select("*")
   if (error) throw normalizeSupabaseError(error)
-  return mapJobRow(data as DriveRepairJobRow)
+  const row = Array.isArray(data) ? (data[0] as DriveRepairJobRow | undefined) : undefined
+  if (!row) {
+    if (updates.expectedAgentId) throw new Error("This job is no longer owned by this worker")
+    throw new Error("Repair job not found")
+  }
+  return mapJobRow(row)
+}
+
+function workerItemIdsFromPayload(payload: Record<string, unknown> | undefined): string[] {
+  if (!payload) return []
+  const ids = new Set<string>()
+  if (Array.isArray(payload.itemIds)) {
+    for (const value of payload.itemIds) if (typeof value === "string" && value.trim()) ids.add(value.trim())
+  }
+  if (Array.isArray(payload.items)) {
+    for (const value of payload.items) {
+      if (!isRecord(value)) continue
+      const id = typeof value.id === "string" ? value.id : typeof value.itemId === "string" ? value.itemId : ""
+      if (id.trim()) ids.add(id.trim())
+    }
+  }
+  return Array.from(ids)
+}
+
+function isWorkerItemComplete(item: DriveMigrationItem): boolean {
+  const progress = isRecord(item.progress) ? item.progress : {}
+  const repair = isRecord(progress.repairWorker) ? progress.repairWorker : null
+  if (String(repair?.status ?? "").toLowerCase() === "completed") {
+    const details = isRecord(repair?.details) ? repair.details : {}
+    const finalMissing = Number(details.finalMissing ?? 0)
+    const finalMismatched = Number(details.finalMismatched ?? 0)
+    return Number.isFinite(finalMissing) && Number.isFinite(finalMismatched) && finalMissing === 0 && finalMismatched === 0
+  }
+  return false
+}
+
+/**
+ * Materialize a durable shared object-shard queue for the worker lane. Each
+ * shard spans every selected bucket; workers filter the object keys by shard
+ * and can claim another shard as soon as they finish. Super Slurper
+ * migrations never call this function.
+ */
+export async function ensureMigrationWorkerJobs(input: {
+  migrationId: string
+  mode?: RepairJobMode
+}): Promise<{ created: number; existing: number; jobs: DriveRepairJob[] }> {
+  const migration = await getMigration(input.migrationId)
+  if (!migration) throw new Error("Migration not found")
+  if (migration.options.executionMode !== "migration_workers") {
+    return { created: 0, existing: 0, jobs: [] }
+  }
+
+  const items = await listMigrationItems(input.migrationId)
+  const generation =
+    typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
+      ? Math.max(1, Math.floor(migration.options.workerGeneration))
+      : 1
+  const shardCount =
+    typeof migration.options.workerShardCount === "number" && Number.isFinite(migration.options.workerShardCount)
+      ? Math.max(1, Math.min(MAX_WORKER_SHARD_COUNT, Math.floor(migration.options.workerShardCount)))
+      : DEFAULT_WORKER_SHARD_COUNT
+  // A bucket-create failure is kept out of the object queue. The next start
+  // attempt can clear that marker after the target bucket becomes available.
+  const queuedItems = items.filter(
+    (item) => !isWorkerItemComplete(item) && item.slurperStatus !== "worker_bucket_create_failed"
+  )
+  if (queuedItems.length === 0) return { created: 0, existing: 0, jobs: [] }
+
+  // Query the current generation by its durable key. A migration may contain
+  // hundreds of historical/manual jobs; a generic newest-500 query could hide
+  // an older current shard and make the orchestrator create a duplicate.
+  const currentJobs = await listWorkerShardJobsByMigrationRaw(input.migrationId, generation, shardCount)
+  const byWorkKey = new Map(currentJobs.filter((job) => job.workKey).map((job) => [job.workKey!, job]))
+  const jobs: DriveRepairJob[] = []
+  let created = 0
+  let existing = 0
+
+  const itemIds = queuedItems.map((item) => item.id)
+  const missingShards: Array<{ index: number; workKey: string }> = []
+  for (let shardIndex = 0; shardIndex < shardCount; shardIndex += 1) {
+    const workKey = `migration:${input.migrationId}:generation:${generation}:shard:${shardIndex}/${shardCount}`
+    const known = byWorkKey.get(workKey)
+    if (known) {
+      existing += 1
+      jobs.push(known)
+      continue
+    }
+    missingShards.push({ index: shardIndex, workKey })
+  }
+
+  // Create missing shards in bounded batches. The unique work key still makes
+  // concurrent orchestrator ticks idempotent, while avoiding a long serial
+  // setup when a migration uses dozens of workers.
+  for (let offset = 0; offset < missingShards.length; offset += 8) {
+    const batch = missingShards.slice(offset, offset + 8)
+    const createdBatch = await Promise.all(
+      batch.map(({ index, workKey }) =>
+        createRepairJob({
+          migrationId: input.migrationId,
+          mode: input.mode ?? "repair_and_verify",
+          workKey,
+          payload: {
+            source: "migration_orchestrator",
+            kind: "migration_shard",
+            workerGeneration: generation,
+            workerShard: { index, count: shardCount },
+            itemIds,
+            items: itemIds.map((id) => ({ id })),
+          },
+        }).then((job) => ({ job, created: job.workKey === workKey && !byWorkKey.has(workKey) }))
+      )
+    )
+    for (const entry of createdBatch) {
+      if (entry.created) created += 1
+      else existing += 1
+      jobs.push(entry.job)
+      byWorkKey.set(entry.job.workKey ?? "", entry.job)
+    }
+  }
+
+  return { created, existing, jobs }
+}
+
+/**
+ * Once every shard in a worker generation is terminal-success, promote the
+ * per-shard item state to a single completed item state. Shard jobs deliberately
+ * leave items running so live-state reconciliation cannot complete a migration
+ * after only one shard has finished.
+ */
+export async function finalizeCompletedMigrationWorkerShards(
+  migrationId: string
+): Promise<{ finalized: boolean; shardCount: number; jobs: number; items: number }> {
+  const migration = await getMigration(migrationId)
+  if (!migration || migration.options.executionMode !== "migration_workers") {
+    return { finalized: false, shardCount: 0, jobs: 0, items: 0 }
+  }
+
+  const generation =
+    typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
+      ? Math.max(1, Math.floor(migration.options.workerGeneration))
+      : 1
+  const shardCount =
+    typeof migration.options.workerShardCount === "number" && Number.isFinite(migration.options.workerShardCount)
+      ? Math.max(1, Math.min(MAX_WORKER_SHARD_COUNT, Math.floor(migration.options.workerShardCount)))
+      : DEFAULT_WORKER_SHARD_COUNT
+  const items = await listMigrationItems(migrationId)
+  if (items.length === 0 || items.every(isWorkerItemComplete)) {
+    return { finalized: true, shardCount, jobs: 0, items: 0 }
+  }
+  const jobs = await listWorkerShardJobsByMigrationRaw(migrationId, generation, shardCount)
+  const jobsByIndex = new Map<number, DriveRepairJob>()
+  for (const job of jobs) {
+    const match = job.workKey?.match(/:shard:(\d+)\/(\d+)$/)
+    if (!match || Number(match[2]) !== shardCount) continue
+    const index = Number(match[1])
+    if (Number.isInteger(index) && index >= 0 && index < shardCount && !jobsByIndex.has(index)) {
+      jobsByIndex.set(index, job)
+    }
+  }
+  if (jobsByIndex.size !== shardCount) {
+    return { finalized: false, shardCount, jobs: jobs.length, items: 0 }
+  }
+  const shardJobs = Array.from(jobsByIndex.values())
+  if (shardJobs.some((job) => job.status !== "completed")) {
+    return { finalized: false, shardCount, jobs: jobs.length, items: 0 }
+  }
+
+  let finalizedItems = 0
+  const now = new Date().toISOString()
+  const count = (value: unknown): number => {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? Math.max(0, parsed) : 0
+  }
+  // Item progress is intentionally shared by all shards for the dashboard,
+  // so two workers can race while publishing telemetry. Rebuild the durable
+  // counters from each terminal shard result before promoting completion.
+  const shardMetrics = new Map<string, { transferred: number; skipped: number; sourceObjects: number; sourceBytes: number }>()
+  for (const shardJob of shardJobs) {
+    const resultItems = isRecord(shardJob.result) && Array.isArray(shardJob.result.items) ? shardJob.result.items : []
+    for (const raw of resultItems) {
+      if (!isRecord(raw) || typeof raw.itemId !== "string") continue
+      const current = shardMetrics.get(raw.itemId) ?? { transferred: 0, skipped: 0, sourceObjects: 0, sourceBytes: 0 }
+      current.transferred += count(raw.transferred)
+      current.skipped += count(raw.skipped)
+      current.sourceObjects = Math.max(current.sourceObjects, count(raw.sourceObjectCount))
+      current.sourceBytes = Math.max(current.sourceBytes, count(raw.sourceBytes))
+      shardMetrics.set(raw.itemId, current)
+    }
+  }
+  for (const item of items) {
+    if (isWorkerItemComplete(item)) continue
+    // Target-bucket provisioning failures are deliberately excluded from the
+    // shared shard queue. Never let successful shards for other buckets
+    // promote this item to completed while its destination is unavailable.
+    if (item.slurperStatus === "worker_bucket_create_failed") continue
+    const current = isRecord(item.progress) ? item.progress : {}
+    const repair = isRecord(current.repairWorker) ? current.repairWorker : {}
+    const live = isRecord(current.live) ? current.live : {}
+    const details = isRecord(repair.details) ? repair.details : {}
+    const slurper = isRecord(current.slurper) ? current.slurper.result : null
+    const slurperTransferred = isRecord(current.slurperCumulative)
+      ? count(current.slurperCumulative.transferredObjects)
+      : isRecord(current.slurperNormalized)
+        ? count(current.slurperNormalized.transferredObjects)
+        : isRecord(slurper)
+          ? count(slurper.transferredObjects)
+          : 0
+    const workerTransferred = Math.max(
+      shardMetrics.get(item.id)?.transferred ?? 0,
+      count(repair.cumulativeTransferred),
+      count(repair.transferred),
+      count(live.transferredObjects) - slurperTransferred
+    )
+    const skipped = Math.max(
+      shardMetrics.get(item.id)?.skipped ?? 0,
+      count(repair.cumulativeSkipped),
+      count(repair.skipped)
+    )
+    const totalObjects = Math.max(
+      count(item.sourceObjects),
+      shardMetrics.get(item.id)?.sourceObjects ?? 0,
+      count(details.sourceObjectCount),
+      count(live.totalObjects)
+    )
+    const nextRepair = {
+      ...repair,
+      status: "completed",
+      stage: "worker_completed",
+      updatedAt: now,
+      cumulativeTransferred: Math.max(0, workerTransferred),
+      cumulativeSkipped: Math.max(0, skipped),
+      details: {
+        ...details,
+        finalMissing: 0,
+        finalMismatched: 0,
+        resolvedAllObjects: true,
+        shardCount,
+        finalizedAt: now,
+      },
+    }
+    const nextProgress = {
+      ...current,
+      stage: "worker_completed",
+      repairWorker: nextRepair,
+      repairWorkerStatus: "completed",
+      slurperStatus: "completed",
+      live: {
+        ...live,
+        updatedAt: now,
+        status: "completed",
+        transferredObjects:
+          totalObjects > 0
+            ? Math.max(totalObjects - Math.max(0, skipped), slurperTransferred + Math.max(0, workerTransferred))
+            : slurperTransferred + Math.max(0, workerTransferred),
+        skippedObjects: Math.max(count(live.skippedObjects), skipped),
+        failedObjects: 0,
+        unaccountedObjects: 0,
+        verifyIssues: 0,
+        totalObjects,
+        workerStage: "worker_completed",
+        workerStatus: "completed",
+        repairJobId: shardJobs[shardJobs.length - 1]?.id ?? null,
+      },
+      syncMessage: `All ${shardCount} migration worker shards completed`,
+    }
+    await updateMigrationItem(item.id, {
+      progress: nextProgress,
+      slurperStatus: "completed",
+      lastProgressAt: now,
+      ...(totalObjects > 0 ? { sourceObjects: totalObjects } : {}),
+    })
+    finalizedItems += 1
+  }
+
+  return { finalized: finalizedItems > 0 || items.every(isWorkerItemComplete), shardCount, jobs: jobs.length, items: finalizedItems }
+}
+
+/**
+ * Tell a pool worker whether it can stop polling. A missing or leased shard
+ * is deliberately treated as active: another worker may still be processing
+ * it, or the orchestrator may need to requeue it after a crash. Only a
+ * terminal migration, a fully completed current generation, or a migration
+ * with no eligible items is safe to stop on.
+ */
+export async function getMigrationWorkerPoolState(migrationId: string): Promise<{
+  done: boolean
+  status?: string
+  reason?: string
+}> {
+  const migration = await getMigration(migrationId)
+  if (!migration || migration.options.executionMode !== "migration_workers") return { done: false }
+  if (["completed", "failed", "canceled"].includes(migration.status)) {
+    return { done: true, status: migration.status, reason: "migration_terminal" }
+  }
+  if (!["running", "verifying"].includes(migration.status)) {
+    return { done: true, status: migration.status, reason: "migration_not_active" }
+  }
+
+  const items = await listMigrationItems(migrationId)
+  const eligibleItems = items.filter(
+    (item) => !isWorkerItemComplete(item) && item.slurperStatus !== "worker_bucket_create_failed"
+  )
+  if (eligibleItems.length === 0) {
+    return { done: true, status: migration.status, reason: items.length === 0 ? "no_items" : "no_eligible_items" }
+  }
+
+  const { generation, shardCount } = workerGenerationAndShardCount(migration)
+  const jobs = await listWorkerShardJobsByMigrationRaw(migrationId, generation, shardCount)
+  const indexes = new Set<number>()
+  for (const job of jobs) {
+    const shard = parseWorkerShardWorkKey(job.workKey)
+    if (shard && shard.generation === generation && shard.count === shardCount) indexes.add(shard.index)
+  }
+  if (indexes.size !== shardCount) return { done: false }
+
+  const currentShards = jobs.filter((job) => {
+    const shard = parseWorkerShardWorkKey(job.workKey)
+    return Boolean(shard && shard.generation === generation && shard.count === shardCount)
+  })
+  if (currentShards.length < shardCount || currentShards.some((job) => job.status !== "completed")) {
+    // A failed shard with retries remaining is still active: the next
+    // orchestrator tick will put the same durable row back in the queue. Once
+    // every shard is terminal and at least one failure has exhausted its retry
+    // budget, there is no useful work for a long-lived GitHub runner to poll.
+    // Let it stop cleanly; live-state reconciliation will expose the migration
+    // failure and a user retry creates a new generation.
+    const exhaustedFailure = currentShards.some((job) => {
+      if (job.status !== "failed") return false
+      const retryCount = isRecord(job.result) ? Number(job.result.retryCount ?? 0) : 0
+      return Number.isFinite(retryCount) && retryCount >= MAX_WORKER_REQUEUE_ATTEMPTS
+    })
+    const allTerminal = currentShards.every((job) => ["completed", "failed", "canceled"].includes(job.status))
+    if (exhaustedFailure && allTerminal) {
+      return { done: true, status: "failed", reason: "shard_retry_exhausted" }
+    }
+    return { done: false }
+  }
+  return { done: true, status: migration.status, reason: "all_shards_completed" }
+}
+
+/** Requeue a claimed worker shard after its worker has disappeared. */
+export async function requeueStaleMigrationWorkerJobs(input?: { migrationId?: string }): Promise<number> {
+  const scopedMigration = input?.migrationId ? await getMigration(input.migrationId) : null
+  const scopedGeneration = scopedMigration ? workerGenerationAndShardCount(scopedMigration) : null
+  const jobs =
+    input?.migrationId && scopedMigration && scopedMigration.options.executionMode === "migration_workers"
+      ? await listWorkerShardJobsByMigrationRaw(input.migrationId, scopedGeneration?.generation ?? 1, scopedGeneration?.shardCount ?? 32)
+      : await listRepairJobsRaw(500)
+  const agents = await listAgents()
+  const agentById = new Map(agents.map((agent) => [agent.id, agent]))
+  let requeued = 0
+  for (const job of jobs) {
+    if (input?.migrationId && job.migrationId !== input.migrationId) continue
+    const migration = input?.migrationId ? scopedMigration : await getMigration(job.migrationId).catch(() => null)
+    if (!migration || migration.options.executionMode !== "migration_workers") continue
+    const workKey = parseWorkerShardWorkKey(job.workKey)
+    const current = workerGenerationAndShardCount(migration)
+    // A retry creates a new generation. Never revive an old generation: doing
+    // so would let a stale worker process the same object set again while the
+    // current generation is already being coordinated.
+    if (
+      !workKey ||
+      workKey.migrationId !== job.migrationId ||
+      workKey.generation !== current.generation ||
+      workKey.count !== current.shardCount
+    ) {
+      continue
+    }
+
+    // A failed shard is retryable because the failure may have been a worker,
+    // network, or provider transient. Keep the same work key and row so the
+    // database uniqueness guarantee still prevents duplicate shard records.
+    // User cancellation remains terminal and is deliberately not retried.
+    if (job.status === "failed") {
+      const previousAttempts = isRecord(job.result) ? Number(job.result.retryCount ?? 0) : 0
+      const retryCount = Number.isFinite(previousAttempts) ? Math.max(0, Math.floor(previousAttempts)) : 0
+      if (retryCount >= MAX_WORKER_REQUEUE_ATTEMPTS) continue
+      const now = new Date().toISOString()
+      const supabase = getSupabaseServerClient()
+      const { data, error } = await supabase
+        .from(REPAIR_JOBS_TABLE)
+        .update({
+          status: "pending",
+          claimed_by_agent_id: null,
+          claimed_at: null,
+          started_at: null,
+          completed_at: null,
+          last_heartbeat_at: null,
+          summary: `Retrying failed worker shard (attempt ${retryCount + 1}/${MAX_WORKER_REQUEUE_ATTEMPTS})`,
+          error: null,
+          result: {
+            ...(job.result ?? {}),
+            retryCount: retryCount + 1,
+            lastRetryAt: now,
+          },
+          updated_at: now,
+        })
+        .eq("id", job.id)
+        .eq("status", "failed")
+        .select("id")
+      if (!error && Array.isArray(data) && data.length > 0) requeued += 1
+      continue
+    }
+
+    if (!["claimed", "running"].includes(job.status) || !job.claimedByAgentId) continue
+    const agent = agentById.get(job.claimedByAgentId)
+    if (!agent) continue
+    const freshJob = isRecentIso(job.lastHeartbeatAt, 120_000)
+    // An idle worker heartbeat must not keep an unrelated lease alive. The
+    // bundled worker reports its current job explicitly; retain the fallback
+    // for older agents that never sent that marker.
+    const agentMetadata = isRecord(agent.metadata) ? agent.metadata : {}
+    const hasCurrentJobMarker = Object.prototype.hasOwnProperty.call(agentMetadata, "currentJobId")
+    const freshAgent =
+      isRecentIso(agent.lastHeartbeatAt, 120_000) &&
+      (!hasCurrentJobMarker || agentMetadata.currentJobId === job.id)
+    const activeRun =
+      agent.latestRun &&
+      ["pending", "running"].includes(agent.latestRun.status) &&
+      isRecentIso(agent.latestRun.updatedAt, 120_000)
+    if (freshJob || freshAgent || activeRun) continue
+
+    const supabase = getSupabaseServerClient()
+    const now = new Date().toISOString()
+    const { data, error } = await supabase
+      .from(REPAIR_JOBS_TABLE)
+      .update({
+        status: "pending",
+        claimed_by_agent_id: null,
+        claimed_at: null,
+        started_at: null,
+        completed_at: null,
+        last_heartbeat_at: now,
+        summary: "Requeued after the worker heartbeat expired",
+        error: null,
+        updated_at: now,
+      })
+      .eq("id", job.id)
+      .eq("status", job.status)
+      .eq("claimed_by_agent_id", job.claimedByAgentId)
+      .select("id")
+    if (!error && Array.isArray(data) && data.length > 0) requeued += 1
+  }
+  if (requeued > 0 && input?.migrationId) {
+    await updateMigration(input.migrationId, {
+      syncStatus: "ok",
+      syncMessage: `Requeued ${requeued} worker shard${requeued === 1 ? "" : "s"}`,
+      lastSyncedAt: new Date().toISOString(),
+    }).catch(() => undefined)
+  }
+  return requeued
 }
 
 export async function buildRepairJobExecutionPayload(job: DriveRepairJob): Promise<Record<string, unknown>> {
   const migration = await getMigration(job.migrationId)
   if (!migration) throw new Error("Migration not found")
-  const items = await listMigrationItems(job.migrationId)
+  const allItems = await listMigrationItems(job.migrationId)
+  const requestedIds = workerItemIdsFromPayload(job.payload)
+  const items = requestedIds.length > 0 ? allItems.filter((item) => requestedIds.includes(item.id)) : allItems
+  if (requestedIds.length > 0 && items.length !== requestedIds.length) {
+    throw new Error("Worker job references a migration item that no longer exists")
+  }
   const accounts = await getAllAccounts()
   const source = accounts.find((account) => account.id === migration.sourceAccountId)
   const target = accounts.find((account) => account.id === migration.targetAccountId)
@@ -704,7 +1296,10 @@ export async function buildRepairJobExecutionPayload(job: DriveRepairJob): Promi
       migrationId: migration.id,
       verifyAllBuckets: true,
       strictCompletion: true,
+      kind: typeof job.payload.kind === "string" ? job.payload.kind : undefined,
     },
+    ...(isRecord(job.payload.workerShard) ? { workerShard: job.payload.workerShard } : {}),
+    ...(typeof job.payload.workerGeneration === "number" ? { workerGeneration: job.payload.workerGeneration } : {}),
     migration: {
       id: migration.id,
       options: migration.options,
@@ -743,7 +1338,18 @@ export async function applyRepairJobItemUpdate(input: {
   transferred?: number
   failed?: number
   skipped?: number
+  expectedAgentId?: string
 }): Promise<DriveMigrationItem> {
+  if (input.expectedAgentId) {
+    const ownedJob = await getRepairJobRaw(input.repairJobId)
+    if (
+      !ownedJob ||
+      ownedJob.claimedByAgentId !== input.expectedAgentId ||
+      !["claimed", "running"].includes(ownedJob.status)
+    ) {
+      throw new Error("This job is no longer owned by this worker")
+    }
+  }
   const item = (await listMigrationItems(input.migrationId)).find((row) => row.id === input.itemId)
   if (!item) throw new Error("Migration item not found")
   const now = new Date().toISOString()

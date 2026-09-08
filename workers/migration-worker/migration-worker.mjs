@@ -22,7 +22,9 @@ function getArg(name, fallback = "") {
 const SERVER_URL = String(getArg("server-url", "")).replace(/\/+$/, "")
 const AGENT_ID = String(getArg("agent-id", ""))
 const AGENT_TOKEN = String(getArg("token", ""))
+const MIGRATION_ID = String(getArg("migration-id", process.env.DRIVE_MIGRATION_ID || process.env.MIGRATION_ID || ""))
 const REPAIR_JOB_ID = String(getArg("repair-job-id", process.env.DRIVE_REPAIR_JOB_ID || ""))
+const POOL_MODE = Boolean(MIGRATION_ID && !REPAIR_JOB_ID)
 const GITHUB_RUN_ID = String(process.env.GITHUB_RUN_ID || "")
 const POLL_MS = Math.max(5_000, Number(getArg("poll-ms", "15000")) || 15_000)
 const HEARTBEAT_MS = Math.max(10_000, Number(getArg("heartbeat-ms", "20000")) || 20_000)
@@ -42,11 +44,15 @@ const RANGE_COPY_THRESHOLD = Math.max(
   Math.min(1024 * 1024 * 1024, (Number.isFinite(RANGE_COPY_THRESHOLD_MB) ? RANGE_COPY_THRESHOLD_MB : 64) * 1024 * 1024)
 )
 const RANGE_COPY_CONCURRENCY = Math.max(1, Math.min(16, Number(getArg("range-copy-concurrency", String(UPLOAD_QUEUE_SIZE))) || UPLOAD_QUEUE_SIZE))
-const HEARTBEAT_TIMEOUT_MS = Math.max(API_TIMEOUT_MS, 60_000)
-const HEARTBEAT_RETRIES = Math.max(API_RETRIES, 5)
+// Keep one heartbeat cycle well below the panel's stale-lease window. A
+// 60-second timeout with five retries can block for several minutes, causing
+// the orchestrator to requeue a live worker while it is still copying.
+const HEARTBEAT_TIMEOUT_MS = Math.max(5_000, Math.min(API_TIMEOUT_MS, 15_000))
+const HEARTBEAT_RETRIES = Math.max(2, Math.min(API_RETRIES, 3))
 const SUPABASE_TIMEOUT_MS = Math.max(1_000, Number(getArg("supabase-timeout-ms", "5000")) || 5_000)
+const DEFAULT_EXIT_AFTER_JOB = POOL_MODE ? "false" : process.env.GITHUB_ACTIONS === "true" ? "true" : "false"
 const EXIT_AFTER_JOB = ["1", "true", "yes"].includes(
-  String(getArg("exit-after-job", process.env.GITHUB_ACTIONS === "true" ? "true" : "false")).toLowerCase()
+  String(getArg("exit-after-job", DEFAULT_EXIT_AFTER_JOB)).toLowerCase()
 )
 const SUPABASE_URL = String(getArg("supabase-url", process.env.NEXT_PUBLIC_SUPABASE_URL || ""))
 const SUPABASE_SERVICE_ROLE_KEY = String(getArg("supabase-service-role-key", ""))
@@ -57,6 +63,7 @@ const supabase =
 const migrationItemProgressCache = new Map()
 const repairJobProgressCache = new Map()
 const jobAbortControllers = new Map()
+const jobUpdateQueues = new Map()
 
 if (!SERVER_URL || !AGENT_ID || !AGENT_TOKEN) {
   console.error("Missing required configuration. Use --server-url, --agent-id, and --token.")
@@ -87,6 +94,36 @@ function isRecord(value) {
   return typeof value === "object" && value !== null
 }
 
+function normalizeWorkerShard(value) {
+  if (!isRecord(value)) return null
+  const index = Number(value.index)
+  const count = Number(value.count)
+  if (!Number.isInteger(index) || !Number.isInteger(count) || count < 1 || index < 0 || index >= count) return null
+  return { index, count }
+}
+
+function requiresWorkerShard(payload) {
+  return payload?.job?.kind === "migration_shard" || payload?.workerGeneration !== undefined
+}
+
+// FNV-1a gives every object a stable owner shard. The namespace includes the
+// source bucket so identical keys in different buckets remain independent.
+function objectBelongsToShard(object, namespace, shard) {
+  if (!shard || shard.count <= 1) return true
+  const value = `${String(namespace || "")}\u0000${String(object?.key || "")}`
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0) % shard.count === shard.index
+}
+
+function filterObjectsForShard(objects, namespace, shard) {
+  if (!shard || shard.count <= 1) return objects
+  return objects.filter((object) => objectBelongsToShard(object, namespace, shard))
+}
+
 function closeBodyStream(body) {
   if (body && typeof body.destroy === "function") {
     try {
@@ -98,7 +135,7 @@ function closeBodyStream(body) {
 function isRetryableError(error) {
   const name = typeof error?.name === "string" ? error.name.toLowerCase() : ""
   const message = error instanceof Error ? error.message.toLowerCase() : String(error || "").toLowerCase()
-  const status = Number(error?.$metadata?.httpStatusCode || 0)
+  const status = Number(error?.$metadata?.httpStatusCode || error?.status || 0)
   return (
     name === "aborterror" ||
     name === "timeouterror" ||
@@ -166,7 +203,12 @@ async function runConcurrent(items, concurrency, worker) {
       await worker(items[index], index)
     }
   })
-  await Promise.all(workers)
+  // Wait for every in-flight task before propagating a failure. Promise.all
+  // rejects immediately and would otherwise let copies from this job continue
+  // in the background while the lease is being finalized or requeued.
+  const settled = await Promise.allSettled(workers)
+  const failure = settled.find((entry) => entry.status === "rejected")
+  if (failure?.status === "rejected") throw failure.reason
 }
 
 class JobAbortedError extends Error {
@@ -224,8 +266,9 @@ async function api(path, body, options = {}) {
         const json = await response.json().catch(() => ({}))
         if (!response.ok) {
           const message = typeof json.error === "string" ? json.error : `Request failed: ${response.status}`
-          if (response.status >= 500 || response.status === 429) throw new Error(message)
-          throw new Error(message)
+          const requestError = new Error(message)
+          requestError.status = response.status
+          throw requestError
         }
         return json
       } finally {
@@ -243,13 +286,21 @@ async function heartbeat(extra = {}) {
       token: AGENT_TOKEN,
       host: os.hostname(),
       version: "worker-v1",
-      capabilities: ["scan", "verify", "repair", "diagnostics"],
+      capabilities: ["scan", "verify", "repair", "bulk_migrate", "diagnostics"],
       metadata: extra,
     },
     { timeoutMs: HEARTBEAT_TIMEOUT_MS, retries: HEARTBEAT_RETRIES }
   )
 
   if (supabase) {
+    const currentAgent = await withTimeout(
+      "supabase load worker metadata",
+      supabase.from("drive_agents").select("metadata").eq("id", AGENT_ID).limit(1)
+    ).catch(() => ({ data: null }))
+    const currentAgentRow = currentAgent && typeof currentAgent === "object" && Array.isArray(currentAgent.data)
+      ? currentAgent.data[0]
+      : null
+    const currentMetadata = isRecord(currentAgentRow?.metadata) ? currentAgentRow.metadata : {}
     await withTimeout(
       "supabase worker heartbeat",
       supabase
@@ -259,7 +310,7 @@ async function heartbeat(extra = {}) {
           last_heartbeat_at: new Date().toISOString(),
           last_seen_host: os.hostname(),
           last_seen_version: "worker-v1",
-          metadata: extra,
+          metadata: { ...currentMetadata, ...extra },
           updated_at: new Date().toISOString(),
         })
         .eq("id", AGENT_ID)
@@ -271,6 +322,8 @@ async function heartbeat(extra = {}) {
 async function claimJob() {
   return api(`/api/workers/${encodeURIComponent(AGENT_ID)}/claim-job`, {
     token: AGENT_TOKEN,
+    ...(MIGRATION_ID ? { migrationId: MIGRATION_ID } : {}),
+    ...(POOL_MODE ? { pool: true } : {}),
     ...(REPAIR_JOB_ID ? { jobId: REPAIR_JOB_ID } : {}),
     ...(GITHUB_RUN_ID ? { githubRunId: GITHUB_RUN_ID } : {}),
   })
@@ -510,18 +563,25 @@ async function updateJob(jobId, body, options = {}) {
     const error = typeof body.error === "string" ? body.error : undefined
     const now = new Date().toISOString()
     persistLocally = async () => {
-      let currentRow = repairJobProgressCache.get(jobId) || null
-      if (!currentRow) {
-        const selectResult = await withTimeout(
-          `supabase load repair job ${jobId}`,
-          supabase
-            .from("drive_repair_jobs")
-            .select("progress, result")
-            .eq("id", jobId)
-            .limit(1)
-        ).catch(() => ({ data: null }))
-        const data = selectResult && typeof selectResult === "object" ? selectResult.data : null
-        currentRow = Array.isArray(data) ? data[0] : null
+      // The API endpoint fences updates by claimed agent id. Keep the direct
+      // Supabase fallback under the same lease fence so an offline worker
+      // cannot overwrite a shard after the orchestrator requeues it.
+      const selectResult = await withTimeout(
+        `supabase load repair job ${jobId}`,
+        supabase
+          .from("drive_repair_jobs")
+          .select("status, claimed_by_agent_id, migration_id, progress, result")
+          .eq("id", jobId)
+          .limit(1)
+      ).catch(() => ({ data: null }))
+      const data = selectResult && typeof selectResult === "object" ? selectResult.data : null
+      const currentRow = Array.isArray(data) ? data[0] : null
+      if (
+        !currentRow ||
+        currentRow.claimed_by_agent_id !== AGENT_ID ||
+        !["claimed", "running"].includes(String(currentRow.status || ""))
+      ) {
+        return
       }
 
       const currentProgress = isRecord(currentRow?.progress) ? currentRow.progress : {}
@@ -529,7 +589,7 @@ async function updateJob(jobId, body, options = {}) {
       const mergedProgress = progress ? { ...currentProgress, ...progress } : undefined
       const mergedResult = result ? { ...currentResult, ...result } : undefined
 
-      await withTimeout(
+      const persisted = await withTimeout(
         `supabase update repair job ${jobId}`,
         supabase
           .from("drive_repair_jobs")
@@ -544,7 +604,11 @@ async function updateJob(jobId, body, options = {}) {
             ...((status === "completed" || status === "failed" || status === "canceled") ? { completed_at: now } : {}),
           })
           .eq("id", jobId)
-      ).catch(() => undefined)
+          .eq("claimed_by_agent_id", AGENT_ID)
+          .in("status", ["claimed", "running"])
+          .select("id")
+      ).catch(() => null)
+      if (!persisted || persisted.error || !Array.isArray(persisted.data) || persisted.data.length === 0) return
 
       if (currentMigrationId && Array.isArray(body.items)) {
         for (const itemUpdate of body.items) {
@@ -582,23 +646,64 @@ async function updateJob(jobId, body, options = {}) {
 }
 
 async function safeUpdateJob(jobId, body) {
-  try {
-    const response = await updateJob(jobId, body, { allowOffline: true })
-    if (response?.offline) {
-      console.error(`Job sync deferred for ${jobId}: ${response.error}`)
+  // Progress is best-effort. Keep at most one request in flight per job and
+  // replace stale queued telemetry with the newest snapshot. Without this,
+  // a panel outage creates dozens of concurrent retries and can delay the
+  // terminal update long after the object work has finished.
+  const existing = jobUpdateQueues.get(jobId)
+  if (existing) {
+    existing.pending = body
+    return existing.promise
+  }
+
+  const state = { pending: body, promise: null }
+  state.promise = (async () => {
+    let response = null
+    while (state.pending) {
+      const nextBody = state.pending
+      state.pending = null
+      try {
+        response = await updateJob(jobId, nextBody, { allowOffline: true })
+        if (response?.offline) {
+          console.error(`Job sync deferred for ${jobId}: ${response.error}`)
+          // Drop stale telemetry after an outage. The next heartbeat/progress
+          // tick will start one fresh bounded attempt if connectivity returns.
+          state.pending = null
+          break
+        }
+      } catch (error) {
+        if (error instanceof JobAbortedError) {
+          markJobAborted(jobId)
+          return { canceled: true }
+        }
+        if (error instanceof Error && /no longer owned|claimed by another worker/i.test(error.message)) {
+          // The orchestrator reclaimed this lease. Fence the old process before it
+          // can report progress or intentionally retry the same object set.
+          markJobAborted(jobId)
+          return { canceled: true, fenced: true }
+        }
+        const message = error instanceof Error ? error.message : String(error)
+        console.error(`Job sync failed for ${jobId}:`, message)
+        return { offline: true, error: message }
+      }
     }
     return response
-  } catch (error) {
-    if (error instanceof JobAbortedError) {
-      markJobAborted(jobId)
-      return { canceled: true }
-    }
-    console.error(`Job sync failed for ${jobId}:`, error instanceof Error ? error.message : String(error))
-    return { offline: true, error: error instanceof Error ? error.message : String(error) }
+  })()
+  jobUpdateQueues.set(jobId, state)
+  try {
+    return await state.promise
+  } finally {
+    if (jobUpdateQueues.get(jobId) === state) jobUpdateQueues.delete(jobId)
   }
 }
 
+async function flushJobUpdates(jobId) {
+  const state = jobUpdateQueues.get(jobId)
+  if (state) await state.promise.catch(() => undefined)
+}
+
 async function finalizeJobUpdate(jobId, body) {
+  await flushJobUpdates(jobId)
   try {
     const response = await updateJob(jobId, body, { allowOffline: true })
     if (response?.offline) {
@@ -607,6 +712,10 @@ async function finalizeJobUpdate(jobId, body) {
     return response
   } catch (error) {
     if (error instanceof JobAbortedError) return { canceled: true }
+    if (error instanceof Error && /no longer owned|claimed by another worker/i.test(error.message)) {
+      markJobAborted(jobId)
+      return { canceled: true, fenced: true }
+    }
     console.error(`Final job update failed for ${jobId}:`, error instanceof Error ? error.message : String(error))
     return { offline: true, error: error instanceof Error ? error.message : String(error) }
   }
@@ -626,6 +735,7 @@ async function tryClaimJob() {
 
 async function listAllObjects(client, bucket, prefix, onProgress) {
   const objects = []
+  const seenKeys = new Set()
   let continuationToken = undefined
   const seenTokens = new Set()
   while (true) {
@@ -649,12 +759,27 @@ async function listAllObjects(client, bucket, prefix, onProgress) {
     for (const object of contents) {
       const key = typeof object?.Key === "string" ? object.Key : ""
       if (!key) continue
+      if (seenKeys.has(key)) continue
+      seenKeys.add(key)
       const size = typeof object?.Size === "number" ? object.Size : 0
       objects.push({ key, size })
       if (typeof onProgress === "function") onProgress({ count: objects.length, key, size })
-      if (objects.length >= MAX_OBJECTS) return objects
+      if (objects.length > MAX_OBJECTS) {
+        throw new Error(
+          `Object inventory for ${bucket} exceeds MAX_OBJECTS=${MAX_OBJECTS}. Increase MAX_OBJECTS and retry; refusing to mark a truncated migration complete.`
+        )
+      }
     }
-    continuationToken = typeof page.NextContinuationToken === "string" ? page.NextContinuationToken : undefined
+    const nextContinuationToken = typeof page.NextContinuationToken === "string" ? page.NextContinuationToken : undefined
+    if (page.IsTruncated === true && !nextContinuationToken) {
+      throw new Error(`Object inventory pagination ended without a continuation token for ${bucket}`)
+    }
+    continuationToken = nextContinuationToken
+    if (objects.length >= MAX_OBJECTS && continuationToken) {
+      throw new Error(
+        `Object inventory for ${bucket} exceeds MAX_OBJECTS=${MAX_OBJECTS}. Increase MAX_OBJECTS and retry; refusing to mark a truncated migration complete.`
+      )
+    }
     if (!continuationToken) return objects
   }
 }
@@ -920,6 +1045,20 @@ async function copyObjectWithRangedMultipart(sourceClient, targetClient, sourceB
       }),
       options.abortSignal ? { abortSignal: options.abortSignal } : undefined
     )
+
+    // CompleteMultipartUpload can succeed while the committed object has a
+    // provider-side size discrepancy. Verify the committed object before the
+    // part is reported as copied; the final migration listing is a second
+    // independent check.
+    const targetHead = await withRetries(
+      `verify target head ${targetBucket}/${key}`,
+      () => targetClient.send(new HeadObjectCommand({ Bucket: targetBucket, Key: key })),
+      S3_RETRIES
+    )
+    const targetSize = typeof targetHead.ContentLength === "number" ? targetHead.ContentLength : -1
+    if (targetSize !== sourceSize) {
+      throw new Error(`Size mismatch after multipart copy for ${key}: source=${sourceSize} target=${targetSize}`)
+    }
   } catch (error) {
     await targetClient
       .send(new AbortMultipartUploadCommand({ Bucket: targetBucket, Key: key, UploadId: uploadId }))
@@ -1007,6 +1146,14 @@ async function copyObject(sourceClient, targetClient, sourceBucket, targetBucket
 
 async function processItem(jobId, payload, item, completedResults, state) {
   const prefix = payload.migration?.pathPrefix || null
+  // Match the migration setting used by the Super Slurper lane. Missing
+  // objects are always safe to copy; an existing size mismatch is copied only
+  // when overwrite is enabled. With overwrite disabled it remains a verified
+  // mismatch and the job reports failure instead of silently replacing data.
+  const overwrite = payload.migration?.options?.overwrite !== false
+  const workerShard = normalizeWorkerShard(payload.workerShard)
+  const isSharded = Boolean(workerShard && workerShard.count > 1)
+  const shardLabel = isSharded ? ` shard ${workerShard.index + 1}/${workerShard.count}` : ""
   const sourceClient = createClient(payload.source)
   const targetClient = createClient(payload.target)
   let stage = "repair_scan"
@@ -1113,7 +1260,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
     })
     if (startSync?.canceled) throw new JobAbortedError()
 
-    const sourceObjects = await listAllObjects(sourceClient, item.sourceBucket, prefix, ({ count, key, size }) => {
+    const allSourceObjects = await listAllObjects(sourceClient, item.sourceBucket, prefix, ({ count, key, size }) => {
       const delta = Math.max(0, count - sourceScanLastCount)
       sourceScanLastCount = count
       state.stats.scannedSourceObjects += delta
@@ -1138,7 +1285,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
       })
       syncLiveProgress()
     })
-    const destinationObjects = await listAllObjects(targetClient, item.targetBucket, prefix, ({ count, key, size }) => {
+    const allDestinationObjects = await listAllObjects(targetClient, item.targetBucket, prefix, ({ count, key, size }) => {
       const delta = Math.max(0, count - destinationScanLastCount)
       destinationScanLastCount = count
       state.stats.scannedDestinationObjects += delta
@@ -1163,7 +1310,14 @@ async function processItem(jobId, payload, item, completedResults, state) {
       })
       syncLiveProgress()
     })
-    const sourceBytes = sourceObjects.reduce((sum, object) => sum + Number(object?.size || 0), 0)
+    // Every shard lists the complete bucket inventory, then owns a disjoint
+    // deterministic subset of keys. This keeps verification accurate while
+    // ensuring two workers never intentionally process the same object.
+    const sourceObjects = filterObjectsForShard(allSourceObjects, item.sourceBucket, workerShard)
+    const destinationObjects = filterObjectsForShard(allDestinationObjects, item.sourceBucket, workerShard)
+    const sourceBytes = allSourceObjects.reduce((sum, object) => sum + Number(object?.size || 0), 0)
+    const sourceObjectCount = allSourceObjects.length
+    const shardObjectCount = sourceObjects.length
     const initialDiff = diffObjectsByListing(sourceObjects, destinationObjects, ({ checked, key, size, missing, mismatched }) => {
       state.currentFile = {
         itemId: item.id,
@@ -1174,7 +1328,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
         status: "verifying",
         startedAt: currentStageStartedAt,
         checkedObjects: checked,
-        totalObjects: sourceObjects.length,
+        totalObjects: shardObjectCount,
         missing,
         mismatched,
         updatedAt: new Date().toISOString(),
@@ -1186,7 +1340,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
         verifyCheckedCount: checked,
         initialMissing: missing,
         initialMismatched: mismatched,
-        summary: `Comparing ${item.sourceBucket}: ${checked}/${sourceObjects.length} checked`,
+        summary: `Comparing ${item.sourceBucket}${shardLabel}: ${checked}/${shardObjectCount} files checked`,
       })
       syncLiveProgress({ verifyCheckedCount: checked, missing, mismatched })
     })
@@ -1203,14 +1357,15 @@ async function processItem(jobId, payload, item, completedResults, state) {
       initialMismatched,
       totalFiles: toRepair.length,
       processedFiles: 0,
-      summary: `Scan complete for ${item.sourceBucket}: ${initialMissing} missing, ${initialMismatched} mismatched`,
+      summary: `Scan complete for ${item.sourceBucket}${shardLabel}: ${initialMissing} missing, ${initialMismatched} mismatched`,
     })
     pushLog(state, `Scan complete for ${item.sourceBucket}`, {
       itemId: item.id,
       stage,
       initialMissing,
       initialMismatched,
-      sourceCount: sourceObjects.length,
+      sourceCount: sourceObjectCount,
+      shardSourceCount: shardObjectCount,
       destinationCount: destinationObjects.length,
     })
 
@@ -1221,6 +1376,35 @@ async function processItem(jobId, payload, item, completedResults, state) {
         throwIfJobAborted(jobId)
         const isMismatch = typeof object?.destinationSize === "number"
         const objectSize = typeof object?.size === "number" ? object.size : 0
+        if (isMismatch && !overwrite) {
+          skipped += 1
+          upsertFileEvent(state, {
+            itemId: item.id,
+            bucket: item.sourceBucket,
+            key: object.key,
+            size: objectSize,
+            kind: "mismatched",
+            stage,
+            status: "skipped",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            bytesTransferred: 0,
+            bytesTotal: objectSize,
+            reason: "overwrite_disabled",
+          })
+          upsertItemProgress(state, {
+            itemId: item.id,
+            stage,
+            status: "running",
+            transferred,
+            failed,
+            skipped,
+            processedFiles: transferred + failed + skipped,
+            totalFiles: toRepair.length,
+            summary: `Skipping mismatched ${item.sourceBucket} object because overwrite is disabled`,
+          })
+          return
+        }
         const latestTargetSize = await getTargetObjectSize(targetClient, item.targetBucket, object.key)
         if (latestTargetSize === objectSize) {
           skipped += 1
@@ -1423,7 +1607,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
         skipped,
         processedFiles: toRepair.length,
         totalFiles: toRepair.length,
-        summary: `Verify-only mode for ${item.sourceBucket}: ${toRepair.length} files queued for verification`,
+        summary: `Verify-only mode for ${item.sourceBucket}${shardLabel}: ${toRepair.length} files queued for verification`,
       })
     }
 
@@ -1432,9 +1616,13 @@ async function processItem(jobId, payload, item, completedResults, state) {
     pushLog(state, `Verifying ${item.sourceBucket}`, {
       itemId: item.id,
       stage,
-      sourceCount: sourceObjects.length,
+      sourceCount: shardObjectCount,
     })
-    let finalDestinationObjects = await listAllObjects(targetClient, item.targetBucket, prefix)
+    let finalDestinationObjects = filterObjectsForShard(
+      await listAllObjects(targetClient, item.targetBucket, prefix),
+      item.sourceBucket,
+      workerShard
+    )
     let finalDiff = diffObjectsByListing(sourceObjects, finalDestinationObjects, ({ checked, key, size, missing, mismatched }) => {
       state.currentFile = {
         itemId: item.id,
@@ -1445,7 +1633,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
         status: "verifying",
         startedAt: currentStageStartedAt,
         checkedObjects: checked,
-        totalObjects: sourceObjects.length,
+        totalObjects: shardObjectCount,
         missing,
         mismatched,
         updatedAt: new Date().toISOString(),
@@ -1457,7 +1645,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
         verifyCheckedCount: checked,
         finalMissing: missing,
         finalMismatched: mismatched,
-        summary: `Verifying ${item.sourceBucket}: ${checked}/${sourceObjects.length} checked`,
+        summary: `Verifying ${item.sourceBucket}${shardLabel}: ${checked}/${shardObjectCount} files checked`,
       })
       syncLiveProgress({ verifyCheckedCount: checked, missing, mismatched })
     })
@@ -1479,6 +1667,24 @@ async function processItem(jobId, payload, item, completedResults, state) {
         throwIfJobAborted(jobId)
         const isMismatch = typeof object?.destinationSize === "number"
         const objectSize = typeof object?.size === "number" ? object.size : 0
+        if (isMismatch && !overwrite) {
+          skipped += 1
+          upsertFileEvent(state, {
+            itemId: item.id,
+            bucket: item.sourceBucket,
+            key: object.key,
+            size: objectSize,
+            kind: "mismatched",
+            stage,
+            status: "skipped",
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            bytesTransferred: 0,
+            bytesTotal: objectSize,
+            reason: "overwrite_disabled",
+          })
+          return
+        }
         const latestTargetSize = await getTargetObjectSize(targetClient, item.targetBucket, object.key)
         if (latestTargetSize === objectSize) {
           skipped += 1
@@ -1595,20 +1801,30 @@ async function processItem(jobId, payload, item, completedResults, state) {
       })
 
       state.currentFile = null
-      finalDestinationObjects = await listAllObjects(targetClient, item.targetBucket, prefix)
+      finalDestinationObjects = filterObjectsForShard(
+        await listAllObjects(targetClient, item.targetBucket, prefix),
+        item.sourceBucket,
+        workerShard
+      )
       finalDiff = diffObjectsByListing(sourceObjects, finalDestinationObjects)
       finalMissing = finalDiff.missing.length
       finalMismatched = finalDiff.mismatched.length
     }
 
     const completed = finalMissing === 0 && finalMismatched === 0
-    const resolvedAllObjects = completed && finalDestinationObjects.length >= sourceObjects.length
-    state.stats.verifiedObjects += sourceObjects.length
+    const resolvedAllObjects = !isSharded && completed && finalDestinationObjects.length >= sourceObjects.length
+    state.stats.verifiedObjects += shardObjectCount
+    const itemStatus = isSharded ? "running" : completed ? "completed" : "failed"
+    const completionSummary = isSharded
+      ? `Shard ${workerShard.index + 1}/${workerShard.count} verified for ${item.sourceBucket}`
+      : completed
+        ? `Repair verified for ${item.sourceBucket}`
+        : `Repair incomplete for ${item.sourceBucket}: ${finalMissing} missing, ${finalMismatched} mismatched`
     state.currentFile = null
     upsertItemProgress(state, {
       itemId: item.id,
       stage,
-      status: completed ? "completed" : "failed",
+      status: itemStatus,
       transferred,
       failed,
       skipped,
@@ -1618,14 +1834,21 @@ async function processItem(jobId, payload, item, completedResults, state) {
       initialMismatched,
       finalMissing,
       finalMismatched,
-      summary: completed
-        ? `Repair verified for ${item.sourceBucket}`
-        : `Repair incomplete for ${item.sourceBucket}: ${finalMissing} missing, ${finalMismatched} mismatched`,
+      summary: completionSummary,
+      ...(isSharded
+        ? {
+            shardIndex: workerShard.index,
+            shardCount: workerShard.count,
+            shardObjectCount,
+          }
+        : {}),
     })
     pushLog(
       state,
       completed
-        ? `Repair verified for ${item.sourceBucket}`
+        ? isSharded
+          ? `Shard ${workerShard.index + 1}/${workerShard.count} verified for ${item.sourceBucket}`
+          : `Repair verified for ${item.sourceBucket}`
         : `Repair incomplete for ${item.sourceBucket}`,
       {
         itemId: item.id,
@@ -1643,17 +1866,23 @@ async function processItem(jobId, payload, item, completedResults, state) {
           {
             itemId: item.id,
             stage,
-            status: completed ? "completed" : "failed",
-            summary: completed
-              ? `Repair verified for ${item.sourceBucket}`
-              : `Repair incomplete for ${item.sourceBucket}: ${finalMissing} missing, ${finalMismatched} mismatched`,
+            status: itemStatus,
+            summary: completionSummary,
             transferred,
             failed,
             skipped,
             details: {
               initialMissing,
               initialMismatched,
-              sourceObjectCount: sourceObjects.length,
+              sourceObjectCount,
+              shardObjectCount,
+              ...(isSharded
+                ? {
+                    shardComplete: completed,
+                    shardIndex: workerShard.index,
+                    shardCount: workerShard.count,
+                  }
+                : {}),
               sourceBytes,
               destinationObjectCountBefore: destinationObjects.length,
               destinationObjectCountAfter: finalDestinationObjects.length,
@@ -1692,7 +1921,8 @@ async function processItem(jobId, payload, item, completedResults, state) {
       targetBucket: item.targetBucket,
       initialMissing,
       initialMismatched,
-      sourceObjectCount: sourceObjects.length,
+      sourceObjectCount,
+      shardObjectCount,
       sourceBytes,
       destinationObjectCountBefore: destinationObjects.length,
       destinationObjectCountAfter: finalDestinationObjects.length,
@@ -1703,6 +1933,9 @@ async function processItem(jobId, payload, item, completedResults, state) {
       finalMismatched,
       completed,
       resolvedAllObjects,
+      shardComplete: isSharded ? completed : undefined,
+      shardIndex: isSharded ? workerShard.index : undefined,
+      shardCount: isSharded ? workerShard.count : undefined,
       failureSamples,
     }
   } catch (error) {
@@ -1780,12 +2013,25 @@ async function processItem(jobId, payload, item, completedResults, state) {
 
 async function runJob(job, payload) {
   const state = createJobTelemetry(payload)
-  pushLog(state, `Strict worker verification enabled across ${Array.isArray(payload?.items) ? payload.items.length : 0} bucket(s)`, {
+  const workerShard = normalizeWorkerShard(payload?.workerShard)
+  if ((requiresWorkerShard(payload) || payload?.workerShard !== undefined) && !workerShard) {
+    throw new Error("Migration shard job is missing a valid worker shard assignment; refusing to process the full migration")
+  }
+  const isSharded = Boolean(workerShard && workerShard.count > 1)
+  const bucketCount = Array.isArray(payload?.items) ? payload.items.length : 0
+  pushLog(
+    state,
+    isSharded
+      ? `Worker shard ${workerShard.index + 1}/${workerShard.count} enabled across ${bucketCount} bucket(s)`
+      : `Strict worker verification enabled across ${bucketCount} bucket(s)`,
+    {
     stage: "start",
     mode: payload?.job?.mode || "repair_and_verify",
     verifyAllBuckets: payload?.job?.verifyAllBuckets === true,
     strictCompletion: payload?.job?.strictCompletion === true,
-  })
+      ...(isSharded ? { shardIndex: workerShard.index, shardCount: workerShard.count } : {}),
+    }
+  )
   const results = []
   for (const item of Array.isArray(payload.items) ? payload.items : []) {
     results.push(await processItem(job.id, payload, item, results, state))
@@ -1795,13 +2041,20 @@ async function runJob(job, payload) {
   const totalMismatched = results.reduce((sum, item) => sum + item.finalMismatched, 0)
   const totalTransferred = results.reduce((sum, item) => sum + item.transferred, 0)
   const totalFailed = results.reduce((sum, item) => sum + item.failed, 0)
-  const totalVerifiedObjects = results.reduce((sum, item) => sum + Number(item.sourceObjectCount || 0), 0)
+  const totalVerifiedObjects = isSharded
+    ? results.reduce((sum, item) => sum + Number(item.shardObjectCount || 0), 0)
+    : results.reduce((sum, item) => sum + Number(item.sourceObjectCount || 0), 0)
   const completed = totalMissing === 0 && totalMismatched === 0 && totalFailed === 0
+  const completionSummary = isSharded
+    ? completed
+      ? `Worker shard ${workerShard.index + 1}/${workerShard.count} completed across ${bucketCount} bucket(s); ${totalVerifiedObjects} objects verified, ${totalTransferred} repaired`
+      : `Worker shard ${workerShard.index + 1}/${workerShard.count} incomplete: ${totalMissing} missing, ${totalMismatched} mismatched, ${totalFailed} copy failures`
+    : completed
+      ? `Worker reconciliation completed: destination matches source across ${bucketCount} bucket(s); ${totalVerifiedObjects} objects verified, ${totalTransferred} repaired`
+      : `Worker reconciliation incomplete: ${totalMissing} missing, ${totalMismatched} mismatched, ${totalFailed} copy failures`
   pushLog(
     state,
-    completed
-      ? `Worker reconciliation completed: destination matches source across ${results.length} bucket(s); ${totalVerifiedObjects} objects verified, ${totalTransferred} repaired`
-      : `Worker reconciliation incomplete: ${totalMissing} missing, ${totalMismatched} mismatched, ${totalFailed} copy failures`,
+    completionSummary,
     {
       stage: "completed",
       transferred: totalTransferred,
@@ -1814,9 +2067,7 @@ async function runJob(job, payload) {
 
   const finalSync = await finalizeJobUpdate(job.id, {
     status: completed ? "completed" : "failed",
-    summary: completed
-      ? `Worker reconciliation completed: destination matches source across ${results.length} bucket(s); ${totalVerifiedObjects} objects verified, ${totalTransferred} repaired`
-      : `Worker reconciliation incomplete: ${totalMissing} missing, ${totalMismatched} mismatched, ${totalFailed} copy failures`,
+    summary: completionSummary,
     error: completed ? null : "One or more items still have missing/mismatched files after worker repair",
     result: {
       items: results,
@@ -1856,9 +2107,10 @@ async function runJob(job, payload) {
 let currentJobId = null
 let currentMigrationId = null
 let heartbeatLoopStarted = false
+let heartbeatLoopStopped = false
 
 async function startHeartbeatLoop() {
-  while (true) {
+  while (!heartbeatLoopStopped) {
     try {
       await heartbeat({ currentJobId: currentJobId ?? null })
     } catch (error) {
@@ -1875,8 +2127,12 @@ async function startHeartbeatLoop() {
         }
       }
     }
-    await sleep(HEARTBEAT_MS)
+    if (!heartbeatLoopStopped) await sleep(HEARTBEAT_MS)
   }
+}
+
+function stopHeartbeatLoop() {
+  heartbeatLoopStopped = true
 }
 
 async function main() {
@@ -1892,6 +2148,11 @@ async function main() {
   while (true) {
     try {
       const claimed = await tryClaimJob()
+      if (claimed?.poolComplete === true) {
+        console.log(`Worker pool is complete (${claimed.poolReason || "terminal"}); stopping worker cleanly`)
+        stopHeartbeatLoop()
+        return
+      }
       if (!claimed?.job || !claimed?.payload) {
         await sleep(POLL_MS)
         continue
@@ -1912,6 +2173,7 @@ async function main() {
       jobAbortControllers.delete(claimed.job.id)
       if (EXIT_AFTER_JOB) {
         console.log(`Exit-after-job enabled; stopping worker after job ${claimed.job.id}`)
+        stopHeartbeatLoop()
         return
       }
     } catch (error) {
@@ -1937,6 +2199,7 @@ async function main() {
       if (failedJobId) jobAbortControllers.delete(failedJobId)
       if (EXIT_AFTER_JOB && failedJobId) {
         console.log(`Exit-after-job enabled; stopping worker after terminal job ${failedJobId}`)
+        stopHeartbeatLoop()
         return
       }
       await sleep(POLL_MS)
@@ -1955,7 +2218,10 @@ async function runWorkerForever() {
       currentMigrationId = null
       migrationItemProgressCache.clear()
       repairJobProgressCache.clear()
-      if (EXIT_AFTER_JOB) return
+      if (EXIT_AFTER_JOB) {
+        stopHeartbeatLoop()
+        return
+      }
       await sleep(POLL_MS)
     }
   }

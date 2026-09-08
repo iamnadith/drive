@@ -42,6 +42,8 @@ type Migration = {
   targetAccountId: string
   status: "draft" | "running" | "verifying" | "completed" | "failed" | "canceled"
   options: {
+    executionMode?: "super_slurper" | "migration_workers"
+    workerShardCount?: number
     overwrite?: boolean
     concurrency?: number
     pathPrefix?: string | null
@@ -232,6 +234,8 @@ export default function MigrationsPage() {
   const [targetAccountId, setTargetAccountId] = React.useState<string>("")
   const [overwrite, setOverwrite] = React.useState(true)
   const [concurrency, setConcurrency] = React.useState("3")
+  const [executionMode, setExecutionMode] = React.useState<"super_slurper" | "migration_workers">("super_slurper")
+  const [workerShardCount, setWorkerShardCount] = React.useState("32")
   const [pathPrefix, setPathPrefix] = React.useState("")
   const [bucketQuery, setBucketQuery] = React.useState("")
   const [selectedBuckets, setSelectedBuckets] = React.useState<Record<string, boolean>>({})
@@ -499,12 +503,14 @@ export default function MigrationsPage() {
       const res = await fetch("/api/migrations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          targetAccountId,
-          overwrite,
-          concurrency: Number.isFinite(parsedConcurrency) ? parsedConcurrency : 3,
-          pathPrefix: pathPrefix.trim() ? pathPrefix.trim() : undefined,
-          includeBuckets: chosen,
+          body: JSON.stringify({
+            targetAccountId,
+            overwrite,
+            concurrency: Number.isFinite(parsedConcurrency) ? concurrencyNumber : 3,
+            executionMode,
+            ...(executionMode === "migration_workers" ? { workerShardCount: Number(workerShardCount) || 32 } : {}),
+            pathPrefix: pathPrefix.trim() ? pathPrefix.trim() : undefined,
+            includeBuckets: chosen,
         }),
       })
       const json: unknown = await res.json().catch(() => ({}))
@@ -608,6 +614,10 @@ export default function MigrationsPage() {
 
   const canRunVerifyAll = React.useMemo(() => {
     if (!activeMigration) return false
+    // Worker-pool migrations verify each object as part of every shard. The
+    // Super Slurper bucket verifier is a separate flow and must not be shown
+    // for this lane.
+    if (activeMigration.options.executionMode === "migration_workers") return false
     if (activeMigration.status !== "completed" && activeMigration.status !== "verifying") return false
     return activeItems.some((item) => {
       if (!isCompletedStatus(item.slurperStatus)) return false
@@ -667,7 +677,11 @@ export default function MigrationsPage() {
       <div className="flex items-center justify-between gap-3">
         <div className="space-y-1">
           <h1 className="text-2xl font-semibold">Migrations</h1>
-          <p className="text-sm text-muted-foreground">Cloudflare Super Slurper (Cloudflare-run)</p>
+          <p className="text-sm text-muted-foreground">
+            {activeMigration?.options.executionMode === "migration_workers"
+              ? "Drive migration worker pool"
+              : "Cloudflare Super Slurper (Cloudflare-run)"}
+          </p>
         </div>
         <Button onClick={() => setCreateOpen(true)} disabled={Boolean(busyAction) || !activeAccount || availableTargets.length === 0}>
           <Plus className="h-4 w-4 mr-0" />
@@ -743,6 +757,26 @@ export default function MigrationsPage() {
 
               <Separator />
 
+              <div className="space-y-2">
+                <Label>Migration engine</Label>
+                <Select value={executionMode} onValueChange={(value) => setExecutionMode(value as "super_slurper" | "migration_workers")}>
+                  <SelectTrigger className="h-11">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="super_slurper">Cloudflare Super Slurper</SelectItem>
+                    <SelectItem value="migration_workers">Drive migration worker pool</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {executionMode === "migration_workers"
+                    ? "Splits every bucket into deterministic object shards. Workers claim shards from one shared queue, so each file has one owner at a time."
+                    : "Uses Cloudflare-managed Super Slurper jobs and its existing three-job limit."}
+                </p>
+              </div>
+
+              <Separator />
+
               <div className="flex items-start justify-between gap-4">
                 <div className="space-y-1">
                   <Label>Overwrite on destination</Label>
@@ -773,8 +807,36 @@ export default function MigrationsPage() {
                     inputMode="numeric"
                   />
                 </div>
-                <p className="text-xs text-muted-foreground">Cloudflare allows up to 3 concurrent Super Slurper jobs.</p>
+                <p className="text-xs text-muted-foreground">
+                  {executionMode === "migration_workers"
+                    ? "This controls how many destination buckets are prepared at once; worker concurrency comes from dispatched workers."
+                    : "Cloudflare allows up to 3 concurrent Super Slurper jobs."}
+                </p>
               </div>
+
+              {executionMode === "migration_workers" ? (
+                <>
+                  <Separator />
+                  <div className="space-y-2">
+                    <Label>Parallel object shards</Label>
+                    <Select value={workerShardCount} onValueChange={setWorkerShardCount}>
+                      <SelectTrigger className="h-11">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {[8, 16, 32, 64, 128].map((count) => (
+                          <SelectItem key={count} value={String(count)}>
+                            {count} shared shards
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Files are assigned by a stable hash across all buckets. Use at least as many shards as workers you expect to run.
+                    </p>
+                  </div>
+                </>
+              ) : null}
 
               <Separator />
 

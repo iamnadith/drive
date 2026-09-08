@@ -78,6 +78,11 @@ export async function POST(request: Request) {
       typeof data.verifyHashMaxBytes === "number" && Number.isFinite(data.verifyHashMaxBytes)
         ? Math.max(0, Math.floor(data.verifyHashMaxBytes))
         : undefined
+    const executionMode = data.executionMode === "migration_workers" ? "migration_workers" : "super_slurper"
+    const workerShardCount =
+      typeof data.workerShardCount === "number" && Number.isFinite(data.workerShardCount)
+        ? Math.max(1, Math.min(128, Math.floor(data.workerShardCount)))
+        : 32
 
     if (!targetAccountId) return jsonBad("targetAccountId is required")
 
@@ -98,6 +103,8 @@ export async function POST(request: Request) {
           excludeBuckets,
           pathPrefix,
           sourceMode: "s3",
+          executionMode,
+          ...(executionMode === "migration_workers" ? { workerGeneration: 1, workerShardCount } : {}),
           verifyAfterCopy,
           verifyStrictDestination,
           verifyMode,
@@ -135,7 +142,9 @@ export async function POST(request: Request) {
     const { migration, items } = await createMigration({
       sourceAccountId: source.id,
       targetAccountId: target.id,
-      // Cross-account migrations must use Super Slurper with the S3-compatible source.
+      // Both engines use the same account and bucket snapshot. The worker lane
+      // copies through the durable queue; the Super Slurper path remains the
+      // default and is unchanged.
       options: {
         overwrite,
         concurrency,
@@ -143,6 +152,8 @@ export async function POST(request: Request) {
         excludeBuckets,
         pathPrefix,
         sourceMode: "s3",
+        executionMode,
+        ...(executionMode === "migration_workers" ? { workerGeneration: 1, workerShardCount } : {}),
         verifyAfterCopy,
         verifyStrictDestination,
         verifyMode,

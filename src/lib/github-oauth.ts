@@ -78,9 +78,15 @@ export function buildGitHubOAuthUrl(state: string, appUrlOverride?: string): str
   return url.toString()
 }
 
-async function githubApi<T>(path: string, token: string, init?: RequestInit): Promise<T> {
+export class GitHubApiError extends Error {
+  constructor(message: string, public status: number) { super(message) }
+}
+
+export async function githubApi<T>(path: string, token: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`https://api.github.com${path}`, {
     ...init,
+    cache: "no-store",
+    signal: init?.signal ?? AbortSignal.timeout(15000),
     headers: {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${token}`,
@@ -89,11 +95,14 @@ async function githubApi<T>(path: string, token: string, init?: RequestInit): Pr
     },
   })
   const text = await response.text()
-  const json = text ? JSON.parse(text) : {}
+  let json
+  try { json = text ? JSON.parse(text) : {} } catch {
+    throw new GitHubApiError(`GitHub returned an invalid response (${response.status}); retry setup`, response.status)
+  }
   if (!response.ok) {
     const message =
       typeof json?.message === "string" ? json.message : `GitHub API request failed (${response.status})`
-    throw new Error(message)
+    throw new GitHubApiError(message, response.status)
   }
   return json as T
 }
@@ -130,35 +139,87 @@ export async function listGitHubRepos(token: string): Promise<Array<{
   private: boolean
   defaultBranch?: string
 }>> {
-  const repos = await githubApi<GitHubRepo[]>("/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member", token)
-  return repos
-    .filter((repo) => Boolean(repo?.owner?.login) && Boolean(repo?.name))
+  const repos: GitHubRepo[] = []
+  for (let page = 1; ; page++) {
+    if (page > 100) throw new Error("Repository listing exceeded 10,000 entries; narrow GitHub access and retry")
+    const response = await githubApi<unknown>(`/user/repos?per_page=100&sort=full_name&direction=asc&affiliation=owner,collaborator,organization_member&page=${page}`, token)
+    const batch = Array.isArray(response) ? response as GitHubRepo[] : []
+    repos.push(...batch)
+    if (batch.length < 100) break
+  }
+  const uniqueRepos = new Map<string, GitHubRepo>()
+  for (const repo of repos) {
+    if (!repo || (typeof repo.id !== "number" && typeof repo.id !== "string") || typeof repo.name !== "string" || !repo.name.trim()) continue
+    const owner = typeof repo.owner?.login === "string" ? repo.owner.login.trim() : ""
+    if (!owner) continue
+    const key = String(repo.id)
+    if (!uniqueRepos.has(key)) uniqueRepos.set(key, repo)
+  }
+  return [...uniqueRepos.values()]
     .map((repo) => ({
       id: String(repo.id),
       owner: String(repo.owner?.login ?? ""),
       name: String(repo.name),
-      fullName: String(repo.full_name),
+      fullName: typeof repo.full_name === "string" && repo.full_name.trim() ? repo.full_name : `${repo.owner?.login}/${repo.name}`,
       private: Boolean(repo.private),
       defaultBranch: typeof repo.default_branch === "string" ? repo.default_branch : undefined,
     }))
 }
 
-export async function listGitHubWorkflows(token: string, owner: string, repo: string): Promise<Array<{
+export async function listGitHubWorkflows(token: string, owner: string, repo: string, ref?: string): Promise<Array<{
   id: string
   name: string
   path: string
   state?: string
 }>> {
-  const response = await githubApi<{ workflows?: GitHubWorkflow[] }>(
-    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/workflows?per_page=100`,
-    token
-  )
-  return (Array.isArray(response.workflows) ? response.workflows : []).map((workflow) => ({
+  const workflowRecords: GitHubWorkflow[] = []
+  for (let page = 1; ; page++) {
+    if (page > 100) throw new Error("Workflow listing exceeded 10,000 entries; narrow GitHub access and retry")
+    const response = await githubApi<{ workflows?: GitHubWorkflow[] }>(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/workflows?per_page=100&page=${page}`,
+      token
+    )
+    const batch = Array.isArray(response.workflows) ? response.workflows : []
+    workflowRecords.push(...batch)
+    if (batch.length < 100) break
+  }
+  const uniqueWorkflows = new Map<string, GitHubWorkflow>()
+  for (const workflow of workflowRecords) {
+    if (!workflow || (typeof workflow.id !== "number" && typeof workflow.id !== "string") || typeof workflow.name !== "string" || typeof workflow.path !== "string") continue
+    if (!uniqueWorkflows.has(workflow.path)) uniqueWorkflows.set(workflow.path, workflow)
+  }
+  const workflows = [...uniqueWorkflows.values()].map((workflow) => ({
     id: String(workflow.id),
     name: workflow.name,
     path: workflow.path,
     state: workflow.state,
   }))
+
+  // GitHub can retain an Actions workflow record after its file was removed.
+  // Verify every returned path against the selected ref (or the repository's
+  // current default branch when no ref was supplied) before exposing it.
+  const actual: typeof workflows = []
+  for (let offset = 0; offset < workflows.length; offset += 5) {
+    const batch = await Promise.all(
+      workflows.slice(offset, offset + 5).map(async (workflow) => {
+        if (!workflow.path.startsWith(".github/workflows/") || !/\.ya?ml$/i.test(workflow.path)) return null
+        const contentPath = workflow.path.split("/").map(encodeURIComponent).join("/")
+        try {
+          const file = await githubApi<{ type?: string; path?: string }>(
+            `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${contentPath}${ref ? `?ref=${encodeURIComponent(ref)}` : ""}`,
+            token
+          )
+          if (file.type !== "file" || (typeof file.path === "string" && file.path !== workflow.path)) return null
+          return workflow
+        } catch (error) {
+          if (error instanceof GitHubApiError && (error.status === 404 || error.status === 409)) return null
+          throw error
+        }
+      })
+    )
+    actual.push(...batch.filter((workflow): workflow is (typeof workflows)[number] => Boolean(workflow)))
+  }
+  return actual
 }
 
 export async function setGitHubActionsSecret(input: {

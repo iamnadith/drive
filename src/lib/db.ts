@@ -1024,6 +1024,7 @@ export async function ensureDriveSchema(): Promise<void> {
           claimed_by_agent_id uuid references drive_agents(id) on delete set null,
           status text not null default 'pending',
           mode text not null default 'repair_and_verify',
+          work_key text,
           payload jsonb not null default '{}'::jsonb,
           progress jsonb not null default '{}'::jsonb,
           result jsonb not null default '{}'::jsonb,
@@ -1041,6 +1042,8 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(`create index if not exists drive_repair_jobs_status_idx on drive_repair_jobs (status, created_at);`)
       await queryDb(`create index if not exists drive_repair_jobs_migration_idx on drive_repair_jobs (migration_id, created_at desc);`)
       await queryDb(`create index if not exists drive_repair_jobs_claimed_idx on drive_repair_jobs (claimed_by_agent_id, status);`)
+      await queryDb(`alter table if exists drive_repair_jobs add column if not exists work_key text;`)
+      await queryDb(`create unique index if not exists drive_repair_jobs_work_key_unique on drive_repair_jobs (work_key) where work_key is not null;`)
 
       await queryDb(`
         create table if not exists drive_app_settings (

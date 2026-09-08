@@ -1,4 +1,4 @@
-import { getMigration, listMigrationItems, mergeMigrationItemProgressState, updateMigration } from "./migrations-store"
+import { getMigration, listMigrationItems, mergeMigrationItemProgressState, updateMigration, type DriveMigration } from "./migrations-store"
 import { activateAccountForCompletedMigration } from "./accounts-store"
 import { listRepairJobsByMigration, type DriveRepairJob } from "./repair-jobs-store"
 import { syncMigrationBucketSettings } from "./migration-settings-sync"
@@ -20,6 +20,50 @@ import {
   readVerifyState,
 } from "./migration-bucket-state"
 
+const MAX_WORKER_REQUEUE_ATTEMPTS = 3
+const MAX_WORKER_SHARD_COUNT = 128
+
+function currentWorkerCoordinates(migration: DriveMigration) {
+  const generation =
+    typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
+      ? Math.max(1, Math.floor(migration.options.workerGeneration))
+      : 1
+  const shardCount =
+    typeof migration.options.workerShardCount === "number" && Number.isFinite(migration.options.workerShardCount)
+      ? Math.max(1, Math.min(MAX_WORKER_SHARD_COUNT, Math.floor(migration.options.workerShardCount)))
+      : 32
+  return { generation, shardCount }
+}
+
+function isCurrentWorkerShardJob(migration: DriveMigration, job: DriveRepairJob): boolean {
+  if (migration.options.executionMode !== "migration_workers") return false
+  if (!isRecord(job.payload) || job.payload.kind !== "migration_shard") return false
+  if (typeof job.workKey !== "string") return false
+  const match = job.workKey.match(/^migration:([^:]+):generation:(\d+):shard:(\d+)\/(\d+)$/)
+  if (!match || match[1] !== migration.id) return false
+  const { generation, shardCount } = currentWorkerCoordinates(migration)
+  return Number(match[2]) === generation && Number(match[4]) === shardCount
+}
+
+function isRetryableCurrentWorkerShard(
+  migration: DriveMigration,
+  job: DriveRepairJob
+): boolean {
+  if (migration.options.executionMode !== "migration_workers" || job.status !== "failed") return false
+  if (!isRecord(job.payload) || job.payload.kind !== "migration_shard") return false
+  if (typeof job.workKey !== "string") return false
+  const match = job.workKey.match(/^migration:([^:]+):generation:(\d+):shard:(\d+)\/(\d+)$/)
+  if (!match || match[1] !== migration.id) return false
+  const generation =
+    typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
+      ? Math.max(1, Math.floor(migration.options.workerGeneration))
+      : 1
+  const { shardCount } = currentWorkerCoordinates(migration)
+  if (Number(match[2]) !== generation || Number(match[4]) !== shardCount) return false
+  const retryCount = Number(isRecord(job.result) ? job.result.retryCount ?? 0 : 0)
+  return Number.isFinite(retryCount) && retryCount < MAX_WORKER_REQUEUE_ATTEMPTS
+}
+
 function readRepairItems(job: DriveRepairJob | null | undefined): Array<Record<string, unknown>> {
   if (!job || !isRecord(job.result) || !Array.isArray(job.result.items)) return []
   return job.result.items.filter(isRecord)
@@ -27,11 +71,16 @@ function readRepairItems(job: DriveRepairJob | null | undefined): Array<Record<s
 
 function readRepairPayloadItemIds(job: DriveRepairJob | null | undefined): Set<string> {
   const ids = new Set<string>()
-  if (!job || !isRecord(job.payload) || !Array.isArray(job.payload.items)) return ids
-  for (const raw of job.payload.items) {
-    if (!isRecord(raw)) continue
-    const itemId = typeof raw.id === "string" ? raw.id : typeof raw.itemId === "string" ? raw.itemId : ""
-    if (itemId) ids.add(itemId)
+  if (!job || !isRecord(job.payload)) return ids
+  if (Array.isArray(job.payload.itemIds)) {
+    for (const raw of job.payload.itemIds) if (typeof raw === "string" && raw.trim()) ids.add(raw.trim())
+  }
+  if (Array.isArray(job.payload.items)) {
+    for (const raw of job.payload.items) {
+      if (!isRecord(raw)) continue
+      const itemId = typeof raw.id === "string" ? raw.id : typeof raw.itemId === "string" ? raw.itemId : ""
+      if (itemId) ids.add(itemId)
+    }
   }
   return ids
 }
@@ -81,15 +130,35 @@ export async function syncMigrationLiveState(
     }).catch(() => undefined)
   }
 
-  const [items, repairJobs] = await Promise.all([listMigrationItems(migrationId), listRepairJobsByMigration(migrationId, 20)])
+  const [items, allRepairJobs] = await Promise.all([listMigrationItems(migrationId), listRepairJobsByMigration(migrationId, 500)])
+  // A retry creates a new generation. Ignore older shard rows and unrelated
+  // manual repair rows when rebuilding live state so stale telemetry cannot
+  // move a current migration backwards or report duplicate work.
+  const repairJobs = migration.options.executionMode === "migration_workers"
+    ? allRepairJobs.filter((job) => isCurrentWorkerShardJob(migration, job))
+    : allRepairJobs
   const latestRepairJob = getLatestRepairJob(repairJobs)
+  const sortedRepairJobs = [...repairJobs].sort(
+    (a, b) => Date.parse(b.updatedAt || b.createdAt || "") - Date.parse(a.updatedAt || a.createdAt || "")
+  )
+  const latestRepairJobByItem = new Map<string, DriveRepairJob>()
   const latestRepairItemsById = new Map<string, Record<string, unknown>>()
-  const latestRepairItemIds = readRepairPayloadItemIds(latestRepairJob)
-  for (const item of readRepairItems(latestRepairJob)) {
-    const itemId = typeof item.itemId === "string" ? item.itemId : ""
-    if (!itemId) continue
-    latestRepairItemsById.set(itemId, item)
-    latestRepairItemIds.add(itemId)
+  const latestRepairItemIds = new Set<string>()
+  for (const job of sortedRepairJobs) {
+    const ids = readRepairPayloadItemIds(job)
+    for (const id of ids) {
+      latestRepairItemIds.add(id)
+      if (!latestRepairJobByItem.has(id)) latestRepairJobByItem.set(id, job)
+    }
+    for (const item of readRepairItems(job)) {
+      const itemId = typeof item.itemId === "string" ? item.itemId : ""
+      if (!itemId) continue
+      // Jobs are sorted newest first. Keep the first result for an item so an
+      // older shard cannot overwrite a newer terminal/progress snapshot.
+      if (!latestRepairItemsById.has(itemId)) latestRepairItemsById.set(itemId, item)
+      latestRepairItemIds.add(itemId)
+      if (!latestRepairJobByItem.has(itemId)) latestRepairJobByItem.set(itemId, job)
+    }
   }
 
   await Promise.all(
@@ -97,18 +166,28 @@ export async function syncMigrationLiveState(
       const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
       const slurper = readSlurperResult(progress)
       const repairState = readRepairWorkerState(progress)
+      const repairJobForItem = latestRepairJobByItem.get(item.id) ?? latestRepairJob
       const repairResultItem = latestRepairItemsById.get(item.id)
       const verify = readVerifyState(progress)
-      const latestRepairJobStatus = normalizeStatus(latestRepairJob?.status)
+      const latestRepairJobStatus = normalizeStatus(repairJobForItem?.status)
+      const isShardRepairJob =
+        migration.options.executionMode === "migration_workers" && repairJobForItem?.payload?.kind === "migration_shard"
+      // A completed shard is only one part of the migration. Keep an active
+      // item active until the orchestrator has observed every shard and the
+      // finalizer promotes the item state to completed.
+      const effectiveLatestRepairJobStatus =
+        isShardRepairJob && latestRepairJobStatus === "completed" && normalizeStatus(repairState?.status) !== "completed"
+          ? "running"
+          : latestRepairJobStatus
       const canceledRepairWithoutResult =
         latestRepairJobStatus === "canceled" &&
         !repairResultItem &&
         isActiveRepairWorkerStatus(repairState?.status)
       const effectiveRepairStatus = getEffectiveRepairStatus({
         repairWorkerStatus: canceledRepairWithoutResult ? "canceled" : repairState?.status,
-        latestRepairJobStatus: latestRepairJob?.status,
+        latestRepairJobStatus: effectiveLatestRepairJobStatus,
         repairAppliesToItem: latestRepairItemIds.has(item.id),
-        latestRepairJobExists: Boolean(latestRepairJob),
+        latestRepairJobExists: Boolean(repairJobForItem),
         latestRepairItemCount: latestRepairItemIds.size,
       })
       const displayStatus = getItemDisplayStatus(item, repairResultItem, effectiveRepairStatus)
@@ -194,7 +273,7 @@ export async function syncMigrationLiveState(
         workerStage: repairState?.stage ?? null,
         workerStatus: effectiveRepairStatus ?? null,
         slurperJobId: item.slurperJobId ?? null,
-        repairJobId: latestRepairJob?.id ?? null,
+        repairJobId: repairJobForItem?.id ?? null,
       }
 
       const sameSlurperJob = (currentLive?.slurperJobId ?? null) === live.slurperJobId
@@ -264,6 +343,11 @@ export async function syncMigrationLiveState(
   const anyVerifying = liveStatuses.some((status) => status === "verifying")
   const anyFailed = liveStatuses.some((status) => isFailedLikeStatus(status))
   const anyAborted = liveStatuses.some((status) => isAbortedStatus(status))
+  // A shard failure is retried by the orchestrator (up to the durable retry
+  // limit). Keep the migration resumable while that retry is pending; marking
+  // it terminal here would remove it from the orchestrator's active set before
+  // the failed shard can be returned to the queue.
+  const retryableWorkerShard = repairJobs.some((job) => isRetryableCurrentWorkerShard(migration, job))
   const allCompleted = liveStatuses.length > 0 && liveStatuses.every((status) => isCompletedStatus(status) || status === "no_files")
   const allTerminal =
     liveStatuses.length > 0 &&
@@ -283,6 +367,14 @@ export async function syncMigrationLiveState(
       status: "verifying",
       syncStatus: "ok",
       syncMessage: "Verifying migrated objects",
+      completedAt: null,
+      lastSyncedAt: now,
+    }).catch(() => undefined)
+  } else if (anyFailed && retryableWorkerShard) {
+    await updateMigration(migrationId, {
+      status: "running",
+      syncStatus: "ok",
+      syncMessage: "A migration worker shard failed; retrying automatically",
       completedAt: null,
       lastSyncedAt: now,
     }).catch(() => undefined)

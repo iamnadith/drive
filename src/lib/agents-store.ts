@@ -1,5 +1,6 @@
 import crypto from "crypto"
 import { getSupabaseServerClient } from "./supabase"
+import { getMigrationWorkerSharedSecret } from "./migration-worker-settings-store"
 
 export type AgentCategory = "worker" | "agent"
 export type AgentProvider = "self_hosted" | "github_actions" | "local"
@@ -99,6 +100,7 @@ type DriveAgentRunRow = {
 
 const AGENTS_TABLE = "drive_agents"
 const AGENT_RUNS_TABLE = "drive_agent_runs"
+const MAX_AGENT_TOKEN_LENGTH = 512
 
 function normalizeSupabaseError(error: { message: string }): Error {
   const message = String(error?.message ?? "Supabase error")
@@ -409,6 +411,7 @@ export async function updateAgentRun(
   updates: Partial<{
     status: DriveAgentRun["status"]
     externalRunId: string | null
+    jobReference: string | null
     summary: string | null
     payload: Record<string, unknown>
     completedAt: string | null
@@ -419,6 +422,7 @@ export async function updateAgentRun(
   const dbUpdates: Record<string, unknown> = { updated_at: now }
   if (updates.status !== undefined) dbUpdates.status = updates.status
   if (updates.externalRunId !== undefined) dbUpdates.external_run_id = updates.externalRunId ?? null
+  if (updates.jobReference !== undefined) dbUpdates.job_reference = updates.jobReference ?? null
   if (updates.summary !== undefined) dbUpdates.summary = updates.summary ?? null
   if (updates.payload !== undefined) dbUpdates.payload = updates.payload
   if (updates.completedAt !== undefined) dbUpdates.completed_at = updates.completedAt ?? null
@@ -481,8 +485,26 @@ export async function authenticateAgent(input: { agentId: string; token: string 
   if (error) throw normalizeSupabaseError(error)
   const row = Array.isArray(data) ? (data[0] as DriveAgentRow | undefined) : undefined
   if (!row) throw new Error("Agent/worker not found")
-  if (!row.registration_token_hash) throw new Error("This agent/worker does not use token authentication")
-  if (hashRegistrationToken(input.token) !== row.registration_token_hash) throw new Error("Invalid registration token")
+  if (String(row.status ?? "").trim().toLowerCase() === "disabled") {
+    throw new Error("Worker is disabled")
+  }
+  const token = input.token.trim()
+  if (!token || token.length > MAX_AGENT_TOKEN_LENGTH) throw new Error("Invalid worker secret")
+  const registrationHash = row.registration_token_hash ?? ""
+  const configuredSharedSecret = await getMigrationWorkerSharedSecret().catch(() => "")
+  // Do not let a malformed legacy setting become a valid authentication
+  // credential. The panel only provisions secrets in this bounded range.
+  const sharedSecret =
+    configuredSharedSecret.length >= 24 && configuredSharedSecret.length <= MAX_AGENT_TOKEN_LENGTH
+      ? configuredSharedSecret
+      : ""
+  const sharedHash = sharedSecret ? hashRegistrationToken(sharedSecret) : ""
+  const tokenHash = hashRegistrationToken(token)
+  const matches = [registrationHash, sharedHash].some((expected) => {
+    if (!expected || expected.length !== tokenHash.length) return false
+    return crypto.timingSafeEqual(Buffer.from(tokenHash), Buffer.from(expected))
+  })
+  if (!matches) throw new Error("Invalid worker secret")
   return mapAgentRow(row)
 }
 

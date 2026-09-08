@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "id": "drive-migration-worker",
+  "workflow": "auto",
+  "directory": "workers/migration-worker"
+}

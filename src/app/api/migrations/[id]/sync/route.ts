@@ -35,6 +35,11 @@ import {
   claimMigrationItemJobCreation,
 } from "@/lib/migrations-store"
 import { syncMigrationLiveState } from "@/lib/migration-live-state"
+import {
+  ensureMigrationWorkerJobs,
+  finalizeCompletedMigrationWorkerShards,
+  requeueStaleMigrationWorkerJobs,
+} from "@/lib/repair-jobs-store"
 import { getMigrationReadOnlyState, isPermanentAccountCommunicationFailure } from "@/lib/migration-read-only"
 import { requireAdmin } from "@/lib/server-auth"
 import { readLiveBucketState, shouldUseLiveBucketState } from "@/lib/migration-bucket-state"
@@ -509,6 +514,19 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
     if (!target.r2AccessKeyId || !target.r2SecretAccessKey) {
       return NextResponse.json({ error: "Target account missing R2 access keys" }, { status: 400 })
+    }
+
+    if (migration.options.executionMode === "migration_workers") {
+      // Worker migrations are reconciled from durable item jobs. Do not enter
+      // the Super Slurper scan/polling code below for this explicit lane.
+      const queued = await ensureMigrationWorkerJobs({ migrationId: id, mode: "repair_and_verify" })
+      const requeued = await requeueStaleMigrationWorkerJobs({ migrationId: id }).catch(() => 0)
+      const finalized = await finalizeCompletedMigrationWorkerShards(id).catch(() => ({ finalized: false, shardCount: 0, jobs: 0, items: 0 }))
+      await syncMigrationLiveState(id, { runSettingsSync: finalizeSettings }).catch(() => undefined)
+      return NextResponse.json(
+        { migration: await getMigration(id), items: await listMigrationItems(id), workerJobs: queued.jobs, requeued, finalized },
+        { status: 200 }
+      )
     }
 
     let items = await listMigrationItems(id)

@@ -5,6 +5,8 @@ import Link from "next/link"
 import { Activity, Bot, CircleDot, Clock3, Copy, Eye, Github, HardDrive, Play, Plus, RefreshCw, Search, Server, Shield, Square, Trash2, Workflow } from "lucide-react"
 import { toast } from "sonner"
 import { useRouter, useSearchParams } from "next/navigation"
+import { GitHubWorkerSetup } from "@/components/dashboard/github-worker-setup"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -281,12 +283,21 @@ export default function WorkersPage() {
   const [githubWorkflowFile, setGithubWorkflowFile] = React.useState("")
   const [githubRef, setGithubRef] = React.useState("main")
   const [githubRepositoryId, setGithubRepositoryId] = React.useState("")
+  const [repositoryMode, setRepositoryMode] = React.useState("manual")
+  const [repositorySetupBusy, setRepositorySetupBusy] = React.useState(false)
+  const [repositorySetupReady, setRepositorySetupReady] = React.useState(false)
+  const handleRepositorySetupBusy = React.useCallback((busy: boolean) => {
+    setRepositorySetupBusy(busy)
+    if (busy) setRepositorySetupReady(false)
+  }, [])
   const [githubToken, setGithubToken] = React.useState("")
   const [notes, setNotes] = React.useState("")
   const [githubConnected, setGithubConnected] = React.useState(false)
   const [githubSessionReady, setGithubSessionReady] = React.useState(false)
   const [githubRepos, setGithubRepos] = React.useState<Array<{ id: string; owner: string; name: string; fullName: string; defaultBranch?: string }>>([])
   const [githubWorkflows, setGithubWorkflows] = React.useState<Array<{ id: string; name: string; path: string }>>([])
+  const [githubWorkflowsLoading, setGithubWorkflowsLoading] = React.useState(false)
+  const githubReposRequest = React.useRef<AbortController | null>(null)
   const [repairJobs, setRepairJobs] = React.useState<RepairJobRow[]>([])
   const [dispatchingAgentId, setDispatchingAgentId] = React.useState<string | null>(null)
   const [deletingWorkerId, setDeletingWorkerId] = React.useState<string | null>(null)
@@ -307,6 +318,7 @@ export default function WorkersPage() {
   const [workerTokenLoading, setWorkerTokenLoading] = React.useState<string | null>(null)
   const [workerTokenValue, setWorkerTokenValue] = React.useState<string | null>(null)
   const [workerTokenWorkerId, setWorkerTokenWorkerId] = React.useState<string | null>(null)
+  const [workerSharedSecretConfigured, setWorkerSharedSecretConfigured] = React.useState(false)
   const [createdWorkerId, setCreatedWorkerId] = React.useState<string | null>(null)
   const refreshInFlightRef = React.useRef(false)
   const shouldLiveRefresh =
@@ -418,13 +430,24 @@ export default function WorkersPage() {
   }, [])
 
   const loadGitHubRepos = React.useCallback(async () => {
+    githubReposRequest.current?.abort()
+    const controller = new AbortController()
+    githubReposRequest.current = controller
     try {
-      const res = await fetch("/api/github/repos", { cache: "no-store" })
+      const res = await fetch("/api/github/repos", { cache: "no-store", signal: controller.signal })
       const json: unknown = await res.json().catch(() => ({}))
+      if (controller.signal.aborted) return
       if (!res.ok) {
         if (res.status === 401) {
           setGithubConnected(false)
           setGithubRepos([])
+          setGithubRepoOwner("")
+          setGithubRepoName("")
+          setGithubWorkflowFile("")
+          setGithubRepositoryId("")
+          setGithubWorkflows([])
+          setGithubWorkflowsLoading(false)
+          setRepositorySetupReady(false)
           return
         }
         const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to load GitHub repositories"
@@ -433,7 +456,9 @@ export default function WorkersPage() {
       setGithubConnected(true)
       setGithubRepos(typeof json === "object" && json !== null && Array.isArray((json as any).repos) ? (json as any).repos : [])
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to load GitHub repositories")
+      if (!controller.signal.aborted) toast.error(error instanceof Error ? error.message : "Unable to load GitHub repositories")
+    } finally {
+      if (githubReposRequest.current === controller) githubReposRequest.current = null
     }
   }, [])
 
@@ -443,29 +468,51 @@ export default function WorkersPage() {
   }, [provider, open, loadGitHubRepos, githubSessionReady])
 
   React.useEffect(() => {
-    if (!githubConnected || !githubSessionReady || provider !== "github_actions" || !open) return
-    void loadGitHubRepos()
-  }, [githubConnected, githubSessionReady, loadGitHubRepos, open, provider])
-
-  React.useEffect(() => {
     if (!githubRepoOwner || !githubRepoName || provider !== "github_actions") {
       setGithubWorkflows([])
+      setGithubWorkflowsLoading(false)
       return
     }
-    ;(async () => {
+    const controller = new AbortController()
+    setGithubWorkflows([])
+    setGithubWorkflowsLoading(true)
+    if (repositoryMode === "manual") setGithubWorkflowFile("")
+    const ref = githubRef.trim()
+    const requestTimer = window.setTimeout(() => void (async () => {
       try {
-        const res = await fetch(`/api/github/workflows?owner=${encodeURIComponent(githubRepoOwner)}&repo=${encodeURIComponent(githubRepoName)}`, { cache: "no-store" })
+        const refQuery = ref ? `&ref=${encodeURIComponent(ref)}` : ""
+        const res = await fetch(`/api/github/workflows?owner=${encodeURIComponent(githubRepoOwner)}&repo=${encodeURIComponent(githubRepoName)}${refQuery}`, { cache: "no-store", signal: controller.signal })
         const json: unknown = await res.json().catch(() => ({}))
         if (!res.ok) {
+          if (res.status === 401) {
+            setGithubConnected(false)
+            setGithubSessionReady(false)
+            setGithubRepos([])
+            setGithubRepoOwner("")
+            setGithubRepoName("")
+            setGithubWorkflowFile("")
+            setGithubRepositoryId("")
+            setGithubWorkflows([])
+            throw new Error("GitHub session expired. Reconnect GitHub and try again.")
+          }
           const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to load GitHub workflows"
           throw new Error(message)
         }
-        setGithubWorkflows(typeof json === "object" && json !== null && Array.isArray((json as any).workflows) ? (json as any).workflows : [])
+        if (controller.signal.aborted) return
+        const workflows = typeof json === "object" && json !== null && Array.isArray((json as any).workflows) ? (json as any).workflows : []
+        setGithubWorkflows(workflows)
+        setGithubWorkflowFile((current) => workflows.some((workflow: { path?: unknown }) => workflow.path === current) ? current : "")
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Unable to load GitHub workflows")
+        if (!controller.signal.aborted) toast.error(error instanceof Error ? error.message : "Unable to load GitHub workflows")
+      } finally {
+        if (!controller.signal.aborted) setGithubWorkflowsLoading(false)
       }
-    })()
-  }, [githubRepoOwner, githubRepoName, provider])
+    })(), 300)
+    return () => {
+      window.clearTimeout(requestTimer)
+      controller.abort()
+    }
+  }, [githubRepoOwner, githubRepoName, githubRef, provider, repositoryMode])
 
   const resetForm = React.useCallback(() => {
     setName("")
@@ -477,6 +524,9 @@ export default function WorkersPage() {
     setGithubRef("main")
     setGithubRepositoryId("")
     setGithubToken("")
+    setRepositoryMode("manual")
+    setRepositorySetupBusy(false)
+    setRepositorySetupReady(false)
     setNotes("")
     setCreatedToken(null)
     setCreatedWorkerId(null)
@@ -484,6 +534,9 @@ export default function WorkersPage() {
     setGithubSessionReady(false)
     setGithubRepos([])
     setGithubWorkflows([])
+    setGithubWorkflowsLoading(false)
+    githubReposRequest.current?.abort()
+    githubReposRequest.current = null
   }, [])
 
   const loadMigrations = React.useCallback(async () => {
@@ -535,6 +588,9 @@ export default function WorkersPage() {
           : worker.id
 
       setWorkerTokenValue(token)
+      setWorkerSharedSecretConfigured(
+        typeof json === "object" && json !== null && (json as { sharedSecretConfigured?: unknown }).sharedSecretConfigured === true
+      )
       setWorkerTokenWorkerId(workerId)
       setSelectedWorker(worker)
       setWorkerDetailsOpen(true)
@@ -831,7 +887,7 @@ export default function WorkersPage() {
           </div>
           <h1 className="mt-2 text-3xl font-bold tracking-tight">Workers</h1>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
-            Manage GitHub-triggered and token-based workers, monitor heartbeat health, and keep repair jobs visible from one place.
+            Manage GitHub-triggered and self-hosted workers, monitor heartbeat health, and keep migration jobs visible from one place.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -870,7 +926,20 @@ export default function WorkersPage() {
                       </div>
                       <div className="space-y-2">
                         <Label>Worker type</Label>
-                        <Select value={provider} onValueChange={(value) => setProvider(value as AgentProvider)}>
+                        <Select value={provider} onValueChange={(value) => {
+                          const nextProvider = value as AgentProvider
+                          setProvider(nextProvider)
+                          if (nextProvider !== "github_actions") {
+                            setGithubRepoOwner("")
+                            setGithubRepoName("")
+                            setGithubWorkflowFile("")
+                            setGithubRepositoryId("")
+                            setGithubWorkflows([])
+                            setGithubWorkflowsLoading(false)
+                            setRepositoryMode("manual")
+                            setRepositorySetupReady(false)
+                          }
+                        }}>
                           <SelectTrigger className="h-11">
                             <SelectValue />
                           </SelectTrigger>
@@ -915,13 +984,31 @@ export default function WorkersPage() {
                         : "Open a small GitHub window, complete OAuth, and continue this form without interruption."}
                     </span>
                   </div>
+                  <div className="md:col-span-2">
+                    <ToggleGroup type="single" variant="outline" value={repositoryMode} disabled={repositorySetupBusy} onValueChange={(value) => { if (value) { setRepositoryMode(value); setRepositorySetupReady(false) } }} aria-label="Repository setup mode">
+                      <ToggleGroupItem value="manual">Select manually</ToggleGroupItem>
+                      <ToggleGroupItem value="auto">Auto detect / fork</ToggleGroupItem>
+                    </ToggleGroup>
+                  </div>
+                  {repositoryMode === "auto" && <GitHubWorkerSetup connected={githubConnected} onBusy={handleRepositorySetupBusy} onSelect={(repo, workflow) => {
+                    setGithubRepos((current) => [...current.filter((entry) => entry.id !== repo.id), repo])
+                    setGithubRepoOwner(repo.owner)
+                    setGithubRepoName(repo.name)
+                    setGithubRepositoryId(repo.id)
+                    setGithubRef(repo.defaultBranch)
+                    setGithubWorkflowFile(workflow)
+                    setRepositorySetupReady(true)
+                  }} />}
                   <div className="space-y-2">
                     <Label>Repository</Label>
                     <Select
+                      disabled={repositorySetupBusy || repositoryMode === "auto"}
                       value={githubRepoOwner && githubRepoName ? `${githubRepoOwner}/${githubRepoName}` : ""}
                       onValueChange={(value) => {
                         const [owner, repo] = value.split("/")
                         const selected = githubRepos.find((entry) => entry.owner === owner && entry.name === repo)
+                        setGithubWorkflowFile("")
+                        setGithubWorkflows([])
                         setGithubRepoOwner(owner || "")
                         setGithubRepoName(repo || "")
                         setGithubRepositoryId(selected?.id || "")
@@ -942,9 +1029,9 @@ export default function WorkersPage() {
                   </div>
                   <div className="space-y-2">
                     <Label>Workflow</Label>
-                    <Select value={githubWorkflowFile} onValueChange={setGithubWorkflowFile}>
+                    <Select disabled={repositoryMode === "auto" || !githubRepoOwner || !githubRepoName || githubWorkflowsLoading} value={githubWorkflowFile} onValueChange={setGithubWorkflowFile}>
                       <SelectTrigger>
-                        <SelectValue placeholder={githubWorkflows.length > 0 ? "Select workflow" : "Choose repository first"} />
+                        <SelectValue placeholder={!githubRepoOwner || !githubRepoName ? "Choose repository first" : githubWorkflowsLoading ? "Loading workflows..." : githubWorkflows.length > 0 ? "Select workflow" : "No workflow files found"} />
                       </SelectTrigger>
                       <SelectContent>
                         {githubWorkflows.map((workflow) => (
@@ -952,17 +1039,16 @@ export default function WorkersPage() {
                             {workflow.name} ({workflow.path})
                           </SelectItem>
                         ))}
-                        <SelectItem value=".github/workflows/migration-worker.yml">migration-worker.yml</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="github-ref">Git ref</Label>
-                    <Input id="github-ref" value={githubRef} onChange={(e) => setGithubRef(e.target.value)} placeholder="main" />
+                    <Input disabled={repositoryMode === "auto"} id="github-ref" value={githubRef} onChange={(e) => setGithubRef(e.target.value)} placeholder="main" />
                   </div>
                   <div className="space-y-2 md:col-span-2">
                     <Label htmlFor="repo-id">Optional repository id</Label>
-                    <Input id="repo-id" value={githubRepositoryId} onChange={(e) => setGithubRepositoryId(e.target.value)} placeholder="123456789" />
+                    <Input disabled={repositoryMode === "auto"} id="repo-id" value={githubRepositoryId} onChange={(e) => setGithubRepositoryId(e.target.value)} placeholder="123456789" />
                   </div>
                   <div className="space-y-2 md:col-span-2">
                     <Label htmlFor="github-token">Optional fallback GitHub token</Label>
@@ -981,8 +1067,8 @@ export default function WorkersPage() {
               ) : (
                 <div className="rounded-lg border bg-muted/40 p-4 text-sm text-muted-foreground">
                   {provider === "local"
-                    ? "Local workers register with a token and heartbeat from your own machine."
-                    : "Self-hosted workers register with a token."}
+                    ? "Local workers use the shared worker secret from Settings and send heartbeats from your own machine."
+                    : "Self-hosted workers use the shared worker secret from Settings. Existing registration tokens remain accepted for older clients."}
                 </div>
               )}
 
@@ -1008,7 +1094,7 @@ export default function WorkersPage() {
                     </div>
                     <div className="rounded-md border border-green-500/20 bg-black/10 p-3">
                       <div className="flex items-center justify-between gap-2">
-                        <div className="text-xs text-green-200">Token</div>
+                        <div className="text-xs text-green-200">Legacy registration token</div>
                         <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-green-50 hover:bg-green-500/10" onClick={() => void copyText(createdToken, "Worker token")}>
                           <Copy className="h-3.5 w-3.5" />
                         </Button>
@@ -1017,7 +1103,7 @@ export default function WorkersPage() {
                     </div>
                   </div>
                   <div className="mt-2 text-xs text-green-200">
-                    Send heartbeats to <span className="font-mono">/api/workers/&lt;workerId&gt;/heartbeat</span> with this token. It is shown only once.
+                    Use the shared worker secret from Settings for new clients. This legacy token can authenticate older clients and is shown only once. Heartbeats go to <span className="font-mono">/api/workers/&lt;workerId&gt;/heartbeat</span>.
                   </div>
                 </div>
               ) : null}
@@ -1035,7 +1121,7 @@ export default function WorkersPage() {
                     Done
                   </Button>
                 ) : (
-                  <Button onClick={submit} disabled={saving}>
+                  <Button onClick={submit} disabled={saving || repositorySetupBusy || githubWorkflowsLoading || (provider === "github_actions" && (!githubRepoOwner || !githubRepoName || !githubWorkflowFile || (repositoryMode === "auto" && !repositorySetupReady)))}>
                     {saving ? "Saving..." : "Save"}
                   </Button>
                 )}
@@ -1053,13 +1139,14 @@ export default function WorkersPage() {
             setSelectedWorker(null)
             setWorkerTokenValue(null)
             setWorkerTokenWorkerId(null)
+            setWorkerSharedSecretConfigured(false)
           }
         }}
       >
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>{selectedWorker?.name || "Worker details"}</DialogTitle>
-            <DialogDescription>Review the worker id, current connection details, and token.</DialogDescription>
+            <DialogDescription>Review the worker id, connection details, and authentication setup.</DialogDescription>
           </DialogHeader>
           {selectedWorker ? (
             <div className="space-y-4 text-sm">
@@ -1085,20 +1172,35 @@ export default function WorkersPage() {
                 </div>
               </div>
               <div className="rounded-xl border p-4">
-                <div className="text-muted-foreground">Registration token</div>
-                <div className="mt-1 break-all font-mono text-xs">{workerTokenValue || "No token loaded"}</div>
-                <div className="mt-3 flex justify-end gap-2">
-                  <Button variant="outline" size="sm" disabled={workerTokenLoading === selectedWorker.id} onClick={() => void loadWorkerToken(selectedWorker)}>
-                    <RefreshCw className={cn("mr-1 h-4 w-4", workerTokenLoading === selectedWorker.id && "animate-spin")} />
-                    {workerTokenValue ? "Refresh token" : "Get token"}
-                  </Button>
-                  {workerTokenValue ? (
-                    <Button variant="outline" size="sm" onClick={() => void copyText(workerTokenValue, "Worker token")}>
-                      <Copy className="mr-1 h-4 w-4" />
-                      Copy token
-                    </Button>
-                  ) : null}
+                <div className="text-muted-foreground">
+                  {selectedWorker.provider === "github_actions" ? "Shared worker secret" : "Registration token"}
                 </div>
+                {selectedWorker.provider === "github_actions" ? (
+                  <>
+                    <div className="mt-1 text-sm">
+                      {workerSharedSecretConfigured ? "Configured in Settings" : "Not configured"}
+                    </div>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      GitHub workers use the one shared secret from Settings plus this worker&apos;s unique ID. The secret is never displayed here.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="mt-1 break-all font-mono text-xs">{workerTokenValue || "No token loaded"}</div>
+                    <div className="mt-3 flex justify-end gap-2">
+                      <Button variant="outline" size="sm" disabled={workerTokenLoading === selectedWorker.id} onClick={() => void loadWorkerToken(selectedWorker)}>
+                        <RefreshCw className={cn("mr-1 h-4 w-4", workerTokenLoading === selectedWorker.id && "animate-spin")} />
+                        {workerTokenValue ? "Refresh token" : "Get token"}
+                      </Button>
+                      {workerTokenValue ? (
+                        <Button variant="outline" size="sm" onClick={() => void copyText(workerTokenValue, "Worker token")}>
+                          <Copy className="mr-1 h-4 w-4" />
+                          Copy token
+                        </Button>
+                      ) : null}
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           ) : null}
@@ -1571,7 +1673,7 @@ export default function WorkersPage() {
         <CardContent className="grid gap-3 text-sm md:grid-cols-3">
           <div className="rounded-xl border p-4">
             <div className="flex items-center gap-2 font-medium"><Shield className="h-4 w-4" /> Identity</div>
-            <div className="mt-2 text-muted-foreground">Self-hosted and local workers use agent id + registration token. IP/domain are descriptive metadata only.</div>
+            <div className="mt-2 text-muted-foreground">Workers authenticate with their unique agent id and the shared worker secret from Settings. Legacy registration tokens remain accepted for existing self-hosted workers.</div>
           </div>
           <div className="rounded-xl border p-4">
             <div className="flex items-center gap-2 font-medium"><Workflow className="h-4 w-4" /> GitHub</div>

@@ -896,6 +896,7 @@ create table if not exists drive_repair_jobs (
   claimed_by_agent_id uuid references drive_agents(id) on delete set null,
   status text not null default 'pending', -- pending | claimed | running | completed | failed | canceled
   mode text not null default 'repair_and_verify', -- verify_only | repair_only | repair_and_verify
+  work_key text,
   payload jsonb not null default '{}'::jsonb,
   progress jsonb not null default '{}'::jsonb,
   result jsonb not null default '{}'::jsonb,
@@ -912,6 +913,14 @@ create table if not exists drive_repair_jobs (
 create index if not exists drive_repair_jobs_status_idx on drive_repair_jobs (status, created_at);
 create index if not exists drive_repair_jobs_migration_idx on drive_repair_jobs (migration_id, created_at desc);
 create index if not exists drive_repair_jobs_claimed_idx on drive_repair_jobs (claimed_by_agent_id, status);
+create unique index if not exists drive_repair_jobs_work_key_unique on drive_repair_jobs (work_key) where work_key is not null;
+
+create table if not exists drive_app_settings (
+  key text primary key,
+  value jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
 
 -- Append-only audit/activity log. This table is designed for large volumes:
 -- use keyset pagination on (occurred_at, id), narrow indexed filters, and
@@ -1007,6 +1016,7 @@ alter table if exists public.drive_repair_jobs add column if not exists requeste
 alter table if exists public.drive_repair_jobs add column if not exists claimed_by_agent_id uuid references public.drive_agents(id) on delete set null;
 alter table if exists public.drive_repair_jobs add column if not exists status text not null default 'pending';
 alter table if exists public.drive_repair_jobs add column if not exists mode text not null default 'repair_and_verify';
+alter table if exists public.drive_repair_jobs add column if not exists work_key text;
 alter table if exists public.drive_repair_jobs add column if not exists payload jsonb not null default '{}'::jsonb;
 alter table if exists public.drive_repair_jobs add column if not exists progress jsonb not null default '{}'::jsonb;
 alter table if exists public.drive_repair_jobs add column if not exists result jsonb not null default '{}'::jsonb;
@@ -1016,6 +1026,7 @@ alter table if exists public.drive_repair_jobs add column if not exists claimed_
 alter table if exists public.drive_repair_jobs add column if not exists started_at timestamptz;
 alter table if exists public.drive_repair_jobs add column if not exists completed_at timestamptz;
 alter table if exists public.drive_repair_jobs add column if not exists last_heartbeat_at timestamptz;
+create unique index if not exists drive_repair_jobs_work_key_unique on public.drive_repair_jobs (work_key) where work_key is not null;
 alter table if exists public.drive_activity_events add column if not exists actor_user_id uuid references public.drive_users(id) on delete set null;
 alter table if exists public.drive_activity_events add column if not exists actor_name text;
 alter table if exists public.drive_activity_events add column if not exists actor_email text;

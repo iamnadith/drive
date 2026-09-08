@@ -128,11 +128,14 @@ async function resolveGitHubRunIdsForWorkerStop(input: {
     for (const run of runs) {
       const status = String(run.status ?? "").toLowerCase()
       if (status === "queued" || status === "in_progress" || status === "waiting" || status === "requested" || status === "pending") {
-        runIds.add(run.id)
+        // Multiple worker records may intentionally share one repository.
+        // The bundled workflow embeds the agent id in run-name, so only use
+        // runs that belong to this worker when the external id was not indexed
+        // yet. Never cancel an unrelated worker's run from the same repo.
+        const identity = `${run.displayTitle ?? ""} ${run.name ?? ""}`
+        if (identity.includes(input.workerId)) runIds.add(run.id)
       }
     }
-
-    if (runIds.size === 0 && runs[0]?.id) runIds.add(runs[0].id)
   }
 
   return Array.from(runIds)
@@ -146,7 +149,7 @@ async function stopGithubWorkerById(workerId: string) {
 
   const allWorkers = await listAgents()
   const workerWithRun = allWorkers.find((entry) => entry.id === workerId) ?? { ...worker, latestRun: null }
-  const linkedJobs = (await listRepairJobs(200)).filter(
+  const linkedJobs = (await listRepairJobs(500)).filter(
     (job) => job.claimedByAgentId === workerId || job.requestedByAgentId === workerId
   )
   const activeLinkedJobs = linkedJobs.filter((job) => isActiveJobStatus(job.status))
@@ -231,6 +234,7 @@ async function stopGithubWorkerById(workerId: string) {
     metadata: {
       ...(worker.metadata ?? {}),
       activeRepairJobId: null,
+      activeMigrationId: null,
       githubAbortRequestedAt: now,
     },
     lastHeartbeatAt: now,
@@ -278,6 +282,21 @@ export async function DELETE(_request: Request, context: { params: Promise<{ id:
     const { id } = await context.params
     const worker = await getAgentById(id)
     if (!worker) return NextResponse.json({ error: "Worker not found" }, { status: 404 })
+
+    // A pool GitHub run can be between shards with no job reference. Stop the
+    // workflow before deleting its agent record so that an idle runner cannot
+    // keep polling with an identity that no longer exists.
+    if (worker.provider === "github_actions") {
+      try {
+        await stopGithubWorkerById(id)
+      } catch (error) {
+        const message = errorMessage(error, "Unable to stop GitHub worker")
+        const terminalOrMissingRun = /Could not find the GitHub workflow run|completed before it could be canceled|ended as failed instead of canceled/i.test(message)
+        if (!terminalOrMissingRun) {
+          return NextResponse.json({ error: message }, { status: 409 })
+        }
+      }
+    }
 
     await deleteAgent(id)
     return NextResponse.json({ ok: true })

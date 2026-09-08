@@ -83,7 +83,8 @@ function getReconciledGithubAgentStatus(runStatus: "running" | "completed" | "fa
 function matchGithubRunToDispatch(
   runs: Awaited<ReturnType<typeof listGitHubWorkflowRuns>>,
   dispatchRequestedAt: unknown,
-  excludedRunIds: unknown
+  excludedRunIds: unknown,
+  identityHints: string[] = []
 ) {
   if (!Array.isArray(runs) || runs.length === 0) return null
 
@@ -95,14 +96,24 @@ function matchGithubRunToDispatch(
   if (!Number.isFinite(requestedAt)) return null
   const excluded = new Set(Array.isArray(excludedRunIds) ? excludedRunIds.filter((value): value is string => typeof value === "string") : [])
 
-  return (
-    runs.find((candidate) => {
+  const candidates = runs.filter((candidate) => {
       if (excluded.has(candidate.id)) return false
       const createdAt = Date.parse(candidate.createdAt || "")
       if (!Number.isFinite(createdAt)) return false
       return createdAt >= requestedAt - 10_000
-    }) ?? null
-  )
+    })
+  if (candidates.length === 0) return null
+  const hints = identityHints.filter((value) => typeof value === "string" && value.length > 0)
+  const identified = hints.length > 0
+    ? candidates.filter((candidate) => {
+        const identity = `${candidate.displayTitle ?? ""} ${candidate.name ?? ""}`
+        return hints.some((hint) => identity.includes(hint))
+      })
+    : []
+  if (identified.length === 1) return identified[0]
+  // Only accept a timestamp match when it is unambiguous. This prevents two
+  // workers sharing one repository from being attached to the same run.
+  return candidates.length === 1 ? candidates[0] : null
 }
 
 export async function GET() {
@@ -149,7 +160,8 @@ export async function GET() {
         githubRun = matchGithubRunToDispatch(
           runs,
           (latestRun.payload ?? {}).dispatchRequestedAt,
-          (latestRun.payload ?? {}).githubRunIdsBeforeDispatch
+          (latestRun.payload ?? {}).githubRunIdsBeforeDispatch,
+          [agent.id, latestRun.jobReference ?? ""]
         )
       }
 
@@ -298,7 +310,7 @@ export async function GET() {
       }
     }
 
-    const activeJobs = await listRepairJobs(100)
+    const activeJobs = await listRepairJobs(500)
     const activeAgentById = new Map(agents.map((agent) => [agent.id, agent]))
 
     for (const job of activeJobs) {
@@ -311,6 +323,10 @@ export async function GET() {
       if (agent.provider === "self_hosted" || agent.provider === "local") {
         const workerOnline = agent.status === "online" && isRecentIso(agent.lastHeartbeatAt, 60_000)
         if (!workerOnline) {
+          // Shared migration shards are leased and requeued by the migration
+          // orchestrator. Do not turn a briefly disconnected worker into a
+          // terminal migration failure from a dashboard refresh.
+          if (job.workKey?.includes(":shard:")) continue
           await updateRepairJob(job.id, {
             status: "failed",
             summary: "Self-hosted worker went offline before the job completed",

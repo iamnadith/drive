@@ -32,7 +32,10 @@ export async function GET() {
     const auth = await requireAdmin()
     if (!auth.ok) return auth.response
 
-    const jobs = await listRepairJobs(100)
+    // Worker-pool migrations may expose the full bounded shard queue (up to
+    // 128 records), so the dashboard should not hide active leases past the
+    // first page.
+    const jobs = await listRepairJobs(500)
     return NextResponse.json({ jobs })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to load repair jobs") }, { status: 400 })

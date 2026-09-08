@@ -1,10 +1,17 @@
 name: Migration Worker
 run-name: >-
   Migration Worker / ${{
+    inputs.agent_id ||
+    github.event.client_payload.agent_id ||
+    github.run_id
+  }} / ${{
     inputs.repair_job_id ||
     github.event.client_payload.repair_job_id ||
     github.run_id
   }}
+
+permissions:
+  contents: read
 
 on:
   workflow_dispatch:
@@ -22,7 +29,7 @@ on:
         description: Drive server URL
         required: false
       agent_token:
-        description: Agent registration token
+        description: Legacy per-agent token (optional; shared secret is preferred)
         required: false
   repository_dispatch:
     types: [drive-migration-worker]
@@ -52,7 +59,12 @@ jobs:
         env:
           SERVER_URL: ${{ inputs.server_url || github.event.client_payload.server_url || secrets.DRIVE_SERVER_URL || secrets.SERVER_URL || vars.DRIVE_SERVER_URL || vars.SERVER_URL }}
           AGENT_ID: ${{ inputs.agent_id || github.event.client_payload.agent_id || secrets.DRIVE_AGENT_ID || secrets.AGENT_ID || vars.DRIVE_AGENT_ID || vars.AGENT_ID }}
-          TOKEN: ${{ inputs.agent_token || github.event.client_payload.agent_token || secrets.DRIVE_AGENT_TOKEN || secrets.AGENT_TOKEN || vars.DRIVE_AGENT_TOKEN || vars.AGENT_TOKEN }}
+          # A migration id is always scoped to this dispatch. Do not fall back
+          # to a repository-wide variable: that can restart an old pool when a
+          # workflow is run manually and can make concurrent workers collide.
+          DRIVE_MIGRATION_ID: ${{ inputs.migration_id || github.event.client_payload.migration_id || '' }}
+          DRIVE_REPAIR_JOB_ID: ${{ inputs.repair_job_id || github.event.client_payload.repair_job_id || '' }}
+          TOKEN: ${{ secrets.DRIVE_WORKER_SHARED_SECRET || inputs.agent_token || github.event.client_payload.agent_token || secrets.DRIVE_AGENT_TOKEN || secrets.AGENT_TOKEN || vars.DRIVE_AGENT_TOKEN || vars.AGENT_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL || secrets.NEXT_PUBLIC_SUPABASE_URL || secrets.DRIVE_SUPABASE_URL || vars.SUPABASE_URL || vars.NEXT_PUBLIC_SUPABASE_URL || vars.DRIVE_SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || secrets.SUPABASE_SECRET_KEY || vars.SUPABASE_SERVICE_ROLE_KEY || vars.SUPABASE_SECRET_KEY }}
           POLL_MS: ${{ vars.POLL_MS || '15000' }}
@@ -67,5 +79,8 @@ jobs:
           RANGE_COPY_THRESHOLD_MB: ${{ vars.RANGE_COPY_THRESHOLD_MB || '64' }}
           RANGE_COPY_CONCURRENCY: ${{ vars.RANGE_COPY_CONCURRENCY || '4' }}
           SUPABASE_TIMEOUT_MS: ${{ vars.SUPABASE_TIMEOUT_MS || '5000' }}
-          EXIT_AFTER_JOB: ${{ vars.EXIT_AFTER_JOB || 'false' }}
+          # Pool runs stay alive to claim successive shards. Exact repair runs
+          # exit after their single job so an idle GitHub runner is not held
+          # until the six-hour Actions timeout.
+          EXIT_AFTER_JOB: ${{ vars.EXIT_AFTER_JOB || ((inputs.repair_job_id || github.event.client_payload.repair_job_id) && 'true' || 'false') }}
         run: npm start

@@ -66,6 +66,13 @@ export async function POST(
       return NextResponse.json({ error: "Migration item not found" }, { status: 404 })
     }
 
+    if (migration.options.executionMode === "migration_workers" && !["logs", "progress"].includes(action)) {
+      return NextResponse.json(
+        { error: "Shared worker migrations are controlled at migration level. Use Retry or Stop on the migration to avoid splitting the shard queue." },
+        { status: 409 }
+      )
+    }
+
     // If the migration is not running, do not hit Cloudflare for logs/progress.
     // Use the stored DB snapshot instead.
     if (migration.status !== "running" && (action === "logs" || action === "progress")) {

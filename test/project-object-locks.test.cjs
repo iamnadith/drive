@@ -4,7 +4,9 @@ const path = require("node:path")
 const test = require("node:test")
 
 const root = path.join(__dirname, "..")
-const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8")
+// Git checkouts may use CRLF on Windows; the source assertions below describe
+// structure, so normalize line endings before matching them.
+const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8").replace(/\r\n/g, "\n")
 
 const lockModule = read("src/lib/project-object-lock.ts")
 const operationsStore = read("src/lib/project-operations-store.ts")

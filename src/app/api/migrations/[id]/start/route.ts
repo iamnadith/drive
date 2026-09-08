@@ -20,6 +20,7 @@ import {
   updateMigrationItem,
   claimMigrationItemJobCreation,
 } from "@/lib/migrations-store"
+import { ensureMigrationWorkerJobs } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
 import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
 
@@ -245,6 +246,95 @@ export async function POST(
 
     const url = new URL(request.url)
     const asyncStart = url.searchParams.get("async") === "1"
+
+    // The worker lane deliberately stops here. It creates destination buckets
+    // and durable shared object-shard jobs, but never calls a Super Slurper API.
+    // The existing Super Slurper path below remains unchanged.
+    if (migration.options.executionMode === "migration_workers") {
+      const targetBuckets = await r2ListBuckets({
+        accountId: target.cloudflareAccountId,
+        apiToken: target.apiToken,
+      })
+      const targetBucketSet = new Set(targetBuckets.map((bucket) => bucket.name))
+      const createBucketItems = items.filter((item) => !targetBucketSet.has(item.targetBucket))
+      await promisePool(createBucketItems, migration.options.concurrency ?? 3, async (item) => {
+        try {
+          await ensureTargetBucketExists({
+            targetCloudflareAccountId: target.cloudflareAccountId!,
+            targetApiToken: target.apiToken,
+            bucketName: item.targetBucket,
+            jurisdiction: mapToJurisdiction(item.sourceJurisdiction),
+            storageClass:
+              item.sourceStorageClass === "Standard" || item.sourceStorageClass === "InfrequentAccess"
+                ? item.sourceStorageClass
+                : undefined,
+          })
+          targetBucketSet.add(item.targetBucket)
+        } catch (error: unknown) {
+          const message = formatCloudflareError(error, "Unable to create target bucket")
+          await updateMigrationItem(item.id, {
+            slurperStatus: "worker_bucket_create_failed",
+            progress: { ...(item.progress ?? {}), stage: "worker_create_target_bucket", error: message },
+            lastProgressAt: new Date().toISOString(),
+          })
+        }
+      })
+
+      const startedAt = migration.startedAt ?? new Date().toISOString()
+      await updateMigration(id, {
+        status: "running",
+        startedAt,
+        syncStatus: "syncing",
+        syncMessage: asyncStart ? "Queued migration worker jobs" : "Preparing migration worker jobs",
+        lastSyncedAt: new Date().toISOString(),
+      })
+
+      const refreshedItems = await listMigrationItems(id)
+      await promisePool(refreshedItems, migration.options.concurrency ?? 3, async (item) => {
+        // A previous attempt may have failed while creating the target bucket.
+        // If the bucket is available now, clear that transient marker so the
+        // item can re-enter the shared object-shard queue.
+        if (item.slurperStatus === "worker_bucket_create_failed" && targetBucketSet.has(item.targetBucket)) {
+          const recoveredProgress = isRecord(item.progress) ? item.progress : {}
+          await updateMigrationItem(item.id, {
+            slurperStatus: "queued",
+            progress: { ...recoveredProgress, stage: "worker_queued", error: null, lastError: null },
+            lastProgressAt: new Date().toISOString(),
+          })
+          return
+        }
+        if (item.slurperStatus === "worker_bucket_create_failed") return
+        const progress = isRecord(item.progress) ? item.progress : {}
+        const repair = isRecord(progress.repairWorker) ? progress.repairWorker : null
+        if (String(repair?.status ?? "").toLowerCase() === "completed") return
+        await updateMigrationItem(item.id, {
+          slurperStatus: "queued",
+          progress: { ...progress, stage: "worker_queued", error: null, lastError: null },
+          lastProgressAt: new Date().toISOString(),
+        })
+      })
+
+      const queued = await ensureMigrationWorkerJobs({ migrationId: id, mode: "repair_and_verify" })
+      const finalItems = await listMigrationItems(id)
+      if (finalItems.length === 0) {
+        const completedAt = new Date().toISOString()
+        await updateMigration(id, {
+          status: "completed",
+          completedAt,
+          syncStatus: "ok",
+          syncMessage: "No buckets selected",
+          lastSyncedAt: completedAt,
+        })
+        return NextResponse.json({ migration: await getMigration(id), items: finalItems, workerJobs: [] }, { status: 200 })
+      }
+      await updateMigration(id, {
+        status: "running",
+        syncStatus: "ok",
+        syncMessage: `Queued ${queued.jobs.length} shared migration worker shard${queued.jobs.length === 1 ? "" : "s"}`,
+        lastSyncedAt: new Date().toISOString(),
+      })
+      return NextResponse.json({ migration: await getMigration(id), items: finalItems, workerJobs: queued.jobs }, { status: 200 })
+    }
 
     const startedAt = migration.startedAt ?? new Date().toISOString()
     await updateMigration(id, {

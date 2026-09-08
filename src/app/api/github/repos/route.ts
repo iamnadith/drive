@@ -1,10 +1,15 @@
 import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
-import { GITHUB_TOKEN_COOKIE, listGitHubRepos } from "@/lib/github-oauth"
+import { GITHUB_TOKEN_COOKIE, GitHubApiError, listGitHubRepos } from "@/lib/github-oauth"
 import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
+}
+
+function errorStatus(error: unknown) {
+  if (!(error instanceof GitHubApiError)) return 400
+  return error.status >= 500 ? 502 : error.status
 }
 
 export async function GET() {
@@ -17,6 +22,6 @@ export async function GET() {
     const repos = await listGitHubRepos(token)
     return NextResponse.json({ repos })
   } catch (error: unknown) {
-    return NextResponse.json({ error: errorMessage(error, "Unable to load GitHub repositories") }, { status: 400 })
+    return NextResponse.json({ error: errorMessage(error, "Unable to load GitHub repositories") }, { status: errorStatus(error) })
   }
 }

@@ -550,8 +550,26 @@ async function reconcileBuckets(db: Client, account: AccountRow, buckets: Bucket
   }
 }
 
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  if (items.length === 0) return []
+  const output = new Array<R>(items.length)
+  let nextIndex = 0
+  const run = async () => {
+    while (true) {
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= items.length) return
+      output[index] = await worker(items[index], index)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, () => run()))
+  return output
+}
+
 async function syncBucketSettingsBatch(db: Client, account: AccountRow, buckets: BucketInfo[]) {
-  const results = await Promise.all(buckets.map(async (bucket) => {
+  // readBucketSettings performs two provider fetches. Keep at most three
+  // buckets in flight so the six-connection free-tier limit is not exceeded.
+  const results = await mapWithConcurrency(buckets, 3, async (bucket) => {
     try {
       const settings = await readBucketSettings(account, bucket)
       return {
@@ -570,7 +588,7 @@ async function syncBucketSettingsBatch(db: Client, account: AccountRow, buckets:
         error: (error instanceof Error ? error.message : String(error)).slice(0, 1000),
       }
     }
-  }))
+  })
   if (results.length > 0) {
     // One atomic, idempotent write is substantially cheaper than one query per
     // bucket. Failed rows update only status metadata and retain verified JSON.

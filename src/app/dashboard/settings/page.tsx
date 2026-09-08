@@ -51,6 +51,20 @@ export default function DashboardSettingsPage() {
   const [orchestratorConnection, setOrchestratorConnection] = React.useState<"unknown" | "connected" | "failed">("unknown")
   const [orchestratorBusy, setOrchestratorBusy] = React.useState(false)
   const [orchestratorMessage, setOrchestratorMessage] = React.useState("")
+  const [workerSecret, setWorkerSecret] = React.useState("")
+  const [workerSecretConfigured, setWorkerSecretConfigured] = React.useState(false)
+  const [workerSecretUpdatedAt, setWorkerSecretUpdatedAt] = React.useState("")
+  const [workerSecretLoaded, setWorkerSecretLoaded] = React.useState(false)
+  const [workerSecretBusy, setWorkerSecretBusy] = React.useState(false)
+  const [workerSecretMessage, setWorkerSecretMessage] = React.useState("")
+  const [migrationOrchestratorUrl, setMigrationOrchestratorUrl] = React.useState("")
+  const [migrationOrchestratorSavedUrl, setMigrationOrchestratorSavedUrl] = React.useState("")
+  const [migrationOrchestratorSecret, setMigrationOrchestratorSecret] = React.useState("")
+  const [migrationOrchestratorEnabled, setMigrationOrchestratorEnabled] = React.useState(false)
+  const [migrationOrchestratorSecretConfigured, setMigrationOrchestratorSecretConfigured] = React.useState(false)
+  const [migrationOrchestratorLoaded, setMigrationOrchestratorLoaded] = React.useState(false)
+  const [migrationOrchestratorBusy, setMigrationOrchestratorBusy] = React.useState(false)
+  const [migrationOrchestratorMessage, setMigrationOrchestratorMessage] = React.useState("")
 
   const loadOrchestratorSettings = React.useCallback(async () => {
     const response = await fetch("/api/settings/backend-orchestrator", { cache: "no-store" })
@@ -82,6 +96,136 @@ export default function DashboardSettingsPage() {
       setOrchestratorMessage(error instanceof Error ? error.message : String(error))
     })
   }, [loadOrchestratorSettings])
+
+  const loadMigrationWorkerSettings = React.useCallback(async () => {
+    const response = await fetch("/api/settings/migration-workers", { cache: "no-store" })
+    const payload = await response.json().catch(() => ({})) as { settings?: { secretConfigured?: boolean; updatedAt?: string }; error?: string }
+    if (!response.ok) throw new Error(payload.error || "Unable to load Migration Worker settings")
+    setWorkerSecretConfigured(payload.settings?.secretConfigured === true)
+    setWorkerSecretUpdatedAt(payload.settings?.updatedAt ?? "")
+    setWorkerSecretLoaded(true)
+  }, [])
+
+  const loadMigrationOrchestratorSettings = React.useCallback(async () => {
+    const response = await fetch("/api/settings/migration-orchestrator", { cache: "no-store" })
+    const payload = await response.json().catch(() => ({})) as {
+      settings?: { enabled?: boolean; orchestratorUrl?: string; secretConfigured?: boolean }
+      error?: string
+    }
+    if (!response.ok) throw new Error(payload.error || "Unable to load Migration Orchestrator settings")
+    const savedUrl = payload.settings?.orchestratorUrl ?? ""
+    setMigrationOrchestratorUrl(savedUrl)
+    setMigrationOrchestratorSavedUrl(savedUrl)
+    setMigrationOrchestratorEnabled(payload.settings?.enabled === true)
+    setMigrationOrchestratorSecretConfigured(payload.settings?.secretConfigured === true)
+    setMigrationOrchestratorLoaded(true)
+  }, [])
+
+  React.useEffect(() => {
+    void loadMigrationWorkerSettings().catch((error) => {
+      setWorkerSecretLoaded(true)
+      setWorkerSecretMessage(error instanceof Error ? error.message : String(error))
+    })
+    void loadMigrationOrchestratorSettings().catch((error) => {
+      setMigrationOrchestratorLoaded(true)
+      setMigrationOrchestratorMessage(error instanceof Error ? error.message : String(error))
+    })
+  }, [loadMigrationOrchestratorSettings, loadMigrationWorkerSettings])
+
+  const saveMigrationWorkerSettings = async () => {
+    setWorkerSecretBusy(true)
+    setWorkerSecretMessage("")
+    try {
+      const response = await fetch("/api/settings/migration-workers", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sharedSecret: workerSecret }),
+      })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || "Unable to save Migration Worker secret")
+      setWorkerSecret("")
+      await loadMigrationWorkerSettings()
+      setWorkerSecretMessage("Shared worker secret saved. Use the same secret for every worker.")
+    } catch (error) {
+      setWorkerSecretMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setWorkerSecretBusy(false)
+    }
+  }
+
+  const saveMigrationOrchestratorSettings = async () => {
+    setMigrationOrchestratorBusy(true)
+    setMigrationOrchestratorMessage("")
+    try {
+      const response = await fetch("/api/settings/migration-orchestrator", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orchestratorUrl: migrationOrchestratorUrl, sharedSecret: migrationOrchestratorSecret }),
+      })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || "Unable to save Migration Orchestrator settings")
+      setMigrationOrchestratorSecret("")
+      await loadMigrationOrchestratorSettings()
+      setMigrationOrchestratorMessage("Migration Orchestrator connection settings saved.")
+    } catch (error) {
+      setMigrationOrchestratorMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setMigrationOrchestratorBusy(false)
+    }
+  }
+
+  const testMigrationOrchestrator = async () => {
+    setMigrationOrchestratorBusy(true)
+    setMigrationOrchestratorMessage("")
+    try {
+      const response = await fetch("/api/settings/migration-orchestrator", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "test" }) })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || "Migration Orchestrator connection test failed")
+      setMigrationOrchestratorMessage("Migration Orchestrator is reachable and authenticated.")
+    } catch (error) {
+      setMigrationOrchestratorMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setMigrationOrchestratorBusy(false)
+    }
+  }
+
+  const runMigrationOrchestratorNow = async () => {
+    setMigrationOrchestratorBusy(true)
+    setMigrationOrchestratorMessage("")
+    try {
+      const response = await fetch("/api/settings/migration-orchestrator", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "run" }),
+      })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || "Migration Orchestrator run failed")
+      await loadMigrationOrchestratorSettings()
+      setMigrationOrchestratorMessage("Migration Orchestrator cycle completed successfully.")
+    } catch (error) {
+      setMigrationOrchestratorMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setMigrationOrchestratorBusy(false)
+    }
+  }
+
+  const setMigrationOrchestratorActive = async (enabled: boolean) => {
+    setMigrationOrchestratorBusy(true)
+    setMigrationOrchestratorMessage("")
+    try {
+      const response = await fetch("/api/settings/migration-orchestrator", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }) })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || `Unable to ${enabled ? "enable" : "disable"} Migration Orchestrator`)
+      await loadMigrationOrchestratorSettings()
+      setMigrationOrchestratorMessage(`Migration Orchestrator ${enabled ? "enabled" : "disabled"}.`)
+    } catch (error) {
+      setMigrationOrchestratorMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setMigrationOrchestratorBusy(false)
+    }
+  }
+
+  const migrationOrchestratorDirty = migrationOrchestratorUrl.trim().replace(/\/$/, "") !== migrationOrchestratorSavedUrl || migrationOrchestratorSecret.length > 0
 
   const saveOrchestratorSettings = async () => {
     setOrchestratorBusy(true)
@@ -258,6 +402,77 @@ export default function DashboardSettingsPage() {
             {orchestratorEnabled ? "Disable" : "Enable"}
           </Button>
           <Button variant="outline" onClick={runOrchestratorNow} disabled={orchestratorBusy || !orchestratorLoaded || !orchestratorEnabled}>Run now</Button>
+        </CardFooter>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Migration workers</CardTitle>
+          <CardDescription>
+            One shared secret authenticates every migration worker. Each worker still has its own generated id, so concurrent workers can claim and report separate object-shard jobs safely.
+          </CardDescription>
+          <CardAction>
+            <Badge variant={workerSecretConfigured ? "outline" : "destructive"}>
+              {!workerSecretLoaded ? "Loading..." : workerSecretConfigured ? "Secret saved" : "Secret required"}
+            </Badge>
+          </CardAction>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <Label htmlFor="migration-worker-secret">Shared worker secret</Label>
+          <Input
+            id="migration-worker-secret"
+            type="password"
+            value={workerSecret}
+            disabled={!workerSecretLoaded}
+            onChange={(event) => setWorkerSecret(event.target.value)}
+            placeholder={workerSecretConfigured ? "Saved securely - enter only to replace" : "At least 24 characters"}
+          />
+          <p className="text-xs text-muted-foreground">
+            The panel never displays a saved secret. GitHub dispatch synchronizes it as `DRIVE_WORKER_SHARED_SECRET` and passes only the worker id at runtime.
+          </p>
+          <p className="text-xs text-muted-foreground">Last saved: {workerSecretUpdatedAt ? new Date(workerSecretUpdatedAt).toLocaleString() : "Never"}</p>
+          {workerSecretMessage ? <p className="text-sm">{workerSecretMessage}</p> : null}
+        </CardContent>
+        <CardFooter>
+          <Button onClick={saveMigrationWorkerSettings} disabled={workerSecretBusy || !workerSecretLoaded || !workerSecret.trim()}>
+            Save worker secret
+          </Button>
+        </CardFooter>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Migration Orchestrator</CardTitle>
+          <CardDescription>
+            The Cloudflare scheduler materializes shared object-shard jobs, requeues stale workers, and reconciles the worker pool. It only processes migrations explicitly created with the migration worker engine.
+          </CardDescription>
+          <CardAction>
+            <Badge variant={migrationOrchestratorEnabled ? "default" : "secondary"}>
+              {!migrationOrchestratorLoaded ? "Loading..." : migrationOrchestratorEnabled ? "Enabled" : "Disabled"}
+            </Badge>
+          </CardAction>
+        </CardHeader>
+        <CardContent className="grid gap-4 lg:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="migration-orchestrator-url">Orchestrator URL</Label>
+            <Input id="migration-orchestrator-url" value={migrationOrchestratorUrl} disabled={!migrationOrchestratorLoaded} onChange={(event) => setMigrationOrchestratorUrl(event.target.value)} placeholder="https://migration-orchestrator.example.workers.dev" />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="migration-orchestrator-secret">Panel shared secret</Label>
+            <Input id="migration-orchestrator-secret" type="password" value={migrationOrchestratorSecret} disabled={!migrationOrchestratorLoaded} onChange={(event) => setMigrationOrchestratorSecret(event.target.value)} placeholder={migrationOrchestratorSecretConfigured ? "Saved securely - enter only to replace" : "At least 24 characters"} />
+            <p className="text-xs text-muted-foreground">
+              A blank field keeps the saved secret. The orchestrator only receives authenticated tick requests and processes the migration worker pool.
+            </p>
+          </div>
+          {migrationOrchestratorMessage ? <p className="text-sm lg:col-span-2">{migrationOrchestratorMessage}</p> : null}
+        </CardContent>
+        <CardFooter className="flex flex-wrap gap-2">
+          <Button onClick={saveMigrationOrchestratorSettings} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded}>Save connection</Button>
+          <Button variant="outline" onClick={testMigrationOrchestrator} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || migrationOrchestratorDirty || !migrationOrchestratorSecretConfigured}>Test connection</Button>
+          <Button variant={migrationOrchestratorEnabled ? "destructive" : "secondary"} onClick={() => void setMigrationOrchestratorActive(!migrationOrchestratorEnabled)} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || (!migrationOrchestratorEnabled && (!migrationOrchestratorUrl || !migrationOrchestratorSecretConfigured))}>
+            {migrationOrchestratorEnabled ? "Disable" : "Enable"}
+          </Button>
+          <Button variant="outline" onClick={runMigrationOrchestratorNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !migrationOrchestratorEnabled}>Run now</Button>
         </CardFooter>
       </Card>
 

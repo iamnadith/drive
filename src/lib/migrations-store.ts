@@ -6,6 +6,12 @@ export type MigrationStatus = "draft" | "running" | "verifying" | "completed" | 
 export type MigrationSyncStatus = "idle" | "syncing" | "ok" | "error"
 
 export type MigrationOptions = {
+  /** Cloudflare-managed Super Slurper (default) or the durable worker pool. */
+  executionMode?: "super_slurper" | "migration_workers"
+  /** Incremented when a worker migration is explicitly retried. */
+  workerGeneration?: number
+  /** Number of deterministic object shards shared by the worker pool. */
+  workerShardCount?: number
   overwrite?: boolean
   concurrency?: number
   includeBuckets?: string[]

@@ -1,9 +1,10 @@
 import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
-import { createAgentRun, ensureAgentRegistrationToken, getAgentById, getAgentGithubToken, listAgentRunsByAgentId, updateAgent, updateAgentRun } from "@/lib/agents-store"
-import { createRepairJob, findActiveRepairJobForDispatch, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
+import { createAgentRun, getAgentById, getAgentGithubToken, listAgentRunsByAgentId, updateAgent, updateAgentRun } from "@/lib/agents-store"
+import { abortRepairJob, createRepairJob, ensureMigrationWorkerJobs, findActiveRepairJobForDispatch, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
 import { GITHUB_TOKEN_COOKIE, listGitHubWorkflowRuns, setGitHubActionsSecret } from "@/lib/github-oauth"
-import { listMigrationItems } from "@/lib/migrations-store"
+import { getMigration, listMigrationItems } from "@/lib/migrations-store"
+import { getMigrationWorkerSharedSecret } from "@/lib/migration-worker-settings-store"
 import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
@@ -36,10 +37,11 @@ async function syncGitHubWorkerSecrets(input: {
   owner: string
   repo: string
   serverUrl: string
-  agentId: string
-  registrationToken: string
+  sharedSecret: string
+  agentId?: string
+  includeLegacyAgentId?: boolean
 }) {
-  await Promise.all([
+  const writes = [
     setGitHubActionsSecret({
       token: input.token,
       owner: input.owner,
@@ -51,17 +53,20 @@ async function syncGitHubWorkerSecrets(input: {
       token: input.token,
       owner: input.owner,
       repo: input.repo,
-      name: "DRIVE_AGENT_ID",
-      value: input.agentId,
+      name: "DRIVE_WORKER_SHARED_SECRET",
+      value: input.sharedSecret,
     }),
-    setGitHubActionsSecret({
+  ]
+  if (input.includeLegacyAgentId && input.agentId) {
+    writes.push(setGitHubActionsSecret({
       token: input.token,
       owner: input.owner,
       repo: input.repo,
-      name: "DRIVE_AGENT_TOKEN",
-      value: input.registrationToken,
-    }),
-  ])
+      name: "DRIVE_AGENT_ID",
+      value: input.agentId,
+    }))
+  }
+  await Promise.all(writes)
 }
 
 function isUnexpectedWorkflowInputsError(status: number, text: string): boolean {
@@ -99,19 +104,36 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const workflowSupportsRuntimeInputs = body.workflowSupportsRuntimeInputs !== false
 
     if (!migrationId) return NextResponse.json({ error: "migrationId is required" }, { status: 400 })
+    const migration = await getMigration(migrationId)
+    if (!migration) return NextResponse.json({ error: "Migration not found" }, { status: 404 })
     const items = await listMigrationItems(migrationId)
-    if (hasActiveSuperSlurper(items)) {
-      return NextResponse.json({ error: "Cannot run with worker while Super Slurper is still active for this migration." }, { status: 409 })
+    const pool = body.pool === true || migration.options.executionMode === "migration_workers"
+    if (body.pool === true && migration.options.executionMode !== "migration_workers") {
+      return NextResponse.json({ error: "Worker pool dispatch requires a migration created with the worker engine" }, { status: 409 })
     }
-    const existingJob = await findActiveRepairJobForDispatch({
-      migrationId,
-      requestedByAgentId: id,
-    })
-    if (existingJob) {
+    if (pool && !["running", "verifying"].includes(migration.status)) {
+      return NextResponse.json({ error: "Start the migration before dispatching its worker pool" }, { status: 409 })
+    }
+    if (pool && !agent.capabilities.includes("bulk_migrate")) {
       return NextResponse.json(
-        { error: `A worker job is already active for this migration on this worker (${existingJob.id}).`, job: existingJob },
+        { error: "This worker is not registered for full migrations. Update the worker runtime and wait for its heartbeat before dispatching a worker-pool migration." },
         { status: 409 }
       )
+    }
+    if (migration.options.executionMode !== "migration_workers" && hasActiveSuperSlurper(items)) {
+      return NextResponse.json({ error: "Cannot run with worker while Super Slurper is still active for this migration." }, { status: 409 })
+    }
+    if (!pool) {
+      const existingJob = await findActiveRepairJobForDispatch({
+        migrationId,
+        requestedByAgentId: id,
+      })
+      if (existingJob) {
+        return NextResponse.json(
+          { error: `A worker job is already active for this migration on this worker (${existingJob.id}).`, job: existingJob },
+          { status: 409 }
+        )
+      }
     }
 
     if (agent.provider !== "github_actions") {
@@ -124,26 +146,40 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           { status: 409 }
         )
       }
-      const job = await createRepairJob({
-        migrationId,
-        mode,
-        requestedByAgentId: id,
-        payload: {
-          source: agent.provider,
-          agentId: id,
-        },
-      })
+      if (pool) {
+        const activePoolJob = (await listRepairJobs(500)).find(
+          (job) => job.claimedByAgentId === id && ["pending", "claimed", "running"].includes(job.status)
+        )
+        if (activePoolJob) {
+          return NextResponse.json(
+            { error: `This worker already owns active pool shard ${activePoolJob.id}.`, job: activePoolJob },
+            { status: 409 }
+          )
+        }
+      }
+      const queued = pool
+        ? await ensureMigrationWorkerJobs({ migrationId, mode })
+        : null
+      const job = pool
+        ? null
+        : await createRepairJob({
+            migrationId,
+            mode,
+            requestedByAgentId: id,
+            payload: { source: agent.provider, agentId: id },
+          })
 
       await updateAgent(id, {
         status: agent.provider === "self_hosted" || agent.provider === "local" ? "online" : agent.status,
         lastError: null,
         metadata: {
           ...(agent.metadata ?? {}),
-          activeRepairJobId: job.id,
+          activeRepairJobId: job?.id ?? null,
+          ...(pool ? { activeMigrationId: migrationId } : { activeMigrationId: null }),
         },
       }).catch(() => undefined)
 
-      return NextResponse.json({ ok: true, job }, { status: 200 })
+      return NextResponse.json({ ok: true, job, jobs: queued?.jobs ?? [] }, { status: 200 })
     }
 
     if (!agent.githubRepoOwner || !agent.githubRepoName || !agent.githubWorkflowFile) {
@@ -153,11 +189,11 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const githubRepoName = agent.githubRepoName
     const githubWorkflowFile = agent.githubWorkflowFile
 
-    const workerJobs = await listRepairJobs(100)
+    const workerJobs = await listRepairJobs(500)
     const activeWorkerJobs = workerJobs.filter(
       (job) =>
         !["completed", "failed", "canceled"].includes(job.status) &&
-        (job.claimedByAgentId === id || job.requestedByAgentId === id)
+        (job.claimedByAgentId === id || (!pool && job.requestedByAgentId === id))
     )
     if (activeWorkerJobs.length > 0) {
       return NextResponse.json(
@@ -195,7 +231,13 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       )
     }
 
-    const registrationToken = await ensureAgentRegistrationToken(id)
+    const sharedSecret = await getMigrationWorkerSharedSecret()
+    if (sharedSecret.length < 24 || sharedSecret.length > 512) {
+      return NextResponse.json(
+        { error: "Configure a Migration Worker shared secret between 24 and 512 characters in Settings before dispatching a GitHub worker." },
+        { status: 409 }
+      )
+    }
 
     const serverUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || new URL(request.url).origin).replace(/\/+$/, "")
     const dispatchRequestedAt = new Date().toISOString()
@@ -216,46 +258,62 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         owner: githubRepoOwner,
         repo: githubRepoName,
         serverUrl,
+        sharedSecret,
         agentId: id,
-        registrationToken,
+        includeLegacyAgentId: !workflowSupportsRuntimeInputs,
       })
     } catch (error: unknown) {
       secretSyncError = errorMessage(error, "Unable to sync GitHub worker secrets")
     }
-    const job = await createRepairJob({
-      migrationId,
-      mode,
-      requestedByAgentId: id,
-      payload: {
-        source: "github_actions",
-        agentId: id,
-      },
-    })
+    if (secretSyncError) {
+      return NextResponse.json(
+        { error: `GitHub worker secret synchronization failed: ${secretSyncError}` },
+        { status: 502 }
+      )
+    }
+    const queued = pool
+      ? await ensureMigrationWorkerJobs({ migrationId, mode })
+      : null
+    const job = pool
+      ? null
+      : await createRepairJob({
+          migrationId,
+          mode,
+          requestedByAgentId: id,
+          payload: { source: "github_actions", agentId: id },
+        })
 
-    const run = await createAgentRun({
-      agentId: id,
-      runType: "github_dispatch",
-      status: "pending",
-      jobReference: job.id,
-      summary: `Queued GitHub dispatch for repair job ${job.id}`,
-      payload: {
-        migrationId,
-        mode,
-        repoOwner: githubRepoOwner,
-        repoName: githubRepoName,
-        workflowFile: githubWorkflowFile,
-        ref: agent.githubRef || "main",
-        dispatchRequestedAt,
-        githubRunIdsBeforeDispatch: Array.from(runIdsBeforeDispatch),
-      },
-    })
+    let run: Awaited<ReturnType<typeof createAgentRun>>
+    try {
+      run = await createAgentRun({
+        agentId: id,
+        runType: "github_dispatch",
+        status: "pending",
+        jobReference: job?.id,
+        summary: pool ? "Queued GitHub dispatch for the migration worker pool" : `Queued GitHub dispatch for repair job ${job?.id}`,
+        payload: {
+          migrationId,
+          mode,
+          pool,
+          repoOwner: githubRepoOwner,
+          repoName: githubRepoName,
+          workflowFile: githubWorkflowFile,
+          ref: agent.githubRef || "main",
+          dispatchRequestedAt,
+          githubRunIdsBeforeDispatch: Array.from(runIdsBeforeDispatch),
+        },
+      })
+    } catch (error) {
+      if (job?.id) await abortRepairJob(job.id).catch(() => undefined)
+      throw error
+    }
 
     await updateAgent(id, {
       status: "offline",
       lastError: null,
       metadata: {
         ...(agent.metadata ?? {}),
-        activeRepairJobId: job.id,
+        activeRepairJobId: job?.id ?? null,
         githubDispatchRequestedAt: dispatchRequestedAt,
       },
     }).catch(() => undefined)
@@ -275,10 +333,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
             ref: agent.githubRef || "main",
             inputs: {
               migration_id: migrationId,
-              repair_job_id: job.id,
+              ...(job?.id ? { repair_job_id: job.id } : {}),
               agent_id: id,
-              ...(includeRuntimeInputs ? { server_url: serverUrl, agent_token: registrationToken } : {}),
-              ...dispatchInputs,
+              ...(includeRuntimeInputs ? { server_url: serverUrl } : {}),
+              ...Object.fromEntries(Object.entries(dispatchInputs).filter(([key]) => key !== "agent_token" && key !== "repair_job_id" && key !== "agent_id")),
             },
           }),
         }
@@ -298,11 +356,13 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         }
       }
     } catch (error: unknown) {
+      if (job?.id) await abortRepairJob(job.id).catch(() => undefined)
       return NextResponse.json({ error: errorMessage(error, "Unable to send GitHub workflow dispatch request") }, { status: 400 })
     }
 
     if (!response.ok) {
       const text = await response.text().catch(() => "")
+      if (job?.id) await abortRepairJob(job.id).catch(() => undefined)
       await updateAgentRun(run.id, {
         status: "failed",
         summary: `GitHub dispatch failed: ${response.status}`,
@@ -340,8 +400,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         perPage: 20,
       }).catch(() => [])
       const newRuns = recentRuns.filter((candidate) => !runIdsBeforeDispatch.has(candidate.id))
+      const runDisplayHint = pool ? id : job?.id
       matchedRun =
-        newRuns.find((candidate) => String(candidate.displayTitle ?? "").includes(job.id)) ??
+        (runDisplayHint ? newRuns.find((candidate) => String(candidate.displayTitle ?? "").includes(runDisplayHint)) : undefined) ??
         newRuns.find((candidate) => {
           const createdAt = Date.parse(candidate.createdAt || "")
           const requestedAt = Date.parse(dispatchRequestedAt)
@@ -353,11 +414,16 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       status: matchedRun ? (matchedRun.status === "completed" ? "completed" : "running") : "pending",
       externalRunId: matchedRun?.id ?? null,
       summary: matchedRun
-        ? `Workflow dispatched for repair job ${job.id} (run #${matchedRun.runNumber ?? matchedRun.id})`
-        : `Workflow dispatch queued for repair job ${job.id}; waiting for GitHub to start the run`,
+        ? pool
+          ? `Workflow dispatched for the migration worker pool (run #${matchedRun.runNumber ?? matchedRun.id})`
+          : `Workflow dispatched for repair job ${job?.id} (run #${matchedRun.runNumber ?? matchedRun.id})`
+        : pool
+          ? "Workflow dispatch queued for the migration worker pool; waiting for GitHub to start the run"
+          : `Workflow dispatch queued for repair job ${job?.id}; waiting for GitHub to start the run`,
       payload: {
         migrationId,
         mode,
+        pool,
         repoOwner: githubRepoOwner,
         repoName: githubRepoName,
         workflowFile: githubWorkflowFile,
@@ -376,7 +442,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       lastError: null,
       metadata: {
         ...(agent.metadata ?? {}),
-        activeRepairJobId: matchedRun && matchedRun.status !== "completed" ? job.id : null,
+        activeRepairJobId: matchedRun && matchedRun.status !== "completed" ? job?.id ?? null : null,
         githubAbortRequestedAt: null,
         githubDispatchRequestedAt: dispatchRequestedAt,
         ...(matchedRun?.id ? { githubRunId: matchedRun.id } : {}),
@@ -386,7 +452,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       },
     }).catch(() => undefined)
 
-    return NextResponse.json({ ok: true, job, run: updatedRun }, { status: 200 })
+    return NextResponse.json({ ok: true, job, jobs: queued?.jobs ?? [], run: updatedRun }, { status: 200 })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to dispatch GitHub workflow") }, { status: 400 })
   }

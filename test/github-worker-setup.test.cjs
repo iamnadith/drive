@@ -1,0 +1,267 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const ts = require('typescript')
+const Module = require('node:module')
+const path = require('node:path')
+
+function loadOAuth() {
+  const filename = path.resolve('src/lib/github-oauth.ts')
+  const mod = new Module(filename, module)
+  mod.filename = filename
+  mod.paths = module.paths
+  mod._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, filename)
+  return mod.exports
+}
+
+function loadSetup(api) {
+  const filename = path.resolve('src/lib/github-worker-setup.ts')
+  const mod = new Module(filename, module)
+  mod.filename = filename
+  mod.paths = module.paths
+  class GitHubApiError extends Error { constructor(message, status) { super(message); this.status = status } }
+  mod.require = (name) => name === './github-oauth' ? {
+    githubApi: api,
+    GitHubApiError,
+    listGitHubWorkflows: async (token, owner, repo) => {
+      const response = await api(`/repos/${owner}/${repo}/actions/workflows?per_page=100`, token)
+      return Array.isArray(response.workflows) ? response.workflows : []
+    },
+  } : require(name)
+  mod._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, filename)
+  return { ...mod.exports, GitHubApiError }
+}
+const source = { id: 1, name: 'Drive', full_name: 'iamnadith/Drive', owner: { login: 'iamnadith' }, default_branch: 'main' }
+const repo = (id, extra = {}) => ({ id, name: `renamed-${id}`, full_name: `me/renamed-${id}`, owner: { login: 'me' }, default_branch: 'custom', permissions: { admin: true, push: true }, ...extra })
+const marker = { encoding: 'base64', content: Buffer.from(fs.readFileSync('.drive-worker.json')).toString('base64') }
+const workflow = { type: 'file', encoding: 'base64', content: Buffer.from(fs.readFileSync('.github/workflows/migration-worker.yml')).toString('base64') }
+function fixture(repos, options = {}) {
+  const calls = []
+  let workflowListCalls = 0
+  let setup
+  const api = async (url, token, init) => {
+    calls.push({ url, method: init?.method || 'GET' })
+    if (options.fail && options.fail(url)) throw new setup.GitHubApiError('Rate limited', 403)
+    if (url === '/repos/iamnadith/Drive') return source
+    if (url.startsWith('/user/repos?')) {
+      const page = Number(new URL(`https://api.github.com${url}`).searchParams.get('page'))
+      return repos.slice((page - 1) * 10, page * 10)
+    }
+    if (url === '/user') return { login: 'me' }
+    if (url === '/repos/me/drive-worker-1' && options.existingFork) return options.existingFork
+    if (options.missingFile && url.includes('/contents/migration')) throw new setup.GitHubApiError('Not ready', 404)
+    if (url.endsWith('/forks')) return repo(500, { fork: true, source: { id: 1 } })
+    if (url.includes('/contents/.drive-worker.json')) {
+      if (options.marked?.some(id => url.includes(`/renamed-${id}/`))) return marker
+      throw new setup.GitHubApiError('Not found', 404)
+    }
+    if (url.includes('/contents/')) return /\.ya?ml/.test(url) ? workflow : { type: 'file' }
+    if (url.endsWith('/enable')) return {}
+    if (url.includes('/actions/workflows?per_page=100')) {
+      if (options.emptyWorkflowLists && workflowListCalls++ < options.emptyWorkflowLists) return { workflows: [] }
+      return { workflows: [{ id: 700, name: options.workflowName || 'Migration Worker', path: options.workflowPath || '.github/workflows/migration-worker.yml', state: options.workflowState || 'active' }] }
+    }
+    if (url.includes('/actions/workflows/')) return { state: options.workflowState || 'active' }
+    const found = repos.find(r => url === `/repos/${r.full_name}`)
+    if (found) return found
+    if (url === '/repos/me/renamed-500') return repo(500, { fork: true, source: { id: 1 } })
+    throw new setup.GitHubApiError('Not found', 404)
+  }
+  setup = loadSetup(api)
+  return { ...setup, calls }
+}
+test('detects a renamed marker repository beyond the first hundred among unrelated repositories', async () => {
+  const repos = Array.from({ length: 125 }, (_, i) => repo(i + 10))
+  const f = fixture(repos, { marked: [134] })
+  let result = await f.advanceWorkerSetup('token')
+  while (result.status === 'pending') result = await f.advanceWorkerSetup('token', result.cursor)
+  assert.equal(result.status, 'ready')
+  assert.equal(result.repo.id, '134')
+  assert.equal(result.repo.defaultBranch, 'custom')
+  assert.ok(!f.calls.some(c => c.method === 'POST'))
+})
+test('detects old renamed forks by ancestry without a marker', async () => {
+  const f = fixture([repo(9, { fork: true, source: { id: 1 } })])
+  assert.equal((await f.advanceWorkerSetup('token')).repo.id, '9')
+})
+test('does not guess between matching copies', async () => {
+  const f = fixture([repo(9), repo(10)], { marked: [9, 10] })
+  const choice = await f.advanceWorkerSetup('token')
+  assert.equal(choice.status, 'choose')
+  assert.equal((await f.advanceWorkerSetup('token', choice.cursor, '10')).repo.id, '10')
+  await assert.rejects(f.advanceWorkerSetup('token', choice.cursor, '99'), /detected matches/)
+})
+test('complete empty scan requests a deterministic fork then verifies readiness', async () => {
+  const f = fixture([])
+  const pending = await f.advanceWorkerSetup('token')
+  assert.equal(pending.status, 'pending')
+  assert.equal(f.calls.filter(c => c.method === 'POST').length, 1)
+  assert.equal((await f.advanceWorkerSetup('token', pending.cursor)).repo.id, '500')
+})
+test('auto detection forks instead of selecting the upstream template repository', async () => {
+  const f = fixture([source])
+  const pending = await f.advanceWorkerSetup('token')
+  assert.equal(pending.status, 'pending')
+  assert.equal(f.calls.filter(c => c.method === 'POST').length, 1)
+  assert.ok(f.calls.some(c => c.url.endsWith('/forks')))
+})
+test('API failure during detection never creates a fork', async () => {
+  const f = fixture([repo(9)], { fail: url => url.includes('.drive-worker.json') })
+  await assert.rejects(f.advanceWorkerSetup('token'), /Rate limited/)
+  assert.ok(!f.calls.some(c => c.method === 'POST'))
+})
+test('read-only matching repositories block automatic fork creation', async () => {
+  const f = fixture([repo(9, { permissions: { push: false } })], { marked: [9] })
+  await assert.rejects(f.advanceWorkerSetup('token'), /admin and push/)
+  assert.ok(!f.calls.some(c => c.method === 'POST'))
+})
+test('continuation cannot be forged or reused with a different account token', async () => {
+  const f = fixture(Array.from({ length: 10 }, (_, i) => repo(i + 10)))
+  const result = await f.advanceWorkerSetup('token')
+  await assert.rejects(f.advanceWorkerSetup('other-token', result.cursor), /session changed/)
+  await assert.rejects(f.advanceWorkerSetup('token', `X${result.cursor}`), /session changed/)
+})
+test('fork workflow is enabled before selection', async () => {
+  const f = fixture([repo(9)], { marked: [9], workflowState: 'disabled_fork' })
+  const result = await f.advanceWorkerSetup('token')
+  assert.equal(result.status, 'pending')
+  assert.ok(f.calls.some(c => c.method === 'PUT' && c.url.endsWith('/enable')))
+})
+test('auto setup returns the actual compatible workflow path instead of a hardcoded filename', async () => {
+  const workflowPath = '.github/workflows/custom-drive-runner.yaml'
+  const f = fixture([repo(9)], { marked: [9], workflowPath })
+  let result = await f.advanceWorkerSetup('token')
+  while (result.status === 'pending') result = await f.advanceWorkerSetup('token', result.cursor)
+  assert.equal(result.status, 'ready')
+  assert.equal(result.workflow, workflowPath)
+})
+test('fork setup waits when GitHub has not indexed its workflow yet', async () => {
+  const f = fixture([], { emptyWorkflowLists: 1 })
+  const fork = await f.advanceWorkerSetup('token')
+  assert.equal(fork.status, 'pending')
+  const waiting = await f.advanceWorkerSetup('token', fork.cursor)
+  assert.equal(waiting.status, 'pending')
+  const ready = await f.advanceWorkerSetup('token', waiting.cursor)
+  assert.equal(ready.status, 'ready')
+})
+test('workflow listing excludes Actions records whose files no longer exist', async () => {
+  const oauth = loadOAuth()
+  const originalFetch = global.fetch
+  const requestedUrls = []
+  const response = (value, status = 200) => ({ ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(value) })
+  global.fetch = async (input) => {
+    const url = String(input)
+    requestedUrls.push(url)
+    if (url.includes('/actions/workflows?per_page=100')) {
+      return response({ workflows: [
+        null,
+        { id: 3, name: 'Malformed', path: null, state: 'active' },
+        { id: 1, name: 'Present', path: '.github/workflows/present.yml', state: 'active' },
+        { id: 2, name: 'Removed', path: '.github/workflows/removed.yml', state: 'active' },
+      ] })
+    }
+    if (url.includes('/contents/.github/workflows/present.yml')) return response({ type: 'file', path: '.github/workflows/present.yml' })
+    if (url.includes('/contents/.github/workflows/removed.yml')) return response({ message: 'Not Found' }, 404)
+    return response({ message: 'Unexpected request' }, 500)
+  }
+  try {
+    assert.deepEqual(await oauth.listGitHubWorkflows('token', 'me', 'repo', 'feature/test'), [{ id: '1', name: 'Present', path: '.github/workflows/present.yml', state: 'active' }])
+    assert.ok(requestedUrls.some((url) => url.includes('ref=feature%2Ftest')))
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+test('workflow listing paginates beyond the first hundred records', async () => {
+  const oauth = loadOAuth()
+  const originalFetch = global.fetch
+  const response = (value, status = 200) => ({ ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(value) })
+  const pageOne = Array.from({ length: 100 }, (_, index) => ({
+    id: index + 1,
+    name: `Workflow ${index + 1}`,
+    path: `.github/workflows/workflow-${index + 1}.yml`,
+    state: 'active',
+  }))
+  const pageTwo = [{ id: 101, name: 'Worker', path: '.github/workflows/worker.yml', state: 'active' }]
+  global.fetch = async (input) => {
+    const url = String(input)
+    const parsed = new URL(url)
+    if (parsed.pathname.endsWith('/actions/workflows')) {
+      return response({ workflows: parsed.searchParams.get('page') === '2' ? pageTwo : pageOne })
+    }
+    if (parsed.pathname.includes('/contents/.github/workflows/')) {
+      const workflowPath = decodeURIComponent(parsed.pathname.split('/contents/')[1])
+      return response({ type: 'file', path: workflowPath })
+    }
+    return response({ message: 'Unexpected request' }, 500)
+  }
+  try {
+    const workflows = await oauth.listGitHubWorkflows('token', 'me', 'repo')
+    assert.equal(workflows.length, 101)
+    assert.equal(workflows.at(-1).path, '.github/workflows/worker.yml')
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+test('dashboard workflow picker has no repository-independent fallback item', () => {
+  const page = fs.readFileSync(path.resolve('src/app/dashboard/workers/page.tsx'), 'utf8')
+  assert.doesNotMatch(page, /<SelectItem value=["']\.github\/workflows\/migration-worker\.yml["']/)
+  assert.match(page, /githubWorkflows\.map\(\(workflow\)/)
+})
+test('migration worker workflow exposes the dispatch contract used by the panel', () => {
+  const workflowFile = fs.readFileSync(path.resolve('.github/workflows/migration-worker.yml'), 'utf8')
+  assert.match(workflowFile, /workflow_dispatch:/)
+  for (const input of ['migration_id', 'repair_job_id', 'agent_id', 'server_url', 'agent_token']) {
+    assert.match(workflowFile, new RegExp(`^      ${input}:`, 'm'))
+  }
+  assert.match(workflowFile, /working-directory: workers\/migration-worker/)
+  assert.match(workflowFile, /cache-dependency-path: workers\/migration-worker\/package-lock\.json/)
+  assert.match(workflowFile, /run: npm ci/)
+  assert.match(workflowFile, /run: npm start/)
+  assert.match(workflowFile, /SERVER_URL:/)
+  assert.match(workflowFile, /AGENT_ID:/)
+  assert.match(workflowFile, /TOKEN:/)
+  assert.match(workflowFile, /secrets\.DRIVE_WORKER_SHARED_SECRET/)
+})
+
+test('migration UI exposes both engines while preserving Super Slurper as the default', () => {
+  const page = fs.readFileSync(path.resolve('src/app/dashboard/migrations/page.tsx'), 'utf8')
+  assert.match(page, /useState<"super_slurper" \| "migration_workers">\("super_slurper"\)/)
+  assert.match(page, /<SelectItem value="super_slurper">Cloudflare Super Slurper<\/SelectItem>/)
+  assert.match(page, /<SelectItem value="migration_workers">Drive migration worker pool<\/SelectItem>/)
+  assert.match(page, /workerShardCount/)
+})
+
+test('migration worker pool documentation and schema keep the shared queue contract explicit', () => {
+  const schema = fs.readFileSync(path.resolve('supabase/drive_schema.sql'), 'utf8')
+  const orchestratorReadme = fs.readFileSync(path.resolve('workers/migration-orchestrator/README.md'), 'utf8')
+  assert.match(schema, /work_key text/)
+  assert.match(schema, /drive_repair_jobs_work_key_unique/)
+  assert.match(schema, /create table if not exists drive_app_settings/)
+  assert.match(orchestratorReadme, /shared\s+object-shard jobs spanning every migration bucket/)
+  assert.match(orchestratorReadme, /migration_workers/)
+})
+
+test('lost fork response is reconciled using the stable destination without another POST', async () => {
+  const existing = repo(500, { fork: true, source: { id: 1 } })
+  const f = fixture([], { existingFork: existing })
+  const pending = await f.advanceWorkerSetup('token')
+  assert.equal(pending.status, 'pending')
+  assert.equal((await f.advanceWorkerSetup('token', pending.cursor)).repo.id, '500')
+  assert.ok(!f.calls.some(c => c.method === 'POST'))
+})
+test('unrelated destination name collision is never overwritten', async () => {
+  const f = fixture([], { existingFork: repo(500) })
+  await assert.rejects(f.advanceWorkerSetup('token'), /already exists and is unrelated/)
+  assert.ok(!f.calls.some(c => c.method !== 'GET'))
+})
+test('archived marker repository is not automatically selected or replaced', async () => {
+  const f = fixture([repo(9, { archived: true })], { marked: [9] })
+  await assert.rejects(f.advanceWorkerSetup('token'), /none allow worker setup/)
+  assert.ok(!f.calls.some(c => c.method !== 'GET'))
+})
+test('read-only upstream in the list does not prevent creating a personal fork', async () => {
+  const f = fixture([{ ...source, permissions: { push: false, admin: false } }])
+  assert.equal((await f.advanceWorkerSetup('token')).status, 'pending')
+  assert.equal(f.calls.filter(c => c.method === 'POST').length, 1)
+})
