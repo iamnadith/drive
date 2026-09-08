@@ -4,7 +4,7 @@ type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: st
 type Row = Record<string, any>
 const BUILD = 1
 const MAX_SECRET_LENGTH = 512
-let authCache: { value: string; expiresAt: number } | null = null
+let authCache: { value: string[]; expiresAt: number } | null = null
 
 function json(value: unknown, status = 200) { return Response.json(value, { status, headers: { "Cache-Control": "no-store, max-age=0" } }) }
 function safeEqual(a: string, b: string) {
@@ -17,11 +17,12 @@ async function authorized(request: Request, env: Env) {
   const value = request.headers.get("authorization") || ""
   if (!value.toLowerCase().startsWith("bearer ")) return false
   const supplied = value.slice(7).trim()
-  if (authCache && authCache.expiresAt > Date.now()) return safeEqual(supplied, authCache.value)
+  if (authCache && authCache.expiresAt > Date.now()) return authCache.value.some((value) => safeEqual(supplied, value))
   return database(env, async (db) => {
-    const result = await db.query(`select value->>'fileScannerSecret' secret from drive_app_settings where key='migration-orchestrator' limit 1`)
-    const expected = String(env.FILE_SCANNER_SECRET || result.rows[0]?.secret || "")
-    if (expected.length >= 24 && expected.length <= MAX_SECRET_LENGTH) authCache = { value: expected, expiresAt: Date.now() + 30_000 }
+    const expected = String(env.FILE_SCANNER_SECRET || "")
+    const stored = String((await db.query(`select value->>'fileScannerSecret' secret from drive_app_settings where key='migration-orchestrator' limit 1`)).rows[0]?.secret || "")
+    if (!safeEqual(expected, stored)) return false
+    if (expected.length >= 24 && expected.length <= MAX_SECRET_LENGTH) authCache = { value: [expected], expiresAt: Date.now() + 30_000 }
     return expected.length >= 24 && expected.length <= MAX_SECRET_LENGTH && safeEqual(supplied, expected)
   }).catch(() => false)
 }

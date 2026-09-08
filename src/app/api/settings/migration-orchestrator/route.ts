@@ -33,11 +33,9 @@ export async function GET() {
   const auth = await requireAdmin()
   if (!auth.ok) return auth.response
   const settings = await getMigrationOrchestratorSettings()
-  const [worker, fileScanner] = await Promise.all([
-    settings.orchestratorUrl && settings.sharedSecret.length >= 24 ? callWorker(settings, "migration", "/status", "GET").catch(() => null) : null,
-    settings.fileScannerUrl && settings.fileScannerSecret.length >= 24 ? callWorker(settings, "file", "/status", "GET").catch(() => null) : null,
-  ])
-  return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings), worker, fileScanner }, { headers: { "Cache-Control": "no-store, max-age=0" } })
+  // Loading settings is database-only. Worker connectivity is tested only by
+  // the individual card's explicit Test button.
+  return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings) }, { headers: { "Cache-Control": "no-store, max-age=0" } })
 }
 
 export async function PUT(request: Request) {
