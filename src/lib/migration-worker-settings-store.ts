@@ -5,7 +5,6 @@ const MIN_SECRET_LENGTH = 24
 const MAX_SECRET_LENGTH = 512
 
 export type MigrationWorkerSettings = {
-  serverUrl: string
   sharedSecret: string
   updatedAt?: string
 }
@@ -19,22 +18,9 @@ function normalizeSecret(value: unknown): string {
   return typeof value === "string" ? value.trim() : ""
 }
 
-function normalizeUrl(value: unknown): string {
-  if (typeof value !== "string" || !value.trim()) return ""
-  const url = new URL(value.trim())
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname))) {
-    throw new Error("Migration Worker URL must use HTTPS")
-  }
-  if (url.username || url.password || url.search || url.hash) {
-    throw new Error("Migration Worker URL must not contain credentials, a query string, or a fragment")
-  }
-  return url.toString().replace(/\/$/, "")
-}
-
 function normalize(value: unknown, updatedAt?: string | null): MigrationWorkerSettings {
   const row = value && typeof value === "object" ? (value as Record<string, unknown>) : {}
   return {
-    serverUrl: normalizeUrl(row.serverUrl),
     sharedSecret: normalizeSecret(row.sharedSecret),
     updatedAt: updatedAt ?? undefined,
   }
@@ -50,7 +36,7 @@ export async function getMigrationWorkerSettings(): Promise<MigrationWorkerSetti
     `select value, updated_at from drive_app_settings where key = $1 limit 1`,
     [SETTINGS_KEY]
   )
-  const saved = rows[0] ? normalize(rows[0].value, rows[0].updated_at) : { serverUrl: "", sharedSecret: "" }
+  const saved = rows[0] ? normalize(rows[0].value, rows[0].updated_at) : { sharedSecret: "" }
   if (saved.sharedSecret.length >= MIN_SECRET_LENGTH && saved.sharedSecret.length <= MAX_SECRET_LENGTH) return saved
   const fallback = envSecret()
   return fallback.length >= MIN_SECRET_LENGTH && fallback.length <= MAX_SECRET_LENGTH
@@ -62,11 +48,10 @@ export async function getMigrationWorkerSharedSecret(): Promise<string> {
   return (await getMigrationWorkerSettings()).sharedSecret
 }
 
-export async function saveMigrationWorkerSettings(input: { serverUrl?: unknown; sharedSecret?: unknown }): Promise<MigrationWorkerSettings> {
+export async function saveMigrationWorkerSettings(input: { sharedSecret?: unknown }): Promise<MigrationWorkerSettings> {
   const current = await getMigrationWorkerSettings()
   const requested = normalizeSecret(input.sharedSecret)
   const nextSecret = requested || current.sharedSecret
-  const serverUrl = input.serverUrl === undefined ? current.serverUrl : normalizeUrl(input.serverUrl)
   if (nextSecret && nextSecret.length < MIN_SECRET_LENGTH) {
     throw new Error(`Migration worker shared secret must be at least ${MIN_SECRET_LENGTH} characters`)
   }
@@ -81,14 +66,13 @@ export async function saveMigrationWorkerSettings(input: { serverUrl?: unknown; 
       on conflict (key) do update set value = excluded.value, updated_at = now()
       returning value, updated_at
     `,
-    [SETTINGS_KEY, JSON.stringify({ serverUrl, sharedSecret: nextSecret })]
+    [SETTINGS_KEY, JSON.stringify({ sharedSecret: nextSecret })]
   )
   return normalize(rows[0]?.value, rows[0]?.updated_at)
 }
 
 export function publicMigrationWorkerSettings(settings: MigrationWorkerSettings) {
   return {
-    serverUrl: settings.serverUrl,
     sharedSecret: settings.sharedSecret,
     secretConfigured: settings.sharedSecret.length >= MIN_SECRET_LENGTH && settings.sharedSecret.length <= MAX_SECRET_LENGTH,
     updatedAt: settings.updatedAt,
