@@ -14,9 +14,7 @@ if (!/^https:\/\//i.test(panelUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)
 if (sharedSecret.length < 24) throw new Error("PANEL_SHARED_SECRET must contain at least 24 characters")
 
 function workerDatabaseUrl(value) {
-  const url = new URL(String(value).trim())
-  if (url.hostname.endsWith(".pooler.supabase.com") && url.port === "6543") url.port = "5432"
-  return url.toString()
+  return new URL(String(value).trim()).toString()
 }
 
 const response = await fetch(`${panelUrl}/api/internal/backend-orchestrator/config`, {
