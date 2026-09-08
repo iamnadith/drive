@@ -876,8 +876,6 @@ create table if not exists drive_agents (
 create index if not exists drive_agents_status_idx on drive_agents (status);
 create index if not exists drive_agents_provider_idx on drive_agents (provider);
 create index if not exists drive_agents_category_idx on drive_agents (category);
-create unique index if not exists drive_agents_runtime_instance_unique
-  on drive_agents (runtime_instance_id) where runtime_instance_id is not null;
 
 update drive_agents
 set github_workflow_file = '.github/workflows/migration-worker.yml', updated_at = now()
@@ -1080,6 +1078,7 @@ alter table if exists public.drive_agents add column if not exists github_ref te
 alter table if exists public.drive_agents add column if not exists github_repository_id text;
 alter table if exists public.drive_agents add column if not exists github_token text;
 alter table if exists public.drive_agents add column if not exists notes text;
+alter table if exists public.drive_agents add column if not exists runtime_instance_id text;
 alter table if exists public.drive_agents add column if not exists registration_token text;
 alter table if exists public.drive_agents add column if not exists registration_token_hash text;
 alter table if exists public.drive_agents add column if not exists last_heartbeat_at timestamptz;
@@ -1088,6 +1087,8 @@ alter table if exists public.drive_agents add column if not exists last_seen_hos
 alter table if exists public.drive_agents add column if not exists last_seen_version text;
 alter table if exists public.drive_agents add column if not exists last_error text;
 alter table if exists public.drive_agents add column if not exists metadata jsonb not null default '{}'::jsonb;
+create unique index if not exists drive_agents_runtime_instance_unique
+  on public.drive_agents (runtime_instance_id) where runtime_instance_id is not null;
 alter table if exists public.drive_repair_jobs add column if not exists requested_by_agent_id uuid references public.drive_agents(id) on delete set null;
 alter table if exists public.drive_repair_jobs add column if not exists claimed_by_agent_id uuid references public.drive_agents(id) on delete set null;
 alter table if exists public.drive_repair_jobs add column if not exists status text not null default 'pending';
