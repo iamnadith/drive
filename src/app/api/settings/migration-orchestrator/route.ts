@@ -42,7 +42,8 @@ export async function PUT(request: Request) {
   if (!auth.ok) return auth.response
   try {
     const body = await request.json().catch(() => ({})) as { orchestratorUrl?: unknown; fileScannerUrl?: unknown; sharedSecret?: unknown; fileScannerSecret?: unknown }
-    const settings = await saveMigrationOrchestratorSettings({ enabled: false, orchestratorUrl: body.orchestratorUrl, fileScannerUrl: body.fileScannerUrl, sharedSecret: body.sharedSecret, fileScannerSecret: body.fileScannerSecret })
+    // Saving connection details must preserve the current enabled state.
+    const settings = await saveMigrationOrchestratorSettings({ orchestratorUrl: body.orchestratorUrl, fileScannerUrl: body.fileScannerUrl, sharedSecret: body.sharedSecret, fileScannerSecret: body.fileScannerSecret })
     return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings) })
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 })
