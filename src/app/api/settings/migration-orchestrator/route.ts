@@ -44,9 +44,11 @@ export async function PUT(request: Request) {
   const auth = await requireAdmin()
   if (!auth.ok) return auth.response
   try {
-    const body = await request.json().catch(() => ({})) as { orchestratorUrl?: unknown; fileScannerUrl?: unknown; sharedSecret?: unknown; fileScannerSecret?: unknown }
+    const body = await request.json().catch(() => ({})) as { worker?: unknown; orchestratorUrl?: unknown; fileScannerUrl?: unknown; sharedSecret?: unknown; fileScannerSecret?: unknown }
     // Saving connection details must preserve the current enabled state.
-    const settings = await saveMigrationOrchestratorSettings({ orchestratorUrl: body.orchestratorUrl, fileScannerUrl: body.fileScannerUrl, sharedSecret: body.sharedSecret, fileScannerSecret: body.fileScannerSecret })
+    const settings = await saveMigrationOrchestratorSettings(body.worker === "file"
+      ? { fileScannerUrl: body.fileScannerUrl, fileScannerSecret: body.fileScannerSecret }
+      : { orchestratorUrl: body.orchestratorUrl, sharedSecret: body.sharedSecret })
     return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings) })
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 })
@@ -73,11 +75,15 @@ export async function POST(request: Request) {
   if (!auth.ok) return auth.response
   try {
     const body = await request.json().catch(() => ({})) as { action?: unknown }
-    const action = body.action === "test" ? "test" : body.action === "run_file" ? "run_file" : "run"
+    const action = body.action === "test_file" ? "test_file" : body.action === "test_migration" ? "test_migration" : body.action === "test" ? "test" : body.action === "run_file" ? "run_file" : "run"
     const settings = await getMigrationOrchestratorSettings()
     if (action !== "test" && !settings.enabled) throw new Error("Enable orchestration before running it")
-    const result = action === "test"
-      ? await Promise.all([callWorker(settings, "migration", "/status", "GET"), callWorker(settings, "file", "/status", "GET")])
+    const result = action === "test_file"
+      ? await callWorker(settings, "file", "/status", "GET")
+      : action === "test_migration"
+        ? await callWorker(settings, "migration", "/status", "GET")
+        : action === "test"
+          ? await Promise.all([callWorker(settings, "migration", "/status", "GET"), callWorker(settings, "file", "/status", "GET")])
       : await callWorker(settings, action === "run_file" ? "file" : "migration", "/run", "POST")
     return NextResponse.json({ ok: true, action, result })
   } catch (error) {

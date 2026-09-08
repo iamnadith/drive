@@ -171,14 +171,14 @@ export default function DashboardSettingsPage() {
     }
   }
 
-  const saveMigrationOrchestratorSettings = async () => {
+  const saveMigrationOrchestratorSettings = async (worker: "migration" | "file") => {
     setMigrationOrchestratorBusy(true)
     setMigrationOrchestratorMessage("")
     try {
       const response = await fetch("/api/settings/migration-orchestrator", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orchestratorUrl: migrationOrchestratorUrl, fileScannerUrl, sharedSecret: migrationOrchestratorSecret, fileScannerSecret }),
+        body: JSON.stringify(worker === "file" ? { worker, fileScannerUrl, fileScannerSecret } : { worker, orchestratorUrl: migrationOrchestratorUrl, sharedSecret: migrationOrchestratorSecret }),
       })
       const payload = await response.json().catch(() => ({})) as { error?: string }
       if (!response.ok) throw new Error(payload.error || "Unable to save Migration Orchestrator settings")
@@ -192,11 +192,11 @@ export default function DashboardSettingsPage() {
     }
   }
 
-  const testMigrationOrchestrator = async () => {
+  const testMigrationOrchestrator = async (worker: "migration" | "file") => {
     setMigrationOrchestratorBusy(true)
     setMigrationOrchestratorMessage("")
     try {
-      const response = await fetch("/api/settings/migration-orchestrator", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "test" }) })
+      const response = await fetch("/api/settings/migration-orchestrator", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: worker === "file" ? "test_file" : "test_migration" }) })
       const payload = await response.json().catch(() => ({})) as { error?: string }
       if (!response.ok) throw new Error(payload.error || "Migration Orchestrator connection test failed")
       setMigrationOrchestratorMessage("Migration Orchestrator is reachable and authenticated.")
@@ -259,7 +259,8 @@ export default function DashboardSettingsPage() {
     }
   }
 
-  const migrationOrchestratorDirty = migrationOrchestratorUrl.trim().replace(/\/$/, "") !== migrationOrchestratorSavedUrl || fileScannerUrl.trim().replace(/\/$/, "") !== fileScannerSavedUrl || migrationOrchestratorSecret !== migrationOrchestratorSavedSecret || fileScannerSecret !== fileScannerSavedSecret
+  const migrationWorkerDirty = migrationOrchestratorUrl.trim().replace(/\/$/, "") !== migrationOrchestratorSavedUrl || migrationOrchestratorSecret !== migrationOrchestratorSavedSecret
+  const fileScannerDirty = fileScannerUrl.trim().replace(/\/$/, "") !== fileScannerSavedUrl || fileScannerSecret !== fileScannerSavedSecret
 
   const saveOrchestratorSettings = async () => {
     setOrchestratorBusy(true)
@@ -489,8 +490,8 @@ export default function DashboardSettingsPage() {
             {migrationOrchestratorMessage ? <p className="text-sm">{migrationOrchestratorMessage}</p> : null}
           </CardContent>
           <CardFooter className="flex flex-wrap gap-2">
-            <Button onClick={saveMigrationOrchestratorSettings} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded}>Save connection</Button>
-            <Button variant="outline" onClick={testMigrationOrchestrator} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || migrationOrchestratorDirty || !migrationOrchestratorSecretConfigured}>Test both workers</Button>
+            <Button onClick={() => void saveMigrationOrchestratorSettings("migration")} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded}>Save connection</Button>
+            <Button variant="outline" onClick={() => void testMigrationOrchestrator("migration")} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || migrationWorkerDirty || !migrationOrchestratorSecretConfigured}>Test worker</Button>
             <Button variant={migrationOrchestratorEnabled ? "destructive" : "secondary"} onClick={() => void setMigrationOrchestratorActive(!migrationOrchestratorEnabled)} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || (!migrationOrchestratorEnabled && (!migrationOrchestratorUrl || !fileScannerUrl || !migrationOrchestratorSecretConfigured || !fileScannerSecretConfigured))}>{migrationOrchestratorEnabled ? "Disable" : "Enable"}</Button>
             <Button variant="outline" onClick={runMigrationOrchestratorNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !migrationOrchestratorEnabled}>Run now</Button>
           </CardFooter>
@@ -504,7 +505,8 @@ export default function DashboardSettingsPage() {
             {migrationOrchestratorMessage ? <p className="text-sm">{migrationOrchestratorMessage}</p> : null}
           </CardContent>
           <CardFooter className="flex flex-wrap gap-2">
-            <Button onClick={saveMigrationOrchestratorSettings} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded}>Save connection</Button>
+            <Button onClick={() => void saveMigrationOrchestratorSettings("file")} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded}>Save connection</Button>
+            <Button variant="outline" onClick={() => void testMigrationOrchestrator("file")} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || fileScannerDirty || !fileScannerSecretConfigured}>Test worker</Button>
             <Button variant="outline" onClick={runFileScannerNow} disabled={migrationOrchestratorBusy || !migrationOrchestratorLoaded || !migrationOrchestratorEnabled}>Run now</Button>
           </CardFooter>
         </Card>
