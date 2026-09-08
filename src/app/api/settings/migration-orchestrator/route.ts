@@ -22,7 +22,10 @@ async function callWorker(settings: Awaited<ReturnType<typeof getMigrationOrches
     signal: AbortSignal.timeout(30_000),
   })
   const payload = await response.json().catch(() => ({})) as { error?: string }
-  if (!response.ok) throw new Error(payload.error || `Migration Orchestrator returned HTTP ${response.status}`)
+  if (!response.ok) {
+    const label = worker === "migration" ? "Migration Orchestrator" : "File Scanner"
+    throw new Error(`${label} rejected the request (HTTP ${response.status}): ${payload.error || "Unauthorized"}`)
+  }
   return payload
 }
 
