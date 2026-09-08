@@ -1,6 +1,6 @@
 import { Client } from "pg"
 
-type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string }
+type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string }
 type Row = Record<string, any>
 const BUILD = 3
 const MAX_SECRET_LENGTH = 512
@@ -30,7 +30,8 @@ async function database<T>(env: Env, operation: (client: Client) => Promise<T>):
   const connectionString = String(env.POSTGRES_URL || "").trim()
   if (!connectionString) throw new Error("POSTGRES_URL is not configured")
   const hostname = new URL(connectionString).hostname
-  const client = new Client({ connectionString, ssl: ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false }, connectionTimeoutMillis: 8_000 })
+  const disableSsl = ["1", "true"].includes(String(env.DISABLE_POSTGRES_SSL || "").toLowerCase())
+  const client = new Client({ connectionString, ssl: disableSsl || ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false }, connectionTimeoutMillis: 8_000 })
   await client.connect()
   try { return await operation(client) } finally { await client.end().catch(() => undefined) }
 }
