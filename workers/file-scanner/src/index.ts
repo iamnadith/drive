@@ -1,9 +1,10 @@
 import { Client } from "pg"
+import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3"
 
 type ScanMessage = { reason: "continue" }
 type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; FILE_SCAN_QUEUE: Queue<ScanMessage> }
 type Row = Record<string, any>
-const BUILD = 4
+const BUILD = 5
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -49,28 +50,20 @@ async function ensureSchema(db: Client) {
 // Keep JSON parsing, de-duplication, and job materialization safely bounded for
 // Free-plan CPU limits. Continuation messages remove the old one-minute gap.
 function pageSize(_env: Env) { return 100 }
-function encodePath(value: string) { return encodeURIComponent(value) }
-
 async function listObjects(env: Env, account: Row, bucket: string, cursor: string | null, jurisdiction: string | null, prefix: string | null = null) {
-  if (!account.cloudflare_account_id || !account.api_token) throw new Error("R2 account ID or API token is missing")
-  const url = new URL(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account.cloudflare_account_id)}/r2/buckets/${encodePath(bucket)}/objects`)
-  url.searchParams.set("per_page", String(pageSize(env)))
-  if (cursor) url.searchParams.set("cursor", cursor)
-  if (prefix) url.searchParams.set("prefix", prefix)
-  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 20_000)
-  try {
-    const headers: Record<string, string> = { Authorization: `Bearer ${account.api_token}`, Accept: "application/json" }
-    if (jurisdiction && jurisdiction !== "default") headers["cf-r2-jurisdiction"] = jurisdiction
-    const response = await fetch(url, { headers, signal: controller.signal })
-    const payload = await response.json().catch(() => ({})) as Row
-    if (!response.ok || payload.success === false) throw new Error(payload.errors?.[0]?.message || `R2 list returned HTTP ${response.status}`)
-    const result = payload.result || payload
-    const objects = Array.isArray(result.objects) ? result.objects.map((object: Row) => ({
-      key: String(object.key || ""), size: Math.max(0, Number(object.size) || 0), etag: object.etag ? String(object.etag) : null,
-      last_modified: object.last_modified || object.uploaded || null, is_dir_marker: String(object.key || "").endsWith("/") && Number(object.size || 0) === 0,
-    })).filter((object: Row) => object.key) : []
-    return { objects, truncated: result.truncated === true, cursor: typeof result.cursor === "string" && result.cursor ? result.cursor : null }
-  } finally { clearTimeout(timeout) }
+  if (!account.cloudflare_account_id || !account.r2_access_key_id || !account.r2_secret_access_key) throw new Error("R2 S3 account credentials are missing")
+  const jurisdictionPart = jurisdiction && jurisdiction !== "default" ? `.${jurisdiction.toLowerCase()}` : ""
+  const client = new S3Client({
+    region: "auto",
+    endpoint: `https://${account.cloudflare_account_id}${jurisdictionPart}.r2.cloudflarestorage.com`,
+    credentials: { accessKeyId: account.r2_access_key_id, secretAccessKey: account.r2_secret_access_key },
+  })
+  const result = await client.send(new ListObjectsV2Command({ Bucket: bucket, MaxKeys: pageSize(env), ContinuationToken: cursor || undefined, Prefix: prefix || undefined }))
+  const objects = (result.Contents || []).map((object) => ({
+    key: String(object.Key || ""), size: Math.max(0, Number(object.Size) || 0), etag: object.ETag ? String(object.ETag) : null,
+    last_modified: object.LastModified?.toISOString() || null, is_dir_marker: String(object.Key || "").endsWith("/") && Number(object.Size || 0) === 0,
+  })).filter((object) => object.key)
+  return { objects, truncated: result.IsTruncated === true, cursor: result.NextContinuationToken || null }
 }
 
 async function claim(db: Client, owner: string): Promise<Row | null> {
@@ -80,8 +73,8 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
     with candidate as (
       select v.migration_item_id,i.source_bucket,i.target_bucket,i.source_jurisdiction,m.source_account_id,m.target_account_id,
         nullif(m.options->>'pathPrefix','') scan_prefix,m.options->>'executionMode' execution_mode,
-        jsonb_build_object('cloudflare_account_id',sa.cloudflare_account_id,'api_token',sa.api_token) source_account,
-        jsonb_build_object('cloudflare_account_id',ta.cloudflare_account_id,'api_token',ta.api_token) target_account
+        jsonb_build_object('cloudflare_account_id',sa.cloudflare_account_id,'r2_access_key_id',sa.r2_access_key_id,'r2_secret_access_key',sa.r2_secret_access_key) source_account,
+        jsonb_build_object('cloudflare_account_id',ta.cloudflare_account_id,'r2_access_key_id',ta.r2_access_key_id,'r2_secret_access_key',ta.r2_secret_access_key) target_account
       from drive_migration_verification_state v join drive_migrations m on m.id=v.migration_id
         join drive_migration_items i on i.id=v.migration_item_id
         join drive_accounts sa on sa.id=m.source_account_id join drive_accounts ta on ta.id=m.target_account_id
@@ -104,7 +97,7 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
 async function claimGenericScan(db: Client, owner: string): Promise<Row | null> {
   const result = await db.query(`
     with candidate as (
-      select s.id,s.account_id,s.bucket_name,s.prefix,s.cursor,a.cloudflare_account_id,a.api_token,coalesce(bs.jurisdiction,'default') jurisdiction
+      select s.id,s.account_id,s.bucket_name,s.prefix,s.cursor,a.cloudflare_account_id,a.r2_access_key_id,a.r2_secret_access_key,coalesce(bs.jurisdiction,'default') jurisdiction
       from drive_bucket_scans s join drive_accounts a on a.id=s.account_id
       left join drive_bucket_settings_snapshots bs on bs.account_id=s.account_id and bs.bucket_name=s.bucket_name
       where s.status in('pending','running')
@@ -255,7 +248,7 @@ async function processTask(db: Client, env: Env, task: Row) {
   return { itemId: task.migration_item_id, phase: "compare", ...(await compareAndWake(db, { ...task, ...refreshed })) }
 }
 async function processGenericScan(db: Client, env: Env, task: Row) {
-  const account = { cloudflare_account_id: task.cloudflare_account_id, api_token: task.api_token }
+  const account = { cloudflare_account_id: task.cloudflare_account_id, r2_access_key_id: task.r2_access_key_id, r2_secret_access_key: task.r2_secret_access_key }
   const page = await listObjects(env, account, task.bucket_name, task.cursor || null, task.jurisdiction || null, task.prefix || null)
   await storePage(db, task.id, page.objects)
   if (page.truncated && (!page.cursor || page.cursor === task.cursor)) throw new Error("R2 returned a truncated page without a forward cursor")
