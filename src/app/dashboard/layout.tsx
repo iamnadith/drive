@@ -88,7 +88,7 @@ export default function DashboardLayout({
     }
 
     if (pathname.startsWith("/dashboard/agents") || pathname.startsWith("/dashboard/workers")) {
-      return [...base, { label: "Workers" }]
+      return [...base, { label: "Workflows & Workers" }]
     }
 
     return [...base, { label: "Dashboard" }]

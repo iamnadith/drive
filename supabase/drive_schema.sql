@@ -871,6 +871,7 @@ create table if not exists drive_agents (
   github_ref text,
   github_repository_id text,
   github_token text,
+  worker_count integer not null default 1 check (worker_count between 1 and 5),
   notes text,
   runtime_instance_id text,
   registration_token text,
@@ -1091,6 +1092,9 @@ alter table if exists public.drive_agents add column if not exists github_workfl
 alter table if exists public.drive_agents add column if not exists github_ref text;
 alter table if exists public.drive_agents add column if not exists github_repository_id text;
 alter table if exists public.drive_agents add column if not exists github_token text;
+alter table if exists public.drive_agents add column if not exists worker_count integer not null default 1;
+alter table if exists public.drive_agents drop constraint if exists drive_agents_worker_count_check;
+alter table if exists public.drive_agents add constraint drive_agents_worker_count_check check (worker_count between 1 and 5);
 alter table if exists public.drive_agents add column if not exists notes text;
 alter table if exists public.drive_agents add column if not exists runtime_instance_id text;
 alter table if exists public.drive_agents add column if not exists registration_token text;

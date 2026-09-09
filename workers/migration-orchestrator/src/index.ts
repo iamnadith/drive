@@ -2,7 +2,7 @@ import { Client } from "pg"
 
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string }
 type Row = Record<string, any>
-const BUILD = 3
+const BUILD = 4
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -244,36 +244,56 @@ async function dispatchWorkers(db: Client, migration: Row) {
   const orchestration = configRows.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
   if (!ids.length) return 0
   const budget = integer(orchestration.maxDispatchesPerCycle, 3, 1, 10)
-  const agents = await db.query(`select id,github_repo_owner,github_repo_name,github_workflow_file,github_ref,github_token from drive_agents where id=any($1::uuid[]) and provider='github_actions' and status<>'disabled' and github_token is not null order by array_position($1::uuid[],id)`, [ids])
+  const agents = await db.query(`select id,github_repo_owner,github_repo_name,github_workflow_file,github_ref,github_token,least(5,greatest(1,coalesce(worker_count,1))) worker_count from drive_agents where id=any($1::uuid[]) and provider='github_actions' and status<>'disabled' and github_token is not null order by array_position($1::uuid[],id)`, [ids])
   let dispatched = 0
   for (const agent of agents.rows) {
     if (dispatched >= budget) break
+    const unlinked = await db.query(`select id,payload from drive_agent_runs where agent_id=$1 and run_type='github_dispatch' and status in('pending','running') and external_run_id is null order by created_at desc limit 10`, [agent.id])
+    if (unlinked.rowCount) {
+      try {
+        const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/workflows/${encodeURIComponent(agent.github_workflow_file || ".github/workflows/migration-worker.yml")}/runs?event=workflow_dispatch&branch=${encodeURIComponent(agent.github_ref || "main")}&per_page=20`, {
+          headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" },
+          signal: AbortSignal.timeout(15_000),
+        })
+        if (response.ok) {
+          const payload = await response.json() as { workflow_runs?: Array<{ id?: number; display_title?: string; html_url?: string }> }
+          for (const pending of unlinked.rows) {
+            const instanceId = String(pending.payload?.workerInstanceId || "")
+            const match = instanceId ? payload.workflow_runs?.find((run) => String(run.display_title || "").includes(instanceId)) : undefined
+            if (match?.id) await db.query(`update drive_agent_runs set external_run_id=$2,status='running',payload=payload||$3::jsonb,updated_at=now() where id=$1 and external_run_id is null`, [pending.id, String(match.id), JSON.stringify(match.html_url ? { htmlUrl: match.html_url } : {})])
+          }
+        }
+      } catch { /* A later cycle will retry run identity reconciliation. */ }
+    }
+    await db.query(`update drive_agent_runs set status='failed',summary='Recovered stale GitHub dispatch',completed_at=now(),updated_at=now() where agent_id=$1 and status in('pending','running') and payload->>'migrationId'=$2 and updated_at<now()-interval '30 minutes'`, [agent.id, migration.id])
     const active = await db.query(`
-      select 1 from drive_agent_runs r join drive_agents a on a.id=r.agent_id
+      select count(*)::int count from drive_agent_runs r join drive_agents a on a.id=r.agent_id
       where r.agent_id=$1 and r.status in('pending','running')
-        and (r.updated_at>now()-interval '30 minutes' or a.last_heartbeat_at>now()-interval '2 minutes') limit 1
+        and (r.updated_at>now()-interval '30 minutes' or a.last_heartbeat_at>now()-interval '2 minutes')
     `, [agent.id])
-    if (active.rowCount) continue
-    await db.query(`update drive_agent_runs set status='failed',summary='Recovered stale GitHub dispatch',completed_at=now(),updated_at=now() where agent_id=$1 and status in('pending','running') and payload->>'migrationId'=$2`, [agent.id, migration.id])
-    const intent = await db.query(`insert into drive_agent_runs(id,agent_id,run_type,status,payload,summary,created_at,updated_at) values(gen_random_uuid(),$1,'github_dispatch','pending',$2::jsonb,'Dispatch intent created by autonomous Migration Orchestrator',now(),now()) returning id`, [agent.id, JSON.stringify({ migrationId: migration.id, pool: true, source: "migration_orchestrator", phase: "dispatching" })])
-    let response: Response
-    try {
-      response = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/workflows/${encodeURIComponent(agent.github_workflow_file || ".github/workflows/migration-worker.yml")}/dispatches`, {
-        method: "POST", headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" },
-        body: JSON.stringify({ ref: agent.github_ref || "main", inputs: { migration_id: migration.id, agent_id: agent.id } }), signal: AbortSignal.timeout(20_000),
-      })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      await db.query(`update drive_agent_runs set status='failed',summary=$2,completed_at=now(),updated_at=now() where id=$1`, [intent.rows[0].id, `GitHub dispatch failed before confirmation: ${message}`])
-      await db.query(`update drive_agents set last_error=$2,updated_at=now() where id=$1`, [agent.id, message])
-      continue
+    const vacancies = Math.max(0, Number(agent.worker_count || 1) - Number(active.rows[0]?.count || 0))
+    for (let slot = 0; slot < vacancies && dispatched < budget; slot += 1) {
+      const workerInstanceId = crypto.randomUUID()
+      const intent = await db.query(`insert into drive_agent_runs(id,agent_id,run_type,status,payload,summary,created_at,updated_at) values(gen_random_uuid(),$1,'github_dispatch','pending',$2::jsonb,'Dispatch intent created by autonomous Migration Orchestrator',now(),now()) returning id`, [agent.id, JSON.stringify({ migrationId: migration.id, pool: true, workerInstanceId, source: "migration_orchestrator", phase: "dispatching" })])
+      let response: Response
+      try {
+        response = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/workflows/${encodeURIComponent(agent.github_workflow_file || ".github/workflows/migration-worker.yml")}/dispatches`, {
+          method: "POST", headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator", "Content-Type": "application/json" },
+          body: JSON.stringify({ ref: agent.github_ref || "main", inputs: { migration_id: migration.id, agent_id: agent.id, worker_instance_id: workerInstanceId } }), signal: AbortSignal.timeout(20_000),
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        await db.query(`update drive_agent_runs set status='failed',summary=$2,completed_at=now(),updated_at=now() where id=$1`, [intent.rows[0].id, `GitHub dispatch failed before confirmation: ${message}`])
+        await db.query(`update drive_agents set last_error=$2,updated_at=now() where id=$1`, [agent.id, message])
+        continue
+      }
+      if (!response.ok) {
+        await db.query(`update drive_agent_runs set status='failed',summary=$2,completed_at=now(),updated_at=now() where id=$1`, [intent.rows[0].id, `GitHub dispatch HTTP ${response.status}`])
+        await db.query(`update drive_agents set last_error=$2,updated_at=now() where id=$1`, [agent.id, `GitHub dispatch HTTP ${response.status}`]); continue
+      }
+      await db.query(`update drive_agent_runs set payload=payload||'{"phase":"dispatched"}'::jsonb,summary='Dispatched by autonomous Migration Orchestrator',updated_at=now() where id=$1`, [intent.rows[0].id])
+      dispatched += 1
     }
-    if (!response.ok) {
-      await db.query(`update drive_agent_runs set status='failed',summary=$2,completed_at=now(),updated_at=now() where id=$1`, [intent.rows[0].id, `GitHub dispatch HTTP ${response.status}`])
-      await db.query(`update drive_agents set last_error=$2,updated_at=now() where id=$1`, [agent.id, `GitHub dispatch HTTP ${response.status}`]); continue
-    }
-    await db.query(`update drive_agent_runs set payload=payload||'{"phase":"dispatched"}'::jsonb,summary='Dispatched by autonomous Migration Orchestrator',updated_at=now() where id=$1`, [intent.rows[0].id])
-    dispatched += 1
   }
   return dispatched
 }
@@ -325,6 +345,37 @@ async function workerPayload(db: Client, job: Row) {
 
 async function workerRequest(request: Request, env: Env, path: string) {
   const body = await request.json().catch(() => ({})) as Row
+  if (path === "/workers/register") {
+    return database(env, async (db) => {
+      const token = String(body.token || "").trim()
+      const instanceId = String(body.instanceId || "").trim()
+      if (!/^[0-9a-f-]{36}$/i.test(instanceId)) return json({ error: "Valid worker instanceId is required" }, 400)
+      const settings = await db.query(`select value->>'sharedSecret' secret from drive_app_settings where key='migration-workers' limit 1`)
+      const expected = String(settings.rows[0]?.secret || "")
+      if (expected.length < 24 || expected.length > MAX_SECRET_LENGTH || !safeEqual(token, expected)) {
+        return json({ error: "Invalid worker secret" }, 401)
+      }
+      const requestedAgentId = /^[0-9a-f-]{36}$/i.test(String(body.agentId || "")) ? String(body.agentId) : ""
+      const existing = await db.query(
+        `select id from drive_agents where runtime_instance_id=$1 or ($2::uuid is not null and id=$2::uuid) order by runtime_instance_id=$1 desc limit 1`,
+        [instanceId, requestedAgentId || null]
+      )
+      const agentId = existing.rows[0]?.id || crypto.randomUUID()
+      const capabilities = Array.isArray(body.capabilities) ? body.capabilities : []
+      if (existing.rows[0]) {
+        await db.query(
+          `update drive_agents set runtime_instance_id=$2,status='online',last_heartbeat_at=now(),last_seen_host=$3,last_seen_version=$4,capabilities=$5::jsonb,metadata=coalesce(metadata,'{}'::jsonb)||'{"temporaryRuntime":true}'::jsonb,updated_at=now(),last_error=null where id=$1`,
+          [agentId, instanceId, String(body.host || "").slice(0, 255) || null, String(body.version || "").slice(0, 80) || null, JSON.stringify(capabilities)]
+        )
+      } else {
+        await db.query(
+          `insert into drive_agents(id,name,category,provider,status,capabilities,runtime_instance_id,last_heartbeat_at,last_seen_host,last_seen_version,metadata,created_at,updated_at) values($1,$2,'worker','self_hosted','online',$3::jsonb,$4,now(),$5,$6,'{"temporaryRuntime":true}'::jsonb,now(),now())`,
+          [agentId, String(body.name || "Temporary migration worker").slice(0, 255), JSON.stringify(capabilities), instanceId, String(body.host || "").slice(0, 255) || null, String(body.version || "").slice(0, 80) || null]
+        )
+      }
+      return json({ ok: true, agentId })
+    })
+  }
   const match = /^\/workers\/([0-9a-f-]{36})(?:\/(heartbeat|claim-job|jobs\/([0-9a-f-]{36})))?$/i.exec(path)
   if (!match) return json({ error: "Not found" }, 404)
   return database(env, async (db) => {
@@ -345,7 +396,7 @@ async function workerRequest(request: Request, env: Env, path: string) {
         const candidate = await db.query(`select * from drive_repair_jobs where migration_id=$1 and status='pending' and work_key like 'migration:%:generation:%:shard:%' order by created_at for update skip locked limit 1`, [migrationId])
         const job = candidate.rows[0]
         if (!job) { await db.query("commit"); return json({ ok: true, job: null }) }
-        const claimed = await db.query(`update drive_repair_jobs set status='running',claimed_by_agent_id=$2,claim_token=gen_random_uuid(),claimed_at=now(),started_at=coalesce(started_at,now()),last_heartbeat_at=now(),summary=$3,updated_at=now() where id=$1 returning *`, [job.id, agent.id, `Claimed by ${agent.name}`])
+        const claimed = await db.query(`update drive_repair_jobs set status='running',claimed_by_agent_id=$2,claim_token=gen_random_uuid(),claimed_at=now(),started_at=coalesce(started_at,now()),last_heartbeat_at=now(),summary=$3,payload=coalesce(payload,'{}'::jsonb)||jsonb_build_object('claimedWorkerInstanceId',$4::text),updated_at=now() where id=$1 returning *`, [job.id, agent.id, `Claimed by ${agent.name}`, typeof body.workerInstanceId === "string" ? body.workerInstanceId : null])
         await db.query("commit")
         const claimedJob = claimed.rows[0]
         return json({ ok: true, job: { id: claimedJob.id, migrationId, mode: claimedJob.mode, payload: claimedJob.payload || {} }, payload: await workerPayload(db, claimedJob) })

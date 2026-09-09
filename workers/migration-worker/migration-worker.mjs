@@ -30,6 +30,7 @@ const MIGRATION_ID = String(getArg("migration-id", process.env.DRIVE_MIGRATION_I
 const REPAIR_JOB_ID = String(getArg("repair-job-id", process.env.DRIVE_REPAIR_JOB_ID || ""))
 const POOL_MODE = Boolean(MIGRATION_ID && !REPAIR_JOB_ID)
 const GITHUB_RUN_ID = String(process.env.GITHUB_RUN_ID || "")
+const WORKER_INSTANCE_ID = String(process.env.WORKER_INSTANCE_ID || GITHUB_RUN_ID || "").trim()
 const POLL_MS = Math.max(5_000, Number(getArg("poll-ms", "15000")) || 15_000)
 const HEARTBEAT_MS = Math.max(10_000, Number(getArg("heartbeat-ms", "20000")) || 20_000)
 const MAX_OBJECTS = Math.max(1, Math.min(10_000_000, Number(getArg("max-objects", "2000000")) || 2_000_000))
@@ -377,7 +378,7 @@ async function heartbeat(extra = {}) {
     try {
       response = await api(
         `/workers/${encodeURIComponent(AGENT_ID)}/heartbeat`,
-        { token: AGENT_TOKEN, host: os.hostname(), version: "worker-v2", capabilities: ["scan", "verify", "repair", "bulk_migrate", "diagnostics"], metadata: extra },
+        { token: AGENT_TOKEN, host: os.hostname(), version: "worker-v2", capabilities: ["scan", "verify", "repair", "bulk_migrate", "diagnostics"], metadata: { ...extra, workerInstanceId: WORKER_INSTANCE_ID || undefined } },
         { timeoutMs: HEARTBEAT_TIMEOUT_MS, retries: HEARTBEAT_RETRIES }
       )
     } catch (error) {
@@ -442,6 +443,7 @@ async function claimJob() {
       ...(POOL_MODE ? { pool: true } : {}),
       ...(REPAIR_JOB_ID ? { jobId: REPAIR_JOB_ID } : {}),
       ...(GITHUB_RUN_ID ? { githubRunId: GITHUB_RUN_ID } : {}),
+      ...(WORKER_INSTANCE_ID ? { workerInstanceId: WORKER_INSTANCE_ID } : {}),
     })
   } catch (error) {
     if ((!POSTGRES_URL && !supabase) || !isRetryableError(error)) throw error
@@ -473,9 +475,9 @@ async function claimJobDirectPostgres() {
         select id from drive_repair_jobs where migration_id=$1 and status='pending' and claimed_by_agent_id is null
           and work_key like $2 order by created_at for update skip locked limit 1
       )
-      update drive_repair_jobs j set status='running',claimed_by_agent_id=$3,claim_token=gen_random_uuid(),claimed_at=now(),started_at=coalesce(started_at,now()),last_heartbeat_at=now(),summary='Claimed directly through PostgreSQL',updated_at=now()
+      update drive_repair_jobs j set status='running',claimed_by_agent_id=$3,claim_token=gen_random_uuid(),claimed_at=now(),started_at=coalesce(started_at,now()),last_heartbeat_at=now(),summary='Claimed directly through PostgreSQL',payload=coalesce(j.payload,'{}'::jsonb)||jsonb_build_object('claimedWorkerInstanceId',$4::text),updated_at=now()
       from candidate c where j.id=c.id returning j.*
-    `, [MIGRATION_ID, `migration:${MIGRATION_ID}:generation:${generation}:shard:%`, AGENT_ID])
+    `, [MIGRATION_ID, `migration:${MIGRATION_ID}:generation:${generation}:shard:%`, AGENT_ID, WORKER_INSTANCE_ID || null])
     const job = claimed.rows[0]
     if (!job) return { ok: true, job: null }
     jobClaimTokens.set(job.id, String(job.claim_token || ""))
@@ -535,6 +537,7 @@ async function claimJobDirect() {
       supabase.from("drive_repair_jobs").update({
         status: "running", claimed_by_agent_id: AGENT_ID, claimed_at: new Date().toISOString(), started_at: new Date().toISOString(),
         last_heartbeat_at: new Date().toISOString(), summary: "Claimed directly through orchestration database", updated_at: new Date().toISOString(),
+        payload: { ...(isRecord(candidate.payload) ? candidate.payload : {}), claimedWorkerInstanceId: WORKER_INSTANCE_ID || null },
       }).eq("id", candidate.id).eq("status", "pending").is("claimed_by_agent_id", null).select("*")
     )
     if (claimed[0]) { job = claimed[0]; break }

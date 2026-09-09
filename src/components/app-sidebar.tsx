@@ -107,7 +107,7 @@ const navSystem: NavItem[] = [
     icon: ArrowRightLeft,
   },
   {
-    title: "Workers",
+    title: "Workflows & Workers",
     url: "/dashboard/workers",
     icon: Bot,
   },

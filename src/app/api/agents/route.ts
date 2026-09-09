@@ -76,6 +76,7 @@ export async function POST(request: Request) {
       githubRef: asString(body.githubRef).trim() || undefined,
       githubRepositoryId: asString(body.githubRepositoryId).trim() || undefined,
       githubToken: githubTokenToUse,
+      workerCount: provider === "github_actions" ? Number(body.workerCount) : 1,
       notes: asString(body.notes).trim() || undefined,
     })
 

@@ -978,6 +978,7 @@ export async function ensureDriveSchema(): Promise<void> {
           github_ref text,
           github_repository_id text,
           github_token text,
+          worker_count integer not null default 1 check (worker_count between 1 and 5),
           notes text,
           runtime_instance_id text,
           registration_token text,
@@ -1000,6 +1001,9 @@ export async function ensureDriveSchema(): Promise<void> {
       // The runtime identity is how an autonomous worker recovers its durable
       // registration without creating another dashboard worker after a restart.
       await queryDb(`alter table if exists drive_agents add column if not exists runtime_instance_id text;`)
+      await queryDb(`alter table if exists drive_agents add column if not exists worker_count integer not null default 1;`)
+      await queryDb(`alter table if exists drive_agents drop constraint if exists drive_agents_worker_count_check;`)
+      await queryDb(`alter table if exists drive_agents add constraint drive_agents_worker_count_check check (worker_count between 1 and 5);`)
       await queryDb(`create unique index if not exists drive_agents_runtime_instance_unique on drive_agents (runtime_instance_id) where runtime_instance_id is not null;`)
       await queryDb(`
         update drive_agents

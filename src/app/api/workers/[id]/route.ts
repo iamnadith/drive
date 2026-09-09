@@ -253,6 +253,52 @@ async function stopGithubWorkerById(workerId: string) {
   }
 }
 
+async function stopGithubWorkerRun(workerId: string, agentRunId: string) {
+  const worker = await getAgentById(workerId)
+  if (!worker || worker.provider !== "github_actions" || !worker.githubRepoOwner || !worker.githubRepoName) {
+    throw new Error("Registered GitHub workflow not found")
+  }
+  const runs = await listAgentRunsByAgentId(workerId, 50)
+  const run = runs.find((candidate) => candidate.id === agentRunId && candidate.runType === "github_dispatch")
+  if (!run) throw new Error("Workflow worker run not found")
+  if (!isActiveRunStatus(run.status)) throw new Error("Workflow worker run is no longer active")
+  if (!run.externalRunId) throw new Error("GitHub has not exposed this worker run id yet; refresh and retry")
+  const githubToken =
+    (await getAgentGithubToken(workerId).catch(() => null)) ||
+    (await cookies()).get(GITHUB_TOKEN_COOKIE)?.value ||
+    getGitHubTokenFallback()
+  if (!githubToken) throw new Error("No GitHub token available to stop this workflow worker")
+
+  const linkedJobs = await listRepairJobs(500)
+  const workerInstanceId = typeof run.payload?.workerInstanceId === "string" ? run.payload.workerInstanceId : ""
+  const ownedJobs = linkedJobs.filter((candidate) =>
+    isActiveJobStatus(candidate.status) &&
+    (candidate.id === run.jobReference || (workerInstanceId && candidate.payload?.claimedWorkerInstanceId === workerInstanceId))
+  )
+  for (const job of ownedJobs) await abortRepairJob(job.id)
+  const stopped = await ensureGitHubRunCanceled({
+    token: githubToken,
+    owner: worker.githubRepoOwner,
+    repo: worker.githubRepoName,
+    runId: run.externalRunId,
+  })
+  if (stopped.status !== "canceled") throw new Error("GitHub worker run did not reach canceled state")
+  const now = new Date().toISOString()
+  await updateAgentRun(run.id, {
+    status: "canceled",
+    completedAt: now,
+    summary: "Individual workflow worker stopped by user",
+    payload: { ...(run.payload ?? {}), githubAbortRequestedAt: now },
+  })
+  const remaining = runs.filter((candidate) => candidate.id !== run.id && isActiveRunStatus(candidate.status))
+  await updateAgent(workerId, {
+    status: remaining.length > 0 ? "online" : "offline",
+    lastError: null,
+    metadata: { ...(worker.metadata ?? {}), activeWorkflowRuns: remaining.length },
+  }).catch(() => undefined)
+  return { workerId, runId: run.id, githubRunId: run.externalRunId }
+}
+
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const auth = await requireAdmin()
@@ -261,6 +307,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const { id } = await context.params
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
     const action = typeof body.action === "string" ? body.action : ""
+    if (action === "stop_run") {
+      const runId = typeof body.runId === "string" ? body.runId.trim() : ""
+      if (!runId) return NextResponse.json({ error: "runId is required" }, { status: 400 })
+      const result = await stopGithubWorkerRun(id, runId)
+      return NextResponse.json({ ok: true, ...result })
+    }
     if (action !== "stop") {
       return NextResponse.json({ error: "Unsupported worker action" }, { status: 400 })
     }
@@ -271,6 +323,26 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const message = errorMessage(error, "Unable to stop worker")
     const status = typeof message === "string" && message.includes("still running") ? 409 : 400
     return NextResponse.json({ error: message }, { status })
+  }
+}
+
+export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
+  try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+    const { id } = await context.params
+    const worker = await getAgentById(id)
+    if (!worker) return NextResponse.json({ error: "Registered workflow not found" }, { status: 404 })
+    if (worker.provider !== "github_actions") return NextResponse.json({ error: "Worker count only applies to GitHub workflows" }, { status: 409 })
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
+    const workerCount = Number(body.workerCount)
+    if (!Number.isInteger(workerCount) || workerCount < 1 || workerCount > 5) {
+      return NextResponse.json({ error: "Worker count must be an integer from 1 to 5" }, { status: 400 })
+    }
+    const updated = await updateAgent(id, { workerCount })
+    return NextResponse.json({ ok: true, agent: updated })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to update workflow worker count") }, { status: 400 })
   }
 }
 

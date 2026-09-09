@@ -29,6 +29,7 @@ export type DriveAgent = {
   githubWorkflowFile?: string
   githubRef?: string
   githubRepositoryId?: string
+  workerCount: number
   notes?: string
   lastHeartbeatAt?: string
   lastSeenIp?: string
@@ -70,6 +71,7 @@ type DriveAgentRow = {
   github_ref: string | null
   github_repository_id: string | null
   github_token: string | null
+  worker_count: number | null
   notes: string | null
   registration_token: string | null
   registration_token_hash: string | null
@@ -177,6 +179,7 @@ function mapAgentRow(row: DriveAgentRow): DriveAgent {
     githubWorkflowFile: row.github_workflow_file ?? undefined,
     githubRef: row.github_ref ?? undefined,
     githubRepositoryId: row.github_repository_id ?? undefined,
+    workerCount: Math.max(1, Math.min(5, Math.floor(Number(row.worker_count) || 1))),
     notes: row.notes ?? undefined,
     lastHeartbeatAt: row.last_heartbeat_at ?? undefined,
     lastSeenIp: row.last_seen_ip ?? undefined,
@@ -230,7 +233,7 @@ function deriveInitialStatus(input: {
   return "pending_registration"
 }
 
-export async function listAgents(): Promise<Array<DriveAgent & { latestRun: DriveAgentRun | null }>> {
+export async function listAgents(): Promise<Array<DriveAgent & { latestRun: DriveAgentRun | null; runs: DriveAgentRun[] }>> {
   const supabase = getSupabaseServerClient()
   let data: unknown
   let error: { message: string } | null = null
@@ -265,14 +268,19 @@ export async function listAgents(): Promise<Array<DriveAgent & { latestRun: Driv
   if (runsError) throw new Error(runsError.message)
 
   const latestByAgent = new Map<string, DriveAgentRun>()
+  const runsByAgent = new Map<string, DriveAgentRun[]>()
   for (const run of Array.isArray(runs) ? (runs as DriveAgentRunRow[]) : []) {
-    if (latestByAgent.has(run.agent_id)) continue
-    latestByAgent.set(run.agent_id, mapRunRow(run))
+    const mapped = mapRunRow(run)
+    if (!latestByAgent.has(run.agent_id)) latestByAgent.set(run.agent_id, mapped)
+    const agentRuns = runsByAgent.get(run.agent_id) ?? []
+    if (agentRuns.length < 20) agentRuns.push(mapped)
+    runsByAgent.set(run.agent_id, agentRuns)
   }
 
   return agents.map((agent) => ({
     ...agent,
     latestRun: latestByAgent.get(agent.id) ?? null,
+    runs: runsByAgent.get(agent.id) ?? [],
   }))
 }
 
@@ -289,6 +297,7 @@ export async function createAgent(input: {
   githubRef?: string
   githubRepositoryId?: string
   githubToken?: string
+  workerCount?: number
   notes?: string
 }): Promise<{ agent: DriveAgent; registrationToken?: string }> {
   const supabase = getSupabaseServerClient()
@@ -312,6 +321,7 @@ export async function createAgent(input: {
     github_ref: input.githubRef?.trim() || null,
     github_repository_id: input.githubRepositoryId?.trim() || null,
     github_token: input.githubToken?.trim() || null,
+    worker_count: input.provider === "github_actions" ? Math.max(1, Math.min(5, Math.floor(input.workerCount ?? 1))) : 1,
     notes: input.notes?.trim() || null,
     registration_token: registrationToken ?? null,
     registration_token_hash: registrationToken ? hashRegistrationToken(registrationToken) : null,
@@ -465,6 +475,7 @@ export async function updateAgent(
     lastError: string | null
     metadata: Record<string, unknown>
     lastHeartbeatAt: string | null
+    workerCount: number
   }>
 ): Promise<DriveAgent> {
   const supabase = getSupabaseServerClient()
@@ -473,6 +484,7 @@ export async function updateAgent(
   if (updates.lastError !== undefined) dbUpdates.last_error = updates.lastError ?? null
   if (updates.metadata !== undefined) dbUpdates.metadata = updates.metadata
   if (updates.lastHeartbeatAt !== undefined) dbUpdates.last_heartbeat_at = updates.lastHeartbeatAt ?? null
+  if (updates.workerCount !== undefined) dbUpdates.worker_count = Math.max(1, Math.min(5, Math.floor(updates.workerCount)))
 
   const { data, error } = await supabase.from(AGENTS_TABLE).update(dbUpdates).eq("id", id).select("*").single()
   if (error) throw normalizeSupabaseError(error)

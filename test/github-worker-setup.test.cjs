@@ -246,11 +246,13 @@ test('dashboard workflow picker has no repository-independent fallback item', ()
   assert.match(page, /githubWorkflows\.map\(\(workflow\)/)
   assert.match(page, /typeof workflows\[0\]\?\.path === "string" \? workflows\[0\]\.path : ""/)
   assert.doesNotMatch(page, /<Select disabled=\{repositoryMode === "auto" \|\|/)
+  assert.doesNotMatch(page, /<SelectItem value="self_hosted">/)
+  assert.match(page, /Self-hosted workers register themselves with the shared secret and orchestrator URL/)
 })
 test('migration worker workflow exposes the dispatch contract used by the panel', () => {
   const workflowFile = fs.readFileSync(path.resolve('.github/workflows/migration-worker.yml'), 'utf8')
   assert.match(workflowFile, /workflow_dispatch:/)
-  for (const input of ['migration_id', 'repair_job_id', 'agent_id']) {
+  for (const input of ['migration_id', 'repair_job_id', 'agent_id', 'worker_instance_id']) {
     assert.match(workflowFile, new RegExp(`^      ${input}:`, 'm'))
   }
   assert.match(workflowFile, /working-directory: workers\/migration-worker/)
@@ -258,9 +260,30 @@ test('migration worker workflow exposes the dispatch contract used by the panel'
   assert.match(workflowFile, /run: npm ci/)
   assert.match(workflowFile, /run: npm start/)
   assert.match(workflowFile, /AGENT_ID:/)
+  assert.match(workflowFile, /worker_instance_id:/)
+  assert.match(workflowFile, /Run \$\{\{ github\.run_number \}\} \/ Worker/)
+  assert.match(workflowFile, /WORKER_INSTANCE_ID: \$\{\{ inputs\.worker_instance_id \|\| github\.run_id \}\}/)
   assert.match(workflowFile, /SERVER_URL: \$\{\{ secrets\.DRIVE_MIGRATION_ORCHESTRATOR_URL \}\}/)
   assert.match(workflowFile, /TOKEN: \$\{\{ secrets\.DRIVE_WORKER_SHARED_SECRET \}\}/)
   assert.doesNotMatch(workflowFile, /^\s+POSTGRES_URL:/m)
+})
+
+test('registered workflows dispatch only vacant independent worker capacity', () => {
+  const dispatchRoute = fs.readFileSync(path.resolve('src/app/api/agents/[id]/dispatch/route.ts'), 'utf8')
+  const workerRoute = fs.readFileSync(path.resolve('src/app/api/workers/[id]/route.ts'), 'utf8')
+  const schema = fs.readFileSync(path.resolve('supabase/drive_schema.sql'), 'utf8')
+  assert.match(dispatchRoute, /agent\.workerCount - activeDispatchRuns\.length/)
+  assert.match(dispatchRoute, /workerInstanceId: additionalInstanceId/)
+  assert.match(dispatchRoute, /worker_instance_id: instanceId/)
+  assert.match(dispatchRoute, /\(pool \|\| !run\.jobReference/)
+  assert.match(workerRoute, /action === "stop_run"/)
+  assert.match(schema, /worker_count integer not null default 1 check \(worker_count between 1 and 5\)/)
+  const orchestrator = fs.readFileSync(path.resolve('workers/migration-orchestrator/src/index.ts'), 'utf8')
+  const runtime = fs.readFileSync(path.resolve('workers/migration-worker/migration-worker.mjs'), 'utf8')
+  assert.match(orchestrator, /path === "\/workers\/register"/)
+  assert.match(orchestrator, /worker_count.*active\.rows\[0\]\?\.count/)
+  assert.match(orchestrator, /worker_instance_id: workerInstanceId/)
+  assert.match(runtime, /claimedWorkerInstanceId: WORKER_INSTANCE_ID/)
 })
 
 test('workflow compatibility requires the orchestrator URL and shared worker secret contract', () => {

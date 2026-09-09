@@ -1,4 +1,5 @@
 import { cookies } from "next/headers"
+import crypto from "node:crypto"
 import { NextResponse } from "next/server"
 import { createAgentRun, getAgentById, getAgentGithubToken, listAgentRunsByAgentId, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { abortRepairJob, createRepairJob, ensureMigrationWorkerJobs, findActiveRepairJobForDispatch, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
@@ -193,7 +194,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         !["completed", "failed", "canceled"].includes(job.status) &&
         (job.claimedByAgentId === id || (!pool && job.requestedByAgentId === id))
     )
-    if (activeWorkerJobs.length > 0) {
+    if (!pool && activeWorkerJobs.length > 0) {
       return NextResponse.json(
         {
           error: `This worker already has ${activeWorkerJobs.length} active repair job(s). Stop or abort them before dispatching another workflow.`,
@@ -209,9 +210,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       (run) =>
         run.runType === "github_dispatch" &&
         (run.status === "pending" || run.status === "running") &&
-        (!run.jobReference || !["completed", "failed", "canceled"].includes(workerJobStatusById.get(run.jobReference) ?? ""))
+        (pool || !run.jobReference || !["completed", "failed", "canceled"].includes(workerJobStatusById.get(run.jobReference) ?? ""))
     )
-    if (activeDispatchRuns.length > 0) {
+    if (!pool && activeDispatchRuns.length > 0) {
       return NextResponse.json(
         {
           error: `This worker already has ${activeDispatchRuns.length} active GitHub workflow run(s). Stop the worker before dispatching again.`,
@@ -219,6 +220,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         },
         { status: 409 }
       )
+    }
+    const dispatchCount = pool ? agent.workerCount - activeDispatchRuns.length : 1
+    if (dispatchCount <= 0) {
+      return NextResponse.json({ error: `All ${agent.workerCount} configured workflow workers are already active.`, runs: activeDispatchRuns }, { status: 409 })
     }
 
     const githubToken = (await getAgentGithubToken(id)) || (await cookies()).get(GITHUB_TOKEN_COOKIE)?.value || getGitHubTokenFallback()
@@ -242,6 +247,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
     await assertWorkerWorkflow({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, ref: agent.githubRef || "main", workflow: githubWorkflowFile })
     const dispatchRequestedAt = new Date().toISOString()
+    const workerInstanceId = crypto.randomUUID()
     const runsBeforeDispatch = await listGitHubWorkflowRuns({
       token: githubToken,
       owner: githubRepoOwner,
@@ -283,11 +289,13 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         runType: "github_dispatch",
         status: "pending",
         jobReference: job?.id,
-        summary: pool ? "Queued GitHub dispatch for the migration worker pool" : `Queued GitHub dispatch for repair job ${job?.id}`,
+        summary: pool ? `Queued GitHub dispatch for ${agent.workerCount} migration worker${agent.workerCount === 1 ? "" : "s"}` : `Queued GitHub dispatch for repair job ${job?.id}`,
         payload: {
           migrationId,
           mode,
           pool,
+          workerCount: pool ? agent.workerCount : 1,
+          workerInstanceId,
           repoOwner: githubRepoOwner,
           repoName: githubRepoName,
           workflowFile: githubWorkflowFile,
@@ -311,7 +319,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       },
     }).catch(() => undefined)
 
-    const dispatchWorkflow = async (includeRuntimeInputs: boolean) =>
+    const dispatchWorkflow = async (includeRuntimeInputs: boolean, instanceId: string) =>
       fetch(
         `https://api.github.com/repos/${encodeURIComponent(githubRepoOwner)}/${encodeURIComponent(githubRepoName)}/actions/workflows/${encodeURIComponent(githubWorkflowFile)}/dispatches`,
         {
@@ -329,9 +337,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
                   migration_id: migrationId,
                   ...(job?.id ? { repair_job_id: job.id } : {}),
                   agent_id: id,
+                  worker_instance_id: instanceId,
                   ...Object.fromEntries(
                     Object.entries(dispatchInputs).filter(
-                      ([key]) => !["agent_token", "repair_job_id", "agent_id", "server_url"].includes(key)
+                      ([key]) => !["agent_token", "repair_job_id", "agent_id", "server_url", "worker_instance_id"].includes(key)
                     )
                   ),
                 }
@@ -343,7 +352,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     let response: Response
     let usedRuntimeInputs = workflowSupportsRuntimeInputs
     try {
-      response = await dispatchWorkflow(workflowSupportsRuntimeInputs)
+      response = await dispatchWorkflow(workflowSupportsRuntimeInputs, workerInstanceId)
       if (!response.ok && workflowSupportsRuntimeInputs) {
         const firstBody = await response.text().catch(() => "")
         // An older workflow cannot safely receive a per-worker credential:
@@ -396,7 +405,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         perPage: 20,
       }).catch(() => [])
       const newRuns = recentRuns.filter((candidate) => !runIdsBeforeDispatch.has(candidate.id))
-      const runDisplayHint = pool ? id : job?.id
+      const runDisplayHint = pool ? workerInstanceId : job?.id
       matchedRun =
         (runDisplayHint ? newRuns.find((candidate) => String(candidate.displayTitle ?? "").includes(runDisplayHint)) : undefined) ??
         newRuns.find((candidate) => {
@@ -420,6 +429,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         migrationId,
         mode,
         pool,
+        workerCount: pool ? agent.workerCount : 1,
+        workerInstanceId,
         repoOwner: githubRepoOwner,
         repoName: githubRepoName,
         workflowFile: githubWorkflowFile,
@@ -432,6 +443,92 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       },
       ...(matchedRun?.status === "completed" ? { completedAt: new Date().toISOString() } : {}),
     })
+
+    const dispatchedRuns = [updatedRun]
+    for (let slot = 1; slot < dispatchCount; slot += 1) {
+      const additionalInstanceId = crypto.randomUUID()
+      const additionalRequestedAt = new Date().toISOString()
+      const before = await listGitHubWorkflowRuns({
+        token: githubToken,
+        owner: githubRepoOwner,
+        repo: githubRepoName,
+        workflow: githubWorkflowFile,
+        branch: agent.githubRef || "main",
+        event: "workflow_dispatch",
+        perPage: 20,
+      }).catch(() => [])
+      const beforeIds = new Set(before.map((candidate) => candidate.id))
+      const pendingRun = await createAgentRun({
+        agentId: id,
+        runType: "github_dispatch",
+        status: "pending",
+        summary: `Queued independent workflow worker ${slot + 1} of ${dispatchCount}`,
+        payload: {
+          migrationId,
+          mode,
+          pool: true,
+          workerCount: agent.workerCount,
+          workerInstanceId: additionalInstanceId,
+          repoOwner: githubRepoOwner,
+          repoName: githubRepoName,
+          workflowFile: githubWorkflowFile,
+          ref: agent.githubRef || "main",
+          dispatchRequestedAt: additionalRequestedAt,
+          githubRunIdsBeforeDispatch: Array.from(beforeIds),
+        },
+      })
+      let additionalResponse: Response
+      try {
+        additionalResponse = await dispatchWorkflow(workflowSupportsRuntimeInputs, additionalInstanceId)
+      } catch (error: unknown) {
+        await updateAgentRun(pendingRun.id, {
+          status: "failed",
+          summary: errorMessage(error, "Unable to dispatch independent GitHub worker"),
+          completedAt: new Date().toISOString(),
+        }).catch(() => undefined)
+        throw error
+      }
+      if (!additionalResponse.ok) {
+        const errorBody = await additionalResponse.text().catch(() => "")
+        await updateAgentRun(pendingRun.id, {
+          status: "failed",
+          summary: `GitHub dispatch failed: ${additionalResponse.status}`,
+          payload: { ...(pendingRun.payload ?? {}), errorBody },
+          completedAt: new Date().toISOString(),
+        }).catch(() => undefined)
+        throw new Error(`GitHub dispatch failed (${additionalResponse.status}). ${errorBody || "Check token/repo/workflow access."}`)
+      }
+
+      let additionalMatch: Awaited<ReturnType<typeof listGitHubWorkflowRuns>>[number] | undefined
+      for (let attempt = 0; attempt < 8 && !additionalMatch; attempt += 1) {
+        if (attempt > 0) await sleep(1_000)
+        const recentRuns = await listGitHubWorkflowRuns({
+          token: githubToken,
+          owner: githubRepoOwner,
+          repo: githubRepoName,
+          workflow: githubWorkflowFile,
+          branch: agent.githubRef || "main",
+          event: "workflow_dispatch",
+          perPage: 20,
+        }).catch(() => [])
+        additionalMatch = recentRuns.find((candidate) =>
+          !beforeIds.has(candidate.id) && String(candidate.displayTitle ?? "").includes(additionalInstanceId)
+        )
+      }
+      dispatchedRuns.push(await updateAgentRun(pendingRun.id, {
+        status: additionalMatch ? (additionalMatch.status === "completed" ? "completed" : "running") : "pending",
+        externalRunId: additionalMatch?.id ?? null,
+        summary: additionalMatch
+          ? `Independent workflow worker started (run #${additionalMatch.runNumber ?? additionalMatch.id})`
+          : "Independent workflow worker dispatched; waiting for GitHub to index the run",
+        payload: {
+          ...(pendingRun.payload ?? {}),
+          usedRuntimeInputs,
+          ...(additionalMatch?.htmlUrl ? { htmlUrl: additionalMatch.htmlUrl } : {}),
+        },
+        ...(additionalMatch?.status === "completed" ? { completedAt: new Date().toISOString() } : {}),
+      }))
+    }
 
     await updateAgent(id, {
       status: matchedRun && matchedRun.status !== "completed" ? "online" : "offline",
@@ -448,7 +545,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       },
     }).catch(() => undefined)
 
-    return NextResponse.json({ ok: true, job, jobs: queued?.jobs ?? [], run: updatedRun }, { status: 200 })
+    return NextResponse.json({ ok: true, job, jobs: queued?.jobs ?? [], run: updatedRun, runs: dispatchedRuns }, { status: 200 })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to dispatch GitHub workflow") }, { status: 400 })
   }

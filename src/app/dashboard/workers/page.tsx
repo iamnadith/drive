@@ -55,6 +55,7 @@ type AgentRow = {
   githubWorkflowFile?: string
   githubRef?: string
   githubRepositoryId?: string
+  workerCount: number
   notes?: string
   lastHeartbeatAt?: string
   lastSeenIp?: string
@@ -73,6 +74,16 @@ type AgentRow = {
     payload?: Record<string, unknown>
     createdAt: string
   } | null
+  runs: Array<{
+    id: string
+    status: "pending" | "running" | "completed" | "failed" | "canceled"
+    runType: string
+    summary?: string
+    externalRunId?: string
+    jobReference?: string
+    payload?: Record<string, unknown>
+    createdAt: string
+  }>
 }
 
 type RepairJobRow = {
@@ -139,6 +150,7 @@ function normalizeAgentRow(input: unknown): AgentRow | null {
     githubWorkflowFile: typeof row.githubWorkflowFile === "string" ? row.githubWorkflowFile : undefined,
     githubRef: typeof row.githubRef === "string" ? row.githubRef : undefined,
     githubRepositoryId: typeof row.githubRepositoryId === "string" ? row.githubRepositoryId : undefined,
+    workerCount: Math.max(1, Math.min(5, Math.floor(Number(row.workerCount) || 1))),
     notes: typeof row.notes === "string" ? row.notes : undefined,
     lastHeartbeatAt: typeof row.lastHeartbeatAt === "string" ? row.lastHeartbeatAt : undefined,
     lastSeenIp: typeof row.lastSeenIp === "string" ? row.lastSeenIp : undefined,
@@ -148,6 +160,7 @@ function normalizeAgentRow(input: unknown): AgentRow | null {
     createdAt: typeof row.createdAt === "string" ? row.createdAt : "",
     updatedAt: typeof row.updatedAt === "string" ? row.updatedAt : "",
     latestRun: typeof row.latestRun === "object" && row.latestRun !== null ? (row.latestRun as AgentRow["latestRun"]) : null,
+    runs: Array.isArray(row.runs) ? (row.runs as AgentRow["runs"]) : [],
   }
 }
 
@@ -283,6 +296,7 @@ export default function WorkersPage() {
   const [githubWorkflowFile, setGithubWorkflowFile] = React.useState("")
   const [githubRef, setGithubRef] = React.useState("main")
   const [githubRepositoryId, setGithubRepositoryId] = React.useState("")
+  const [workerCount, setWorkerCount] = React.useState(1)
   const [repositoryMode, setRepositoryMode] = React.useState("manual")
   const [repositorySetupBusy, setRepositorySetupBusy] = React.useState(false)
   const [repositorySetupReady, setRepositorySetupReady] = React.useState(false)
@@ -304,6 +318,7 @@ export default function WorkersPage() {
   const [deletingJobId, setDeletingJobId] = React.useState<string | null>(null)
   const [abortingJobId, setAbortingJobId] = React.useState<string | null>(null)
   const [stoppingWorkerId, setStoppingWorkerId] = React.useState<string | null>(null)
+  const [stoppingRunId, setStoppingRunId] = React.useState<string | null>(null)
   const [dispatchOpen, setDispatchOpen] = React.useState(false)
   const [dispatchAgent, setDispatchAgent] = React.useState<AgentRow | null>(null)
   const [confirmDeleteWorker, setConfirmDeleteWorker] = React.useState<AgentRow | null>(null)
@@ -526,6 +541,7 @@ export default function WorkersPage() {
     setGithubWorkflowFile("")
     setGithubRef("main")
     setGithubRepositoryId("")
+    setWorkerCount(1)
     setGithubToken("")
     setRepositoryMode("manual")
     setRepositorySetupBusy(false)
@@ -642,6 +658,7 @@ export default function WorkersPage() {
           githubWorkflowFile,
           githubRef,
           githubRepositoryId,
+          workerCount,
           githubToken,
           notes,
         }),
@@ -804,7 +821,7 @@ export default function WorkersPage() {
   const totalWorkers = agents.length
   const activeJobs = repairJobs.filter((job) => !["completed", "failed", "canceled"].includes(job.status)).length
   const pendingRegistration = agents.filter((agent) => getEffectiveStatus(agent) === "pending_registration").length
-  const visibleWorkers = agents.slice(0, 3)
+  const visibleWorkers = agents
   const visibleRepairJobs = repairJobs.slice(0, 3)
   const getWorkerLinkedJobs = React.useCallback(
     (worker: AgentRow) =>
@@ -841,6 +858,49 @@ export default function WorkersPage() {
     setDispatchOpen(true)
     void loadMigrations()
   }, [loadMigrations])
+
+  const updateWorkflowWorkerCount = React.useCallback(async (workflow: AgentRow, count: number) => {
+    setAgents((current) => current.map((entry) => entry.id === workflow.id ? { ...entry, workerCount: count } : entry))
+    try {
+      const res = await fetch(`/api/workers/${encodeURIComponent(workflow.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workerCount: count }),
+      })
+      const json: unknown = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to update worker count"
+        throw new Error(message)
+      }
+      toast.success(`Workflow will dispatch ${count} worker${count === 1 ? "" : "s"}`)
+    } catch (error) {
+      setAgents((current) => current.map((entry) => entry.id === workflow.id ? { ...entry, workerCount: workflow.workerCount } : entry))
+      toast.error(error instanceof Error ? error.message : "Unable to update worker count")
+    }
+  }, [])
+
+  const stopWorkflowRun = React.useCallback(async (workflow: AgentRow, runId: string) => {
+    setStoppingRunId(runId)
+    try {
+      const res = await fetch(`/api/workers/${encodeURIComponent(workflow.id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop_run", runId }),
+      })
+      const json: unknown = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to stop workflow worker"
+        throw new Error(message)
+      }
+      toast.success("Workflow worker stopped; one capacity slot is now available")
+      await loadAgents()
+      await loadRepairJobs()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to stop workflow worker")
+    } finally {
+      setStoppingRunId(null)
+    }
+  }, [loadAgents, loadRepairJobs])
 
   const handleDispatch = React.useCallback(async () => {
     if (!dispatchAgent) return
@@ -888,7 +948,7 @@ export default function WorkersPage() {
             <Bot className="h-4 w-4" />
             Worker orchestration
           </div>
-          <h1 className="mt-2 text-3xl font-bold tracking-tight">Workers</h1>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight">Workflows & Workers</h1>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
             Manage GitHub-triggered and self-hosted workers, monitor heartbeat health, and keep migration jobs visible from one place.
           </p>
@@ -908,49 +968,24 @@ export default function WorkersPage() {
             <DialogTrigger asChild>
               <Button className="h-8 px-3 text-sm">
                 <Plus className="mr-1 h-3.5 w-3.5" />
-                Add worker
+                Add workflow
               </Button>
             </DialogTrigger>
             <DialogContent className="max-h-[88vh] sm:max-h-[94vh] sm:max-w-3xl flex flex-col rounded-2xl p-0 overflow-hidden">
               <DialogHeader className="border-b px-6 py-5">
-                <DialogTitle>Add worker</DialogTitle>
+                <DialogTitle>Add GitHub workflow</DialogTitle>
                 <DialogDescription>
-                  Connect a GitHub worker or register a self-hosted worker without changing the existing migration or account flows.
+                  Connect a GitHub account and register a migration workflow. Self-hosted workers register themselves with the shared secret and orchestrator URL.
                 </DialogDescription>
               </DialogHeader>
               <div className="mt-0 flex-1 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                 <div className="space-y-6 p-6 pb-6">
                   <div className="rounded-lg border bg-muted/40 p-4 pb-6 space-y-4">
-                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Worker setup</p>
-                    <div className="grid gap-4 md:grid-cols-2">
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Workflow setup</p>
+                    <div className="grid gap-4">
                       <div className="space-y-2">
-                        <Label htmlFor="worker-name">Worker name</Label>
-                        <Input id="worker-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="repair-gh-main" />
-                      </div>
-                      <div className="space-y-2">
-                        <Label>Worker type</Label>
-                        <Select value={provider} onValueChange={(value) => {
-                          const nextProvider = value as AgentProvider
-                          setProvider(nextProvider)
-                          if (nextProvider !== "github_actions") {
-                            setGithubRepoOwner("")
-                            setGithubRepoName("")
-                            setGithubWorkflowFile("")
-                            setGithubRepositoryId("")
-                            setGithubWorkflows([])
-                            setGithubWorkflowsLoading(false)
-                            setRepositoryMode("manual")
-                            setRepositorySetupReady(false)
-                          }
-                        }}>
-                          <SelectTrigger className="h-11">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="github_actions">GitHub Actions</SelectItem>
-                            <SelectItem value="self_hosted">Self-hosted</SelectItem>
-                          </SelectContent>
-                        </Select>
+                        <Label htmlFor="worker-name">Workflow name</Label>
+                        <Input id="worker-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="github-migration-main" />
                       </div>
                     </div>
                   </div>
@@ -1042,6 +1077,15 @@ export default function WorkersPage() {
                             {workflow.name} ({workflow.path})
                           </SelectItem>
                         ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Workers per dispatch</Label>
+                    <Select value={String(workerCount)} onValueChange={(value) => setWorkerCount(Number(value))}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {[1, 2, 3, 4, 5].map((count) => <SelectItem key={count} value={String(count)}>{count} worker{count === 1 ? "" : "s"}</SelectItem>)}
                       </SelectContent>
                     </Select>
                   </div>
@@ -1383,8 +1427,8 @@ export default function WorkersPage() {
       <Card>
         <CardHeader className="flex flex-col gap-3 border-b pb-5 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <CardTitle>Worker Fleet</CardTitle>
-            <CardDescription>Current registration, routing, and runtime signals for the latest three workers.</CardDescription>
+            <CardTitle>Registered Workflows & Worker Fleet</CardTitle>
+            <CardDescription>GitHub accounts are registered as workflows; each workflow dispatches its configured worker count.</CardDescription>
           </div>
           <div className="flex flex-wrap gap-2">
             <Badge variant="outline" className="gap-1">
@@ -1395,11 +1439,6 @@ export default function WorkersPage() {
               <Github className="h-3.5 w-3.5" />
               {totalGithub} GitHub
             </Badge>
-            {agents.length > 3 ? (
-              <Button asChild variant="outline" size="sm">
-                <Link href="/dashboard/workers/all">View all</Link>
-              </Button>
-            ) : null}
           </div>
         </CardHeader>
         <CardContent className="space-y-4 pt-1">
@@ -1414,6 +1453,7 @@ export default function WorkersPage() {
             const summary = worker.latestRun?.summary || worker.lastError || worker.notes || "No notes yet"
             const linkedWorkerJobs = getWorkerLinkedJobs(worker)
             const activeLinkedWorkerJobs = getWorkerActiveLinkedJobs(worker)
+            const activeWorkflowRuns = worker.runs.filter((run) => run.runType === "github_dispatch" && (run.status === "pending" || run.status === "running"))
 
             return (
               <div key={worker.id} className="rounded-xl border bg-card p-4 shadow-sm">
@@ -1428,6 +1468,7 @@ export default function WorkersPage() {
                           <h3 className="text-base font-semibold">{worker.name}</h3>
                           {statusBadge(effectiveStatus)}
                           <Badge variant="outline">{providerLabel(worker.provider)}</Badge>
+                          {worker.provider === "github_actions" ? <Badge variant="secondary">Registered workflow</Badge> : null}
                         </div>
                         <p className="mt-1 font-mono text-xs text-muted-foreground">{worker.id}</p>
                       </div>
@@ -1443,6 +1484,14 @@ export default function WorkersPage() {
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+                    {worker.provider === "github_actions" ? (
+                      <Select value={String(worker.workerCount)} onValueChange={(value) => void updateWorkflowWorkerCount(worker, Number(value))}>
+                        <SelectTrigger className="h-9 w-[132px]" aria-label="Workers per dispatch"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {[1, 2, 3, 4, 5].map((count) => <SelectItem key={count} value={String(count)}>{count} worker{count === 1 ? "" : "s"}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    ) : null}
                     {worker.provider === "github_actions" ? (
                       <Button
                         variant="outline"
@@ -1519,6 +1568,35 @@ export default function WorkersPage() {
                     ) : null}
                   </div>
                 </div>
+                {worker.provider === "github_actions" ? (
+                  <div className="mt-3 rounded-lg border bg-muted/20 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Independent workflow workers</div>
+                      <div className="text-xs text-muted-foreground">{activeWorkflowRuns.length} active / {worker.workerCount} configured</div>
+                    </div>
+                    {activeWorkflowRuns.length === 0 ? (
+                      <div className="text-sm text-muted-foreground">No active workflow workers.</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {activeWorkflowRuns.map((run) => {
+                          const instanceId = typeof run.payload?.workerInstanceId === "string" ? run.payload.workerInstanceId : run.id
+                          return (
+                            <div key={run.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-background p-2 text-sm">
+                              <div>
+                                <div className="font-medium">Worker {instanceId.slice(0, 8)}</div>
+                                <div className="text-xs text-muted-foreground">GitHub run {run.externalRunId || "indexing"} · {run.status}{run.jobReference ? ` · job ${run.jobReference.slice(0, 8)}` : ""}</div>
+                              </div>
+                              <Button variant="outline" size="sm" disabled={!run.externalRunId || stoppingRunId === run.id} onClick={() => void stopWorkflowRun(worker, run.id)}>
+                                <Square className="mr-1 h-3.5 w-3.5" />
+                                {stoppingRunId === run.id ? "Stopping..." : "Stop worker"}
+                              </Button>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
               </div>
             )
           })}
