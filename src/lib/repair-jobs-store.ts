@@ -869,14 +869,6 @@ export async function ensureMigrationWorkerJobs(input: {
   }
 
   const items = await listMigrationItems(input.migrationId)
-  const generation =
-    typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
-      ? Math.max(1, Math.floor(migration.options.workerGeneration))
-      : 1
-  const shardCount =
-    typeof migration.options.workerShardCount === "number" && Number.isFinite(migration.options.workerShardCount)
-      ? Math.max(1, Math.min(MAX_WORKER_SHARD_COUNT, Math.floor(migration.options.workerShardCount)))
-      : DEFAULT_WORKER_SHARD_COUNT
   // A bucket-create failure is kept out of the object queue. The next start
   // attempt can clear that marker after the target bucket becomes available.
   const queuedItems = items.filter(
@@ -884,59 +876,11 @@ export async function ensureMigrationWorkerJobs(input: {
   )
   if (queuedItems.length === 0) return { created: 0, existing: 0, jobs: [] }
 
-  // Query the current generation by its durable key. A migration may contain
-  // hundreds of historical/manual jobs; a generic newest-500 query could hide
-  // an older current shard and make the orchestrator create a duplicate.
-  const currentJobs = await listWorkerShardJobsByMigrationRaw(input.migrationId, generation, shardCount)
-  const byWorkKey = new Map(currentJobs.filter((job) => job.workKey).map((job) => [job.workKey!, job]))
-  const jobs: DriveRepairJob[] = []
-  let created = 0
-  let existing = 0
-
-  const itemIds = queuedItems.map((item) => item.id)
-  const missingShards: Array<{ index: number; workKey: string }> = []
-  for (let shardIndex = 0; shardIndex < shardCount; shardIndex += 1) {
-    const workKey = `migration:${input.migrationId}:generation:${generation}:shard:${shardIndex}/${shardCount}`
-    const known = byWorkKey.get(workKey)
-    if (known) {
-      existing += 1
-      jobs.push(known)
-      continue
-    }
-    missingShards.push({ index: shardIndex, workKey })
-  }
-
-  // Create missing shards in bounded batches. The unique work key still makes
-  // concurrent orchestrator ticks idempotent, while avoiding a long serial
-  // setup when a migration uses dozens of workers.
-  for (let offset = 0; offset < missingShards.length; offset += 8) {
-    const batch = missingShards.slice(offset, offset + 8)
-    const createdBatch = await Promise.all(
-      batch.map(({ index, workKey }) =>
-        createRepairJob({
-          migrationId: input.migrationId,
-          mode: input.mode ?? "repair_and_verify",
-          workKey,
-          payload: {
-            source: "migration_orchestrator",
-            kind: "migration_shard",
-            workerGeneration: generation,
-            workerShard: { index, count: shardCount },
-            itemIds,
-            items: itemIds.map((id) => ({ id })),
-          },
-        }).then((job) => ({ job, created: job.workKey === workKey && !byWorkKey.has(workKey) }))
-      )
-    )
-    for (const entry of createdBatch) {
-      if (entry.created) created += 1
-      else existing += 1
-      jobs.push(entry.job)
-      byWorkKey.set(entry.job.workKey ?? "", entry.job)
-    }
-  }
-
-  return { created, existing, jobs }
+  // The autonomous orchestrator now materializes work only after the File
+  // Scanner has committed an authoritative source inventory. Creating hash
+  // shards here would make every worker relist every bucket and could race the
+  // scanner-generated object queue.
+  return { created: 0, existing: 0, jobs: [] }
 }
 
 /**

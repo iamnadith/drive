@@ -7,6 +7,21 @@
   "triggers": {
     "crons": ["* * * * *"]
   },
+  "queues": {
+    "producers": [
+      { "binding": "GITHUB_DISPATCH_QUEUE", "queue": "drive-github-dispatch" }
+    ],
+    "consumers": [
+      {
+        "queue": "drive-github-dispatch",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 20,
+        "dead_letter_queue": "drive-github-dispatch-dlq",
+        "retry_delay": 30
+      }
+    ]
+  },
   "observability": {
     "enabled": true
   }

@@ -1587,7 +1587,8 @@ export default function MigrationDetailsPage() {
     setDispatchingWorkerId(workerIds[0] ?? null)
     setError(null)
     try {
-      for (const workerId of workerIds) {
+      const dispatchIds = migration.options.executionMode === "migration_workers" ? workerIds.slice(0, 1) : workerIds
+      await Promise.all(dispatchIds.map(async (workerId) => {
         const res = await fetch(`/api/workers/${encodeURIComponent(workerId)}/dispatch`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1595,6 +1596,7 @@ export default function MigrationDetailsPage() {
             migrationId: migration.id,
             mode: workerMode,
             pool: migration.options.executionMode === "migration_workers",
+            poolAgentIds: migration.options.executionMode === "migration_workers" ? workerIds : undefined,
             workflowSupportsRuntimeInputs: true,
           }),
         })
@@ -1603,7 +1605,7 @@ export default function MigrationDetailsPage() {
           const message = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to dispatch worker"
           throw new Error(message)
         }
-      }
+      }))
       setWorkersOpen(false)
       await loadInitial()
     } catch (e: unknown) {

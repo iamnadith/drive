@@ -5,5 +5,9 @@
   "compatibility_date": "2026-08-04",
   "compatibility_flags": ["nodejs_compat_v2"],
   "triggers": { "crons": ["* * * * *"] },
+  "queues": {
+    "producers": [{ "binding": "FILE_SCAN_QUEUE", "queue": "drive-file-scan" }],
+    "consumers": [{ "queue": "drive-file-scan", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 20, "dead_letter_queue": "drive-file-scan-dlq", "retry_delay": 15 }]
+  },
   "observability": { "enabled": true }
 }

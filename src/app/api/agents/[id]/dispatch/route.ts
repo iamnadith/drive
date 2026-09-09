@@ -5,7 +5,7 @@ import { createAgentRun, getAgentById, getAgentGithubToken, listAgentRunsByAgent
 import { abortRepairJob, createRepairJob, ensureMigrationWorkerJobs, findActiveRepairJobForDispatch, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
 import { GITHUB_TOKEN_COOKIE, listGitHubWorkflowRuns, setGitHubActionsSecret } from "@/lib/github-oauth"
 import { assertWorkerWorkflow } from "@/lib/github-worker-setup"
-import { enrollMigrationWorkerAgent, getMigration, listMigrationItems } from "@/lib/migrations-store"
+import { enrollMigrationWorkerAgents, getMigration, listMigrationItems } from "@/lib/migrations-store"
 import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
 import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
 import { requireAdmin } from "@/lib/server-auth"
@@ -72,10 +72,6 @@ async function syncGitHubWorkerSecrets(input: {
   await Promise.all(writes)
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 function isRecentIso(value: string | undefined, maxAgeMs: number): boolean {
   if (!value) return false
   const time = Date.parse(value)
@@ -101,6 +97,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const dispatchInputs =
       typeof body.inputs === "object" && body.inputs !== null ? (body.inputs as Record<string, unknown>) : {}
     const workflowSupportsRuntimeInputs = body.workflowSupportsRuntimeInputs !== false
+    const poolAgentIds = Array.isArray(body.poolAgentIds)
+      ? Array.from(new Set(body.poolAgentIds.filter((value): value is string => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value))) )
+      : []
 
     if (!migrationId) return NextResponse.json({ error: "migrationId is required" }, { status: 400 })
     const migration = await getMigration(migrationId)
@@ -188,6 +187,23 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const githubRepoName = agent.githubRepoName
     const githubWorkflowFile = agent.githubWorkflowFile
 
+    if (pool) {
+      const selectedIds = poolAgentIds.length > 0 ? poolAgentIds : [id]
+      await enrollMigrationWorkerAgents(migrationId, selectedIds)
+      await ensureMigrationWorkerJobs({ migrationId, mode })
+      const orchestrator = await getMigrationOrchestratorSettings()
+      if (!orchestrator.orchestratorUrl || !orchestrator.sharedSecret) {
+        return NextResponse.json({ error: "Migration Orchestrator URL and secret are required for worker-pool dispatch" }, { status: 409 })
+      }
+      const wake = await fetch(`${orchestrator.orchestratorUrl.replace(/\/+$/, "")}/run`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${orchestrator.sharedSecret}` },
+        signal: AbortSignal.timeout(15_000),
+      }).catch(() => null)
+      if (wake && !wake.ok) return NextResponse.json({ error: `Migration Orchestrator wake returned HTTP ${wake.status}` }, { status: 502 })
+      return NextResponse.json({ ok: true, queued: true, workflowIds: selectedIds }, { status: 202 })
+    }
+
     const workerJobs = await listRepairJobs(500)
     const activeWorkerJobs = workerJobs.filter(
       (job) =>
@@ -248,15 +264,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     await assertWorkerWorkflow({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, ref: agent.githubRef || "main", workflow: githubWorkflowFile })
     const dispatchRequestedAt = new Date().toISOString()
     const workerInstanceId = crypto.randomUUID()
-    const runsBeforeDispatch = await listGitHubWorkflowRuns({
-      token: githubToken,
-      owner: githubRepoOwner,
-      repo: githubRepoName,
-      workflow: githubWorkflowFile,
-      branch: agent.githubRef || "main",
-      event: "workflow_dispatch",
-      perPage: 20,
-    }).catch(() => [])
+    // Every dispatch carries a cryptographically unique instance id, so it can
+    // be reconciled without an expensive before/after run-list request.
+    const runsBeforeDispatch: Awaited<ReturnType<typeof listGitHubWorkflowRuns>> = []
     const runIdsBeforeDispatch = new Set(runsBeforeDispatch.map((candidate) => candidate.id))
     let secretSyncError: string | null = null
     try {
@@ -270,6 +280,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         { status: 502 }
       )
     }
+    if (pool) await enrollMigrationWorkerAgents(migrationId, poolAgentIds.length > 0 ? poolAgentIds : [id])
     const queued = pool
       ? await ensureMigrationWorkerJobs({ migrationId, mode })
       : null
@@ -391,29 +402,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       )
     }
 
-    if (pool) await enrollMigrationWorkerAgent(migrationId, id)
     let matchedRun: Awaited<ReturnType<typeof listGitHubWorkflowRuns>>[number] | undefined
-    for (let attempt = 0; attempt < 8 && !matchedRun; attempt += 1) {
-      if (attempt > 0) await sleep(1_000)
-      const recentRuns = await listGitHubWorkflowRuns({
-        token: githubToken,
-        owner: githubRepoOwner,
-        repo: githubRepoName,
-        workflow: githubWorkflowFile,
-        branch: agent.githubRef || "main",
-        event: "workflow_dispatch",
-        perPage: 20,
-      }).catch(() => [])
-      const newRuns = recentRuns.filter((candidate) => !runIdsBeforeDispatch.has(candidate.id))
-      const runDisplayHint = pool ? workerInstanceId : job?.id
-      matchedRun =
-        (runDisplayHint ? newRuns.find((candidate) => String(candidate.displayTitle ?? "").includes(runDisplayHint)) : undefined) ??
-        newRuns.find((candidate) => {
-          const createdAt = Date.parse(candidate.createdAt || "")
-          const requestedAt = Date.parse(dispatchRequestedAt)
-          return Number.isFinite(createdAt) && Number.isFinite(requestedAt) && createdAt >= requestedAt - 10_000
-        })
-    }
 
     const updatedRun = await updateAgentRun(run.id, {
       status: matchedRun ? (matchedRun.status === "completed" ? "completed" : "running") : "pending",
@@ -448,15 +437,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     for (let slot = 1; slot < dispatchCount; slot += 1) {
       const additionalInstanceId = crypto.randomUUID()
       const additionalRequestedAt = new Date().toISOString()
-      const before = await listGitHubWorkflowRuns({
-        token: githubToken,
-        owner: githubRepoOwner,
-        repo: githubRepoName,
-        workflow: githubWorkflowFile,
-        branch: agent.githubRef || "main",
-        event: "workflow_dispatch",
-        perPage: 20,
-      }).catch(() => [])
+      const before: Awaited<ReturnType<typeof listGitHubWorkflowRuns>> = []
       const beforeIds = new Set(before.map((candidate) => candidate.id))
       const pendingRun = await createAgentRun({
         agentId: id,
@@ -500,21 +481,6 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       }
 
       let additionalMatch: Awaited<ReturnType<typeof listGitHubWorkflowRuns>>[number] | undefined
-      for (let attempt = 0; attempt < 8 && !additionalMatch; attempt += 1) {
-        if (attempt > 0) await sleep(1_000)
-        const recentRuns = await listGitHubWorkflowRuns({
-          token: githubToken,
-          owner: githubRepoOwner,
-          repo: githubRepoName,
-          workflow: githubWorkflowFile,
-          branch: agent.githubRef || "main",
-          event: "workflow_dispatch",
-          perPage: 20,
-        }).catch(() => [])
-        additionalMatch = recentRuns.find((candidate) =>
-          !beforeIds.has(candidate.id) && String(candidate.displayTitle ?? "").includes(additionalInstanceId)
-        )
-      }
       dispatchedRuns.push(await updateAgentRun(pendingRun.id, {
         status: additionalMatch ? (additionalMatch.status === "completed" ? "completed" : "running") : "pending",
         externalRunId: additionalMatch?.id ?? null,

@@ -195,7 +195,7 @@ function normalizeWorkerShard(value) {
 }
 
 function requiresWorkerShard(payload) {
-  return payload?.job?.kind === "migration_shard" || payload?.workerGeneration !== undefined
+  return payload?.job?.kind === "migration_shard"
 }
 
 // FNV-1a gives every object a stable owner shard. The namespace includes the
@@ -477,9 +477,10 @@ async function claimJobDirectPostgres() {
       )
       update drive_repair_jobs j set status='running',claimed_by_agent_id=$3,claim_token=gen_random_uuid(),claimed_at=now(),started_at=coalesce(started_at,now()),last_heartbeat_at=now(),summary='Claimed directly through PostgreSQL',payload=coalesce(j.payload,'{}'::jsonb)||jsonb_build_object('claimedWorkerInstanceId',$4::text),updated_at=now()
       from candidate c where j.id=c.id returning j.*
-    `, [MIGRATION_ID, `migration:${MIGRATION_ID}:generation:${generation}:shard:%`, AGENT_ID, WORKER_INSTANCE_ID || null])
+    `, [MIGRATION_ID, `migration:${MIGRATION_ID}:generation:${generation}:inventory:%`, AGENT_ID, WORKER_INSTANCE_ID || null])
     const job = claimed.rows[0]
     if (!job) return { ok: true, job: null }
+    if (WORKER_INSTANCE_ID) await db.query(`update drive_agent_runs set job_reference=$2,status='running',updated_at=now() where agent_id=$1 and payload->>'workerInstanceId'=$3 and status in('pending','running')`, [AGENT_ID, job.id, WORKER_INSTANCE_ID])
     jobClaimTokens.set(job.id, String(job.claim_token || ""))
     const items = await db.query(`select * from drive_migration_items where migration_id=$1 order by created_at`, [MIGRATION_ID])
     const requested = new Set(Array.isArray(job.payload?.itemIds) ? job.payload.itemIds : [])
@@ -489,6 +490,7 @@ async function claimJobDirectPostgres() {
       job: { id: job.id, mode: job.mode, migrationId: MIGRATION_ID, verifyAllBuckets: true, strictCompletion: true, kind: job.payload?.kind },
       ...(isRecord(job.payload?.workerShard) ? { workerShard: job.payload.workerShard } : {}),
       ...(typeof job.payload?.workerGeneration === "number" ? { workerGeneration: job.payload.workerGeneration } : {}),
+      ...(Array.isArray(job.payload?.inventoryObjects) ? { inventoryObjects: job.payload.inventoryObjects } : {}),
       migration: { id: MIGRATION_ID, options: migration.options || {}, pathPrefix: migration.options?.pathPrefix || null },
       source: { accountId: source.cloudflare_account_id, accessKeyId: source.r2_access_key_id, secretAccessKey: source.r2_secret_access_key },
       target: { accountId: target.cloudflare_account_id, accessKeyId: target.r2_access_key_id, secretAccessKey: target.r2_secret_access_key },
@@ -531,7 +533,7 @@ async function claimJobDirect() {
   )
   let job = null
   for (const candidate of candidates) {
-    if (!String(candidate.work_key || "").startsWith(`migration:${MIGRATION_ID}:generation:`)) continue
+    if (!String(candidate.work_key || "").startsWith(`migration:${MIGRATION_ID}:generation:${Math.max(1, Math.trunc(Number(migration.options?.workerGeneration) || 1))}:inventory:`)) continue
     const claimed = await supabaseRows(
       `claim autonomous shard ${candidate.id}`,
       supabase.from("drive_repair_jobs").update({
@@ -557,6 +559,7 @@ async function claimJobDirect() {
     job: { id: job.id, mode: job.mode, migrationId: MIGRATION_ID, verifyAllBuckets: true, strictCompletion: true, kind: job.payload?.kind },
     ...(isRecord(job.payload?.workerShard) ? { workerShard: job.payload.workerShard } : {}),
     ...(typeof job.payload?.workerGeneration === "number" ? { workerGeneration: job.payload.workerGeneration } : {}),
+    ...(Array.isArray(job.payload?.inventoryObjects) ? { inventoryObjects: job.payload.inventoryObjects } : {}),
     migration: { id: MIGRATION_ID, options: migration.options || {}, pathPrefix: migration.options?.pathPrefix || null },
     source: { accountId: source.cloudflare_account_id, accessKeyId: source.r2_access_key_id, secretAccessKey: source.r2_secret_access_key },
     target: { accountId: target.cloudflare_account_id, accessKeyId: target.r2_access_key_id, secretAccessKey: target.r2_secret_access_key },
@@ -1073,6 +1076,15 @@ async function getTargetObjectSize(targetClient, bucket, key) {
   }
 }
 
+async function inspectAssignedObjects(targetClient, bucket, objects) {
+  const found = []
+  await runConcurrent(objects, COPY_CONCURRENCY, async (object) => {
+    const size = await getTargetObjectSize(targetClient, bucket, object.key)
+    if (size !== null) found.push({ key: object.key, size })
+  })
+  return found
+}
+
 function diffObjectsByListing(sourceObjects, destObjects, onProgress) {
   const destinationMap = new Map(destObjects.map((object) => [object.key, object.size]))
   const missing = []
@@ -1520,7 +1532,8 @@ async function processItem(jobId, payload, item, completedResults, state) {
     })
     if (startSync?.canceled) throw new JobAbortedError()
 
-    const allSourceObjects = await listAllObjects(sourceClient, item.sourceBucket, prefix, ({ count, key, size }) => {
+    const assignedInventory = Array.isArray(payload.inventoryObjects) ? payload.inventoryObjects : null
+    const allSourceObjects = assignedInventory || await listAllObjects(sourceClient, item.sourceBucket, prefix, ({ count, key, size }) => {
       const delta = Math.max(0, count - sourceScanLastCount)
       sourceScanLastCount = count
       state.stats.scannedSourceObjects += delta
@@ -1545,7 +1558,9 @@ async function processItem(jobId, payload, item, completedResults, state) {
       })
       syncLiveProgress()
     })
-    const allDestinationObjects = await listAllObjects(targetClient, item.targetBucket, prefix, ({ count, key, size }) => {
+    const allDestinationObjects = assignedInventory
+      ? await inspectAssignedObjects(targetClient, item.targetBucket, assignedInventory)
+      : await listAllObjects(targetClient, item.targetBucket, prefix, ({ count, key, size }) => {
       const delta = Math.max(0, count - destinationScanLastCount)
       destinationScanLastCount = count
       state.stats.scannedDestinationObjects += delta
@@ -1570,9 +1585,8 @@ async function processItem(jobId, payload, item, completedResults, state) {
       })
       syncLiveProgress()
     })
-    // Every shard lists the complete bucket inventory, then owns a disjoint
-    // deterministic subset of keys. This keeps verification accurate while
-    // ensuring two workers never intentionally process the same object.
+    // Inventory batches come from the File Scanner and are already disjoint.
+    // Legacy manual shard jobs retain deterministic filtering compatibility.
     const sourceObjects = filterObjectsForShard(allSourceObjects, item.sourceBucket, workerShard)
     const destinationObjects = filterObjectsForShard(allDestinationObjects, item.sourceBucket, workerShard)
     const sourceBytes = allSourceObjects.reduce((sum, object) => sum + Number(object?.size || 0), 0)
@@ -1879,11 +1893,9 @@ async function processItem(jobId, payload, item, completedResults, state) {
       stage,
       sourceCount: shardObjectCount,
     })
-    let finalDestinationObjects = filterObjectsForShard(
-      await listAllObjects(targetClient, item.targetBucket, prefix),
-      item.sourceBucket,
-      workerShard
-    )
+    let finalDestinationObjects = assignedInventory
+      ? await inspectAssignedObjects(targetClient, item.targetBucket, sourceObjects)
+      : filterObjectsForShard(await listAllObjects(targetClient, item.targetBucket, prefix), item.sourceBucket, workerShard)
     let finalDiff = diffObjectsByListing(sourceObjects, finalDestinationObjects, ({ checked, key, size, missing, mismatched }) => {
       state.currentFile = {
         itemId: item.id,
@@ -2062,11 +2074,9 @@ async function processItem(jobId, payload, item, completedResults, state) {
       })
 
       state.currentFile = null
-      finalDestinationObjects = filterObjectsForShard(
-        await listAllObjects(targetClient, item.targetBucket, prefix),
-        item.sourceBucket,
-        workerShard
-      )
+      finalDestinationObjects = assignedInventory
+        ? await inspectAssignedObjects(targetClient, item.targetBucket, sourceObjects)
+        : filterObjectsForShard(await listAllObjects(targetClient, item.targetBucket, prefix), item.sourceBucket, workerShard)
       finalDiff = diffObjectsByListing(sourceObjects, finalDestinationObjects)
       finalMissing = finalDiff.missing.length
       finalMismatched = finalDiff.mismatched.length
@@ -2075,7 +2085,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
     const completed = finalMissing === 0 && finalMismatched === 0
     const resolvedAllObjects = !isSharded && completed && finalDestinationObjects.length >= sourceObjects.length
     state.stats.verifiedObjects += shardObjectCount
-    const itemStatus = isSharded ? "running" : completed ? "completed" : "failed"
+    const itemStatus = isSharded || assignedInventory ? "running" : completed ? "completed" : "failed"
     const completionSummary = isSharded
       ? `Shard ${workerShard.index + 1}/${workerShard.count} verified for ${item.sourceBucket}`
       : completed

@@ -476,27 +476,37 @@ export async function updateMigration(
 }
 
 export async function enrollMigrationWorkerAgent(migrationId: string, agentId: string): Promise<void> {
+  return enrollMigrationWorkerAgents(migrationId, [agentId])
+}
+
+export async function enrollMigrationWorkerAgents(migrationId: string, agentIds: string[]): Promise<void> {
+  const uniqueAgentIds = Array.from(new Set(agentIds.filter(Boolean)))
+  if (uniqueAgentIds.length === 0) return
   await queryDb(
     `
-      update drive_migrations
+      update drive_migrations m
       set options = jsonb_set(
         jsonb_set(
-          coalesce(options, '{}'::jsonb),
-          '{workerAgentIds}',
-          case
-            when jsonb_typeof(coalesce(options->'workerAgentIds', '[]'::jsonb)) <> 'array' then jsonb_build_array($2::text)
-            when coalesce(options->'workerAgentIds', '[]'::jsonb) @> jsonb_build_array($2::text) then coalesce(options->'workerAgentIds', '[]'::jsonb)
-            else coalesce(options->'workerAgentIds', '[]'::jsonb) || jsonb_build_array($2::text)
-          end,
+          jsonb_set(
+            coalesce(m.options, '{}'::jsonb),
+            '{workerAgentIds}',
+            $2::jsonb,
+            true
+          ),
+          '{workerShardCount}',
+          to_jsonb(least(128, greatest(
+            coalesce((m.options->>'workerShardCount')::integer, 32),
+            coalesce((select sum(least(5, greatest(1, coalesce(a.worker_count, 1))))::integer from drive_agents a where a.id::text in (select jsonb_array_elements_text($2::jsonb)) and a.provider='github_actions' and a.status<>'disabled'), 1)
+          ))),
           true
         ),
         '{requireIndependentVerification}',
-        coalesce(options->'requireIndependentVerification', 'true'::jsonb),
+        coalesce(m.options->'requireIndependentVerification', 'true'::jsonb),
         true
       ), updated_at = now()
-      where id = $1
+      where m.id = $1
     `,
-    [migrationId, agentId]
+    [migrationId, JSON.stringify(uniqueAgentIds)]
   )
 }
 

@@ -1,8 +1,9 @@
 import { Client } from "pg"
 
-type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string }
+type ScanMessage = { reason: "continue" }
+type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; FILE_SCAN_QUEUE: Queue<ScanMessage> }
 type Row = Record<string, any>
-const BUILD = 1
+const BUILD = 2
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -289,6 +290,12 @@ async function cycle(env: Env) {
   })
 }
 
+async function cycleAndContinue(env: Env) {
+  const result = await cycle(env)
+  if (!result.idle && !result.skipped) await env.FILE_SCAN_QUEUE.send({ reason: "continue" }, { contentType: "json" })
+  return result
+}
+
 export default {
   async fetch(request: Request, env: Env) {
     const url = new URL(request.url)
@@ -297,8 +304,14 @@ export default {
     }
     if (!(await authorized(request, env))) return json({ error: "Unauthorized" }, 401)
     if (url.pathname === "/status" && request.method === "GET") return json(await database(env, async (db) => { const state = await db.query(`select * from drive_file_scanner_state where id=true`); const queue = await db.query(`select status,count(*)::int count from drive_migration_verification_state group by status`); return { ok: true, service: "file-scanner", build: BUILD, state: state.rows[0] || null, queue: queue.rows } }))
-    if (url.pathname === "/run" && request.method === "POST") { try { return json(await cycle(env)) } catch (error) { return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 503) } }
+    if (url.pathname === "/run" && request.method === "POST") { try { return json(await cycleAndContinue(env)) } catch (error) { return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 503) } }
     return json({ error: "Not found" }, 404)
   },
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) { ctx.waitUntil(cycle(env).then(() => undefined).catch((error) => console.error(error))) },
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) { ctx.waitUntil(cycleAndContinue(env).then(() => undefined).catch((error) => console.error(error))) },
+  async queue(batch: MessageBatch<ScanMessage>, env: Env) {
+    for (const message of batch.messages) {
+      try { await cycleAndContinue(env); message.ack() }
+      catch (error) { console.error("File Scanner continuation failed", error); message.retry({ delaySeconds: Math.min(15 * (2 ** Math.min(message.attempts, 8)), 900) }) }
+    }
+  },
 }
