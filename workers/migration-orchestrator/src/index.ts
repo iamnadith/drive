@@ -215,7 +215,24 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
   if (settings.settings !== "synced") return { verification: settings.settings === "failed" ? "failed" : "settings_sync", missing, mismatched, extra, ...settings }
   await db.query("begin")
   try {
-    await db.query(`update drive_accounts set status=case when id=$1 then 'active' when status='active' then 'available' else status end,last_migrated=case when id=$1 then to_char(now(),'YYYY-MM-DD HH24:MI:SS') else last_migrated end,updated_at=now() where id=$1 or status='active'`, [migration.target_account_id])
+    await db.query(`
+      with previous as (
+        select total_buckets,total_objects,total_bytes,last_synced_at
+        from drive_accounts where status='active' and id<>$1
+        order by last_synced_at desc nulls last limit 1
+      )
+      update drive_accounts a set
+        status=case when a.id=$1 then 'active' when a.status='active' then 'available' else a.status end,
+        last_migrated=case when a.id=$1 then to_char(now(),'YYYY-MM-DD HH24:MI:SS') else a.last_migrated end,
+        total_buckets=case when a.id=$1 and a.last_synced_at is null then coalesce((select total_buckets from previous),a.total_buckets) else a.total_buckets end,
+        total_objects=case when a.id=$1 and a.last_synced_at is null then coalesce((select total_objects from previous),a.total_objects) else a.total_objects end,
+        total_bytes=case when a.id=$1 and a.last_synced_at is null then coalesce((select total_bytes from previous),a.total_bytes) else a.total_bytes end,
+        last_synced_at=case when a.id=$1 and a.last_synced_at is null then (select last_synced_at from previous) else a.last_synced_at end,
+        sync_status=case when a.id=$1 then 'syncing' else a.sync_status end,
+        sync_message=case when a.id=$1 then 'Awaiting Backend Orchestrator refresh; showing last committed totals' else a.sync_message end,
+        updated_at=now()
+      where a.id=$1 or a.status='active'
+    `, [migration.target_account_id])
     await db.query(`update drive_migrations set status='completed',completed_at=now(),sync_status='synced',sync_message='Migration independently verified',last_synced_at=now(),updated_at=now(),summary_item_count=(select count(*) from drive_migration_items where migration_id=$1),summary_objects=(select coalesce(sum(source_objects),0) from drive_migration_items where migration_id=$1),summary_bytes=(select coalesce(sum(source_bytes),0) from drive_migration_items where migration_id=$1) where id=$1`, [migration.id])
     await db.query("commit")
   } catch (error) { await db.query("rollback"); throw error }

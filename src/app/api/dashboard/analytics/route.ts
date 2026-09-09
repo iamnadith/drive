@@ -526,9 +526,10 @@ async function buildAnalyticsPayload(range: RangeKey) {
     }
   })
 
-  // Current KPIs are strictly active-account scoped. Historical chart data,
-  // archived rows, and disabled accounts must never be used as current values.
-  const activeAggregateReady = activeAccount?.syncStatus === "ok"
+  // Account totals are the last atomically committed provider snapshot. Keep
+  // using them during a refresh; pending bucket rows are work-in-progress and
+  // must never replace a committed snapshot with placeholder zeroes.
+  const activeAggregateReady = Boolean(activeAccount?.lastSyncedAt)
   const activeBucketCount = new Set(activeBucketStats.map((row) => row.bucket_name)).size
   const activeBucketObjects = activeBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0)
   const activeBucketBytes = activeBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0)
@@ -630,7 +631,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
         return status === "pending" || status === "running" || status === "error"
       }))
   const staleBucketStats =
-    activeBucketStatsIncomplete ||
+    (activeBucketStatsIncomplete && !activeAggregateReady) ||
     (Boolean(activeAccount) && activeBucketStats.length > 0 && !Number.isFinite(newestBucketStat))
 
   return {

@@ -515,7 +515,19 @@ alter table public.drive_project_object_inventory alter column bucket_name set d
 alter table public.drive_project_object_inventory alter column bucket_name set not null;
 alter table public.drive_project_object_inventory alter column file_id set default encode(gen_random_bytes(12), 'hex');
 alter table public.drive_project_object_inventory alter column file_id set not null;
-alter table public.drive_project_object_inventory drop constraint if exists drive_project_object_inventory_pkey;
+do $$
+declare
+  constraint_name text;
+begin
+  for constraint_name in
+    select conname
+    from pg_constraint
+    where conrelid = 'public.drive_project_object_inventory'::regclass
+      and contype = 'p'
+  loop
+    execute format('alter table public.drive_project_object_inventory drop constraint %I', constraint_name);
+  end loop;
+end $$;
 alter table public.drive_project_object_inventory add constraint drive_project_object_inventory_pkey primary key (project_id, bucket_name, object_key);
 create unique index if not exists drive_project_object_inventory_file_id_key
   on drive_project_object_inventory (file_id);

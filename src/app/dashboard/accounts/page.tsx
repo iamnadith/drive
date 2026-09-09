@@ -371,6 +371,21 @@ export default function AccountsPage() {
   }, [loadAccounts]);
 
   React.useEffect(() => {
+    const refresh = () => void loadAccounts({ silent: true });
+    const interval = window.setInterval(refresh, 15_000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [loadAccounts]);
+
+  React.useEffect(() => {
     if (!settingsAccount) return;
     setEditLabel(settingsAccount.name || "");
     setEditEmail(settingsAccount.email || "");

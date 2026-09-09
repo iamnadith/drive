@@ -515,6 +515,10 @@ export async function activateAccountForCompletedMigration(input: {
   const accounts = await getAllAccounts()
   const target = accounts.find((account) => account.id === targetAccountId)
   if (!target) throw new Error("Migration target account not found")
+  const lastCommitted = accounts
+    .filter((account) => account.lastSyncedAt)
+    .sort((a, b) => Date.parse(b.lastSyncedAt || "") - Date.parse(a.lastSyncedAt || ""))[0]
+  const retainedSnapshot = target.lastSyncedAt ? target : lastCommitted
 
   const completedAt =
     typeof input.completedAt === "string" && input.completedAt.trim().length > 0
@@ -528,9 +532,12 @@ export async function activateAccountForCompletedMigration(input: {
   if (target.status === "active") {
     return updateAccount(target.id, {
       lastMigrated: completedAt,
-      lastSyncedAt: null,
+      totalBuckets: retainedSnapshot?.totalBuckets ?? target.totalBuckets,
+      totalObjects: retainedSnapshot?.totalObjects ?? target.totalObjects,
+      totalBytes: retainedSnapshot?.totalBytes ?? target.totalBytes,
+      lastSyncedAt: retainedSnapshot?.lastSyncedAt ?? null,
       syncStatus: "syncing",
-      syncMessage: "Awaiting Backend Orchestrator refresh after migration activation",
+      syncMessage: "Awaiting Backend Orchestrator refresh; showing last committed totals",
     })
   }
 
@@ -538,9 +545,12 @@ export async function activateAccountForCompletedMigration(input: {
     const updated = await updateAccount(target.id, {
       status: "active",
       lastMigrated: completedAt,
-      lastSyncedAt: null,
+      totalBuckets: retainedSnapshot?.totalBuckets ?? target.totalBuckets,
+      totalObjects: retainedSnapshot?.totalObjects ?? target.totalObjects,
+      totalBytes: retainedSnapshot?.totalBytes ?? target.totalBytes,
+      lastSyncedAt: retainedSnapshot?.lastSyncedAt ?? null,
       syncStatus: "syncing",
-      syncMessage: "Awaiting Backend Orchestrator refresh after migration activation",
+      syncMessage: "Awaiting Backend Orchestrator refresh; showing last committed totals",
     })
     const rows = await reconcileAccountStatuses(getSupabaseServerClient(), { preferredActiveAccountId: target.id })
     const reconciled = rows.find((account) => account.id === target.id)
@@ -559,9 +569,12 @@ export async function activateAccountForCompletedMigration(input: {
 
     return updateAccount(activeTarget.id, {
       lastMigrated: completedAt,
-      lastSyncedAt: null,
+      totalBuckets: retainedSnapshot?.totalBuckets ?? activeTarget.totalBuckets,
+      totalObjects: retainedSnapshot?.totalObjects ?? activeTarget.totalObjects,
+      totalBytes: retainedSnapshot?.totalBytes ?? activeTarget.totalBytes,
+      lastSyncedAt: retainedSnapshot?.lastSyncedAt ?? null,
       syncStatus: "syncing",
-      syncMessage: "Awaiting Backend Orchestrator refresh after migration activation",
+      syncMessage: "Awaiting Backend Orchestrator refresh; showing last committed totals",
     })
   }
 }

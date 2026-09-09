@@ -75,6 +75,7 @@ test("backend orchestrator uses account analytics without per-object scans and p
 test("worker sync is aggregate-only and resumable across CPU-limited invocations", () => {
   const orchestrator = read("workers/backend-orchestrator/src/index.ts")
   const analyticsRoute = read("src/app/api/dashboard/analytics/route.ts")
+  const accountsPage = read("src/app/dashboard/accounts/page.tsx")
   const accountsStore = read("src/lib/accounts-store.ts")
   const deploy = read("workers/backend-orchestrator/scripts/deploy.mjs")
 
@@ -136,8 +137,12 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   assert.doesNotMatch(analyticsRoute, /listLogicalStorageSnapshots/)
   assert.doesNotMatch(analyticsRoute, /capture\("accounts"/)
   assert.doesNotMatch(analyticsRoute, /capture\("bucket stats"/)
-  assert.match(accountsStore, /Awaiting Backend Orchestrator refresh after migration activation/)
-  assert.equal((accountsStore.match(/lastSyncedAt: null/g) || []).length >= 3, true)
+  assert.match(accountsStore, /showing last committed totals/)
+  assert.match(accountsStore, /retainedSnapshot/)
+  assert.match(analyticsRoute, /activeAggregateReady = Boolean\(activeAccount\?\.lastSyncedAt\)/)
+  assert.match(analyticsRoute, /activeBucketStatsIncomplete && !activeAggregateReady/)
+  assert.match(accountsPage, /window\.setInterval\(refresh, 15_000\)/)
+  assert.match(accountsPage, /visibilitychange/)
   assert.match(orchestrator, /processedBuckets: nextOffset/)
   assert.match(orchestrator, /const batch = buckets\.slice\(bucketOffset, bucketOffset \+ BUCKET_BATCH_SIZE\)/)
   assert.match(orchestrator, /bucketOffset \+ batch\.length/)
