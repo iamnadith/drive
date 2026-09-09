@@ -14,7 +14,7 @@ const directory = mkdtempSync(join(tmpdir(), "drive-migration-orchestrator-")); 
 function ensureQueue(wrangler, name) {
   const created = spawnSync(wrangler, ["wrangler", "queues", "create", name], { encoding: "utf8", shell: false })
   const output = `${created.stdout || ""}\n${created.stderr || ""}`
-  if (created.status === 0 || /already exists|already been taken|code.?10020/i.test(output)) return
+  if (created.status === 0 || /already exists|already (?:been |is )?taken|code.?11009|code.?10020/i.test(output)) return
   throw new Error(output.trim() || `Unable to create Cloudflare Queue ${name}`)
 }
 function deployWithRetry(wrangler, args) {
