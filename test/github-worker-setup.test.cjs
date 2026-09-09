@@ -244,6 +244,8 @@ test('dashboard workflow picker has no repository-independent fallback item', ()
   const page = fs.readFileSync(path.resolve('src/app/dashboard/workers/page.tsx'), 'utf8')
   assert.doesNotMatch(page, /<SelectItem value=["']\.github\/workflows\/migration-worker\.yml["']/)
   assert.match(page, /githubWorkflows\.map\(\(workflow\)/)
+  assert.match(page, /typeof workflows\[0\]\?\.path === "string" \? workflows\[0\]\.path : ""/)
+  assert.doesNotMatch(page, /<Select disabled=\{repositoryMode === "auto" \|\|/)
 })
 test('migration worker workflow exposes the dispatch contract used by the panel', () => {
   const workflowFile = fs.readFileSync(path.resolve('.github/workflows/migration-worker.yml'), 'utf8')

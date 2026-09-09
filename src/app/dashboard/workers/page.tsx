@@ -501,7 +501,10 @@ export default function WorkersPage() {
         if (controller.signal.aborted) return
         const workflows = typeof json === "object" && json !== null && Array.isArray((json as any).workflows) ? (json as any).workflows : []
         setGithubWorkflows(workflows)
-        setGithubWorkflowFile((current) => workflows.some((workflow: { path?: unknown }) => workflow.path === current) ? current : "")
+        setGithubWorkflowFile((current) => {
+          if (workflows.some((workflow: { path?: unknown }) => workflow.path === current)) return current
+          return typeof workflows[0]?.path === "string" ? workflows[0].path : ""
+        })
       } catch (error) {
         if (!controller.signal.aborted) toast.error(error instanceof Error ? error.message : "Unable to load GitHub workflows")
       } finally {
@@ -1029,7 +1032,7 @@ export default function WorkersPage() {
                   </div>
                   <div className="space-y-2">
                     <Label>Workflow</Label>
-                    <Select disabled={repositoryMode === "auto" || !githubRepoOwner || !githubRepoName || githubWorkflowsLoading} value={githubWorkflowFile} onValueChange={setGithubWorkflowFile}>
+                    <Select disabled={!githubRepoOwner || !githubRepoName || githubWorkflowsLoading} value={githubWorkflowFile} onValueChange={setGithubWorkflowFile}>
                       <SelectTrigger>
                         <SelectValue placeholder={!githubRepoOwner || !githubRepoName ? "Choose repository first" : githubWorkflowsLoading ? "Loading workflows..." : githubWorkflows.length > 0 ? "Select workflow" : "No workflow files found"} />
                       </SelectTrigger>
