@@ -1157,6 +1157,7 @@ export async function ensureDriveSchema(): Promise<void> {
           mismatched_objects bigint not null default 0,
           extra_objects bigint not null default 0,
           attempt_count integer not null default 0,
+          attempt_generation integer,
           last_error text,
           lease_owner text,
           lease_expires_at timestamptz,
@@ -1165,6 +1166,7 @@ export async function ensureDriveSchema(): Promise<void> {
           updated_at timestamptz not null default now()
         );
       `)
+      await queryDb(`alter table if exists drive_migration_verification_state add column if not exists attempt_generation integer;`)
       await queryDb(`create index if not exists drive_migration_verification_state_queue_idx on drive_migration_verification_state (status, updated_at);`)
       await queryDb(`create index if not exists drive_migration_verification_state_migration_idx on drive_migration_verification_state (migration_id, generation);`)
       await queryDb(`

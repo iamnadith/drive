@@ -41,6 +41,7 @@ async function ensureSchema(db: Client) {
       id boolean primary key default true check(id),status text not null default 'idle',last_started_at timestamptz,last_completed_at timestamptz,
       last_error text,last_result jsonb not null default '{}'::jsonb,cycle_count bigint not null default 0,updated_at timestamptz not null default now()
     );
+    alter table if exists drive_migration_verification_state add column if not exists attempt_generation integer;
     create index if not exists drive_migration_verification_state_queue_idx on drive_migration_verification_state(status,updated_at);
   `)
 }
@@ -69,7 +70,9 @@ async function listObjects(env: Env, account: Row, bucket: string, cursor: strin
 }
 
 async function claim(db: Client, owner: string): Promise<Row | null> {
-  const result = await db.query(`
+  let result
+  try {
+    result = await db.query(`
     with candidate as (
       select v.migration_item_id,i.source_bucket,i.target_bucket,i.source_jurisdiction,m.source_account_id,m.target_account_id,
         jsonb_build_object('cloudflare_account_id',sa.cloudflare_account_id,'api_token',sa.api_token) source_account,
@@ -82,11 +85,15 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
       order by v.updated_at for update of v skip locked limit 1
     )
     update drive_migration_verification_state v set status='running',lease_owner=$1,lease_expires_at=now()+interval '90 seconds',
-      attempt_count=case when v.attempt_generation<>v.generation then 0 else v.attempt_count end,
-      attempt_generation=v.generation,last_error=case when v.attempt_generation<>v.generation then null else v.last_error end,updated_at=now()
+      attempt_count=case when v.attempt_generation is distinct from v.generation then 0 else v.attempt_count end,
+      attempt_generation=v.generation,last_error=case when v.attempt_generation is distinct from v.generation then null else v.last_error end,updated_at=now()
     from candidate c where v.migration_item_id=c.migration_item_id
     returning v.*,c.source_bucket,c.target_bucket,c.source_jurisdiction,c.source_account_id,c.target_account_id,c.source_account,c.target_account
-  `, [owner])
+    `, [owner])
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`File Scanner verification claim failed: ${message}`)
+  }
   return result.rows[0] || null
 }
 async function claimGenericScan(db: Client, owner: string): Promise<Row | null> {
@@ -245,6 +252,7 @@ async function finishState(db: Client, owner: string, result: Row, error?: strin
 }
 async function cycle(env: Env) {
   return database(env, async (db) => {
+    await ensureSchema(db)
     const owner = crypto.randomUUID()
     const lease = await db.query(`
       insert into drive_file_scanner_state(id,status,lease_owner,last_started_at,last_error,updated_at) values(true,'running',$1,now(),null,now())
