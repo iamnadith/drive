@@ -48,11 +48,12 @@ async function ensureSchema(db: Client) {
 function pageSize(_env: Env) { return 1000 }
 function encodePath(value: string) { return encodeURIComponent(value) }
 
-async function listObjects(env: Env, account: Row, bucket: string, cursor: string | null, jurisdiction: string | null) {
+async function listObjects(env: Env, account: Row, bucket: string, cursor: string | null, jurisdiction: string | null, prefix: string | null = null) {
   if (!account.cloudflare_account_id || !account.api_token) throw new Error("R2 account ID or API token is missing")
   const url = new URL(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account.cloudflare_account_id)}/r2/buckets/${encodePath(bucket)}/objects`)
   url.searchParams.set("per_page", String(pageSize(env)))
   if (cursor) url.searchParams.set("cursor", cursor)
+  if (prefix) url.searchParams.set("prefix", prefix)
   const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 20_000)
   try {
     const headers: Record<string, string> = { Authorization: `Bearer ${account.api_token}`, Accept: "application/json" }
@@ -75,12 +76,13 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
     result = await db.query(`
     with candidate as (
       select v.migration_item_id,i.source_bucket,i.target_bucket,i.source_jurisdiction,m.source_account_id,m.target_account_id,
+        nullif(m.options->>'pathPrefix','') scan_prefix,
         jsonb_build_object('cloudflare_account_id',sa.cloudflare_account_id,'api_token',sa.api_token) source_account,
         jsonb_build_object('cloudflare_account_id',ta.cloudflare_account_id,'api_token',ta.api_token) target_account
       from drive_migration_verification_state v join drive_migrations m on m.id=v.migration_id
         join drive_migration_items i on i.id=v.migration_item_id
         join drive_accounts sa on sa.id=m.source_account_id join drive_accounts ta on ta.id=m.target_account_id
-      where m.status='verifying' and m.options->>'executionMode'='migration_workers'
+      where m.status='verifying'
         and v.status in('pending','running') and (v.lease_expires_at is null or v.lease_expires_at<now())
       order by v.updated_at for update of v skip locked limit 1
     )
@@ -102,13 +104,17 @@ async function claimGenericScan(db: Client, owner: string): Promise<Row | null> 
       select s.id,s.account_id,s.bucket_name,s.prefix,s.cursor,a.cloudflare_account_id,a.api_token,coalesce(bs.jurisdiction,'default') jurisdiction
       from drive_bucket_scans s join drive_accounts a on a.id=s.account_id
       left join drive_bucket_settings_snapshots bs on bs.account_id=s.account_id and bs.bucket_name=s.bucket_name
-      where s.migration_item_id is null and s.status in('pending','running')
+      where s.status in('pending','running')
         and (s.lease_expires_at is null or s.lease_expires_at<now())
+        and not exists (
+          select 1 from drive_migration_verification_state v
+          where v.source_scan_id=s.id or v.destination_scan_id=s.id
+        )
       order by s.updated_at for update of s skip locked limit 1
     )
     update drive_bucket_scans s set status='running',lease_owner=$1,lease_expires_at=now()+interval '90 seconds',started_at=coalesce(started_at,now()),updated_at=now()
     from candidate c where s.id=c.id
-    returning s.*,c.cloudflare_account_id,c.api_token
+    returning s.*,c.cloudflare_account_id,c.api_token,c.jurisdiction
   `, [owner])
   return result.rows[0] || null
 }
@@ -213,7 +219,7 @@ async function processTask(db: Client, env: Env, task: Row) {
   const account = phase === "source" ? task.source_account : task.target_account
   const bucket = phase === "source" ? task.source_bucket : task.target_bucket
   const cursor = phase === "source" ? task.source_cursor : task.destination_cursor
-  const page = await listObjects(env, account, bucket, cursor, task.source_jurisdiction || null)
+  const page = await listObjects(env, account, bucket, cursor, task.source_jurisdiction || null, task.scan_prefix || null)
   await storePage(db, scanId, page.objects)
   const objects = page.objects.length; const bytes = page.objects.reduce((sum: number, object: Row) => sum + object.size, 0)
   const cursorColumn = phase === "source" ? "source_cursor" : "destination_cursor"
@@ -235,7 +241,7 @@ async function processTask(db: Client, env: Env, task: Row) {
 }
 async function processGenericScan(db: Client, env: Env, task: Row) {
   const account = { cloudflare_account_id: task.cloudflare_account_id, api_token: task.api_token }
-  const page = await listObjects(env, account, task.bucket_name, task.cursor || null, null)
+  const page = await listObjects(env, account, task.bucket_name, task.cursor || null, task.jurisdiction || null, task.prefix || null)
   await storePage(db, task.id, page.objects)
   if (page.truncated && (!page.cursor || page.cursor === task.cursor)) throw new Error("R2 returned a truncated page without a forward cursor")
   const updated = await db.query(`

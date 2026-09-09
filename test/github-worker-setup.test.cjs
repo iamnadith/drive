@@ -255,6 +255,7 @@ test('migration and file orchestrators operate through durable shared state with
   const file = fs.readFileSync(path.resolve('workers/file-scanner/src/index.ts'), 'utf8')
   const worker = fs.readFileSync(path.resolve('workers/migration-worker/migration-worker.mjs'), 'utf8')
   const liveState = fs.readFileSync(path.resolve('src/lib/migration-live-state.ts'), 'utf8')
+  const panelSync = fs.readFileSync(path.resolve('src/app/api/migrations/[id]/sync/route.ts'), 'utf8')
   assert.match(migration, /POSTGRES_URL/)
   assert.match(migration, /drive_migration_verification_state/)
   assert.match(migration, /verifyStrictDestination/)
@@ -264,6 +265,21 @@ test('migration and file orchestrators operate through durable shared state with
   assert.match(file, /for update of v skip locked/)
   assert.match(file, /claimGenericScan/)
   assert.match(file, /R2 returned a truncated page without a forward cursor/)
+  assert.doesNotMatch(file, /m\.options->>'executionMode'='migration_workers'/)
+  assert.doesNotMatch(file, /s\.migration_item_id is null/)
+  const sourceScanQueue = panelSync.slice(
+    panelSync.indexOf('const incompleteSourceScans'),
+    panelSync.indexOf('// Refresh progress for any created jobs.')
+  )
+  const workerVerificationQueue = panelSync.slice(
+    panelSync.indexOf('const workerVerifyEnabled'),
+    panelSync.indexOf('// Post-copy verification:')
+  )
+  assert.match(sourceScanQueue, /wakeFileScanner\(\)/)
+  assert.doesNotMatch(sourceScanQueue, /runBucketScanBatch/)
+  assert.match(workerVerificationQueue, /ensureFileVerification/)
+  assert.match(workerVerificationQueue, /wakeFileScanner\(\)/)
+  assert.doesNotMatch(workerVerificationQueue, /runBucketScanBatch|computeAndStoreVerifyDiffs/)
   assert.match(worker, /claimJobDirect/)
   assert.match(worker, /for update skip locked/)
   assert.match(worker, /claim_token=gen_random_uuid/)

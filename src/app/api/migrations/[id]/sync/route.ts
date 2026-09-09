@@ -43,10 +43,61 @@ import {
 import { getMigrationReadOnlyState, isPermanentAccountCommunicationFailure } from "@/lib/migration-read-only"
 import { requireAdmin } from "@/lib/server-auth"
 import { readLiveBucketState, shouldUseLiveBucketState } from "@/lib/migration-bucket-state"
+import { queryDb } from "@/lib/db"
+import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
 
 export const runtime = "nodejs"
 
 const MAX_CLOUDFLARE_CONCURRENT_JOBS = 3
+
+async function wakeFileScanner(): Promise<void> {
+  const settings = await getMigrationOrchestratorSettings()
+  if (!settings.fileScannerEnabled || !settings.fileScannerUrl || !settings.fileScannerSecret) {
+    throw new Error("File Scanner must be configured and enabled for migration bucket scanning")
+  }
+  const response = await fetch(`${settings.fileScannerUrl.replace(/\/+$/, "")}/run`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${settings.fileScannerSecret}` },
+    signal: AbortSignal.timeout(8_000),
+  })
+  if (!response.ok) throw new Error(`File Scanner wake-up returned HTTP ${response.status}`)
+}
+
+type FileVerificationRow = {
+  status: string
+  missing_objects: string | number
+  mismatched_objects: string | number
+  extra_objects: string | number
+  last_error: string | null
+}
+
+async function ensureFileVerification(input: {
+  migrationId: string
+  itemId: string
+  sourceScanId: string
+  destinationScanId: string
+}): Promise<FileVerificationRow> {
+  const { rows } = await queryDb<FileVerificationRow>(`
+    insert into drive_migration_verification_state(
+      migration_item_id,migration_id,generation,source_scan_id,destination_scan_id,phase,status,updated_at
+    ) values($1,$2,1,$3,$4,'compare','pending',now())
+    on conflict(migration_item_id) do update set
+      generation=drive_migration_verification_state.generation+1,
+      source_scan_id=excluded.source_scan_id,destination_scan_id=excluded.destination_scan_id,
+      phase='compare',status='pending',missing_objects=0,mismatched_objects=0,extra_objects=0,
+      attempt_count=0,attempt_generation=null,last_error=null,lease_owner=null,lease_expires_at=null,completed_at=null,updated_at=now()
+    where drive_migration_verification_state.source_scan_id is distinct from excluded.source_scan_id
+       or drive_migration_verification_state.destination_scan_id is distinct from excluded.destination_scan_id
+    returning status,missing_objects,mismatched_objects,extra_objects,last_error
+  `, [input.itemId, input.migrationId, input.sourceScanId, input.destinationScanId])
+  if (rows[0]) return rows[0]
+  const current = await queryDb<FileVerificationRow>(`
+    select status,missing_objects,mismatched_objects,extra_objects,last_error
+    from drive_migration_verification_state where migration_item_id=$1
+  `, [input.itemId])
+  if (!current.rows[0]) throw new Error("Unable to queue File Scanner verification")
+  return current.rows[0]
+}
 
 function isRecentlySynced(lastSyncedAt: string | undefined, withinMs = 5_000): boolean {
   if (!lastSyncedAt) return false
@@ -600,64 +651,33 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       await updateMigration(id, {
         status: migration.status === "draft" ? "running" : migration.status,
         syncStatus: "syncing",
-        syncMessage: `Scanning source buckets (${incompleteSourceScans.length} remaining)`,
+        syncMessage: `File Scanner is scanning source buckets (${incompleteSourceScans.length} remaining)`,
         lastSyncedAt: new Date().toISOString(),
       })
+      await wakeFileScanner()
+      // The panel only observes durable scan state. The File Scanner owns all
+      // provider listing and inventory writes.
+      return NextResponse.json({ migration: await getMigration(id), items: await listMigrationItems(id) }, { status: 200 })
+    }
 
-      // Scan at most 1 bucket per tick to keep latency low.
-      const targetScan = incompleteSourceScans[0]!
-      try {
-        const scan = await runBucketScanBatch({
-          scanId: targetScan.scanId,
-          r2: {
-            accountId: source.cloudflareAccountId!,
-            accessKeyId: source.r2AccessKeyId!,
-            secretAccessKey: source.r2SecretAccessKey!,
-          },
-          bucketName: targetScan.item.sourceBucket,
-          prefix: scanPrefix,
-          maxObjects: 2_000,
-        })
-
-        await updateMigrationItem(targetScan.item.id, {
-          sourceObjects: scan.objects,
-          sourceBytes: scan.bytes,
+    for (const target of scanTargets) {
+      if (!target.scan) continue
+      if (target.scan.status === "failed") throw new Error(target.scan.error || `File Scanner failed for ${target.item.sourceBucket}`)
+      if (target.scan.status === "completed") {
+        await updateMigrationItem(target.item.id, {
+          sourceObjects: target.scan.objects,
+          sourceBytes: target.scan.bytes,
           progress: {
-            ...targetScan.item.progress,
-            stage: "scanning_source",
-            sourceScanId: scan.id,
-            sourceScanStatus: scan.status,
+            ...target.item.progress,
+            stage: "scan_completed",
+            sourceScanId: target.scan.id,
+            sourceScanStatus: "completed",
             error: null,
             lastError: null,
           },
           lastProgressAt: new Date().toISOString(),
         })
-      } catch (e: unknown) {
-        const message =
-          typeof e === "object" && e !== null && "message" in e
-            ? String((e as { message?: unknown }).message ?? "Source scan failed")
-            : "Source scan failed"
-        if (isTransientNetworkError(e)) {
-          await updateMigrationItem(targetScan.item.id, {
-            progress: {
-              ...targetScan.item.progress,
-              stage: "scanning_source_retry",
-              error: null,
-              lastError: message,
-            },
-            lastProgressAt: new Date().toISOString(),
-          })
-        } else {
-          await markBucketScanFailed({ scanId: targetScan.scanId, error: message })
-          await updateMigrationItem(targetScan.item.id, {
-            progress: { ...targetScan.item.progress, stage: "scan_failed", error: message },
-            lastProgressAt: new Date().toISOString(),
-          })
-        }
       }
-
-      // Return early; scanning must finish before job creation to ensure accurate totals.
-      return NextResponse.json({ migration: await getMigration(id), items: await listMigrationItems(id) }, { status: 200 })
     }
 
     // Refresh progress for any created jobs.
@@ -1133,6 +1153,115 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     items = await listMigrationItems(id)
+
+    const workerVerifyEnabled = migration.options?.verifyAfterCopy !== false
+    if (workerVerifyEnabled) {
+      const strictDestination = migration.options?.verifyStrictDestination === true
+      const verifyPrefix = typeof pathPrefix === "string" && pathPrefix.trim().length > 0 ? pathPrefix : null
+      let scannerWorkPending = false
+      const workerSuccessStatus = (value: string | undefined) =>
+        ["completed", "copy_completed", "complete", "finished", "success", "succeeded"].includes(String(value ?? "").toLowerCase())
+
+      for (const item of items.filter((candidate) => workerSuccessStatus(candidate.slurperStatus))) {
+        const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
+        const sourceScanId = typeof progress.sourceScanId === "string" ? progress.sourceScanId : ""
+        if (!sourceScanId) throw new Error(`Source scan is missing for ${item.sourceBucket}`)
+
+        const existingDestinationScanId = typeof progress.destScanId === "string" ? progress.destScanId : ""
+        const destinationScan = existingDestinationScanId
+          ? await getBucketScan(existingDestinationScanId)
+          : await ensureBucketScan({
+              accountId: target.id,
+              bucketName: item.targetBucket,
+              kind: "dest",
+              migrationId: id,
+              migrationItemId: item.id,
+              prefix: verifyPrefix,
+            })
+        if (!destinationScan) throw new Error(`Destination scan is missing for ${item.targetBucket}`)
+        if (destinationScan.status === "failed") {
+          throw new Error(destinationScan.error || `File Scanner failed for ${item.targetBucket}`)
+        }
+
+        if (destinationScan.status !== "completed") {
+          scannerWorkPending = true
+          await updateMigrationItem(item.id, {
+            progress: {
+              ...progress,
+              stage: "verify_scanning_dest",
+              destScanId: destinationScan.id,
+              error: null,
+              lastError: null,
+              verify: {
+                ...createInitialBucketVerifyState({ prefix: verifyPrefix ?? undefined }),
+                status: "running",
+                sourceListedObjects: item.sourceObjects ?? 0,
+                destListedObjects: destinationScan.objects,
+                updatedAt: new Date().toISOString(),
+              },
+            },
+            lastProgressAt: new Date().toISOString(),
+          })
+          continue
+        }
+
+        const verification = await ensureFileVerification({
+          migrationId: id,
+          itemId: item.id,
+          sourceScanId,
+          destinationScanId: destinationScan.id,
+        })
+        const missing = Number(verification.missing_objects || 0)
+        const mismatched = Number(verification.mismatched_objects || 0)
+        const extra = Number(verification.extra_objects || 0)
+        if (verification.status === "pending" || verification.status === "running") scannerWorkPending = true
+        const completed = verification.status === "completed"
+        const ok = completed && missing === 0 && mismatched === 0 && (!strictDestination || extra === 0)
+        const failed = verification.status === "failed" || (completed && !ok)
+        const lastError = verification.last_error ||
+          (missing ? `Verification failed: ${missing} source objects missing in destination` :
+            mismatched ? `Verification failed: ${mismatched} objects have size mismatches` :
+              strictDestination && extra ? `Verification failed: ${extra} extra objects in destination` : "")
+
+        await updateMigrationItem(item.id, {
+          progress: {
+            ...progress,
+            stage: completed ? "verify_progress" : "verify_queued",
+            destScanId: destinationScan.id,
+            error: failed ? lastError || "File Scanner verification failed" : null,
+            lastError: failed ? lastError || "File Scanner verification failed" : null,
+            verify: {
+              ...createInitialBucketVerifyState({ prefix: verifyPrefix ?? undefined }),
+              status: failed ? "error" : completed ? "ok" : "running",
+              sourceListedObjects: item.sourceObjects ?? 0,
+              destListedObjects: destinationScan.objects,
+              missingInDest: missing,
+              sizeMismatched: mismatched,
+              extraInDest: extra,
+              updatedAt: new Date().toISOString(),
+              ...(completed ? { finishedAt: new Date().toISOString() } : {}),
+              lastError,
+            },
+          },
+          lastProgressAt: new Date().toISOString(),
+        })
+      }
+
+      if (scannerWorkPending) {
+        await updateMigration(id, {
+          status: "verifying",
+          syncStatus: "syncing",
+          syncMessage: "File Scanner verification in progress",
+          lastSyncedAt: new Date().toISOString(),
+        })
+        await wakeFileScanner()
+      }
+      await syncMigrationLiveState(id).catch(() => undefined)
+      if (finalizeSettings && !scannerWorkPending) {
+        after(async () => { await syncMigrationLiveState(id, { runSettingsSync: true }).catch(() => undefined) })
+      }
+      return NextResponse.json({ migration: await getMigration(id), items: await listMigrationItems(id) }, { status: 200 })
+    }
 
     // Post-copy verification: once Cloudflare marks a bucket "completed", we verify that every
     // source object exists in destination (and matches size). This is needed because the CF UI
