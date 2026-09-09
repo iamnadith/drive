@@ -1,5 +1,8 @@
 import crypto from "node:crypto"
 import { githubApi, GitHubApiError, listGitHubWorkflows } from "./github-oauth"
+import { isWorkerWorkflow } from "./github-worker-workflow"
+
+export { isWorkerWorkflow } from "./github-worker-workflow"
 
 const WORKFLOW_DIRECTORY = "workers/migration-worker"
 type Repo = {
@@ -52,13 +55,6 @@ async function getWorkerMarker(repo: Repo, token: string): Promise<{ workflow?: 
 
 type WorkflowFile = { id: string; name: string; path: string; state?: string; content: string }
 class WorkerWorkflowPendingError extends Error {}
-export function isWorkerWorkflow(content: string): boolean {
-  const hasBootstrap = content.includes("DRIVE_MIGRATION_ORCHESTRATOR_URL") && content.includes("DRIVE_WORKER_SHARED_SECRET")
-  return /^\s*workflow_dispatch\s*:/m.test(content) &&
-    ["migration_id", "repair_job_id", "agent_id"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content)) &&
-    hasBootstrap &&
-    content.includes(WORKFLOW_DIRECTORY)
-}
 
 export async function assertWorkerWorkflow(input: { token: string; owner: string; repo: string; ref: string; workflow: string }) {
   if (!/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(input.workflow)) throw new Error("Select a valid GitHub Actions workflow file")

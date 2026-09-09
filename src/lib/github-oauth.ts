@@ -1,4 +1,5 @@
 import crypto from "crypto"
+import { isWorkerWorkflow } from "./github-worker-workflow"
 
 export const GITHUB_TOKEN_COOKIE = "githubOAuthToken"
 export const GITHUB_STATE_COOKIE = "githubOAuthState"
@@ -213,9 +214,7 @@ export async function listGitHubWorkflows(token: string, owner: string, repo: st
           if (compatibleOnly) {
             if (file.encoding !== "base64" || !file.content) return null
             const content = Buffer.from(file.content, "base64").toString("utf8")
-            const hasInputs = ["migration_id", "repair_job_id", "agent_id"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content))
-            const hasBootstrap = /^\s*POSTGRES_URL\s*:/m.test(content) || ["server_url", "agent_token"].every((key) => new RegExp(`^\\s*${key}\\s*:`, "m").test(content))
-            if (!/^\s*workflow_dispatch\s*:/m.test(content) || !hasInputs || !hasBootstrap || !content.includes("workers/migration-worker")) return null
+            if (!isWorkerWorkflow(content)) return null
           }
           return workflow
         } catch (error) {

@@ -6,11 +6,21 @@ const ts = require('typescript')
 const Module = require('node:module')
 const path = require('node:path')
 
+function loadWorkflowContract() {
+  const filename = path.resolve('src/lib/github-worker-workflow.ts')
+  const mod = new Module(filename, module)
+  mod.filename = filename
+  mod.paths = module.paths
+  mod._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, filename)
+  return mod.exports
+}
+
 function loadOAuth() {
   const filename = path.resolve('src/lib/github-oauth.ts')
   const mod = new Module(filename, module)
   mod.filename = filename
   mod.paths = module.paths
+  mod.require = (name) => name === './github-worker-workflow' ? loadWorkflowContract() : require(name)
   mod._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, filename)
   return mod.exports
 }
@@ -21,14 +31,18 @@ function loadSetup(api) {
   mod.filename = filename
   mod.paths = module.paths
   class GitHubApiError extends Error { constructor(message, status) { super(message); this.status = status } }
-  mod.require = (name) => name === './github-oauth' ? {
-    githubApi: api,
-    GitHubApiError,
-    listGitHubWorkflows: async (token, owner, repo) => {
-      const response = await api(`/repos/${owner}/${repo}/actions/workflows?per_page=100`, token)
-      return Array.isArray(response.workflows) ? response.workflows : []
-    },
-  } : require(name)
+  mod.require = (name) => {
+    if (name === './github-worker-workflow') return loadWorkflowContract()
+    if (name === './github-oauth') return {
+      githubApi: api,
+      GitHubApiError,
+      listGitHubWorkflows: async (token, owner, repo) => {
+        const response = await api(`/repos/${owner}/${repo}/actions/workflows?per_page=100`, token)
+        return Array.isArray(response.workflows) ? response.workflows : []
+      },
+    }
+    return require(name)
+  }
   mod._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, filename)
   return { ...mod.exports, GitHubApiError }
 }
@@ -199,6 +213,29 @@ test('workflow listing paginates beyond the first hundred records', async () => 
     const workflows = await oauth.listGitHubWorkflows('token', 'me', 'repo')
     assert.equal(workflows.length, 101)
     assert.equal(workflows.at(-1).path, '.github/workflows/worker.yml')
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+test('compatible workflow listing detects the current migration worker contract', async () => {
+  const oauth = loadOAuth()
+  const originalFetch = global.fetch
+  const workflowPath = '.github/workflows/migration-worker.yml'
+  const workflowContent = fs.readFileSync(path.resolve(workflowPath), 'utf8')
+  const response = (value) => ({ ok: true, status: 200, text: async () => JSON.stringify(value) })
+  global.fetch = async (input) => {
+    const url = String(input)
+    if (url.includes('/actions/workflows?')) {
+      return response({ workflows: [{ id: 1, name: 'Migration Worker', path: workflowPath, state: 'active' }] })
+    }
+    if (url.includes('/contents/.github/workflows/migration-worker.yml')) {
+      return response({ type: 'file', path: workflowPath, encoding: 'base64', content: Buffer.from(workflowContent).toString('base64') })
+    }
+    throw new Error(`Unexpected request: ${url}`)
+  }
+  try {
+    const workflows = await oauth.listGitHubWorkflows('token', 'me', 'repo', 'main', true)
+    assert.deepEqual(workflows, [{ id: '1', name: 'Migration Worker', path: workflowPath, state: 'active' }])
   } finally {
     global.fetch = originalFetch
   }
