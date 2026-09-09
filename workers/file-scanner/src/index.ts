@@ -4,7 +4,7 @@ import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3"
 type ScanMessage = { reason: "continue" }
 type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; FILE_SCAN_QUEUE: Queue<ScanMessage> }
 type Row = Record<string, any>
-const BUILD = 5
+const BUILD = 6
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -110,7 +110,7 @@ async function claimGenericScan(db: Client, owner: string): Promise<Row | null> 
     )
     update drive_bucket_scans s set status='running',lease_owner=$1,lease_expires_at=now()+interval '90 seconds',started_at=coalesce(started_at,now()),updated_at=now()
     from candidate c where s.id=c.id
-    returning s.*,c.cloudflare_account_id,c.api_token,c.jurisdiction
+    returning s.*,c.cloudflare_account_id,c.r2_access_key_id,c.r2_secret_access_key,c.jurisdiction
   `, [owner])
   return result.rows[0] || null
 }
