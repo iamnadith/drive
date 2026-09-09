@@ -17,6 +17,18 @@ function ensureQueue(wrangler, name) {
   if (created.status === 0 || /already exists|already been taken|code.?10020/i.test(output)) return
   throw new Error(output.trim() || `Unable to create Cloudflare Queue ${name}`)
 }
+function deployWithRetry(wrangler, args) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const result = spawnSync(wrangler, args, { encoding: "utf8", shell: false })
+    if (result.stdout) process.stdout.write(result.stdout)
+    if (result.stderr) process.stderr.write(result.stderr)
+    if (result.status === 0) return
+    const output = `${result.stdout || ""}\n${result.stderr || ""}`
+    const transient = /503|service unavailable|connection termination|connection reset|malformed response/i.test(output)
+    if (!transient || attempt === 3) process.exit(result.status ?? 1)
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, attempt * 3_000)
+  }
+}
 try {
   const wrangler = process.platform === "win32" ? "npx.cmd" : "npx"
   const auth = spawnSync(wrangler, ["wrangler", "whoami"], { stdio: "inherit", shell: false })
@@ -25,6 +37,5 @@ try {
     ensureQueue(wrangler, name)
   }
   writeFileSync(secrets, JSON.stringify({ POSTGRES_URL: url.toString(), FILE_SCANNER_SECRET: sharedSecret, PANEL_URL: panelUrl, DISABLE_POSTGRES_SSL: config.disablePostgresSsl === true ? "1" : "0" }), { mode: 0o600 })
-  const result = spawnSync(wrangler, ["wrangler", "deploy", "--secrets-file", secrets], { stdio: "inherit", shell: false })
-  if (result.status !== 0) process.exit(result.status ?? 1)
+  deployWithRetry(wrangler, ["wrangler", "deploy", "--secrets-file", secrets])
 } finally { rmSync(directory, { recursive: true, force: true }) }
