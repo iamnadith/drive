@@ -11,12 +11,6 @@ const config = await response.json().catch(() => ({}))
 if (!response.ok || config?.version !== 1 || !config?.postgresUrl) throw new Error(config?.error || `Invalid File Scanner build configuration (${response.status})`)
 const url = new URL(String(config.postgresUrl))
 const directory = mkdtempSync(join(tmpdir(), "drive-file-scanner-")); const secrets = join(directory, "secrets.json")
-function ensureQueue(wrangler, name) {
-  const created = spawnSync(wrangler, ["wrangler", "queues", "create", name], { encoding: "utf8", shell: false })
-  const output = `${created.stdout || ""}\n${created.stderr || ""}`
-  if (created.status === 0 || /already exists|already (?:been |is )?taken|code.?11009|code.?10020/i.test(output)) return
-  throw new Error(output.trim() || `Unable to create Cloudflare Queue ${name}`)
-}
 function deployWithRetry(wrangler, args) {
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const result = spawnSync(wrangler, args, { encoding: "utf8", shell: false })
@@ -31,11 +25,6 @@ function deployWithRetry(wrangler, args) {
 }
 try {
   const wrangler = process.platform === "win32" ? "npx.cmd" : "npx"
-  const auth = spawnSync(wrangler, ["wrangler", "whoami"], { stdio: "inherit", shell: false })
-  if (auth.status !== 0) process.exit(auth.status ?? 1)
-  for (const name of ["drive-file-scan", "drive-file-scan-dlq"]) {
-    ensureQueue(wrangler, name)
-  }
   writeFileSync(secrets, JSON.stringify({ POSTGRES_URL: url.toString(), FILE_SCANNER_SECRET: sharedSecret, PANEL_URL: panelUrl, DISABLE_POSTGRES_SSL: config.disablePostgresSsl === true ? "1" : "0" }), { mode: 0o600 })
   deployWithRetry(wrangler, ["wrangler", "deploy", "--secrets-file", secrets])
 } finally { rmSync(directory, { recursive: true, force: true }) }
