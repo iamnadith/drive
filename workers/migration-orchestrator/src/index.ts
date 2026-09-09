@@ -320,11 +320,11 @@ async function reconcileGitHubIntent(db: Client, intent: Row, agent: Row) {
   return true
 }
 
-async function consumeDispatch(env: Env, message: Message<DispatchMessage>) {
+async function consumeDispatch(env: Env, intentId: string, attempts: number) {
   return database(env, async (db) => {
-    const lock = await db.query(`select pg_try_advisory_lock(hashtext($1)) acquired`, [String(message.body?.intentId || "")])
+    const lock = await db.query(`select pg_try_advisory_lock(hashtext($1)) acquired`, [intentId])
     if (lock.rows[0]?.acquired !== true) return "awaiting_reconciliation"
-    const result = await db.query(`select r.*,a.github_repo_owner,a.github_repo_name,a.github_workflow_file,a.github_ref,a.github_token,a.status agent_status from drive_agent_runs r join drive_agents a on a.id=r.agent_id where r.id=$1 for update of r`, [message.body?.intentId])
+    const result = await db.query(`select r.*,a.github_repo_owner,a.github_repo_name,a.github_workflow_file,a.github_ref,a.github_token,a.status agent_status from drive_agent_runs r join drive_agents a on a.id=r.agent_id where r.id=$1 for update of r`, [intentId])
     const intent = result.rows[0]
     if (!intent || intent.external_run_id || ["completed", "failed", "canceled"].includes(intent.status)) return "terminal"
     if (intent.agent_status === "disabled" || !intent.github_token) throw new Error("Registered workflow is disabled or missing its GitHub token")
@@ -333,7 +333,7 @@ async function consumeDispatch(env: Env, message: Message<DispatchMessage>) {
     const dispatchStartedAt = Date.parse(String(intent.payload?.dispatchStartedAt || ""))
     if (phase === "accepted" || (phase === "dispatching" && Number.isFinite(dispatchStartedAt) && Date.now() - dispatchStartedAt < 5 * 60_000)) return "awaiting_reconciliation"
     const workerInstanceId = String(intent.payload.workerInstanceId)
-    await db.query(`update drive_agent_runs set payload=payload||$2::jsonb,summary='Submitting GitHub workflow dispatch',updated_at=now() where id=$1`, [intent.id, JSON.stringify({ phase: "dispatching", dispatchStartedAt: new Date().toISOString(), dispatchAttempt: message.attempts })])
+    await db.query(`update drive_agent_runs set payload=payload||$2::jsonb,summary='Submitting GitHub workflow dispatch',updated_at=now() where id=$1`, [intent.id, JSON.stringify({ phase: "dispatching", dispatchStartedAt: new Date().toISOString(), dispatchAttempt: attempts })])
     const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(intent.github_repo_owner)}/${encodeURIComponent(intent.github_repo_name)}/actions/workflows/${encodeURIComponent(intent.github_workflow_file || ".github/workflows/migration-worker.yml")}/dispatches`, {
       method: "POST", headers: { Authorization: `Bearer ${intent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator", "Content-Type": "application/json" },
       body: JSON.stringify({ ref: intent.github_ref || "main", inputs: { migration_id: intent.payload.migrationId, agent_id: intent.agent_id, worker_instance_id: workerInstanceId } }), signal: AbortSignal.timeout(20_000),
@@ -517,11 +517,11 @@ export default {
           else message.ack()
           continue
         }
-        const outcome = await consumeDispatch(env, message)
+        const outcome = await consumeDispatch(env, message.body.intentId, message.attempts)
         if (outcome === "accepted" || outcome === "awaiting_reconciliation") message.retry({ delaySeconds: 30 })
         else message.ack()
       } catch (error) {
-        console.error("GitHub dispatch message failed", message.body?.intentId, error)
+        console.error("GitHub dispatch message failed", "intentId" in message.body ? message.body.intentId : message.body.control, error)
         message.retry({ delaySeconds: Math.min(30 * (2 ** Math.min(message.attempts, 10)), 3600) })
       }
     }
