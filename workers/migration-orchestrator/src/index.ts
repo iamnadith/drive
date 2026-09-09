@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 5
+const BUILD = 6
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -89,7 +89,7 @@ async function ensureShards(db: Client, migration: Row) {
   }
   let inventoryPending = 0
   for (const item of items.rows) {
-    let scanId = String(item.progress?.migrationInventory?.sourceScanId || "")
+    let scanId = Number(item.progress?.migrationInventory?.generation) === generation ? String(item.progress?.migrationInventory?.sourceScanId || "") : ""
     if (!scanId) {
       const scan = await db.query(`insert into drive_bucket_scans(id,account_id,bucket_name,kind,migration_id,migration_item_id,status,created_at,updated_at) values(gen_random_uuid(),$1,$2,'migration_source_queue',$3,$4,'pending',now(),now()) returning id`, [migration.source_account_id, item.source_bucket, migration.id, item.id])
       scanId = scan.rows[0].id
@@ -108,7 +108,7 @@ async function ensureShards(db: Client, migration: Row) {
   const inserted = await db.query(`
     with objects as (
       select i.id item_id,i.source_bucket,i.target_bucket,s.id scan_id,o.key,o.size,o.etag,
-        ((row_number() over(partition by i.id order by o.key)-1)/250)::int batch_index
+        (row_number() over(partition by i.id order by o.key)-1)::int batch_index
       from drive_migration_items i join drive_bucket_scans s on s.id=(i.progress->'migrationInventory'->>'sourceScanId')::uuid
       join drive_bucket_scan_objects o on o.scan_id=s.id
       where i.migration_id=$1 and s.status='completed' and not o.is_dir_marker
@@ -134,7 +134,7 @@ async function recoverJobs(db: Client, migrationId: string, generation: number, 
   const result = await db.query(`
     update drive_repair_jobs set status='pending',claimed_by_agent_id=null,claim_token=null,claimed_at=null,started_at=null,last_heartbeat_at=null,error=null,
       summary='Recovered by Migration Orchestrator',result=jsonb_set(coalesce(result,'{}'::jsonb),'{retryCount}',to_jsonb(coalesce((result->>'retryCount')::int,0)+1)),updated_at=now()
-    where migration_id=$1 and work_key like $2 and work_key like $3 and ((status='failed' and coalesce((result->>'retryCount')::int,0)<3) or (status in('claimed','running') and coalesce(last_heartbeat_at,started_at,claimed_at,updated_at)<now()-interval '3 minutes'))
+    where migration_id=$1 and work_key like $2 and work_key like $3 and ((status='failed' and coalesce((result->>'retryCount')::int,0)<3) or status='canceled' or (status in('claimed','running') and coalesce(last_heartbeat_at,started_at,claimed_at,updated_at)<now()-interval '3 minutes'))
   `, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`, `%`])
   return result.rowCount || 0
 }

@@ -11,7 +11,7 @@ import {
 import { Upload } from "@aws-sdk/lib-storage"
 import { createClient as createSupabaseClient } from "@supabase/supabase-js"
 import { Client as PostgresClient } from "pg"
-import { randomUUID } from "crypto"
+import { createHash, randomUUID } from "crypto"
 import { mkdir, readFile, rename, writeFile } from "fs/promises"
 import os from "os"
 import path from "path"
@@ -1076,11 +1076,49 @@ async function getTargetObjectSize(targetClient, bucket, key) {
   }
 }
 
-async function inspectAssignedObjects(targetClient, bucket, objects) {
+async function hashObject(client, bucket, key, abortSignal) {
+  const response = await withRetries(
+    `hash ${bucket}/${key}`,
+    () => client.send(new GetObjectCommand({ Bucket: bucket, Key: key }), abortSignal ? { abortSignal } : undefined),
+    S3_RETRIES
+  )
+  const body = response.Body
+  if (!body) throw new Error(`Object body missing while hashing ${bucket}/${key}`)
+  const hash = createHash("sha256")
+  try {
+    for await (const chunk of body) {
+      if (abortSignal?.aborted) throw new JobAbortedError()
+      hash.update(chunk)
+    }
+    return hash.digest("hex")
+  } finally { closeBodyStream(body) }
+}
+
+async function inspectAssignedObjects(sourceClient, targetClient, sourceBucket, targetBucket, objects, abortSignal) {
   const found = []
-  await runConcurrent(objects, COPY_CONCURRENCY, async (object) => {
-    const size = await getTargetObjectSize(targetClient, bucket, object.key)
-    if (size !== null) found.push({ key: object.key, size })
+  await runConcurrent(objects, Math.min(2, COPY_CONCURRENCY), async (object) => {
+    let targetHead
+    try {
+      targetHead = await withRetries(`head target ${targetBucket}/${object.key}`, () => targetClient.send(new HeadObjectCommand({ Bucket: targetBucket, Key: object.key })), S3_RETRIES)
+    } catch (error) {
+      if (isObjectNotFoundError(error)) return
+      throw error
+    }
+    const actualSize = typeof targetHead.ContentLength === "number" ? targetHead.ContentLength : -1
+    if (actualSize !== Number(object.size)) { found.push({ key: object.key, size: actualSize }); return }
+    const [sourceSha256, destinationSha256] = await Promise.all([
+      hashObject(sourceClient, sourceBucket, object.key, abortSignal),
+      hashObject(targetClient, targetBucket, object.key, abortSignal),
+    ])
+    found.push({
+      key: object.key,
+      size: sourceSha256 === destinationSha256 ? actualSize : -1,
+      destinationSize: actualSize,
+      destinationEtag: typeof targetHead.ETag === "string" ? targetHead.ETag.replace(/^"|"$/g, "") : null,
+      sourceSha256,
+      destinationSha256,
+      integrityVerified: sourceSha256 === destinationSha256,
+    })
   })
   return found
 }
@@ -1559,7 +1597,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
       syncLiveProgress()
     })
     const allDestinationObjects = assignedInventory
-      ? await inspectAssignedObjects(targetClient, item.targetBucket, assignedInventory)
+      ? await inspectAssignedObjects(sourceClient, targetClient, item.sourceBucket, item.targetBucket, assignedInventory, getJobAbortSignal(jobId))
       : await listAllObjects(targetClient, item.targetBucket, prefix, ({ count, key, size }) => {
       const delta = Math.max(0, count - destinationScanLastCount)
       destinationScanLastCount = count
@@ -1894,7 +1932,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
       sourceCount: shardObjectCount,
     })
     let finalDestinationObjects = assignedInventory
-      ? await inspectAssignedObjects(targetClient, item.targetBucket, sourceObjects)
+      ? await inspectAssignedObjects(sourceClient, targetClient, item.sourceBucket, item.targetBucket, sourceObjects, getJobAbortSignal(jobId))
       : filterObjectsForShard(await listAllObjects(targetClient, item.targetBucket, prefix), item.sourceBucket, workerShard)
     let finalDiff = diffObjectsByListing(sourceObjects, finalDestinationObjects, ({ checked, key, size, missing, mismatched }) => {
       state.currentFile = {
@@ -2075,7 +2113,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
 
       state.currentFile = null
       finalDestinationObjects = assignedInventory
-        ? await inspectAssignedObjects(targetClient, item.targetBucket, sourceObjects)
+        ? await inspectAssignedObjects(sourceClient, targetClient, item.sourceBucket, item.targetBucket, sourceObjects, getJobAbortSignal(jobId))
         : filterObjectsForShard(await listAllObjects(targetClient, item.targetBucket, prefix), item.sourceBucket, workerShard)
       finalDiff = diffObjectsByListing(sourceObjects, finalDestinationObjects)
       finalMissing = finalDiff.missing.length
@@ -2210,6 +2248,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
       shardIndex: isSharded ? workerShard.index : undefined,
       shardCount: isSharded ? workerShard.count : undefined,
       failureSamples,
+      integrityProofs: assignedInventory ? finalDestinationObjects.map((object) => ({ key: object.key, size: object.destinationSize ?? object.size, destinationEtag: object.destinationEtag ?? null, sha256: object.sourceSha256 ?? null, verified: object.integrityVerified === true })) : undefined,
     }
   } catch (error) {
     if (error instanceof JobAbortedError) throw error

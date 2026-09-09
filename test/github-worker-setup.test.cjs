@@ -293,6 +293,11 @@ test('registered workflows dispatch only vacant independent worker capacity', ()
   assert.match(orchestrator, /migration_inventory_batch/)
   assert.match(runtime, /inspectAssignedObjects/)
   assert.match(runtime, /assignedInventory/)
+  assert.match(orchestrator, /row_number\(\) over\(partition by i\.id order by o\.key\)-1/)
+  assert.doesNotMatch(orchestrator, /\/250/)
+  assert.match(runtime, /createHash\("sha256"\)/)
+  assert.match(runtime, /sourceSha256 === destinationSha256/)
+  assert.match(orchestrator, /status='canceled'/)
 })
 
 test('workflow compatibility requires the orchestrator URL and shared worker secret contract', () => {
@@ -336,6 +341,8 @@ test('migration and file orchestrators operate through durable shared state with
   assert.match(file, /for update of v skip locked/)
   assert.match(file, /claimGenericScan/)
   assert.match(file, /R2 returned a truncated page without a forward cursor/)
+  assert.match(file, /integrityProofs/)
+  assert.match(file, /destinationEtag/)
   assert.doesNotMatch(file, /m\.options->>'executionMode'='migration_workers'/)
   assert.doesNotMatch(file, /s\.migration_item_id is null/)
   const sourceScanQueue = panelSync.slice(

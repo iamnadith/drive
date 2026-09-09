@@ -3,7 +3,7 @@ import { Client } from "pg"
 type ScanMessage = { reason: "continue" }
 type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; FILE_SCAN_QUEUE: Queue<ScanMessage> }
 type Row = Record<string, any>
-const BUILD = 2
+const BUILD = 3
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -77,7 +77,7 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
     result = await db.query(`
     with candidate as (
       select v.migration_item_id,i.source_bucket,i.target_bucket,i.source_jurisdiction,m.source_account_id,m.target_account_id,
-        nullif(m.options->>'pathPrefix','') scan_prefix,
+        nullif(m.options->>'pathPrefix','') scan_prefix,m.options->>'executionMode' execution_mode,
         jsonb_build_object('cloudflare_account_id',sa.cloudflare_account_id,'api_token',sa.api_token) source_account,
         jsonb_build_object('cloudflare_account_id',ta.cloudflare_account_id,'api_token',ta.api_token) target_account
       from drive_migration_verification_state v join drive_migrations m on m.id=v.migration_id
@@ -168,7 +168,19 @@ async function compare(db: Client, task: Row) {
         from drive_bucket_scan_objects s left join drive_bucket_scan_objects d on d.scan_id=$3 and d.key=s.key
         where s.scan_id=$2 and (
           d.key is null or d.size<>s.size or
-          (trim(both '"' from coalesce(s.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from coalesce(d.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from s.etag)<>trim(both '"' from d.etag))
+          (trim(both '"' from coalesce(s.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from coalesce(d.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from s.etag)<>trim(both '"' from d.etag)) or
+          ($8='migration_workers' and not exists (
+            select 1 from drive_repair_jobs j
+            where j.migration_id=$9 and j.status='completed'
+              and j.payload->>'workerGeneration'=$4::text
+              and j.payload->'itemIds'->>0=$1::text
+              and j.payload->'inventoryObjects'->0->>'key'=s.key
+              and trim(both '"' from coalesce(j.payload->'inventoryObjects'->0->>'etag',''))=trim(both '"' from coalesce(s.etag,''))
+              and j.result->'items'->0->'integrityProofs'->0->>'key'=s.key
+              and j.result->'items'->0->'integrityProofs'->0->>'verified'='true'
+              and j.result->'items'->0->'integrityProofs'->0->>'sha256' ~ '^[0-9a-f]{64}$'
+              and trim(both '"' from coalesce(j.result->'items'->0->'integrityProofs'->0->>'destinationEtag',''))=trim(both '"' from coalesce(d.etag,''))
+          ))
         ) returning kind
       ), extra_diffs as (
         insert into drive_bucket_verify_diffs(id,migration_item_id,source_scan_id,dest_scan_id,kind,key,source_size,dest_size)
@@ -192,7 +204,7 @@ async function compare(db: Client, task: Row) {
           )), '{stage}','"file_verification_completed"'::jsonb)
         from state_done s where i.id=$1 returning i.id
       ) select missing,mismatched,extra from state_done
-    `, [task.migration_item_id, task.source_scan_id, task.destination_scan_id, task.generation, task.lease_owner, task.source_objects, task.source_bytes])
+    `, [task.migration_item_id, task.source_scan_id, task.destination_scan_id, task.generation, task.lease_owner, task.source_objects, task.source_bytes, task.execution_mode || null, task.migration_id])
     if (!completed.rowCount) throw new Error("File Scanner task lease was lost")
     await db.query("commit")
     const value = completed.rows[0]
