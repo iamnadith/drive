@@ -3,11 +3,12 @@ import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3"
 import { DOMParser } from "@xmldom/xmldom"
 
 if (!(globalThis as { DOMParser?: unknown }).DOMParser) (globalThis as { DOMParser?: unknown }).DOMParser = DOMParser
+if (!(globalThis as { Node?: unknown }).Node) (globalThis as { Node?: unknown }).Node = { ELEMENT_NODE: 1, TEXT_NODE: 3 }
 
 type ScanMessage = { reason: "continue" }
 type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; FILE_SCAN_QUEUE: Queue<ScanMessage> }
 type Row = Record<string, any>
-const BUILD = 7
+const BUILD = 8
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
