@@ -576,6 +576,22 @@ export async function listRepairJobs(limit = 50): Promise<DriveRepairJob[]> {
   return listRepairJobsRaw(limit)
 }
 
+export async function listLiveRepairJobs(activeLimit = 500, recentLimit = 50): Promise<DriveRepairJob[]> {
+  const supabase = getSupabaseServerClient()
+  const [active, recent] = await Promise.all([
+    supabase.from(REPAIR_JOBS_TABLE).select("*").in("status", ["pending", "claimed", "running"]).order("updated_at", { ascending: false }).limit(activeLimit),
+    supabase.from(REPAIR_JOBS_TABLE).select("*").in("status", ["completed", "failed", "canceled"]).order("updated_at", { ascending: false }).limit(recentLimit),
+  ])
+  if (active.error) throw normalizeSupabaseError(active.error)
+  if (recent.error) throw normalizeSupabaseError(recent.error)
+  const rows = new Map<string, DriveRepairJobRow>()
+  for (const row of [
+    ...(Array.isArray(active.data) ? (active.data as DriveRepairJobRow[]) : []),
+    ...(Array.isArray(recent.data) ? (recent.data as DriveRepairJobRow[]) : []),
+  ].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))) rows.set(row.id, row)
+  return [...rows.values()].map(mapJobRow)
+}
+
 export async function listRepairJobsByMigration(migrationId: string, limit = 20): Promise<DriveRepairJob[]> {
   await reconcileRepairJobs({ migrationId }).catch(() => undefined)
   return listRepairJobsByMigrationRaw(migrationId, limit)

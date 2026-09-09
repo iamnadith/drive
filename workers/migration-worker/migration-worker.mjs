@@ -1,9 +1,9 @@
 import {
-  AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
   CreateMultipartUploadCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListPartsCommand,
   ListObjectsV2Command,
   S3Client,
   UploadPartCommand,
@@ -31,7 +31,10 @@ const REPAIR_JOB_ID = String(getArg("repair-job-id", process.env.DRIVE_REPAIR_JO
 const POOL_MODE = Boolean(MIGRATION_ID && !REPAIR_JOB_ID)
 const GITHUB_RUN_ID = String(process.env.GITHUB_RUN_ID || "")
 const WORKER_INSTANCE_ID = String(process.env.WORKER_INSTANCE_ID || GITHUB_RUN_ID || "").trim()
-const POLL_MS = Math.max(5_000, Number(getArg("poll-ms", "15000")) || 15_000)
+// Persistent workers immediately claim again after every completed file. When
+// the scanner is still producing inventory pages, a five-second idle poll
+// bounds hand-off latency without letting large worker pools hammer Postgres.
+const POLL_MS = Math.max(2_000, Number(getArg("poll-ms", "5000")) || 5_000)
 const HEARTBEAT_MS = Math.max(10_000, Number(getArg("heartbeat-ms", "20000")) || 20_000)
 const MAX_OBJECTS = Math.max(1, Math.min(10_000_000, Number(getArg("max-objects", "2000000")) || 2_000_000))
 const API_TIMEOUT_MS = Math.max(5_000, Number(getArg("api-timeout-ms", "30000")) || 30_000)
@@ -487,7 +490,7 @@ async function claimJobDirectPostgres() {
     const selected = requested.size ? items.rows.filter((item) => requested.has(item.id)) : items.rows
     const source = migration.source_account; const target = migration.target_account
     const payload = {
-      job: { id: job.id, mode: job.mode, migrationId: MIGRATION_ID, verifyAllBuckets: true, strictCompletion: true, kind: job.payload?.kind },
+      job: { id: job.id, mode: job.mode, migrationId: MIGRATION_ID, verifyAllBuckets: true, strictCompletion: true, kind: job.payload?.kind, progress: job.progress || {} },
       ...(isRecord(job.payload?.workerShard) ? { workerShard: job.payload.workerShard } : {}),
       ...(typeof job.payload?.workerGeneration === "number" ? { workerGeneration: job.payload.workerGeneration } : {}),
       ...(Array.isArray(job.payload?.inventoryObjects) ? { inventoryObjects: job.payload.inventoryObjects } : {}),
@@ -556,7 +559,7 @@ async function claimJobDirect() {
   if (!source?.cloudflare_account_id || !target?.cloudflare_account_id) throw new Error("Source or target account is incomplete")
   const selectedItems = requested.size ? items.filter((item) => requested.has(item.id)) : items
   const payload = {
-    job: { id: job.id, mode: job.mode, migrationId: MIGRATION_ID, verifyAllBuckets: true, strictCompletion: true, kind: job.payload?.kind },
+    job: { id: job.id, mode: job.mode, migrationId: MIGRATION_ID, verifyAllBuckets: true, strictCompletion: true, kind: job.payload?.kind, progress: job.progress || {} },
     ...(isRecord(job.payload?.workerShard) ? { workerShard: job.payload.workerShard } : {}),
     ...(typeof job.payload?.workerGeneration === "number" ? { workerGeneration: job.payload.workerGeneration } : {}),
     ...(Array.isArray(job.payload?.inventoryObjects) ? { inventoryObjects: job.payload.inventoryObjects } : {}),
@@ -1266,29 +1269,46 @@ function createProgressTransform(onChunk) {
 
 async function copyObjectWithRangedMultipart(sourceClient, targetClient, sourceBucket, targetBucket, key, sourceHead, options = {}) {
   const sourceSize = typeof sourceHead.ContentLength === "number" ? sourceHead.ContentLength : 0
-  const createResult = await targetClient.send(
-    new CreateMultipartUploadCommand({
-      Bucket: targetBucket,
-      Key: key,
-      ...buildObjectMetadataParams(sourceHead),
-    }),
-    options.abortSignal ? { abortSignal: options.abortSignal } : undefined
-  )
-  const uploadId = createResult.UploadId
-  if (!uploadId) throw new Error(`Multipart upload id missing for ${key}`)
-
+  const checkpoint = async (state) => { options.multipartState = state; await options.onMultipartCheckpoint?.(state) }
   const partCount = Math.ceil(sourceSize / UPLOAD_PART_SIZE)
   const parts = Array.from({ length: partCount }, (_, index) => {
     const start = index * UPLOAD_PART_SIZE
     const end = Math.min(sourceSize - 1, start + UPLOAD_PART_SIZE - 1)
     return { partNumber: index + 1, start, end, size: end - start + 1 }
   })
+  let uploadId = options.multipartState?.key === key && Number(options.multipartState?.sourceSize) === sourceSize
+    ? String(options.multipartState?.uploadId || "")
+    : ""
   const uploadedParts = []
   const partProgress = new Map()
   let reportedLoaded = 0
 
+  if (uploadId) {
+    try {
+      let marker
+      do {
+        const listed = await targetClient.send(new ListPartsCommand({ Bucket: targetBucket, Key: key, UploadId: uploadId, PartNumberMarker: marker }))
+        for (const part of listed.Parts || []) {
+          if (part.PartNumber && part.ETag) uploadedParts.push({ PartNumber: part.PartNumber, ETag: part.ETag, Size: Number(part.Size || 0) })
+        }
+        marker = listed.IsTruncated ? listed.NextPartNumberMarker : undefined
+      } while (marker)
+    } catch { uploadId = ""; uploadedParts.length = 0 }
+  }
+  if (!uploadId) {
+    const createResult = await targetClient.send(new CreateMultipartUploadCommand({ Bucket: targetBucket, Key: key, ...buildObjectMetadataParams(sourceHead) }), options.abortSignal ? { abortSignal: options.abortSignal } : undefined)
+    uploadId = String(createResult.UploadId || "")
+    if (!uploadId) throw new Error(`Multipart upload id missing for ${key}`)
+  }
+  await checkpoint({ uploadId, key, sourceBucket, targetBucket, sourceSize, completedParts: uploadedParts.length })
+  const completedParts = new Map(uploadedParts.map((part) => [part.PartNumber, part]))
+  for (const part of parts) {
+    const existing = completedParts.get(part.partNumber)
+    if (existing && Number(existing.Size) === part.size) { partProgress.set(part.partNumber, part.size); reportedLoaded += part.size }
+  }
+
   try {
-    await runConcurrent(parts, RANGE_COPY_CONCURRENCY, async (part) => {
+    await runConcurrent(parts.filter((part) => !completedParts.has(part.partNumber) || Number(completedParts.get(part.partNumber)?.Size) !== part.size), RANGE_COPY_CONCURRENCY, async (part) => {
       const uploaded = await withRetries(
         `range copy ${sourceBucket}/${key} part ${part.partNumber}`,
         async () => {
@@ -1342,6 +1362,7 @@ async function copyObjectWithRangedMultipart(sourceClient, targetClient, sourceB
 
       if (!uploaded.ETag) throw new Error(`Multipart upload ETag missing for ${key} part ${part.partNumber}`)
       uploadedParts.push({ PartNumber: part.partNumber, ETag: uploaded.ETag })
+      await checkpoint({ uploadId, key, sourceBucket, targetBucket, sourceSize, completedParts: uploadedParts.length, lastPartNumber: part.partNumber })
     })
 
     await targetClient.send(
@@ -1350,7 +1371,7 @@ async function copyObjectWithRangedMultipart(sourceClient, targetClient, sourceB
         Key: key,
         UploadId: uploadId,
         MultipartUpload: {
-          Parts: uploadedParts.sort((a, b) => a.PartNumber - b.PartNumber),
+          Parts: uploadedParts.sort((a, b) => a.PartNumber - b.PartNumber).map(({ PartNumber, ETag }) => ({ PartNumber, ETag })),
         },
       }),
       options.abortSignal ? { abortSignal: options.abortSignal } : undefined
@@ -1369,10 +1390,10 @@ async function copyObjectWithRangedMultipart(sourceClient, targetClient, sourceB
     if (targetSize !== sourceSize) {
       throw new Error(`Size mismatch after multipart copy for ${key}: source=${sourceSize} target=${targetSize}`)
     }
+    await checkpoint(null)
   } catch (error) {
-    await targetClient
-      .send(new AbortMultipartUploadCommand({ Bucket: targetBucket, Key: key, UploadId: uploadId }))
-      .catch(() => undefined)
+    // Leave the provider-side multipart upload intact. The durable upload ID
+    // and ListParts reconciliation let a replacement worker resume it.
     throw error
   }
 }
@@ -1783,6 +1804,8 @@ async function processItem(jobId, payload, item, completedResults, state) {
         try {
           await copyObject(sourceClient, targetClient, item.sourceBucket, item.targetBucket, object.key, {
             abortSignal: getJobAbortSignal(jobId),
+            multipartState: payload.job?.progress?.multipart,
+            onMultipartCheckpoint: (multipart) => updateJob(jobId, { progress: { multipart } }, { allowOffline: true }),
             onProgress: ({ loaded, total }) => {
               const now = Date.now()
               if (now - lastProgressAt < 800 && loaded < total) return
@@ -2043,6 +2066,8 @@ async function processItem(jobId, payload, item, completedResults, state) {
         try {
           await copyObject(sourceClient, targetClient, item.sourceBucket, item.targetBucket, object.key, {
             abortSignal: getJobAbortSignal(jobId),
+            multipartState: payload.job?.progress?.multipart,
+            onMultipartCheckpoint: (multipart) => updateJob(jobId, { progress: { multipart } }, { allowOffline: true }),
             onProgress: ({ loaded, total }) => {
               state.currentFile = {
                 itemId: item.id,

@@ -1,9 +1,9 @@
 import { Client } from "pg"
 
-type DispatchMessage = { intentId: string }
+type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 6
+const BUILD = 7
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -105,30 +105,36 @@ async function ensureShards(db: Client, migration: Row) {
       progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{migrationInventory}',coalesce(i.progress->'migrationInventory','{}'::jsonb)||jsonb_build_object('status','completed','completedAt',s.completed_at))
     from drive_bucket_scans s where i.migration_id=$1 and s.id=(i.progress->'migrationInventory'->>'sourceScanId')::uuid and s.status='completed'
   `, [migration.id])
-  const inserted = await db.query(`
-    with objects as (
-      select i.id item_id,i.source_bucket,i.target_bucket,s.id scan_id,o.key,o.size,o.etag,
-        (row_number() over(partition by i.id order by o.key)-1)::int batch_index
-      from drive_migration_items i join drive_bucket_scans s on s.id=(i.progress->'migrationInventory'->>'sourceScanId')::uuid
-      join drive_bucket_scan_objects o on o.scan_id=s.id
-      where i.migration_id=$1 and s.status='completed' and not o.is_dir_marker
-    ), batches as (
-      select item_id,source_bucket,target_bucket,batch_index,
-        jsonb_agg(jsonb_build_object('key',key,'size',size,'etag',etag) order by key) objects
-      from objects group by item_id,source_bucket,target_bucket,batch_index
-    )
-    insert into drive_repair_jobs(id,migration_id,status,mode,work_key,payload,progress,result,created_at,updated_at)
-    select gen_random_uuid(),$1,'pending','repair_and_verify',format('migration:%s:generation:%s:inventory:%s:%s',$1::text,$2::int,item_id::text,batch_index),
-      jsonb_build_object('source','file_scanner_inventory','kind','migration_inventory_batch','workerGeneration',$2::int,'itemIds',jsonb_build_array(item_id),'inventoryObjects',objects),
-      '{}'::jsonb,'{}'::jsonb,now(),now() from batches
-    on conflict(work_key) where work_key is not null do nothing
-  `, [migration.id, generation])
+  const queueItem = items.rows.find((item) => Number(item.progress?.migrationQueue?.generation) !== generation || item.progress?.migrationQueue?.status !== "completed")
+  let created = 0
+  if (queueItem) {
+    const scanId = String(queueItem.progress?.migrationInventory?.sourceScanId || "")
+    const lastKey = Number(queueItem.progress?.migrationQueue?.generation) === generation ? String(queueItem.progress?.migrationQueue?.lastKey || "") : ""
+    const page = await db.query(`select key,size,etag from drive_bucket_scan_objects where scan_id=$1 and not is_dir_marker and key>$2 order by key limit 100`, [scanId, lastKey])
+    await db.query("begin")
+    try {
+      for (const object of page.rows) {
+        const inserted = await db.query(`
+          insert into drive_repair_jobs(id,migration_id,status,mode,work_key,payload,progress,result,created_at,updated_at)
+          values(gen_random_uuid(),$1,'pending','repair_and_verify',format('migration:%s:generation:%s:inventory:%s:%s',$1::text,$2::int,$3::uuid,encode(convert_to($4::text,'UTF8'),'hex')),
+            jsonb_build_object('source','file_scanner_inventory','kind','migration_inventory_file','workerGeneration',$2::int,'itemIds',jsonb_build_array($3::uuid),'inventoryObjects',jsonb_build_array(jsonb_build_object('key',$4::text,'size',$5::bigint,'etag',$6::text))),
+            '{}'::jsonb,'{}'::jsonb,now(),now()) on conflict(work_key) where work_key is not null do nothing
+        `, [migration.id, generation, queueItem.id, object.key, object.size, object.etag])
+        created += inserted.rowCount || 0
+      }
+      const completed = page.rowCount === 0
+      const nextKey = page.rows[page.rows.length - 1]?.key || lastKey
+      await db.query(`update drive_migration_items set progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{migrationQueue}',$2::jsonb),updated_at=now() where id=$1`, [queueItem.id, JSON.stringify({ generation, status: completed ? "completed" : "materializing", lastKey: nextKey, updatedAt: new Date().toISOString() })])
+      await db.query("commit")
+    } catch (error) { await db.query("rollback").catch(() => undefined); throw error }
+    return { generation, shardCount: 0, created, inventoryPending: 0, queuePending: 1 }
+  }
   const total = await db.query(`select count(*)::int count from drive_repair_jobs where migration_id=$1 and work_key like $2`, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
   const shardCount = Number(total.rows[0]?.count || 0)
   if (!shardCount) {
     await db.query(`update drive_migration_items set slurper_status='completed',source_objects=0,source_bytes=00,updated_at=now() where migration_id=$1`, [migration.id])
   }
-  return { generation, shardCount, created: inserted.rowCount || 0, inventoryPending: 0 }
+  return { generation, shardCount, created, inventoryPending: 0, queuePending: 0 }
 }
 async function recoverJobs(db: Client, migrationId: string, generation: number, shardCount: number) {
   const result = await db.query(`
@@ -373,7 +379,7 @@ async function workerPayload(db: Client, job: Row) {
   const requested = new Set(Array.isArray(job.payload?.itemIds) ? job.payload.itemIds : [])
   const selected = requested.size ? items.rows.filter((item) => requested.has(item.id)) : items.rows
   return {
-    job: { id: job.id, mode: job.mode, migrationId: migration.id, verifyAllBuckets: true, strictCompletion: true, kind: job.payload?.kind },
+    job: { id: job.id, mode: job.mode, migrationId: migration.id, verifyAllBuckets: true, strictCompletion: true, kind: job.payload?.kind, progress: job.progress || {} },
     ...(job.payload?.workerShard ? { workerShard: job.payload.workerShard } : {}),
     ...(typeof job.payload?.workerGeneration === "number" ? { workerGeneration: job.payload.workerGeneration } : {}),
     ...(Array.isArray(job.payload?.inventoryObjects) ? { inventoryObjects: job.payload.inventoryObjects } : {}),
@@ -466,16 +472,17 @@ async function cycle(env: Env) {
       if (!migration) return complete(db, owner, null, { ok: true, idle: true })
       migrationId = migration.id
       const shards = await ensureShards(db, migration)
-      const recovered = shards.inventoryPending ? 0 : await recoverJobs(db, migration.id, shards.generation, shards.shardCount)
+      const recovered = shards.inventoryPending || shards.queuePending ? 0 : await recoverJobs(db, migration.id, shards.generation, shards.shardCount)
       await renew(db, owner)
-      const finalized = shards.terminalFailure || shards.inventoryPending
+      const finalized = shards.terminalFailure || shards.inventoryPending || shards.queuePending
         ? { complete: false, terminalFailure: Boolean(shards.terminalFailure), jobs: {} }
         : await finalizeShards(db, migration, shards.generation, shards.shardCount)
       const verification = finalized.complete ? await finishOrRepair(db, migration, shards.generation) : { verification: "waiting_for_shards" }
       await renew(db, owner)
       const fileScanner = shards.inventoryPending || (finalized.complete && verification.verification === "pending") ? await wakeFileScanner(db) : "not_needed"
       const current = (await db.query(`select * from drive_migrations where id=$1`, [migration.id])).rows[0]
-      const dispatched = current?.status === "running" ? await dispatchWorkers(db, env, current) : 0
+      const dispatched = current?.status === "running" && !shards.inventoryPending && !shards.queuePending ? await dispatchWorkers(db, env, current) : 0
+      if (shards.inventoryPending || shards.queuePending) await env.GITHUB_DISPATCH_QUEUE.send({ control: "cycle" })
       await db.query(`update drive_migrations set last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
       return complete(db, owner, migration.id, { ok: true, migrationId, ...shards, recovered, finalized, ...verification, fileScanner, dispatched })
     } catch (error) {
@@ -504,6 +511,12 @@ export default {
   async queue(batch: MessageBatch<DispatchMessage>, env: Env) {
     for (const message of batch.messages) {
       try {
+        if ("control" in message.body) {
+          const result = await cycle(env)
+          if (result?.skipped === "cycle_already_running") message.retry({ delaySeconds: 2 })
+          else message.ack()
+          continue
+        }
         const outcome = await consumeDispatch(env, message)
         if (outcome === "accepted" || outcome === "awaiting_reconciliation") message.retry({ delaySeconds: 30 })
         else message.ack()

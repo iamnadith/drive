@@ -5,6 +5,7 @@ const OBJECT_CHANGE_RETENTION_DAYS = 7
 const SCAN_DETAIL_RETENTION_DAYS = 7
 const OPERATION_HISTORY_RETENTION_DAYS = 30
 const ACTIVITY_RETENTION_DAYS = 90
+const WORKER_TELEMETRY_RETENTION_DAYS = 7
 const MAINTENANCE_INTERVAL_HOURS = 6
 
 type MaintenanceResult = {
@@ -148,7 +149,8 @@ export async function compactPreviousMigrationDetails(completedMigrationId?: str
       ), candidates as (
         select m.id
         from drive_migrations m, cutoff c
-        where m.created_at < c.created_at
+        where (m.created_at < c.created_at
+          or coalesce(m.completed_at, m.updated_at) < now() - ($2::text || ' days')::interval)
           and m.status in ('completed', 'failed', 'canceled')
           and m.details_compacted_at is null
           and exists (select 1 from drive_migration_items i where i.migration_id = m.id)
@@ -171,7 +173,7 @@ export async function compactPreviousMigrationDetails(completedMigrationId?: str
       where m.id = totals.migration_id
       returning m.id
     `,
-    [completedMigrationId ?? null]
+    [completedMigrationId ?? null, WORKER_TELEMETRY_RETENTION_DAYS]
   )
 
   if (rows.length === 0) return 0
@@ -286,6 +288,13 @@ export async function runDatabaseMaintenance(options?: {
     table: "drive_project_operation_jobs",
     condition: `status in ('completed', 'failed', 'canceled') and coalesce(completed_at, updated_at) < now() - ($1::text || ' days')::interval`,
     params: [OPERATION_HISTORY_RETENTION_DAYS], batchSize: 1000, maxBatches,
+  })
+  deleted.workerRuns = await deleteInBatches({
+    table: "drive_agent_runs",
+    condition: `status in ('completed', 'failed', 'canceled')
+      and coalesce(completed_at, updated_at) < now() - ($1::text || ' days')::interval
+      and not exists (select 1 from drive_repair_jobs r where r.id::text = drive_agent_runs.job_reference)`,
+    params: [WORKER_TELEMETRY_RETENTION_DAYS], batchSize: 1000, maxBatches,
   })
   deleted.activityEvents = await deleteInBatches({
     table: "drive_activity_events",

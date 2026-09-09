@@ -249,19 +249,18 @@ export async function listAgents(): Promise<Array<DriveAgent & { latestRun: Driv
   const agents = (Array.isArray(data) ? (data as DriveAgentRow[]) : []).map(mapAgentRow)
   if (agents.length === 0) return []
 
-  let runs: unknown
+  let activeRuns: unknown
+  let recentRuns: unknown
   let runsError: { message: string } | null = null
   try {
-    const response = await supabase
-      .from(AGENT_RUNS_TABLE)
-      .select("*")
-      .in(
-        "agent_id",
-        agents.map((agent) => agent.id)
-      )
-      .order("created_at", { ascending: false })
-    runs = response.data
-    runsError = response.error
+    const agentIds = agents.map((agent) => agent.id)
+    const [activeResponse, recentResponse] = await Promise.all([
+      supabase.from(AGENT_RUNS_TABLE).select("*").in("agent_id", agentIds).in("status", ["pending", "running"]).order("created_at", { ascending: false }).limit(500),
+      supabase.from(AGENT_RUNS_TABLE).select("*").in("agent_id", agentIds).in("status", ["completed", "failed", "canceled"]).order("created_at", { ascending: false }).limit(100),
+    ])
+    activeRuns = activeResponse.data
+    recentRuns = recentResponse.data
+    runsError = activeResponse.error ?? recentResponse.error
   } catch (caughtError) {
     throw wrapSupabaseQueryError(caughtError, `reading '${AGENT_RUNS_TABLE}' for latest worker runs`)
   }
@@ -269,7 +268,12 @@ export async function listAgents(): Promise<Array<DriveAgent & { latestRun: Driv
 
   const latestByAgent = new Map<string, DriveAgentRun>()
   const runsByAgent = new Map<string, DriveAgentRun[]>()
-  for (const run of Array.isArray(runs) ? (runs as DriveAgentRunRow[]) : []) {
+  const uniqueRuns = new Map<string, DriveAgentRunRow>()
+  for (const run of [
+    ...(Array.isArray(activeRuns) ? (activeRuns as DriveAgentRunRow[]) : []),
+    ...(Array.isArray(recentRuns) ? (recentRuns as DriveAgentRunRow[]) : []),
+  ].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))) uniqueRuns.set(run.id, run)
+  for (const run of uniqueRuns.values()) {
     const mapped = mapRunRow(run)
     if (!latestByAgent.has(run.agent_id)) latestByAgent.set(run.agent_id, mapped)
     const agentRuns = runsByAgent.get(run.agent_id) ?? []

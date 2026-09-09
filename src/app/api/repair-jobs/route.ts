@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { createRepairJob, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
+import { createRepairJob, listLiveRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
 import { getAgentById } from "@/lib/agents-store"
 import { listMigrationItems } from "@/lib/migrations-store"
 import { requireAdmin } from "@/lib/server-auth"
@@ -32,10 +32,9 @@ export async function GET() {
     const auth = await requireAdmin()
     if (!auth.ok) return auth.response
 
-    // Worker-pool migrations may expose the full bounded shard queue (up to
-    // 128 records), so the dashboard should not hide active leases past the
-    // first page.
-    const jobs = await listRepairJobs(500)
+    // Live views need every claimed/running lease, not the first page of a
+    // potentially million-file pending queue. Terminal history stays bounded.
+    const jobs = await listLiveRepairJobs(500, 50)
     return NextResponse.json({ jobs })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to load repair jobs") }, { status: 400 })

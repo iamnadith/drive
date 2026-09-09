@@ -290,10 +290,12 @@ test('registered workflows dispatch only vacant independent worker capacity', ()
   assert.match(migrationPage, /poolAgentIds:/)
   assert.match(orchestrator, /GITHUB_DISPATCH_QUEUE/)
   assert.match(orchestrator, /reconcileGitHubIntent/)
-  assert.match(orchestrator, /migration_inventory_batch/)
+  assert.match(orchestrator, /migration_inventory_file/)
   assert.match(runtime, /inspectAssignedObjects/)
   assert.match(runtime, /assignedInventory/)
-  assert.match(orchestrator, /row_number\(\) over\(partition by i\.id order by o\.key\)-1/)
+  assert.match(orchestrator, /encode\(convert_to\(\$4::text,'UTF8'\),'hex'\)/)
+  assert.match(orchestrator, /key>\$2 order by key limit 100/)
+  assert.match(orchestrator, /control: "cycle"/)
   assert.doesNotMatch(orchestrator, /\/250/)
   assert.match(runtime, /createHash\("sha256"\)/)
   assert.match(runtime, /sourceSha256 === destinationSha256/)
@@ -328,6 +330,7 @@ test('migration worker pool documentation and schema keep the shared queue contr
 
 test('migration and file orchestrators operate through durable shared state without runtime panel callbacks', () => {
   const migration = fs.readFileSync(path.resolve('workers/migration-orchestrator/src/index.ts'), 'utf8')
+  const orchestrator = migration
   const file = fs.readFileSync(path.resolve('workers/file-scanner/src/index.ts'), 'utf8')
   const worker = fs.readFileSync(path.resolve('workers/migration-worker/migration-worker.mjs'), 'utf8')
   const liveState = fs.readFileSync(path.resolve('src/lib/migration-live-state.ts'), 'utf8')
@@ -343,6 +346,8 @@ test('migration and file orchestrators operate through durable shared state with
   assert.match(file, /R2 returned a truncated page without a forward cursor/)
   assert.match(file, /integrityProofs/)
   assert.match(file, /destinationEtag/)
+  assert.match(file, /function pageSize\(_env: Env\) \{ return 100 \}/)
+  assert.match(orchestrator, /!shards\.inventoryPending/)
   assert.doesNotMatch(file, /m\.options->>'executionMode'='migration_workers'/)
   assert.doesNotMatch(file, /s\.migration_item_id is null/)
   const sourceScanQueue = panelSync.slice(

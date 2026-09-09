@@ -3,7 +3,7 @@ import { Client } from "pg"
 type ScanMessage = { reason: "continue" }
 type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; FILE_SCAN_QUEUE: Queue<ScanMessage> }
 type Row = Record<string, any>
-const BUILD = 3
+const BUILD = 4
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -46,7 +46,9 @@ async function ensureSchema(db: Client) {
     create index if not exists drive_migration_verification_state_queue_idx on drive_migration_verification_state(status,updated_at);
   `)
 }
-function pageSize(_env: Env) { return 1000 }
+// Keep JSON parsing, de-duplication, and job materialization safely bounded for
+// Free-plan CPU limits. Continuation messages remove the old one-minute gap.
+function pageSize(_env: Env) { return 100 }
 function encodePath(value: string) { return encodeURIComponent(value) }
 
 async function listObjects(env: Env, account: Row, bucket: string, cursor: string | null, jurisdiction: string | null, prefix: string | null = null) {

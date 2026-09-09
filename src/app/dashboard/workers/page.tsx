@@ -371,13 +371,13 @@ export default function WorkersPage() {
       const res = await fetch("/api/repair-jobs", { cache: "no-store" })
       const json: unknown = await res.json().catch(() => ({}))
       if (!res.ok) {
-        const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to load repair jobs"
+        const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to load migration work items"
         throw new Error(message)
       }
       setRepairJobs(typeof json === "object" && json !== null && Array.isArray((json as any).jobs) ? (json as any).jobs : [])
     } catch (error) {
       if (notify) {
-        toast.error(error instanceof Error ? error.message : "Unable to load repair jobs")
+        toast.error(error instanceof Error ? error.message : "Unable to load migration work items")
       }
     }
   }, [])
@@ -745,13 +745,13 @@ export default function WorkersPage() {
         const res = await fetch(`/api/repair-jobs/${encodeURIComponent(job.id)}`, { method: "DELETE" })
         const json: unknown = await res.json().catch(() => ({}))
         if (!res.ok) {
-          const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to delete repair job"
+          const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to delete migration work item"
           throw new Error(message)
         }
-        toast.success("Repair job deleted")
+        toast.success("Migration work item deleted")
         await loadRepairJobs()
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Unable to delete repair job")
+        toast.error(error instanceof Error ? error.message : "Unable to delete migration work item")
       } finally {
         setDeletingJobId(null)
       }
@@ -771,14 +771,14 @@ export default function WorkersPage() {
         const json: unknown = await res.json().catch(() => ({}))
         if (!res.ok) {
           const message =
-            typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to abort repair job"
+            typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to abort migration work item"
           throw new Error(message)
         }
-        toast.success("Repair job aborted")
+        toast.success("Migration work item aborted")
         await loadRepairJobs()
         await loadAgents()
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Unable to abort repair job")
+        toast.error(error instanceof Error ? error.message : "Unable to abort migration work item")
       } finally {
         setAbortingJobId(null)
       }
@@ -923,7 +923,7 @@ export default function WorkersPage() {
             : "Unable to dispatch GitHub worker"
         throw new Error(message)
       }
-      toast.success("Repair job queued and GitHub workflow dispatched")
+      toast.success("Migration work queued and GitHub workflow dispatched")
       setDispatchOpen(false)
       setDispatchMigrationId("")
       setDispatchAgent(null)
@@ -1292,7 +1292,7 @@ export default function WorkersPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{loading ? "-" : activeJobs}</div>
-            <p className="text-xs text-muted-foreground">{repairJobs.length} repair jobs total</p>
+            <p className="text-xs text-muted-foreground">{repairJobs.length} live/recent work items</p>
           </CardContent>
         </Card>
       </div>
@@ -1303,7 +1303,7 @@ export default function WorkersPage() {
               <DialogHeader className="border-b px-6 py-5 pr-16">
                 <DialogTitle>Dispatch GitHub worker</DialogTitle>
                 <DialogDescription>
-                  Queue a repair job and trigger the configured workflow for {dispatchAgent?.name || "the selected worker"}.
+                  Queue migration work and trigger the configured workflow for {dispatchAgent?.name || "the selected worker"}.
                 </DialogDescription>
               </DialogHeader>
 
@@ -1580,10 +1580,25 @@ export default function WorkersPage() {
                       <div className="space-y-2">
                         {activeWorkflowRuns.map((run) => {
                           const instanceId = typeof run.payload?.workerInstanceId === "string" ? run.payload.workerInstanceId : run.id
+                          const currentJob = run.jobReference ? repairJobs.find((job) => job.id === run.jobReference) : undefined
+                          const inventoryObjects = Array.isArray(currentJob?.payload?.inventoryObjects) ? currentJob.payload.inventoryObjects : []
+                          const currentObject = inventoryObjects[0] && typeof inventoryObjects[0] === "object" ? inventoryObjects[0] as Record<string, unknown> : null
+                          const currentFile = typeof currentJob?.progress?.currentFile === "object" && currentJob.progress.currentFile !== null
+                            ? currentJob.progress.currentFile as Record<string, unknown>
+                            : currentObject
+                          const fileKey = typeof currentFile?.key === "string" ? currentFile.key : "Waiting for next file"
+                          const bytesTransferred = Number(currentJob?.progress?.bytesTransferred ?? 0)
+                          const bytesTotal = Number(currentJob?.progress?.bytesTotal ?? currentObject?.size ?? 0)
+                          const percent = bytesTotal > 0 ? Math.min(100, Math.max(0, Math.round((bytesTransferred / bytesTotal) * 100))) : null
                           return (
-                            <div key={run.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-background p-2 text-sm">
-                              <div>
+                            <div key={run.id} className="flex flex-wrap items-start justify-between gap-2 rounded-md border bg-background p-3 text-sm">
+                              <div className="min-w-0 flex-1">
                                 <div className="font-medium">Worker {instanceId.slice(0, 8)}</div>
+                                <div className="mt-2 truncate font-mono text-xs" title={fileKey}>{fileKey}</div>
+                                <div className="mt-1 text-xs text-muted-foreground">
+                                  {currentJob ? `${jobStatusLabel(currentJob.status)}${percent === null ? "" : ` · ${percent}%`}` : "Idle and ready to claim"}
+                                  {currentJob?.lastHeartbeatAt ? ` · heartbeat ${formatDate(currentJob.lastHeartbeatAt)}` : ""}
+                                </div>
                                 <div className="text-xs text-muted-foreground">GitHub run {run.externalRunId || "indexing"} · {run.status}{run.jobReference ? ` · job ${run.jobReference.slice(0, 8)}` : ""}</div>
                               </div>
                               <Button variant="outline" size="sm" disabled={!run.externalRunId || stoppingRunId === run.id} onClick={() => void stopWorkflowRun(worker, run.id)}>
@@ -1650,7 +1665,7 @@ export default function WorkersPage() {
             <div className="max-h-64 space-y-3 overflow-y-auto rounded-lg border bg-muted/30 p-3 text-sm">
               <div className="font-medium">Jobs linked to this worker</div>
               {getWorkerLinkedJobs(confirmStopWorker).length === 0 ? (
-                <div className="text-muted-foreground">No linked repair jobs were found for this worker.</div>
+                <div className="text-muted-foreground">No linked migration work was found for this worker.</div>
               ) : (
                 getWorkerLinkedJobs(confirmStopWorker).map((job) => (
                   <div key={job.id} className="rounded-md border bg-background p-3">
@@ -1683,8 +1698,8 @@ export default function WorkersPage() {
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <div>
-              <CardTitle className="text-base">Repair Jobs</CardTitle>
-              <CardDescription>Latest three repair and verification jobs from the worker queue.</CardDescription>
+              <CardTitle className="text-base">Migration Worker Pool</CardTitle>
+              <CardDescription>Live and recent file work handled by independent migration workflow instances.</CardDescription>
             </div>
             {repairJobs.length > 3 ? (
               <Button asChild variant="outline" size="sm">
@@ -1695,7 +1710,7 @@ export default function WorkersPage() {
         </CardHeader>
         <CardContent className="space-y-3">
           {repairJobs.length === 0 ? (
-            <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">No repair jobs yet.</div>
+            <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">No migration work yet.</div>
           ) : (
             <div className="space-y-2">
               {visibleRepairJobs.map((job) => (
