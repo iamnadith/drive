@@ -568,8 +568,69 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     if (migration.options.executionMode === "migration_workers") {
-      // Worker migrations are reconciled from durable item jobs. Do not enter
-      // the Super Slurper scan/polling code below for this explicit lane.
+      // Worker migrations use the File Scanner as the authoritative inventory
+      // source. Seed/inspect scans here as well as from the orchestrator so a
+      // panel refresh explicitly advances the scan and immediately reflects
+      // scanner-owned counts; never create migration jobs from cached stats.
+      let workerItems = await listMigrationItems(id)
+      const scanPrefix = typeof migration.options.pathPrefix === "string" && migration.options.pathPrefix.trim().length > 0
+        ? migration.options.pathPrefix
+        : null
+      await promisePool(workerItems, 2, async (item) => {
+        const progress = isRecord(item.progress) ? item.progress : {}
+        const inventory = isRecord(progress.migrationInventory) ? progress.migrationInventory : {}
+        let scanId = typeof inventory.sourceScanId === "string" ? inventory.sourceScanId : ""
+        if (!scanId) {
+          const scan = await ensureBucketScan({
+            accountId: migration.sourceAccountId,
+            bucketName: item.sourceBucket,
+            kind: "migration_source_queue",
+            migrationId: id,
+            migrationItemId: item.id,
+            prefix: scanPrefix,
+          })
+          scanId = scan.id
+          await updateMigrationItem(item.id, {
+            slurperStatus: "scanning",
+            progress: { ...progress, stage: "scanning_source", migrationInventory: { sourceScanId: scanId, status: "scanning" } },
+            lastProgressAt: new Date().toISOString(),
+          })
+        }
+      })
+      workerItems = await listMigrationItems(id)
+      const workerScans = await Promise.all(workerItems.map(async (item) => {
+        const progress = isRecord(item.progress) ? item.progress : {}
+        const inventory = isRecord(progress.migrationInventory) ? progress.migrationInventory : {}
+        const scanId = typeof inventory.sourceScanId === "string" ? inventory.sourceScanId : ""
+        return { item, scan: scanId ? await getBucketScan(scanId).catch(() => null) : null }
+      }))
+      const pendingScans = workerScans.filter(({ scan }) => !scan || (scan.status !== "completed" && scan.status !== "failed"))
+      for (const { item, scan } of workerScans) {
+        if (scan?.status === "failed") throw new Error(scan.error || `File Scanner failed for ${item.sourceBucket}`)
+        if (scan?.status === "completed") {
+          const progress = isRecord(item.progress) ? item.progress : {}
+          const inventory = isRecord(progress.migrationInventory) ? progress.migrationInventory : {}
+          await updateMigrationItem(item.id, {
+            sourceObjects: scan.objects,
+            sourceBytes: scan.bytes,
+            slurperStatus: "queued",
+            progress: { ...progress, stage: "scan_completed", migrationInventory: { ...inventory, status: "completed", completedAt: scan.completedAt } },
+            lastProgressAt: new Date().toISOString(),
+          })
+        }
+      }
+      if (pendingScans.length > 0) {
+        await updateMigration(id, {
+          syncStatus: "syncing",
+          syncMessage: `File Scanner is scanning source buckets (${pendingScans.length} remaining)`,
+          lastSyncedAt: new Date().toISOString(),
+        })
+        await wakeFileScanner()
+        return NextResponse.json({ migration: await getMigration(id), items: await listMigrationItems(id), workerJobs: [] }, { status: 200 })
+      }
+
+      // All scanner inventories are complete; only now materialize durable
+      // per-file jobs for workers to claim.
       const queued = await ensureMigrationWorkerJobs({ migrationId: id, mode: "repair_and_verify" })
       const requeued = await requeueStaleMigrationWorkerJobs({ migrationId: id }).catch(() => 0)
       const finalized = await finalizeCompletedMigrationWorkerShards(id).catch(() => ({ finalized: false, shardCount: 0, jobs: 0, items: 0 }))
