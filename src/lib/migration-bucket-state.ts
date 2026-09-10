@@ -172,6 +172,7 @@ export function readLiveBucketState(progress: Record<string, unknown>) {
     updatedAt: typeof live.updatedAt === "string" ? live.updatedAt : null,
     status: typeof live.status === "string" ? live.status : undefined,
     transferredObjects: typeof live.transferredObjects === "number" ? live.transferredObjects : 0,
+    transferredBytes: typeof live.transferredBytes === "number" ? live.transferredBytes : 0,
     skippedObjects: typeof live.skippedObjects === "number" ? live.skippedObjects : 0,
     failedObjects: typeof live.failedObjects === "number" ? live.failedObjects : 0,
     unaccountedObjects: typeof live.unaccountedObjects === "number" ? live.unaccountedObjects : 0,
