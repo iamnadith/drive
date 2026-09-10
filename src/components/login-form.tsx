@@ -3,7 +3,7 @@
 import * as React from "react"
 import Link from "next/link"
 import { ClipboardPaste, GalleryVerticalEnd } from "lucide-react"
-import { useRouter, useSearchParams } from "next/navigation"
+import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 
 import { type AuthUser, useAuth } from "@/components/auth-provider"
@@ -33,10 +33,10 @@ type VerificationMethod = "authenticator" | "email" | "sms"
 export function LoginForm({
   className,
   initialMode = "login",
+  redirectTo = "/",
   ...props
-}: React.ComponentProps<"div"> & { initialMode?: Mode }) {
+}: React.ComponentProps<"div"> & { initialMode?: Mode; redirectTo?: string }) {
   const router = useRouter()
-  const searchParams = useSearchParams()
   const { login, user, loading, setUserDirect } = useAuth()
 
   const [mode, setMode] = React.useState<Mode>(initialMode)
@@ -73,8 +73,8 @@ export function LoginForm({
   const [resetConfirmPassword, setResetConfirmPassword] = React.useState("")
 
   React.useEffect(() => {
-    if (user && !loading) router.replace(searchParams.get("redirect") || "/")
-  }, [user, loading, router, searchParams])
+    if (user && !loading) router.replace(redirectTo)
+  }, [user, loading, redirectTo, router])
 
   function isEmail(value: string) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
@@ -156,7 +156,6 @@ export function LoginForm({
   }
 
   function handleGoogleLogin(nextMode: "login" | "signup") {
-    const redirectTo = searchParams.get("redirect") || "/"
     const url = new URL("/api/auth/google/login", window.location.origin)
     url.searchParams.set("mode", nextMode)
     url.searchParams.set("redirect", redirectTo)
@@ -231,7 +230,7 @@ export function LoginForm({
       if (!res.ok) throw new Error(data.error ?? "Unable to verify authenticator code")
       setUserDirect(data.user as AuthUser)
       toast.success("Logged in")
-      router.replace(searchParams.get("redirect") || "/")
+      router.replace(redirectTo)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to verify authenticator code")
     } finally {
@@ -268,7 +267,7 @@ export function LoginForm({
       if (!res.ok) throw new Error(data.error ?? "Unable to verify login")
       setUserDirect(data.user as AuthUser)
       toast.success("Logged in")
-      router.replace(searchParams.get("redirect") || "/")
+      router.replace(redirectTo)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to verify login")
     } finally {
