@@ -20,7 +20,6 @@ import {
   updateMigrationItem,
   claimMigrationItemJobCreation,
 } from "@/lib/migrations-store"
-import { ensureMigrationWorkerJobs } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
 import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
 
@@ -285,7 +284,7 @@ export async function POST(
         status: "running",
         startedAt,
         syncStatus: "syncing",
-        syncMessage: asyncStart ? "Queued migration worker jobs" : "Preparing migration worker jobs",
+        syncMessage: asyncStart ? "Queued File Scanner inventory" : "Preparing File Scanner inventory",
         lastSyncedAt: new Date().toISOString(),
       })
 
@@ -297,8 +296,8 @@ export async function POST(
         if (item.slurperStatus === "worker_bucket_create_failed" && targetBucketSet.has(item.targetBucket)) {
           const recoveredProgress = isRecord(item.progress) ? item.progress : {}
           await updateMigrationItem(item.id, {
-            slurperStatus: "queued",
-            progress: { ...recoveredProgress, stage: "worker_queued", error: null, lastError: null },
+            slurperStatus: "scanning",
+            progress: { ...recoveredProgress, stage: "scanning_source", error: null, lastError: null },
             lastProgressAt: new Date().toISOString(),
           })
           return
@@ -308,13 +307,14 @@ export async function POST(
         const repair = isRecord(progress.repairWorker) ? progress.repairWorker : null
         if (String(repair?.status ?? "").toLowerCase() === "completed") return
         await updateMigrationItem(item.id, {
-          slurperStatus: "queued",
-          progress: { ...progress, stage: "worker_queued", error: null, lastError: null },
+          // Scanner inventory is the first worker-pool phase. Do not mark the
+          // item queued or create migration jobs until that inventory ends.
+          slurperStatus: "scanning",
+          progress: { ...progress, stage: "scanning_source", error: null, lastError: null },
           lastProgressAt: new Date().toISOString(),
         })
       })
 
-      const queued = await ensureMigrationWorkerJobs({ migrationId: id, mode: "repair_and_verify" })
       const finalItems = await listMigrationItems(id)
       if (finalItems.length === 0) {
         const completedAt = new Date().toISOString()
@@ -329,11 +329,11 @@ export async function POST(
       }
       await updateMigration(id, {
         status: "running",
-        syncStatus: "ok",
-        syncMessage: `Queued ${queued.jobs.length} shared migration worker shard${queued.jobs.length === 1 ? "" : "s"}`,
+        syncStatus: "syncing",
+        syncMessage: "File Scanner inventory queued; migration jobs will be created after scanning",
         lastSyncedAt: new Date().toISOString(),
       })
-      return NextResponse.json({ migration: await getMigration(id), items: finalItems, workerJobs: queued.jobs }, { status: 200 })
+      return NextResponse.json({ migration: await getMigration(id), items: finalItems, workerJobs: [] }, { status: 200 })
     }
 
     const startedAt = migration.startedAt ?? new Date().toISOString()
