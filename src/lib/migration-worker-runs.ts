@@ -41,7 +41,11 @@ export async function listMigrationWorkerRuns(migrationId: string): Promise<Migr
       coalesce((r.payload->>'failedFiles')::bigint,0) failed_files,
       coalesce((r.payload->>'completedBytes')::bigint,0) completed_bytes,r.created_at,r.updated_at
     from drive_agent_runs r
-    left join drive_repair_jobs j on j.id=r.job_reference
+    -- job_reference is legacy text while repair job ids are uuid. Compare
+    -- using the uuid's text representation so the projection cannot fail on
+    -- non-UUID/legacy references (the API previously swallowed this error
+    -- and rendered an empty worker list).
+    left join drive_repair_jobs j on j.id::text=r.job_reference
     where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1
     order by r.created_at
     limit 100
