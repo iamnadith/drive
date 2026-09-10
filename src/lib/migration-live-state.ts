@@ -98,6 +98,11 @@ export async function syncMigrationLiveState(
   const migration = await getMigration(migrationId)
   if (!migration) return
   if (getMigrationReadOnlyState(migration).readOnly) return
+  // Migration Orchestrator is the sole writer for worker-pool counters,
+  // statuses, verification, and completion. The legacy panel reconciler is
+  // based on aggregate repair jobs and can only manufacture zero snapshots
+  // for the per-file inventory queue, causing periodic UI/DB regressions.
+  if (migration.options.executionMode === "migration_workers") return
   if (migration.status === "completed" && migration.options?.targetActivatedAt) return
 
   const completeWithSettingsWarning = async (warning: string) => {

@@ -107,11 +107,13 @@ test('worker job details live only below their migration route', () => {
 test('migration details never regress worker counters on refresh or reconnect', () => {
   const detailsPage = read('src/app/dashboard/migrations/[id]/page.tsx')
   const bucketState = read('src/lib/migration-bucket-state.ts')
+  const panelReconciler = read('src/lib/migration-live-state.ts')
   assert.match(detailsPage, /const sameWorkerGeneration =/)
   assert.match(detailsPage, /prevGeneration === nextGeneration/)
   assert.match(detailsPage, /totalObjects: Math\.max\(prevLive\.totalObjects, nextLive\.totalObjects\)/)
   assert.match(detailsPage, /transferredBytes:[\s\S]*Math\.max\(prevLive\.transferredBytes, nextLive\.transferredBytes\)/)
   assert.match(bucketState, /live\.workerStage === "migration" \|\| live\.workerStage === "verification"/)
+  assert.match(panelReconciler, /if \(migration\.options\.executionMode === "migration_workers"\) return/)
 })
 
 test('file scanner comparison binds UUID and text parameters explicitly', () => {
