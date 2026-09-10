@@ -36,3 +36,10 @@ test('the GitHub workflow exposes no manual dispatch fields and receives system 
   assert.match(workflow, /DRIVE_REPAIR_JOB_ID: \$\{\{ github\.event\.client_payload\.repair_job_id \|\| '' \}\}/)
   assert.doesNotMatch(workflow, /DRIVE_REPAIR_JOB_ID:.*vars\.DRIVE_REPAIR_JOB_ID/)
 })
+
+test('orchestrator binds the migration id as one PostgreSQL type while materializing file jobs', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(orchestrator, /values\(gen_random_uuid\(\),\$1::uuid,'pending','migration'/)
+  assert.match(orchestrator, /format\('migration:%s:generation:%s:inventory:%s:%s',\$1::uuid/)
+  assert.doesNotMatch(orchestrator, /format\('migration:%s:generation:%s:inventory:%s:%s',\$1::text/)
+})

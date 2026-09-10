@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 8
+const BUILD = 9
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -127,7 +127,7 @@ async function ensureShards(db: Client, migration: Row) {
       for (const object of page.rows) {
         const inserted = await db.query(`
           insert into drive_repair_jobs(id,migration_id,status,mode,work_key,payload,progress,result,created_at,updated_at)
-          values(gen_random_uuid(),$1,'pending','migration',format('migration:%s:generation:%s:inventory:%s:%s',$1::text,$2::int,$3::uuid,encode(convert_to($4::text,'UTF8'),'hex')),
+          values(gen_random_uuid(),$1::uuid,'pending','migration',format('migration:%s:generation:%s:inventory:%s:%s',$1::uuid,$2::int,$3::uuid,encode(convert_to($4::text,'UTF8'),'hex')),
             jsonb_build_object('source','file_scanner_inventory','kind','migration_inventory_file','workerGeneration',$2::int,'itemIds',jsonb_build_array($3::uuid),'inventoryObjects',jsonb_build_array(jsonb_build_object('key',$4::text,'size',$5::bigint,'etag',$6::text))),
             '{}'::jsonb,'{}'::jsonb,now(),now()) on conflict(work_key) where work_key is not null do nothing
         `, [migration.id, generation, queueItem.id, object.key, object.size, object.etag])
