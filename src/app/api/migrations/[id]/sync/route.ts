@@ -584,7 +584,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           const scan = await ensureBucketScan({
             accountId: migration.sourceAccountId,
             bucketName: item.sourceBucket,
-            kind: "migration_source_queue",
+            // The shared scan store's source kind is also used for worker
+            // migration inventories; the migration/item scope keeps it
+            // separate from ordinary bucket scans.
+            kind: "source",
             migrationId: id,
             migrationItemId: item.id,
             prefix: scanPrefix,
