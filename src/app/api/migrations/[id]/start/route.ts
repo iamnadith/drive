@@ -22,6 +22,7 @@ import {
 } from "@/lib/migrations-store"
 import { requireAdmin } from "@/lib/server-auth"
 import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
+import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
 
 export const runtime = "nodejs"
 
@@ -333,6 +334,14 @@ export async function POST(
         syncMessage: "File Scanner inventory queued; migration jobs will be created after scanning",
         lastSyncedAt: new Date().toISOString(),
       })
+      const orchestrator = await getMigrationOrchestratorSettings()
+      if (orchestrator.migrationEnabled && orchestrator.orchestratorUrl && orchestrator.sharedSecret) {
+        await fetch(`${orchestrator.orchestratorUrl.replace(/\/+$/, "")}/run`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${orchestrator.sharedSecret}` },
+          signal: AbortSignal.timeout(15_000),
+        }).catch(() => null)
+      }
       return NextResponse.json({ migration: await getMigration(id), items: finalItems, workerJobs: [] }, { status: 200 })
     }
 

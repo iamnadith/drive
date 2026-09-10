@@ -137,9 +137,10 @@ function readLogs(job: RepairJob | null) {
   return lines
 }
 
-export default function WorkerJobDetailsPage() {
-  const params = useParams<{ id: string }>()
-  const jobId = typeof params?.id === "string" ? params.id : ""
+export default function MigrationWorkerJobDetailsPage() {
+  const params = useParams<{ id: string; jobId: string }>()
+  const migrationId = typeof params?.id === "string" ? params.id : ""
+  const jobId = typeof params?.jobId === "string" ? params.jobId : ""
   const [job, setJob] = React.useState<RepairJob | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [refreshing, setRefreshing] = React.useState(false)
@@ -281,7 +282,7 @@ export default function WorkerJobDetailsPage() {
         </div>
         <div className="flex flex-wrap gap-2">
           <Button asChild variant="outline">
-            <Link href="/dashboard/workers/jobs">
+            <Link href={`/dashboard/migrations/${encodeURIComponent(migrationId)}`}>
               <ArrowLeft className="mr-2 h-4 w-4" />
               Back
             </Link>

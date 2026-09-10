@@ -32,9 +32,9 @@ const POOL_MODE = Boolean(MIGRATION_ID && !REPAIR_JOB_ID)
 const GITHUB_RUN_ID = String(process.env.GITHUB_RUN_ID || "")
 const WORKER_INSTANCE_ID = String(process.env.WORKER_INSTANCE_ID || GITHUB_RUN_ID || "").trim()
 // Persistent workers immediately claim again after every completed file. When
-// the scanner is still producing inventory pages, a five-second idle poll
+// the scanner is still producing inventory pages, a one-second idle poll
 // bounds hand-off latency without letting large worker pools hammer Postgres.
-const POLL_MS = Math.max(2_000, Number(getArg("poll-ms", "5000")) || 5_000)
+const POLL_MS = Math.max(500, Number(getArg("poll-ms", "1000")) || 1_000)
 const HEARTBEAT_MS = Math.max(10_000, Number(getArg("heartbeat-ms", "20000")) || 20_000)
 const MAX_OBJECTS = Math.max(1, Math.min(10_000_000, Number(getArg("max-objects", "2000000")) || 2_000_000))
 const API_TIMEOUT_MS = Math.max(5_000, Number(getArg("api-timeout-ms", "30000")) || 30_000)
@@ -398,6 +398,9 @@ async function heartbeat(extra = {}) {
       const row = auth.rows[0]
       if (!row || row.status === "disabled" || row.secret !== AGENT_TOKEN) throw new Error("Worker is missing, disabled, or has an invalid shared secret")
       await db.query(`update drive_agents set status='online',last_heartbeat_at=now(),last_seen_host=$2,last_seen_version='worker-v2',metadata=coalesce(metadata,'{}'::jsonb)||$3::jsonb,updated_at=now() where id=$1 and status<>'disabled'`, [AGENT_ID, os.hostname(), JSON.stringify(extra)])
+      if (WORKER_INSTANCE_ID) {
+        await db.query(`update drive_agent_runs set status='running',updated_at=now() where agent_id=$1 and payload->>'workerInstanceId'=$2 and status in('pending','running')`, [AGENT_ID, WORKER_INSTANCE_ID])
+      }
       if (currentJobId) {
         const renewed = await db.query(`update drive_repair_jobs set last_heartbeat_at=now(),updated_at=now() where id=$1 and claimed_by_agent_id=$2 and ($3::uuid is null or claim_token=$3::uuid) and status in('claimed','running') returning id`, [currentJobId, AGENT_ID, jobClaimTokens.get(currentJobId) || null])
         if (!renewed.rowCount) throw new Error("This job lease is no longer owned by this worker")

@@ -736,10 +736,6 @@ export default function WorkersPage() {
     [loadAgents, loadRepairJobs, repairJobs]
   )
 
-  const viewRepairJob = React.useCallback((jobId: string) => {
-    router.push(`/dashboard/workers/jobs/${encodeURIComponent(jobId)}`)
-  }, [router])
-
   const deleteRepairJobRecord = React.useCallback(
     async (job: RepairJobRow) => {
       setDeletingJobId(job.id)

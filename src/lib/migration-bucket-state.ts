@@ -197,7 +197,7 @@ export function shouldUseLiveBucketState(
   // jobs, so there is no single slurper/repair job id to attach to `live`.
   // Requiring an id here discarded valid worker counters and made the page
   // fall back to zero while the bucket was visibly running.
-  if (live.workerStage === "migration") return true
+  if (live.workerStage === "migration" || live.workerStage === "verification") return true
 
   const currentSlurperJobId = item.slurperJobId ?? null
   const currentRepairJobId = options?.latestRepairJobId ?? null

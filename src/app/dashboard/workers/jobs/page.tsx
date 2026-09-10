@@ -225,7 +225,7 @@ export default function WorkerJobsPage() {
                   </Button>
                 ) : null}
                 <Button asChild variant="outline" size="sm">
-                  <Link href={`/dashboard/workers/jobs/${encodeURIComponent(job.id)}`}>
+                  <Link href={`/dashboard/migrations/${encodeURIComponent(job.migrationId)}/jobs/${encodeURIComponent(job.id)}`}>
                     <Eye className="mr-1 h-4 w-4" />
                     Details
                   </Link>

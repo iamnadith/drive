@@ -584,7 +584,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
         severity: "critical",
         title: "Worker job failed",
         detail: job.error || job.summary || `Repair job ${job.id} failed`,
-        href: `/dashboard/workers/jobs/${job.id}`,
+        href: `/dashboard/migrations/${job.migrationId}/jobs/${job.id}`,
         at: job.updatedAt || job.completedAt || job.createdAt,
       })),
     ...bucketStats

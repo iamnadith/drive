@@ -82,5 +82,34 @@ test('migration orchestrator projects durable per-file completion into live buck
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   assert.match(orchestrator, /async function refreshWorkerItemProgress/)
   assert.match(orchestrator, /'transferredObjects',coalesce\(a\.completed_objects,0\)/)
+  assert.match(orchestrator, /v\.status='completed' and v\.missing_objects=0 and v\.mismatched_objects=0/)
+  assert.match(orchestrator, /then 'verification_failed'/)
   assert.match(orchestrator, /await refreshWorkerItemProgress\(db, migration, shards\.generation\)/)
+})
+
+test('orchestrator continuously maintains every registered workflow instance', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const runtime = read('workers/migration-worker/migration-worker.mjs')
+  assert.match(orchestrator, /where provider='github_actions' and status<>'disabled'/)
+  assert.match(orchestrator, /Workflow heartbeat expired; replacement dispatched/)
+  assert.match(orchestrator, /payload->>'workerInstanceId'/)
+  assert.doesNotMatch(orchestrator, /const ids = Array\.isArray\(opts\(migration\)\.workerAgentIds\)/)
+  assert.match(runtime, /getArg\("poll-ms", "1000"\)/)
+})
+
+test('worker job details live only below their migration route', () => {
+  assert.equal(fs.existsSync('src/app/dashboard/workers/jobs/[id]/page.tsx'), false)
+  assert.equal(fs.existsSync('src/app/dashboard/migrations/[id]/jobs/[jobId]/page.tsx'), true)
+  const migrationDetails = read('src/app/dashboard/migrations/[id]/page.tsx')
+  assert.doesNotMatch(migrationDetails, /dashboard\/workers\/jobs\//)
+})
+
+test('migration details never regress worker counters on refresh or reconnect', () => {
+  const detailsPage = read('src/app/dashboard/migrations/[id]/page.tsx')
+  const bucketState = read('src/lib/migration-bucket-state.ts')
+  assert.match(detailsPage, /const sameWorkerGeneration =/)
+  assert.match(detailsPage, /prevGeneration === nextGeneration/)
+  assert.match(detailsPage, /totalObjects: Math\.max\(prevLive\.totalObjects, nextLive\.totalObjects\)/)
+  assert.match(detailsPage, /transferredBytes:[\s\S]*Math\.max\(prevLive\.transferredBytes, nextLive\.transferredBytes\)/)
+  assert.match(bucketState, /live\.workerStage === "migration" \|\| live\.workerStage === "verification"/)
 })

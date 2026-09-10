@@ -201,6 +201,8 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
     )
     update drive_migration_items i set
       slurper_status=case
+        when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status='completed' and v.missing_objects=0 and v.mismatched_objects=0 and (v.extra_objects=0 or $4=false)) then 'completed'
+        when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status in('failed','completed') and (v.status='failed' or v.missing_objects>0 or v.mismatched_objects>0 or (v.extra_objects>0 and $4=true))) then 'verification_failed'
         when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status in('pending','running')) then 'verifying'
         -- Inventory and job materialization are one scanner-owned stage.  Do
         -- not advertise a bucket as queued while the scanner is still
@@ -216,6 +218,8 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
       progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{live}',jsonb_build_object(
         'updatedAt',now(),
         'status',case
+          when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status='completed' and v.missing_objects=0 and v.mismatched_objects=0 and (v.extra_objects=0 or $4=false)) then 'completed'
+          when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status in('failed','completed') and (v.status='failed' or v.missing_objects>0 or v.mismatched_objects>0 or (v.extra_objects>0 and $4=true))) then 'verification_failed'
           when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status in('pending','running')) then 'verifying'
           when coalesce(i.progress->'migrationInventory'->>'status','') <> 'completed'
             or coalesce(i.progress->'migrationQueue'->>'status','') <> 'completed' then 'scanning'
@@ -231,19 +235,21 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
         'verifyIssues',0,
         'totalObjects',coalesce(i.source_objects,0),
         'workerStatus',case
+          when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status='completed' and v.missing_objects=0 and v.mismatched_objects=0 and (v.extra_objects=0 or $4=false)) then 'completed'
+          when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status in('failed','completed') and (v.status='failed' or v.missing_objects>0 or v.mismatched_objects>0 or (v.extra_objects>0 and $4=true))) then 'verification_failed'
           when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status in('pending','running')) then 'verifying'
           when coalesce(i.progress->'migrationInventory'->>'status','') <> 'completed'
             or coalesce(i.progress->'migrationQueue'->>'status','') <> 'completed' then 'scanning'
           when coalesce(a.active_objects,0)>0 then 'running' else 'queued' end,
         'workerStage',case
-          when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status in('pending','running')) then 'verification'
+          when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3) then 'verification'
           when coalesce(i.progress->'migrationInventory'->>'status','') <> 'completed'
             or coalesce(i.progress->'migrationQueue'->>'status','') <> 'completed' then 'scanning'
           else 'migration' end,
         'queuedObjects',coalesce(a.queued_objects,0)
       ))
     from aggregate a where i.id=a.item_id and i.migration_id=$1
-  `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`, generation])
+  `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`, generation, opts(migration).verifyStrictDestination === true])
 }
 async function ensureBucketVerification(db: Client, migration: Row, generation: number) {
   // A bucket is eligible as soon as its own queue is complete and every one
@@ -407,21 +413,22 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
   return { verification: "completed", missing, mismatched, extra, backendOrchestrator: await wakeBackendOrchestrator(db) }
 }
 async function dispatchWorkers(db: Client, env: Env, migration: Row) {
-  const ids = Array.isArray(opts(migration).workerAgentIds) ? opts(migration).workerAgentIds.filter((id: unknown) => typeof id === "string") : []
   const configRows = await db.query(`select key,value from drive_app_settings where key='migration-orchestrator'`)
   const orchestration = configRows.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
-  if (!ids.length) return 0
   const budget = integer(orchestration.maxDispatchesPerCycle, 100, 1, 100)
   const stranded = await db.query(`select id from drive_agent_runs where run_type='github_dispatch' and status='pending' and payload->>'migrationId'=$1 and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit $2`, [migration.id, budget])
   for (const row of stranded.rows) await env.GITHUB_DISPATCH_QUEUE.send({ intentId: row.id }, { contentType: "json" })
-  const agents = await db.query(`select id,github_repo_owner,github_repo_name,github_workflow_file,github_ref,github_token,least(5,greatest(1,coalesce(worker_count,1))) worker_count from drive_agents where id=any($1::uuid[]) and provider='github_actions' and status<>'disabled' and github_token is not null order by array_position($1::uuid[],id)`, [ids])
+  // Every registered GitHub workflow contributes its configured capacity to
+  // every active worker-pool migration. Re-read this set on every cycle so a
+  // workflow registered mid-migration joins automatically.
+  const agents = await db.query(`select id,github_repo_owner,github_repo_name,github_workflow_file,github_ref,github_token,least(5,greatest(1,coalesce(worker_count,1))) worker_count from drive_agents where provider='github_actions' and status<>'disabled' and github_token is not null and github_repo_owner is not null and github_repo_name is not null and github_workflow_file is not null order by created_at,id`)
   let queued = stranded.rowCount || 0
   for (const agent of agents.rows) {
-    await db.query(`update drive_agent_runs r set status='failed',summary='Recovered stale GitHub dispatch',completed_at=now(),updated_at=now() from drive_agents a where r.agent_id=$1 and a.id=r.agent_id and r.status in('pending','running') and r.payload->>'migrationId'=$2 and r.updated_at<now()-interval '30 minutes' and coalesce(a.last_heartbeat_at,'epoch'::timestamptz)<now()-interval '2 minutes'`, [agent.id, migration.id])
+    await db.query(`update drive_agent_runs r set status='failed',summary='Workflow heartbeat expired; replacement dispatched',completed_at=now(),updated_at=now() where r.agent_id=$1 and r.status in('pending','running') and r.payload->>'migrationId'=$2 and r.updated_at<now()-interval '3 minutes'`, [agent.id, migration.id])
     const active = await db.query(`
-      select count(*)::int count from drive_agent_runs r join drive_agents a on a.id=r.agent_id
+      select count(*)::int count from drive_agent_runs r
       where r.agent_id=$1 and r.status in('pending','running')
-        and (r.updated_at>now()-interval '30 minutes' or a.last_heartbeat_at>now()-interval '2 minutes')
+        and r.updated_at>now()-interval '3 minutes'
     `, [agent.id])
     const vacancies = Math.max(0, Number(agent.worker_count || 1) - Number(active.rows[0]?.count || 0))
     for (let slot = 0; slot < vacancies && queued < budget; slot += 1) {
@@ -561,6 +568,10 @@ async function workerRequest(request: Request, env: Env, path: string) {
     const now = new Date().toISOString()
     if (action === "register" || action === "heartbeat") {
       await db.query(`update drive_agents set status='online',last_heartbeat_at=now(),last_seen_host=$2,last_seen_version=$3,capabilities=case when jsonb_array_length($4::jsonb)>0 then $4::jsonb else capabilities end,metadata=coalesce(metadata,'{}'::jsonb)||$5::jsonb,updated_at=now(),last_error=null where id=$1 and status<>'disabled'`, [agent.id, String(body.host || "").slice(0, 255) || null, String(body.version || "").slice(0, 80) || null, JSON.stringify(Array.isArray(body.capabilities) ? body.capabilities : []), JSON.stringify(body.metadata && typeof body.metadata === "object" ? body.metadata : {})])
+      const instanceId = typeof body.metadata?.workerInstanceId === "string" ? body.metadata.workerInstanceId : ""
+      if (instanceId) {
+        await db.query(`update drive_agent_runs set status='running',updated_at=now() where agent_id=$1 and payload->>'workerInstanceId'=$2 and status in('pending','running')`, [agent.id, instanceId])
+      }
       return json({ ok: true, agentId: agent.id })
     }
     if (action === "claim-job") {

@@ -362,7 +362,15 @@ function mergeIncomingItem(prev: MigrationItem | undefined, next: MigrationItem)
 
   const sameSlurperJob = (prevLive.slurperJobId ?? prev.slurperJobId ?? null) === (nextLive.slurperJobId ?? next.slurperJobId ?? null)
   const sameRepairJob = (prevLive.repairJobId ?? null) === (nextLive.repairJobId ?? null)
-  const sameCycle = Boolean(prevLive.slurperJobId || prevLive.repairJobId || nextLive.slurperJobId || nextLive.repairJobId) && sameSlurperJob && sameRepairJob
+  const prevQueue = isRecord(prevProgress.migrationQueue) ? prevProgress.migrationQueue : null
+  const nextQueue = isRecord(nextProgress.migrationQueue) ? nextProgress.migrationQueue : null
+  const prevGeneration = typeof prevQueue?.generation === "number" ? prevQueue.generation : null
+  const nextGeneration = typeof nextQueue?.generation === "number" ? nextQueue.generation : null
+  const isWorkerStage = (stage: string | null) => stage === "migration" || stage === "verification"
+  const sameWorkerGeneration = isWorkerStage(prevLive.workerStage) && isWorkerStage(nextLive.workerStage) &&
+    (prevGeneration === null || nextGeneration === null || prevGeneration === nextGeneration)
+  const sameJobCycle = Boolean(prevLive.slurperJobId || prevLive.repairJobId || nextLive.slurperJobId || nextLive.repairJobId) && sameSlurperJob && sameRepairJob
+  const sameCycle = sameWorkerGeneration || sameJobCycle
   if (!sameCycle) return next
 
   const prevUpdatedAt = prevLive.updatedAt ? Date.parse(prevLive.updatedAt) : NaN
@@ -373,10 +381,9 @@ function mergeIncomingItem(prev: MigrationItem | undefined, next: MigrationItem)
 
   const mergedLive = {
     ...nextLive,
-    totalObjects: nextLive.totalObjects,
-    transferredObjects: isTerminalBucketDisplayStatus(nextLive.status)
-      ? nextLive.transferredObjects
-      : Math.max(prevLive.transferredObjects, nextLive.transferredObjects),
+    totalObjects: Math.max(prevLive.totalObjects, nextLive.totalObjects),
+    transferredObjects: Math.max(prevLive.transferredObjects, nextLive.transferredObjects),
+    transferredBytes: Math.max(prevLive.transferredBytes, nextLive.transferredBytes),
     skippedObjects: isTerminalBucketDisplayStatus(nextLive.status)
       ? nextLive.skippedObjects
       : Math.max(prevLive.skippedObjects, nextLive.skippedObjects),
@@ -1571,7 +1578,6 @@ export default function MigrationDetailsPage() {
   )
 
   const openWorkerDispatch = React.useCallback(async () => {
-    setWorkersOpen(true)
     setWorkersLoading(true)
     setError(null)
     try {
@@ -1585,7 +1591,9 @@ export default function MigrationDetailsPage() {
         isRecord(json) && Array.isArray(json.agents)
           ? (json.agents as WorkerOption[]).filter(
               (worker) =>
-                (worker.provider === "github_actions" || worker.provider === "self_hosted" || worker.provider === "local") &&
+                (migration?.options.executionMode === "migration_workers"
+                  ? worker.provider === "github_actions"
+                  : worker.provider === "github_actions" || worker.provider === "self_hosted" || worker.provider === "local") &&
                 Array.isArray(worker.capabilities) &&
                 worker.capabilities.includes(migration?.options.executionMode === "migration_workers" ? "bulk_migrate" : "repair")
             )
@@ -1593,6 +1601,20 @@ export default function MigrationDetailsPage() {
       setWorkers(rows)
       setSelectedWorkerId(rows[0]?.id ?? "")
       setSelectedWorkerIds(rows.map((worker) => worker.id))
+      if (migration?.options.executionMode === "migration_workers") {
+        if (!migration.id || rows.length === 0) throw new Error("No registered migration workflows are available")
+        setDispatchingWorkerId(rows[0].id)
+        const res = await fetch(`/api/workers/${encodeURIComponent(rows[0].id)}/dispatch`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ migrationId: migration.id, mode: "migration", pool: true, poolAgentIds: rows.map((worker) => worker.id) }),
+        })
+        const result: unknown = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(isRecord(result) && typeof result.error === "string" ? result.error : "Unable to dispatch migration workflows")
+        await loadInitial()
+      } else {
+        setWorkersOpen(true)
+      }
     } catch (e: unknown) {
       const message =
         typeof e === "object" && e !== null && "message" in e
@@ -1604,8 +1626,9 @@ export default function MigrationDetailsPage() {
       setSelectedWorkerIds([])
     } finally {
       setWorkersLoading(false)
+      setDispatchingWorkerId(null)
     }
-  }, [migration?.options.executionMode])
+  }, [loadInitial, migration])
 
   const dispatchMigrationWorker = React.useCallback(async () => {
     const workerIds = migration?.options.executionMode === "migration_workers"
@@ -1813,7 +1836,7 @@ export default function MigrationDetailsPage() {
                   transferredPct={overviewProgress.transferredPct}
                   skippedPct={overviewProgress.skippedPct}
                   failedPct={overviewProgress.copyFailedPct}
-                  unaccountedPct={overviewProgress.unaccountedPct}
+                  unaccountedPct={migration.options.executionMode === "migration_workers" ? 0 : overviewProgress.unaccountedPct}
                 />
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <div className="flex items-center gap-3">
@@ -1832,7 +1855,7 @@ export default function MigrationDetailsPage() {
                       {formatNumber(overviewProgress.copyFailed)} copy failed objects ({overviewProgress.copyFailedPct.toFixed(1)}%)
                     </span>
                   ) : null}
-                  {overviewProgress.unaccounted > 0 ? (
+                  {migration.options.executionMode !== "migration_workers" && overviewProgress.unaccounted > 0 ? (
                     <span className="text-muted-foreground">
                       {formatNumber(overviewProgress.unaccounted)} not reported by Cloudflare counters ({overviewProgress.unaccountedPct.toFixed(1)}%)
                     </span>
@@ -2017,28 +2040,33 @@ export default function MigrationDetailsPage() {
       {migration.options.executionMode === "migration_workers" ? (
         <Card className="gap-2">
           <CardHeader className="pb-1">
-            <CardTitle>Migration workflow workers</CardTitle>
-            <CardDescription>Live workflow instances and their current file. Per-file queue records remain internal and resumable.</CardDescription>
+            <CardTitle>Worker Overview</CardTitle>
+            <CardDescription>Live migration worker execution, progress, current files, and workflow instances.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 pt-0">
             {workerRuns.length === 0 ? (
               <div className="rounded-xl border border-dashed p-5 text-sm text-muted-foreground">Waiting for workflow dispatch.</div>
             ) : <>
-              <div className="rounded-xl border bg-muted/15 p-4">
+              <div className="rounded-2xl border bg-muted/15 p-4">
                 <div className="flex items-center justify-between text-sm">
-                  <span className="font-medium">Worker pool overview</span>
+                  <span className="font-medium">Overall progress</span>
                   <span className="font-mono">{overviewProgress.totalObjects > 0 ? ((overviewProgress.transferred / overviewProgress.totalObjects) * 100).toFixed(1) : "0.0"}%</span>
                 </div>
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
                   <div className="h-full bg-primary transition-all" style={{ width: `${overviewProgress.totalObjects > 0 ? Math.min(100, (overviewProgress.transferred / overviewProgress.totalObjects) * 100) : 0}%` }} />
                 </div>
-                <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2 lg:grid-cols-4">
-                  <div>Transferred: <span className="font-medium text-foreground">{formatNumber(overviewProgress.transferred)} / {formatNumber(overviewProgress.totalObjects)}</span></div>
-                  <div>Transferred bytes: <span className="font-medium text-foreground">{formatBytes(items.reduce((n, item) => n + (readLiveBucketState(isRecord(item.progress) ? item.progress : {})?.transferredBytes || 0), 0))}</span></div>
-                  <div>Active workers: <span className="font-medium text-foreground">{workerRuns.filter((run) => run.status === "running").length}</span> / {workerRuns.length}</div>
-                  <div>Failures: <span className="font-medium text-foreground">{formatNumber(overviewProgress.copyFailed)}</span></div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Processed files</div><div className="mt-1 text-lg font-semibold">{formatNumber(overviewProgress.transferred + overviewProgress.copyFailed + overviewProgress.skipped)} / {formatNumber(overviewProgress.totalObjects)}</div></div>
+                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Transferred</div><div className="mt-1 text-lg font-semibold">{formatNumber(overviewProgress.transferred)}</div></div>
+                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Transferred bytes</div><div className="mt-1 text-lg font-semibold">{formatBytes(items.reduce((n, item) => n + (readLiveBucketState(isRecord(item.progress) ? item.progress : {})?.transferredBytes || 0), 0))}</div></div>
+                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Failed</div><div className="mt-1 text-lg font-semibold">{formatNumber(overviewProgress.copyFailed)}</div></div>
+                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Workers</div><div className="mt-1 text-lg font-semibold">{workerRuns.filter((run) => run.status === "running").length} / {workerRuns.length}</div></div>
+                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Buckets completed</div><div className="mt-1 text-lg font-semibold">{bucketCounts.completed} / {bucketCounts.total}</div></div>
+                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Verification issues</div><div className="mt-1 text-lg font-semibold">{formatNumber(overviewProgress.verifyIssues)}</div></div>
+                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Remaining</div><div className="mt-1 text-lg font-semibold">{formatNumber(Math.max(0, overviewProgress.totalObjects - overviewProgress.transferred - overviewProgress.skipped - overviewProgress.copyFailed))}</div></div>
                 </div>
               </div>
+              <div className="pt-1 text-sm font-medium">Workflow instances</div>
               {workerRuns.map((run) => {
               const file = run.currentFile && typeof run.currentFile === "object" ? run.currentFile : null
               const key = typeof file?.key === "string" ? file.key : "Waiting for next file"
@@ -2125,7 +2153,7 @@ export default function MigrationDetailsPage() {
                         ) : null}
                         <Button
                           variant="outline"
-                          onClick={() => router.push(`/dashboard/workers/jobs/${encodeURIComponent(job.id)}`)}
+                          onClick={() => router.push(`/dashboard/migrations/${encodeURIComponent(id)}/jobs/${encodeURIComponent(job.id)}`)}
                         >
                           Details
                         </Button>
