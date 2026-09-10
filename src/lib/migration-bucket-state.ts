@@ -192,6 +192,12 @@ export function shouldUseLiveBucketState(
 ): boolean {
   if (!live) return false
 
+  // Migration-worker progress is aggregated across a fleet of durable file
+  // jobs, so there is no single slurper/repair job id to attach to `live`.
+  // Requiring an id here discarded valid worker counters and made the page
+  // fall back to zero while the bucket was visibly running.
+  if (live.workerStage === "migration") return true
+
   const currentSlurperJobId = item.slurperJobId ?? null
   const currentRepairJobId = options?.latestRepairJobId ?? null
   const liveSlurperJobId = live.slurperJobId ?? null
