@@ -136,12 +136,7 @@ export async function syncMigrationLiveState(
   }
 
   const [items, allRepairJobs] = await Promise.all([listMigrationItems(migrationId), listRepairJobsByMigration(migrationId, 500)])
-  // A retry creates a new generation. Ignore older shard rows and unrelated
-  // manual repair rows when rebuilding live state so stale telemetry cannot
-  // move a current migration backwards or report duplicate work.
-  const repairJobs = migration.options.executionMode === "migration_workers"
-    ? allRepairJobs.filter((job) => isCurrentWorkerShardJob(migration, job))
-    : allRepairJobs
+  const repairJobs = allRepairJobs
   const latestRepairJob = getLatestRepairJob(repairJobs)
   const sortedRepairJobs = [...repairJobs].sort(
     (a, b) => Date.parse(b.updatedAt || b.createdAt || "") - Date.parse(a.updatedAt || a.createdAt || "")
@@ -394,19 +389,6 @@ export async function syncMigrationLiveState(
       lastSyncedAt: now,
     }).catch(() => undefined)
   } else if (allCompleted) {
-    if (
-      migration.options.executionMode === "migration_workers" &&
-      migration.options.requireIndependentVerification !== false
-    ) {
-      await updateMigration(migrationId, {
-        status: "verifying",
-        syncStatus: "ok",
-        syncMessage: "Object migration completed; File Scanner verification pending",
-        completedAt: null,
-        lastSyncedAt: now,
-      }).catch(() => undefined)
-      return
-    }
     if (options?.runSettingsSync !== true) {
       if (settingsSyncRunning || settingsSyncFailures.length > 0 || settingsSyncCompleted) return
       await updateMigration(migrationId, {

@@ -139,3 +139,13 @@ test('verified bucket settings respect strict destination verification', () => {
   assert.match(orchestrator, /add column if not exists attempt_generation integer/)
   assert.match(orchestrator, /where drive_migration_verification_state\.generation<>excluded\.generation/)
 })
+
+test('orchestrator persists bucket stage and settings events for migration logs', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const details = read('src/app/dashboard/migrations/[id]/page.tsx')
+  assert.match(orchestrator, /async function recordItemStageEvents/)
+  assert.match(orchestrator, /'File Scanner verification passed; bucket migration completed'/)
+  assert.match(orchestrator, /'Bucket settings synchronized after successful verification'/)
+  assert.match(orchestrator, /await recordItemStageEvents\(db, migration, shards\.generation\)/)
+  assert.doesNotMatch(details, /files completed`/)
+})

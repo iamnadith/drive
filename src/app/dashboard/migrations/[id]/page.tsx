@@ -583,11 +583,7 @@ function collectLogLines(items: MigrationItem[], workerRuns: MigrationWorkerRun[
     }
   }
 
-  for (const run of workerRuns) {
-    const atIso = run.updatedAt || run.createdAt
-    const at = Date.parse(atIso)
-    if (Number.isFinite(at)) lines.push({ at, atIso, bucket: "worker-pool", stage: "migration_worker", status: run.status, message: `Worker ${run.instanceId || run.id} ${run.status}; ${run.completedFiles} files completed` })
-  }
+  void workerRuns
   lines.sort((a, b) => a.at - b.at)
   return lines
 }
@@ -2441,8 +2437,7 @@ export default function MigrationDetailsPage() {
         </CardContent>
       </Card>
 
-      {logLines.length > 0 ? (
-        <Card>
+      <Card>
         <CardHeader>
           <CardTitle>Migration Logs</CardTitle>
           <CardDescription>Aggregated logs and errors for this migration.</CardDescription>
@@ -2562,8 +2557,10 @@ export default function MigrationDetailsPage() {
             </ScrollArea>
           </div>
         </CardContent>
+            {logLines.length === 0 ? (
+              <div className="p-4 text-sm text-muted-foreground">Waiting for scanner and orchestrator lifecycle events.</div>
+            ) : null}
         </Card>
-      ) : null}
 
       <Dialog open={failedOpen} onOpenChange={setFailedOpen}>
         <DialogContent className="w-[96vw] max-w-[96vw] sm:max-w-[min(96vw,72rem)] h-[88vh] sm:h-[min(88vh,56rem)] overflow-hidden p-0 flex flex-col gap-0">

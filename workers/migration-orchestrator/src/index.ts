@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 14
+const BUILD = 15
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -251,6 +251,55 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
       ))
     from aggregate a where i.id=a.item_id and i.migration_id=$1
   `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`, generation, opts(migration).verifyStrictDestination === true])
+}
+async function recordItemStageEvents(db: Client, migration: Row, generation: number) {
+  await db.query(`
+    with changed as (
+      select i.id,i.source_bucket,i.progress,
+        case when i.slurper_status in('completed','verification_failed','failed') then i.slurper_status
+          else coalesce(i.progress->'live'->>'status',i.slurper_status,'unknown') end status,
+        coalesce((i.progress->'live'->>'transferredObjects')::bigint,0) transferred,
+        coalesce((i.progress->'live'->>'totalObjects')::bigint,i.source_objects,0) total,
+        (select v.last_error from drive_migration_verification_state v
+          where v.migration_item_id=i.id and v.generation=$2 limit 1) verification_error
+      from drive_migration_items i where i.migration_id=$1
+    ), pending as (
+      select *,case status
+        when 'scanning' then 'File Scanner is listing source objects and creating the durable queue'
+        when 'queued' then 'Source inventory is queued for migration workers'
+        when 'running' then format('Migration workers are transferring files (%s/%s completed)',transferred,total)
+        when 'verifying' then 'Transfer completed; File Scanner verification started'
+        when 'completed' then 'File Scanner verification passed; bucket migration completed'
+        when 'verification_failed' then coalesce('File Scanner verification failed: '||nullif(verification_error,''),'File Scanner verification found file differences')
+        when 'failed' then coalesce(nullif(verification_error,''),'Bucket migration failed')
+        else 'Bucket state changed to '||status end message
+      from changed
+      where coalesce(progress->>'workerEventStatus','') is distinct from status
+    )
+    update drive_migration_items i set progress=jsonb_set(
+      jsonb_set(coalesce(i.progress,'{}'::jsonb),'{events}',
+        coalesce(case when jsonb_typeof(i.progress->'events')='array' then i.progress->'events' else '[]'::jsonb end,'[]'::jsonb)
+        || jsonb_build_array(jsonb_build_object('at',now(),'stage','worker_'||p.status,'status',p.status,'message',p.message)),true),
+      '{workerEventStatus}',to_jsonb(p.status),true),updated_at=now()
+    from pending p where i.id=p.id
+  `, [migration.id, generation])
+  await db.query(`
+    with changed as (
+      select id,progress,progress->'orchestratorSettings'->>'status' status,
+        progress->'orchestratorSettings'->>'error' error
+      from drive_migration_items
+      where migration_id=$1 and progress->'orchestratorSettings'->>'status' in('synced','failed')
+        and coalesce(progress->>'workerSettingsEventStatus','') is distinct from progress->'orchestratorSettings'->>'status'
+    )
+    update drive_migration_items i set progress=jsonb_set(
+      jsonb_set(coalesce(i.progress,'{}'::jsonb),'{events}',
+        coalesce(case when jsonb_typeof(i.progress->'events')='array' then i.progress->'events' else '[]'::jsonb end,'[]'::jsonb)
+        || jsonb_build_array(jsonb_build_object('at',now(),'stage',case when c.status='synced' then 'settings_synced' else 'settings_sync_failed' end,
+          'status',case when c.status='synced' then 'completed' else 'failed' end,
+          'message',case when c.status='synced' then 'Bucket settings synchronized after successful verification' else coalesce(nullif(c.error,''),'Bucket settings synchronization failed') end)),true),
+      '{workerSettingsEventStatus}',to_jsonb(c.status),true),updated_at=now()
+    from changed c where i.id=c.id
+  `, [migration.id])
 }
 async function ensureBucketVerification(db: Client, migration: Row, generation: number) {
   // A bucket is eligible as soon as its own queue is complete and every one
@@ -661,6 +710,7 @@ async function cycle(env: Env) {
       // is queued, so this does not create a completion race.
       const hasRunnableFiles = shards.shardCount > 0 || shards.created > 0
       const dispatched = current?.status === "running" && hasRunnableFiles ? await dispatchWorkers(db, env, current) : 0
+      await recordItemStageEvents(db, migration, shards.generation)
       if (shards.inventoryPending || shards.queuePending) await env.GITHUB_DISPATCH_QUEUE.send({ control: "cycle" })
       await db.query(`update drive_migrations set last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
       return complete(db, owner, migration.id, { ok: true, migrationId, ...shards, recovered, finalized, ...verification, bucketSettings, fileScanner, dispatched })

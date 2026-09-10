@@ -134,8 +134,12 @@ async function main() {
       connected = true
       // Serialize panel schema installers. Runtime workers may still perform
       // idempotent schema guards, so retry transaction-level deadlocks below.
-      await client.query("select pg_advisory_lock(hashtext($1))", ["drive-schema-install-v1"])
-      locked = true
+      const lockResult = await client.query("select pg_try_advisory_lock(hashtext($1)) acquired", ["drive-schema-install-v1"])
+      locked = lockResult.rows[0]?.acquired === true
+      if (!locked) {
+        console.warn("[db:schema] another deployment is already preparing this schema; continuing without a duplicate installer")
+        return
+      }
       await client.query("begin")
       await client.query("set local lock_timeout = '60s'")
       await client.query("set local statement_timeout = '10min'")
