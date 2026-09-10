@@ -8,7 +8,7 @@ if (!(globalThis as { Node?: unknown }).Node) (globalThis as { Node?: unknown })
 type ScanMessage = { reason: "continue" }
 type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; FILE_SCAN_QUEUE: Queue<ScanMessage> }
 type Row = Record<string, any>
-const BUILD = 9
+const BUILD = 10
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -167,7 +167,7 @@ async function compare(db: Client, task: Row) {
         insert into drive_bucket_verify_diffs(id,migration_item_id,source_scan_id,dest_scan_id,kind,key,source_size,dest_size)
         select gen_random_uuid(),$1::uuid,$2::uuid,$3::uuid,case when d.key is null then 'missing' else 'size_mismatch' end,s.key,s.size,d.size
         from drive_bucket_scan_objects s left join drive_bucket_scan_objects d on d.scan_id=$3::uuid and d.key=s.key
-        where s.scan_id=$2::uuid and (
+        where s.scan_id=$2::uuid and not s.is_dir_marker and (
           d.key is null or d.size<>s.size or
           (trim(both '"' from coalesce(s.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from coalesce(d.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from s.etag)<>trim(both '"' from d.etag)) or
           ($8='migration_workers' and not exists (
@@ -186,7 +186,8 @@ async function compare(db: Client, task: Row) {
       ), extra_diffs as (
         insert into drive_bucket_verify_diffs(id,migration_item_id,source_scan_id,dest_scan_id,kind,key,source_size,dest_size)
         select gen_random_uuid(),$1::uuid,$2::uuid,$3::uuid,'extra',d.key,null,d.size from drive_bucket_scan_objects d
-        left join drive_bucket_scan_objects s on s.scan_id=$2::uuid and s.key=d.key where d.scan_id=$3::uuid and s.key is null
+        left join drive_bucket_scan_objects s on s.scan_id=$2::uuid and s.key=d.key and not s.is_dir_marker
+        where d.scan_id=$3::uuid and not d.is_dir_marker and s.key is null
         returning kind
       ), counts as (
         select count(*) filter(where kind='missing')::int missing,
@@ -242,12 +243,12 @@ async function processTask(db: Client, env: Env, task: Row) {
   if (page.truncated) {
     if (!page.cursor || page.cursor === cursor) throw new Error("R2 returned a truncated page without a forward cursor")
     await db.query(`update drive_bucket_scans set objects=(select count(*) from drive_bucket_scan_objects where scan_id=$1),bytes=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$1),last_key=$2,updated_at=now() where id=$1`, [scanId, page.objects.at(-1)?.key || null])
-    const advanced = await db.query(`update drive_migration_verification_state set ${cursorColumn}=$2,${objectsColumn}=(select count(*) from drive_bucket_scan_objects where scan_id=$3),${bytesColumn}=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$3),status='pending',lease_owner=null,lease_expires_at=null,updated_at=now() where migration_item_id=$1 and generation=$4 and lease_owner=$5`, [task.migration_item_id, page.cursor, scanId, task.generation, task.lease_owner])
+    const advanced = await db.query(`update drive_migration_verification_state set ${cursorColumn}=$2,${objectsColumn}=(select count(*) from drive_bucket_scan_objects where scan_id=$3 and not is_dir_marker),${bytesColumn}=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$3 and not is_dir_marker),status='pending',lease_owner=null,lease_expires_at=null,updated_at=now() where migration_item_id=$1 and generation=$4 and lease_owner=$5`, [task.migration_item_id, page.cursor, scanId, task.generation, task.lease_owner])
     if (!advanced.rowCount) throw new Error("File Scanner task lease was lost")
     return { itemId: task.migration_item_id, phase, pageObjects: objects, continued: true }
   }
   await db.query(`update drive_bucket_scans set status='completed',objects=(select count(*) from drive_bucket_scan_objects where scan_id=$1),bytes=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$1),last_key=$2,completed_at=now(),updated_at=now() where id=$1`, [scanId, page.objects.at(-1)?.key || null])
-  const advanced = await db.query(`update drive_migration_verification_state set ${cursorColumn}=null,${objectsColumn}=(select count(*) from drive_bucket_scan_objects where scan_id=$2),${bytesColumn}=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$2),phase=$3,status='pending',lease_owner=null,lease_expires_at=null,updated_at=now() where migration_item_id=$1 and generation=$4 and lease_owner=$5`, [task.migration_item_id, scanId, phase === "source" ? "destination" : "compare", task.generation, task.lease_owner])
+  const advanced = await db.query(`update drive_migration_verification_state set ${cursorColumn}=null,${objectsColumn}=(select count(*) from drive_bucket_scan_objects where scan_id=$2 and not is_dir_marker),${bytesColumn}=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$2 and not is_dir_marker),phase=$3,status='pending',lease_owner=null,lease_expires_at=null,updated_at=now() where migration_item_id=$1 and generation=$4 and lease_owner=$5`, [task.migration_item_id, scanId, phase === "source" ? "destination" : "compare", task.generation, task.lease_owner])
   if (!advanced.rowCount) throw new Error("File Scanner task lease was lost")
   if (phase === "source") return { itemId: task.migration_item_id, phase, pageObjects: objects, continued: false }
   const refreshed = (await db.query(`select * from drive_migration_verification_state where migration_item_id=$1`, [task.migration_item_id])).rows[0]

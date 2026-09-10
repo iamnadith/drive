@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 13
+const BUILD = 14
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -56,6 +56,7 @@ async function ensureSchema(db: Client) {
       attempt_count integer not null default 0, last_error text, lease_owner text, lease_expires_at timestamptz,
       completed_at timestamptz, created_at timestamptz not null default now(), updated_at timestamptz not null default now()
     );
+    alter table if exists drive_migration_verification_state add column if not exists attempt_generation integer;
   `)
 }
 function opts(row: Row): Row { return row.options && typeof row.options === "object" ? row.options : {} }
@@ -262,7 +263,13 @@ async function ensureBucketVerification(db: Client, migration: Row, generation: 
       and i.progress->'migrationQueue'->>'status'='completed'
       and not exists (select 1 from drive_repair_jobs j where j.migration_id=$1 and j.work_key like $3 and (j.payload->'itemIds'->>0)::uuid=i.id and j.status<>'completed')
       and not exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$2)
-    on conflict (migration_item_id) do nothing
+    on conflict (migration_item_id) do update set
+      migration_id=excluded.migration_id,generation=excluded.generation,source_scan_id=excluded.source_scan_id,
+      destination_scan_id=null,status='pending',phase='source',source_cursor=null,destination_cursor=null,
+      source_objects=0,source_bytes=0,destination_objects=0,destination_bytes=0,
+      missing_objects=0,mismatched_objects=0,extra_objects=0,attempt_count=0,attempt_generation=null,
+      last_error=null,lease_owner=null,lease_expires_at=null,completed_at=null,updated_at=now()
+    where drive_migration_verification_state.generation<>excluded.generation
   `, [migration.id, generation, `migration:${migration.id}:generation:${generation}:inventory:%`])
   await db.query(`
     update drive_migration_items i set slurper_status='verifying',last_progress_at=now(),updated_at=now(),
@@ -336,8 +343,9 @@ async function syncNextBucketSettings(db: Client, migration: Row) {
     join drive_migration_verification_state v on v.migration_item_id=i.id and v.migration_id=i.migration_id
     where i.migration_id=$1 and i.slurper_status='completed' and v.status='completed'
       and v.missing_objects=0 and v.mismatched_objects=0
+      and (v.extra_objects=0 or $2=false)
       and coalesce(i.progress->'orchestratorSettings'->>'status','')<>'synced'
-    order by i.created_at limit 1`, [migration.id])
+    order by i.created_at limit 1`, [migration.id, opts(migration).verifyStrictDestination === true])
   const item = pending.rows[0]
   if (!item) return { settings: "synced" }
   const accounts = await db.query(`select id,cloudflare_account_id,api_token from drive_accounts where id in($1,$2)`, [migration.source_account_id, migration.target_account_id])

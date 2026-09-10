@@ -119,6 +119,8 @@ test('file scanner comparison binds UUID and text parameters explicitly', () => 
   assert.match(scanner, /migration_item_id=\$1::uuid/)
   assert.match(scanner, /j\.payload->'itemIds'->>0=\$1::text/)
   assert.match(scanner, /j\.migration_id=\$9::uuid/)
+  assert.match(scanner, /not s\.is_dir_marker/)
+  assert.match(scanner, /not d\.is_dir_marker/)
 })
 
 test('worker verification can be rerun for failed buckets while migration continues', () => {
@@ -127,4 +129,11 @@ test('worker verification can be rerun for failed buckets while migration contin
   assert.match(action, /current\.status in\('failed','completed'\)/)
   assert.match(action, /migration\.status === "running" \? "running" : "verifying"/)
   assert.match(details, /hasVerificationFailure \|\| allBucketsTerminal/)
+})
+
+test('verified bucket settings respect strict destination verification', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(orchestrator, /and \(v\.extra_objects=0 or \$2=false\)/)
+  assert.match(orchestrator, /add column if not exists attempt_generation integer/)
+  assert.match(orchestrator, /where drive_migration_verification_state\.generation<>excluded\.generation/)
 })

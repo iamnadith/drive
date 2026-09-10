@@ -119,36 +119,54 @@ async function main() {
     return
   }
 
-  const client = new Client({
-    ...config,
-    ssl: sslConfig(),
-    connectionTimeoutMillis: 15_000,
-    application_name: "drive-build-schema",
-  })
-
-  let connected = false
-  try {
-    await client.connect()
-    connected = true
-    await client.query("begin")
-    await client.query("set local lock_timeout = '60s'")
-    await client.query("set local statement_timeout = '10min'")
-    await client.query(schema)
-    await client.query("commit")
-    console.log("[db:schema] schema is ready")
-  } catch (error) {
-    if (connected) await client.query("rollback").catch(() => undefined)
-    const details =
-      error && typeof error === "object"
-        ? {
-            code: "code" in error ? error.code : undefined,
-            message: "message" in error ? error.message : String(error),
-          }
-        : { message: String(error) }
-    console.error("[db:schema] schema preparation failed", details)
-    process.exitCode = 1
-  } finally {
-    await client.end().catch(() => undefined)
+  const maxAttempts = 4
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const client = new Client({
+      ...config,
+      ssl: sslConfig(),
+      connectionTimeoutMillis: 15_000,
+      application_name: "drive-build-schema",
+    })
+    let connected = false
+    let locked = false
+    try {
+      await client.connect()
+      connected = true
+      // Serialize panel schema installers. Runtime workers may still perform
+      // idempotent schema guards, so retry transaction-level deadlocks below.
+      await client.query("select pg_advisory_lock(hashtext($1))", ["drive-schema-install-v1"])
+      locked = true
+      await client.query("begin")
+      await client.query("set local lock_timeout = '60s'")
+      await client.query("set local statement_timeout = '10min'")
+      await client.query(schema)
+      await client.query("commit")
+      console.log("[db:schema] schema is ready")
+      return
+    } catch (error) {
+      if (connected) await client.query("rollback").catch(() => undefined)
+      const code = error && typeof error === "object" && "code" in error ? String(error.code ?? "") : ""
+      const retryable = ["40P01", "55P03", "57014"].includes(code)
+      if (retryable && attempt < maxAttempts) {
+        const delayMs = attempt * 1_000
+        console.warn(`[db:schema] transient database lock (${code}); retrying attempt ${attempt + 1}/${maxAttempts}`)
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs))
+        continue
+      }
+      const details =
+        error && typeof error === "object"
+          ? {
+              code: "code" in error ? error.code : undefined,
+              message: "message" in error ? error.message : String(error),
+            }
+          : { message: String(error) }
+      console.error("[db:schema] schema preparation failed", details)
+      process.exitCode = 1
+      return
+    } finally {
+      if (locked) await client.query("select pg_advisory_unlock(hashtext($1))", ["drive-schema-install-v1"]).catch(() => undefined)
+      await client.end().catch(() => undefined)
+    }
   }
 }
 

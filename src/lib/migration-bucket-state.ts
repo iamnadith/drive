@@ -338,6 +338,7 @@ export function getMergedBucketSnapshot(
   const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
   const live = readLiveBucketState(progress)
   const repairState = readRepairWorkerState(progress)
+  const durableItemStatus = normalizeStatus(getItemStatus(item))
   const latestRepairJobStatus = normalizeStatus(options?.latestRepairJobStatus)
   const canceledRepairWithoutResult =
     latestRepairJobStatus === "canceled" &&
@@ -349,6 +350,8 @@ export function getMergedBucketSnapshot(
       displayStatus:
         canceledRepairWithoutResult
           ? "aborted"
+          : durableItemStatus === "verification_failed"
+            ? "verification_failed"
           : stableLive.status ?? getItemDisplayStatus(item, repairResultItem, stableLive.workerStatus ?? undefined),
       total: stableLive.totalObjects,
       transferred: stableLive.transferredObjects,
