@@ -201,6 +201,7 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
     )
     update drive_migration_items i set
       slurper_status=case
+        when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status in('pending','running')) then 'verifying'
         -- Inventory and job materialization are one scanner-owned stage.  Do
         -- not advertise a bucket as queued while the scanner is still
         -- producing pages/jobs; doing so makes the UI look idle and allows a
@@ -215,6 +216,7 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
       progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{live}',jsonb_build_object(
         'updatedAt',now(),
         'status',case
+          when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status in('pending','running')) then 'verifying'
           when coalesce(i.progress->'migrationInventory'->>'status','') <> 'completed'
             or coalesce(i.progress->'migrationQueue'->>'status','') <> 'completed' then 'scanning'
           when coalesce(a.active_objects,0)>0 or coalesce(a.completed_objects,0)>0 then 'running'
@@ -229,17 +231,19 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
         'verifyIssues',0,
         'totalObjects',coalesce(i.source_objects,0),
         'workerStatus',case
+          when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status in('pending','running')) then 'verifying'
           when coalesce(i.progress->'migrationInventory'->>'status','') <> 'completed'
             or coalesce(i.progress->'migrationQueue'->>'status','') <> 'completed' then 'scanning'
           when coalesce(a.active_objects,0)>0 then 'running' else 'queued' end,
         'workerStage',case
+          when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status in('pending','running')) then 'verification'
           when coalesce(i.progress->'migrationInventory'->>'status','') <> 'completed'
             or coalesce(i.progress->'migrationQueue'->>'status','') <> 'completed' then 'scanning'
           else 'migration' end,
         'queuedObjects',coalesce(a.queued_objects,0)
       ))
     from aggregate a where i.id=a.item_id and i.migration_id=$1
-  `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
+  `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`, generation])
 }
 async function ensureBucketVerification(db: Client, migration: Row, generation: number) {
   // A bucket is eligible as soon as its own queue is complete and every one
