@@ -241,6 +241,36 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
     from aggregate a where i.id=a.item_id and i.migration_id=$1
   `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
 }
+async function ensureBucketVerification(db: Client, migration: Row, generation: number) {
+  // A bucket is eligible as soon as its own queue is complete and every one
+  // of its file jobs is terminal-success. It must not wait for other buckets.
+  await db.query(`
+    insert into drive_migration_verification_state(migration_item_id,migration_id,generation,source_scan_id,status,phase)
+    select i.id,i.migration_id,$2,(i.progress->'migrationInventory'->>'sourceScanId')::uuid,'pending','source'
+    from drive_migration_items i
+    where i.migration_id=$1
+      and i.progress->'migrationQueue'->>'status'='completed'
+      and not exists (select 1 from drive_repair_jobs j where j.migration_id=$1 and j.work_key like $3 and (j.payload->'itemIds'->>0)::uuid=i.id and j.status<>'completed')
+      and not exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$2)
+    on conflict (migration_item_id) do nothing
+  `, [migration.id, generation, `migration:${migration.id}:generation:${generation}:inventory:%`])
+  await db.query(`
+    update drive_migration_items i set slurper_status='verifying',last_progress_at=now(),updated_at=now(),
+      progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{stage}','"awaiting_independent_verification"'::jsonb)
+    from drive_migration_verification_state v
+    where v.migration_item_id=i.id and v.migration_id=$1 and v.generation=$2 and v.status in('pending','running')
+      and coalesce(i.slurper_status,'') not in('completed','worker_bucket_create_failed')
+  `, [migration.id, generation])
+}
+async function finalizeVerifiedBuckets(db: Client, migration: Row, generation: number) {
+  await db.query(`
+    update drive_migration_items i set slurper_status='completed',last_progress_at=now(),updated_at=now(),
+      progress=jsonb_set(jsonb_set(coalesce(i.progress,'{}'::jsonb),'{repairWorkerStatus}','"completed"'::jsonb),'{stage}','"verified"'::jsonb)
+    from drive_migration_verification_state v
+    where v.migration_item_id=i.id and v.migration_id=$1 and v.generation=$2 and v.status='completed'
+      and v.missing_objects=0 and v.mismatched_objects=0 and (v.extra_objects=0 or $3=false)
+  `, [migration.id, generation, opts(migration).verifyStrictDestination === true])
+}
 async function finalizeShards(db: Client, migration: Row, generation: number, shardCount: number) {
   const counts = await db.query(`select status,count(*)::int count from drive_repair_jobs where migration_id=$1 and work_key like $2 group by status`, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
   const jobs = Object.fromEntries(counts.rows.map((row) => [row.status, Number(row.count)]))
@@ -292,7 +322,12 @@ async function cloudflare(account: Row, path: string, method = "GET", body?: unk
   return payload.result ?? payload
 }
 async function syncNextBucketSettings(db: Client, migration: Row) {
-  const pending = await db.query(`select * from drive_migration_items where migration_id=$1 and coalesce(progress->'orchestratorSettings'->>'status','')<>'synced' order by created_at limit 1`, [migration.id])
+  const pending = await db.query(`select i.* from drive_migration_items i
+    join drive_migration_verification_state v on v.migration_item_id=i.id and v.migration_id=i.migration_id
+    where i.migration_id=$1 and i.slurper_status='completed' and v.status='completed'
+      and v.missing_objects=0 and v.mismatched_objects=0
+      and coalesce(i.progress->'orchestratorSettings'->>'status','')<>'synced'
+    order by i.created_at limit 1`, [migration.id])
   const item = pending.rows[0]
   if (!item) return { settings: "synced" }
   const accounts = await db.query(`select id,cloudflare_account_id,api_token from drive_accounts where id in($1,$2)`, [migration.source_account_id, migration.target_account_id])
@@ -582,6 +617,11 @@ async function cycle(env: Env) {
         await db.query(`update drive_migrations set sync_status='running',sync_message='Scanning source buckets and creating migration queue',last_synced_at=now(),updated_at=now() where id=$1 and status='running'`, [migration.id])
       }
       await refreshWorkerItemProgress(db, migration, shards.generation)
+      await ensureBucketVerification(db, migration, shards.generation)
+      await finalizeVerifiedBuckets(db, migration, shards.generation)
+      // Settings follow each bucket's successful verification instead of
+      // waiting for the entire migration to finish.
+      const bucketSettings = await syncNextBucketSettings(db, migration)
       const recovered = shards.inventoryPending || shards.queuePending ? 0 : await recoverJobs(db, migration.id, shards.generation, shards.shardCount)
       await renew(db, owner)
       const finalized = shards.terminalFailure || shards.inventoryPending || shards.queuePending
@@ -589,7 +629,8 @@ async function cycle(env: Env) {
         : await finalizeShards(db, migration, shards.generation, shards.shardCount)
       const verification = finalized.complete ? await finishOrRepair(db, migration, shards.generation) : { verification: "waiting_for_shards" }
       await renew(db, owner)
-      const fileScanner = shards.inventoryPending || (finalized.complete && verification.verification === "pending") ? await wakeFileScanner(db) : "not_needed"
+      const pendingVerification = await db.query(`select 1 from drive_migration_verification_state where migration_id=$1 and generation=$2 and status in('pending','running') limit 1`, [migration.id, shards.generation])
+      const fileScanner = shards.inventoryPending || (pendingVerification.rowCount || 0) > 0 || (finalized.complete && verification.verification === "pending") ? await wakeFileScanner(db) : "not_needed"
       const current = (await db.query(`select * from drive_migrations where id=$1`, [migration.id])).rows[0]
       // Once scanning is complete and the first durable file jobs exist, the
       // fleet can begin consuming while later inventory pages are still being
@@ -599,7 +640,7 @@ async function cycle(env: Env) {
       const dispatched = current?.status === "running" && hasRunnableFiles ? await dispatchWorkers(db, env, current) : 0
       if (shards.inventoryPending || shards.queuePending) await env.GITHUB_DISPATCH_QUEUE.send({ control: "cycle" })
       await db.query(`update drive_migrations set last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
-      return complete(db, owner, migration.id, { ok: true, migrationId, ...shards, recovered, finalized, ...verification, fileScanner, dispatched })
+      return complete(db, owner, migration.id, { ok: true, migrationId, ...shards, recovered, finalized, ...verification, bucketSettings, fileScanner, dispatched })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await db.query(`update drive_migration_orchestrator_state set status='error',lease_owner=null,lease_expires_at=null,last_completed_at=now(),last_error=$1,last_migration_id=$2,last_result=$3::jsonb,updated_at=now() where id=true and lease_owner=$4`, [message, migrationId, JSON.stringify({ ok: false, error: message }), owner]).catch(() => undefined)

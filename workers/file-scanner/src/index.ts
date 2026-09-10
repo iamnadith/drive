@@ -82,7 +82,9 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
       from drive_migration_verification_state v join drive_migrations m on m.id=v.migration_id
         join drive_migration_items i on i.id=v.migration_item_id
         join drive_accounts sa on sa.id=m.source_account_id join drive_accounts ta on ta.id=m.target_account_id
-      where m.status='verifying'
+      -- Verification may run per bucket while the migration worker fleet is
+      -- still copying other buckets. Keep the task eligible in both states.
+      where m.status in('running','verifying')
         and v.status in('pending','running') and (v.lease_expires_at is null or v.lease_expires_at<now())
       order by v.updated_at for update of v skip locked limit 1
     )
