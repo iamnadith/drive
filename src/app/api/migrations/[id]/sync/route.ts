@@ -607,14 +607,27 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       const pendingScans = workerScans.filter(({ scan }) => !scan || (scan.status !== "completed" && scan.status !== "failed"))
       for (const { item, scan } of workerScans) {
         if (scan?.status === "failed") throw new Error(scan.error || `File Scanner failed for ${item.sourceBucket}`)
-        if (scan?.status === "completed") {
+        if (scan) {
           const progress = isRecord(item.progress) ? item.progress : {}
           const inventory = isRecord(progress.migrationInventory) ? progress.migrationInventory : {}
           await updateMigrationItem(item.id, {
-            sourceObjects: scan.objects,
-            sourceBytes: scan.bytes,
-            slurperStatus: "queued",
-            progress: { ...progress, stage: "scan_completed", migrationInventory: { ...inventory, status: "completed", completedAt: scan.completedAt } },
+            // Scanner counters are durable and incremental. Persist them on
+            // every sync so the dashboard shows live counts while listing is
+            // still running, then keep the completed marker authoritative.
+            ...(Number.isFinite(scan.objects) ? { sourceObjects: scan.objects } : {}),
+            ...(Number.isFinite(scan.bytes) ? { sourceBytes: scan.bytes } : {}),
+            slurperStatus: scan.status === "completed" ? "queued" : "scanning",
+            progress: {
+              ...progress,
+              stage: scan.status === "completed" ? "scan_completed" : "scanning_source",
+              migrationInventory: {
+                ...inventory,
+                status: scan.status,
+                objects: scan.objects,
+                bytes: scan.bytes,
+                ...(scan.completedAt ? { completedAt: scan.completedAt } : {}),
+              },
+            },
             lastProgressAt: new Date().toISOString(),
           })
         }
