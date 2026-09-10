@@ -43,3 +43,10 @@ test('orchestrator binds the migration id as one PostgreSQL type while materiali
   assert.match(orchestrator, /format\('migration:%s:generation:%s:inventory:%s:%s',\$1::uuid/)
   assert.doesNotMatch(orchestrator, /format\('migration:%s:generation:%s:inventory:%s:%s',\$1::text/)
 })
+
+test('orchestrator dispatches the fleet as soon as durable file jobs are available', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(orchestrator, /const hasRunnableFiles = shards\.shardCount > 0 \|\| shards\.created > 0/)
+  assert.match(orchestrator, /!shards\.inventoryPending && hasRunnableFiles \? await dispatchWorkers/)
+  assert.doesNotMatch(orchestrator, /!shards\.inventoryPending && !shards\.queuePending \? await dispatchWorkers/)
+})

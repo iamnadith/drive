@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 9
+const BUILD = 10
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -489,7 +489,12 @@ async function cycle(env: Env) {
       await renew(db, owner)
       const fileScanner = shards.inventoryPending || (finalized.complete && verification.verification === "pending") ? await wakeFileScanner(db) : "not_needed"
       const current = (await db.query(`select * from drive_migrations where id=$1`, [migration.id])).rows[0]
-      const dispatched = current?.status === "running" && !shards.inventoryPending && !shards.queuePending ? await dispatchWorkers(db, env, current) : 0
+      // Once scanning is complete and the first durable file jobs exist, the
+      // fleet can begin consuming while later inventory pages are still being
+      // materialized. Pool-state polling keeps runners alive until every page
+      // is queued, so this does not create a completion race.
+      const hasRunnableFiles = shards.shardCount > 0 || shards.created > 0
+      const dispatched = current?.status === "running" && !shards.inventoryPending && hasRunnableFiles ? await dispatchWorkers(db, env, current) : 0
       if (shards.inventoryPending || shards.queuePending) await env.GITHUB_DISPATCH_QUEUE.send({ control: "cycle" })
       await db.query(`update drive_migrations set last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
       return complete(db, owner, migration.id, { ok: true, migrationId, ...shards, recovered, finalized, ...verification, fileScanner, dispatched })
