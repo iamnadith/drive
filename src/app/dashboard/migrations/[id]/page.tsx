@@ -1894,6 +1894,9 @@ export default function MigrationDetailsPage() {
               const anyRunning = items.some((i) => normalizeStatus(getBucketSnapshot(i).displayStatus) === "running")
               const anyPaused = items.some((i) => Boolean(i.slurperJobId) && String(getItemStatus(i) ?? "").toLowerCase() === "paused")
               const workerPoolMigration = migration.options.executionMode === "migration_workers"
+              const hasVerificationFailure = failedBuckets.some((item) =>
+                normalizeStatus(getBucketSnapshot(item).displayStatus) === "verification_failed"
+              ) || migration.syncMessage?.toLowerCase().includes("verification failed") === true
               const showCancel = !allBucketsTerminal && !["completed", "failed", "canceled"].includes(String(effectiveMigrationStatus))
               const settingsSyncFailed =
                 (migration.syncStatus === "error" && migration.syncMessage?.toLowerCase().includes("settings sync failed")) ||
@@ -1950,7 +1953,7 @@ export default function MigrationDetailsPage() {
                     </Button>
                   ) : null}
 
-                  {workerPoolMigration && (allBucketsTerminal || ["completed", "failed"].includes(String(effectiveMigrationStatus))) ? (
+                  {workerPoolMigration && (hasVerificationFailure || allBucketsTerminal || ["completed", "failed"].includes(String(effectiveMigrationStatus))) ? (
                     <Button
                       onClick={() => void runMigrationAction("verify_all")}
                       loading={busyAction === "verify_all"}

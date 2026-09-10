@@ -525,24 +525,37 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
             ? Math.max(1, Math.floor(migration.options.workerGeneration))
             : 1
-        await queryDb(`
+        const verificationResult = await queryDb(`
           insert into drive_migration_verification_state(migration_item_id,migration_id,generation,status,phase,updated_at)
-          select id,migration_id,$2,'pending','source',now() from drive_migration_items where migration_id=$1
+          select i.id,i.migration_id,$2,'pending','source',now()
+          from drive_migration_items i
+          where i.migration_id=$1
+            and (
+              i.slurper_status in('completed','verification_failed')
+              or exists (
+                select 1 from drive_migration_verification_state current
+                where current.migration_item_id=i.id and current.generation=$2 and current.status in('failed','completed')
+              )
+            )
           on conflict(migration_item_id) do update set
             generation=$2,status='pending',phase='source',source_scan_id=null,destination_scan_id=null,
             source_cursor=null,destination_cursor=null,source_objects=0,source_bytes=0,destination_objects=0,destination_bytes=0,
             missing_objects=0,mismatched_objects=0,extra_objects=0,attempt_count=0,attempt_generation=null,last_error=null,
             lease_owner=null,lease_expires_at=null,completed_at=null,updated_at=now()
         `, [id, generation])
+        const verifying = verificationResult.rowCount ?? 0
+        if (verifying === 0) {
+          return NextResponse.json({ error: "No completed or failed buckets are ready for verification" }, { status: 409 })
+        }
         await updateMigration(id, {
-          status: "verifying",
+          status: migration.status === "running" ? "running" : "verifying",
           completedAt: null,
           syncStatus: "syncing",
-          syncMessage: "File Scanner verification requested",
+          syncMessage: `File Scanner verification requested for ${verifying} bucket(s)`,
           lastSyncedAt: now,
         })
         await wakeMigrationService("scanner")
-        return NextResponse.json({ ok: true, verifying: items.length, scanner: true }, { status: 200 })
+        return NextResponse.json({ ok: true, verifying, scanner: true }, { status: 200 })
       }
       const prefix =
         typeof migration.options?.pathPrefix === "string" && migration.options.pathPrefix.trim().length > 0

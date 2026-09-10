@@ -113,3 +113,18 @@ test('migration details never regress worker counters on refresh or reconnect', 
   assert.match(detailsPage, /transferredBytes:[\s\S]*Math\.max\(prevLive\.transferredBytes, nextLive\.transferredBytes\)/)
   assert.match(bucketState, /live\.workerStage === "migration" \|\| live\.workerStage === "verification"/)
 })
+
+test('file scanner comparison binds UUID and text parameters explicitly', () => {
+  const scanner = read('workers/file-scanner/src/index.ts')
+  assert.match(scanner, /migration_item_id=\$1::uuid/)
+  assert.match(scanner, /j\.payload->'itemIds'->>0=\$1::text/)
+  assert.match(scanner, /j\.migration_id=\$9::uuid/)
+})
+
+test('worker verification can be rerun for failed buckets while migration continues', () => {
+  const action = read('src/app/api/migrations/[id]/action/route.ts')
+  const details = read('src/app/dashboard/migrations/[id]/page.tsx')
+  assert.match(action, /current\.status in\('failed','completed'\)/)
+  assert.match(action, /migration\.status === "running" \? "running" : "verifying"/)
+  assert.match(details, /hasVerificationFailure \|\| allBucketsTerminal/)
+})
