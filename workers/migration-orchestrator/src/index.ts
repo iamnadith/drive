@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 12
+const BUILD = 13
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -186,18 +186,27 @@ async function recoverJobs(db: Client, migrationId: string, generation: number, 
 async function refreshWorkerItemProgress(db: Client, migration: Row, generation: number) {
   await db.query(`
     with aggregate as (
-      select (payload->'itemIds'->>0)::uuid item_id,
-        count(*)::bigint queued_objects,
-        count(*) filter(where status='completed')::bigint completed_objects,
-        count(*) filter(where status in('claimed','running'))::bigint active_objects,
-        count(*) filter(where status='failed')::bigint failed_objects,
-        coalesce(sum((payload->'inventoryObjects'->0->>'size')::bigint) filter(where status='completed'),0)::bigint completed_bytes
-      from drive_repair_jobs
-      where migration_id=$1 and work_key like $2
-      group by (payload->'itemIds'->>0)::uuid
+      select i0.id item_id,
+        count(j.*)::bigint queued_objects,
+        count(j.*) filter(where j.status='completed')::bigint completed_objects,
+        count(j.*) filter(where j.status in('claimed','running'))::bigint active_objects,
+        count(j.*) filter(where j.status='failed')::bigint failed_objects,
+        coalesce(sum((j.payload->'inventoryObjects'->0->>'size')::bigint) filter(where j.status='completed'),0)::bigint completed_bytes
+      from drive_migration_items i0
+      left join drive_repair_jobs j on j.migration_id=i0.migration_id
+        and j.work_key like $2
+        and (j.payload->'itemIds'->>0)::uuid=i0.id
+      where i0.migration_id=$1
+      group by i0.id
     )
     update drive_migration_items i set
       slurper_status=case
+        -- Inventory and job materialization are one scanner-owned stage.  Do
+        -- not advertise a bucket as queued while the scanner is still
+        -- producing pages/jobs; doing so makes the UI look idle and allows a
+        -- partially materialized queue to be mistaken for a complete list.
+        when coalesce(i.progress->'migrationInventory'->>'status','') <> 'completed'
+          or coalesce(i.progress->'migrationQueue'->>'status','') <> 'completed' then 'scanning'
         when coalesce(a.active_objects,0)>0 or coalesce(a.completed_objects,0)>0 then 'running'
         when coalesce(a.queued_objects,0)>0 then 'queued'
         else i.slurper_status
@@ -206,6 +215,8 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
       progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{live}',jsonb_build_object(
         'updatedAt',now(),
         'status',case
+          when coalesce(i.progress->'migrationInventory'->>'status','') <> 'completed'
+            or coalesce(i.progress->'migrationQueue'->>'status','') <> 'completed' then 'scanning'
           when coalesce(a.active_objects,0)>0 or coalesce(a.completed_objects,0)>0 then 'running'
           when coalesce(a.queued_objects,0)>0 then 'queued'
           else 'scanning'
@@ -217,8 +228,14 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
         'unaccountedObjects',greatest(coalesce(i.source_objects,0)-coalesce(a.completed_objects,0)-coalesce(a.failed_objects,0),0),
         'verifyIssues',0,
         'totalObjects',coalesce(i.source_objects,0),
-        'workerStatus',case when coalesce(a.active_objects,0)>0 then 'running' else 'queued' end,
-        'workerStage','migration',
+        'workerStatus',case
+          when coalesce(i.progress->'migrationInventory'->>'status','') <> 'completed'
+            or coalesce(i.progress->'migrationQueue'->>'status','') <> 'completed' then 'scanning'
+          when coalesce(a.active_objects,0)>0 then 'running' else 'queued' end,
+        'workerStage',case
+          when coalesce(i.progress->'migrationInventory'->>'status','') <> 'completed'
+            or coalesce(i.progress->'migrationQueue'->>'status','') <> 'completed' then 'scanning'
+          else 'migration' end,
         'queuedObjects',coalesce(a.queued_objects,0)
       ))
     from aggregate a where i.id=a.item_id and i.migration_id=$1
@@ -557,6 +574,13 @@ async function cycle(env: Env) {
       if (!migration) return complete(db, owner, null, { ok: true, idle: true })
       migrationId = migration.id
       const shards = await ensureShards(db, migration)
+      // Keep the migration at the scanner-owned stage until every source
+      // inventory page and its corresponding durable file jobs are present.
+      // This message is intentionally independent of the worker fleet: a
+      // queued job is not runnable until materialization has finished.
+      if (shards.inventoryPending || shards.queuePending) {
+        await db.query(`update drive_migrations set sync_status='running',sync_message='Scanning source buckets and creating migration queue',last_synced_at=now(),updated_at=now() where id=$1 and status='running'`, [migration.id])
+      }
       await refreshWorkerItemProgress(db, migration, shards.generation)
       const recovered = shards.inventoryPending || shards.queuePending ? 0 : await recoverJobs(db, migration.id, shards.generation, shards.shardCount)
       await renew(db, owner)
