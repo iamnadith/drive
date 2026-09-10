@@ -3,7 +3,6 @@ import { authenticateMigrationOrchestrator } from "@/lib/migration-orchestrator-
 import { listMigrations } from "@/lib/migrations-store"
 import {
   ensureMigrationWorkerJobs,
-  finalizeCompletedMigrationWorkerShards,
   reconcileRepairJobs,
   requeueStaleMigrationWorkerJobs,
 } from "@/lib/repair-jobs-store"
@@ -35,11 +34,10 @@ export async function POST(request: Request) {
   const results: Array<Record<string, unknown>> = []
   for (const migration of candidates) {
     try {
-      const queue = await ensureMigrationWorkerJobs({ migrationId: migration.id, mode: "repair_and_verify" })
+      const queue = await ensureMigrationWorkerJobs({ migrationId: migration.id, mode: "migration" })
       const requeued = await requeueStaleMigrationWorkerJobs({ migrationId: migration.id }).catch(() => 0)
-      const finalized = await finalizeCompletedMigrationWorkerShards(migration.id).catch(() => ({ finalized: false, shardCount: 0, jobs: 0, items: 0 }))
       await syncMigrationLiveState(migration.id, { runSettingsSync: true })
-      results.push({ id: migration.id, ok: true, created: queue.created, existing: queue.existing, requeued, finalized })
+      results.push({ id: migration.id, ok: true, created: queue.created, existing: queue.existing, requeued })
     } catch (error) {
       results.push({ id: migration.id, ok: false, error: error instanceof Error ? error.message : String(error) })
     }

@@ -9,9 +9,10 @@ import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflo
 import { getSupabaseServerClient } from "./supabase"
 import { getMigration, listMigrationItems, updateMigration, updateMigrationItem, type DriveMigrationItem } from "./migrations-store"
 import { getAllAccounts } from "./accounts-store"
+import { queryDb } from "./db"
 
 export type RepairJobStatus = "pending" | "claimed" | "running" | "completed" | "failed" | "canceled"
-export type RepairJobMode = "verify_only" | "repair_only" | "repair_and_verify"
+export type RepairJobMode = "verify_only" | "repair_only" | "repair_and_verify" | "migration"
 
 export type DriveRepairJob = {
   id: string
@@ -92,6 +93,16 @@ function parseWorkerShardWorkKey(value: unknown): {
   return { migrationId: match[1], generation, index, count }
 }
 
+function parseWorkerInventoryWorkKey(value: unknown): { migrationId: string; generation: number } | null {
+  if (typeof value !== "string") return null
+  const match = value.match(/^migration:([^:]+):generation:(\d+):inventory:[^:]+:[0-9a-f]+$/i)
+  if (!match) return null
+  const generation = Number(match[2])
+  return match[1] && Number.isInteger(generation) && generation >= 1
+    ? { migrationId: match[1], generation }
+    : null
+}
+
 function workerGenerationAndShardCount(migration: { options?: Record<string, unknown> } | null | undefined) {
   const generation =
     typeof migration?.options?.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
@@ -114,7 +125,7 @@ function mapJobRow(row: DriveRepairJobRow): DriveRepairJob {
     status: (["pending", "claimed", "running", "completed", "failed", "canceled"].includes(row.status)
       ? row.status
       : "pending") as RepairJobStatus,
-    mode: (["verify_only", "repair_only", "repair_and_verify"].includes(row.mode) ? row.mode : "repair_and_verify") as RepairJobMode,
+    mode: (["verify_only", "repair_only", "repair_and_verify", "migration"].includes(row.mode) ? row.mode : "repair_and_verify") as RepairJobMode,
     payload: isRecord(row.payload) ? row.payload : {},
     progress: isRecord(row.progress) ? row.progress : {},
     result: isRecord(row.result) ? row.result : {},
@@ -322,7 +333,7 @@ export async function reconcileRepairJobs(input?: { jobId?: string; migrationId?
           repo: agent.githubRepoName,
           workflow: agent.githubWorkflowFile,
           branch: agent.githubRef || "main",
-          event: "workflow_dispatch",
+          event: "repository_dispatch",
           perPage: 10,
         }).catch(() => [])
         githubRun = matchGithubRunToDispatch(
@@ -690,7 +701,7 @@ export async function claimRepairJob(
     .eq("status", "pending")
     .or(`requested_by_agent_id.is.null,requested_by_agent_id.eq.${agentId}`)
     .order("created_at", { ascending: true })
-    // A pool worker may only claim durable shard records. Without this filter
+    // A pool worker may only claim durable scanner-inventory records. Without this filter
     // an older/manual repair row in the same migration could be claimed first
     // and make the worker process the whole migration again.
     .limit(poolOnly ? 100 : 1)
@@ -699,7 +710,7 @@ export async function claimRepairJob(
   if (poolOnly && migrationId && poolCoordinates) {
     pendingQuery = pendingQuery.like(
       "work_key",
-      `migration:${migrationId}:generation:${poolCoordinates.generation}:shard:%`
+      `migration:${migrationId}:generation:${poolCoordinates.generation}:inventory:%`
     )
   }
   const { data: pendingRows, error: listError } = await pendingQuery
@@ -707,12 +718,11 @@ export async function claimRepairJob(
   const candidate = Array.isArray(pendingRows)
     ? ((pendingRows.find((row) => {
         if (!poolOnly) return true
-        const key = parseWorkerShardWorkKey(typeof row === "object" && row !== null ? (row as DriveRepairJobRow).work_key : null)
+        const key = parseWorkerInventoryWorkKey(typeof row === "object" && row !== null ? (row as DriveRepairJobRow).work_key : null)
         return Boolean(
           key &&
             key.migrationId === migrationId &&
-            key.generation === poolCoordinates?.generation &&
-            key.count === poolCoordinates?.shardCount
+            key.generation === poolCoordinates?.generation
         )
       }) ?? undefined) as DriveRepairJobRow | undefined)
     : undefined
@@ -1084,47 +1094,33 @@ export async function getMigrationWorkerPoolState(migrationId: string): Promise<
     return { done: true, status: migration.status, reason: items.length === 0 ? "no_items" : "no_eligible_items" }
   }
 
-  const { generation, shardCount } = workerGenerationAndShardCount(migration)
-  const jobs = await listWorkerShardJobsByMigrationRaw(migrationId, generation, shardCount)
-  const indexes = new Set<number>()
-  for (const job of jobs) {
-    const shard = parseWorkerShardWorkKey(job.workKey)
-    if (shard && shard.generation === generation && shard.count === shardCount) indexes.add(shard.index)
-  }
-  if (indexes.size !== shardCount) return { done: false }
-
-  const currentShards = jobs.filter((job) => {
-    const shard = parseWorkerShardWorkKey(job.workKey)
-    return Boolean(shard && shard.generation === generation && shard.count === shardCount)
+  const { generation } = workerGenerationAndShardCount(migration)
+  const queueReady = items.every((item) => {
+    const progress = isRecord(item.progress) ? item.progress : {}
+    const queue = isRecord(progress.migrationQueue) ? progress.migrationQueue : {}
+    return Number(queue.generation) === generation && queue.status === "completed"
   })
-  if (currentShards.length < shardCount || currentShards.some((job) => job.status !== "completed")) {
-    // A failed shard with retries remaining is still active: the next
-    // orchestrator tick will put the same durable row back in the queue. Once
-    // every shard is terminal and at least one failure has exhausted its retry
-    // budget, there is no useful work for a long-lived GitHub runner to poll.
-    // Let it stop cleanly; live-state reconciliation will expose the migration
-    // failure and a user retry creates a new generation.
-    const exhaustedFailure = currentShards.some((job) => {
-      if (job.status !== "failed") return false
-      const retryCount = isRecord(job.result) ? Number(job.result.retryCount ?? 0) : 0
-      return Number.isFinite(retryCount) && retryCount >= MAX_WORKER_REQUEUE_ATTEMPTS
-    })
-    const allTerminal = currentShards.every((job) => ["completed", "failed", "canceled"].includes(job.status))
-    if (exhaustedFailure && allTerminal) {
-      return { done: true, status: "failed", reason: "shard_retry_exhausted" }
-    }
-    return { done: false }
+  if (!queueReady) return { done: false }
+  const counts = await queryDb<{ status: string; count: string }>(`
+    select status,count(*)::text count from drive_repair_jobs
+    where migration_id=$1 and work_key like $2 group by status
+  `, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`])
+  const byStatus = Object.fromEntries(counts.rows.map((row) => [row.status, Number(row.count)]))
+  const total = Object.values(byStatus).reduce((sum, value) => sum + value, 0)
+  if (!total || (byStatus.pending || 0) > 0 || (byStatus.claimed || 0) > 0 || (byStatus.running || 0) > 0) return { done: false }
+  if ((byStatus.failed || 0) > 0 || (byStatus.canceled || 0) > 0) {
+    return { done: true, status: "failed", reason: "migration_file_jobs_terminal" }
   }
-  return { done: true, status: migration.status, reason: "all_shards_completed" }
+  return { done: true, status: migration.status, reason: "all_migration_files_completed" }
 }
 
-/** Requeue a claimed worker shard after its worker has disappeared. */
+/** Requeue a claimed migration file after its worker has disappeared. */
 export async function requeueStaleMigrationWorkerJobs(input?: { migrationId?: string }): Promise<number> {
   const scopedMigration = input?.migrationId ? await getMigration(input.migrationId) : null
   const scopedGeneration = scopedMigration ? workerGenerationAndShardCount(scopedMigration) : null
   const jobs =
     input?.migrationId && scopedMigration && scopedMigration.options.executionMode === "migration_workers"
-      ? await listWorkerShardJobsByMigrationRaw(input.migrationId, scopedGeneration?.generation ?? 1, scopedGeneration?.shardCount ?? 32)
+      ? await listRepairJobsByMigrationRaw(input.migrationId, 500)
       : await listRepairJobsRaw(500)
   const agents = await listAgents()
   const agentById = new Map(agents.map((agent) => [agent.id, agent]))
@@ -1133,7 +1129,7 @@ export async function requeueStaleMigrationWorkerJobs(input?: { migrationId?: st
     if (input?.migrationId && job.migrationId !== input.migrationId) continue
     const migration = input?.migrationId ? scopedMigration : await getMigration(job.migrationId).catch(() => null)
     if (!migration || migration.options.executionMode !== "migration_workers") continue
-    const workKey = parseWorkerShardWorkKey(job.workKey)
+    const workKey = parseWorkerInventoryWorkKey(job.workKey)
     const current = workerGenerationAndShardCount(migration)
     // A retry creates a new generation. Never revive an old generation: doing
     // so would let a stale worker process the same object set again while the
@@ -1141,8 +1137,7 @@ export async function requeueStaleMigrationWorkerJobs(input?: { migrationId?: st
     if (
       !workKey ||
       workKey.migrationId !== job.migrationId ||
-      workKey.generation !== current.generation ||
-      workKey.count !== current.shardCount
+      workKey.generation !== current.generation
     ) {
       continue
     }
@@ -1166,7 +1161,7 @@ export async function requeueStaleMigrationWorkerJobs(input?: { migrationId?: st
           started_at: null,
           completed_at: null,
           last_heartbeat_at: null,
-          summary: `Retrying failed worker shard (attempt ${retryCount + 1}/${MAX_WORKER_REQUEUE_ATTEMPTS})`,
+          summary: `Retrying failed migration file (attempt ${retryCount + 1}/${MAX_WORKER_REQUEUE_ATTEMPTS})`,
           error: null,
           result: {
             ...(job.result ?? {}),
@@ -1224,7 +1219,7 @@ export async function requeueStaleMigrationWorkerJobs(input?: { migrationId?: st
   if (requeued > 0 && input?.migrationId) {
     await updateMigration(input.migrationId, {
       syncStatus: "ok",
-      syncMessage: `Requeued ${requeued} worker shard${requeued === 1 ? "" : "s"}`,
+      syncMessage: `Requeued ${requeued} migration file${requeued === 1 ? "" : "s"}`,
       lastSyncedAt: new Date().toISOString(),
     }).catch(() => undefined)
   }

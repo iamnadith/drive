@@ -175,7 +175,7 @@ type RepairJob = {
   requestedByAgentId?: string
   claimedByAgentId?: string
   status: "pending" | "claimed" | "running" | "completed" | "failed" | "canceled"
-  mode: "verify_only" | "repair_and_verify"
+  mode: "verify_only" | "repair_and_verify" | "migration"
   payload: Record<string, unknown>
   progress: Record<string, unknown>
   result: Record<string, unknown>
@@ -321,6 +321,7 @@ function repairJobBadge(status: RepairJob["status"] | undefined) {
 }
 
 function formatRepairMode(mode: RepairJob["mode"] | string | undefined): string {
+  if (mode === "migration") return "Migration"
   if (mode === "repair_and_verify") return "Repair and verify"
   if (mode === "verify_only") return "Verify only"
   if (mode === "repair_only") return "Repair only"
@@ -1179,7 +1180,7 @@ export default function MigrationDetailsPage() {
   }, [loadInitial])
 
   const runMigrationAction = React.useCallback(
-    async (action: "pause_all" | "resume_all" | "cancel_migration" | "mark_completed" | "retry_migration" | "settings_sync") => {
+    async (action: "pause_all" | "resume_all" | "cancel_migration" | "mark_completed" | "retry_migration" | "repair_migration" | "verify_all" | "settings_sync") => {
       if (!id) return
       if (busyAction) return
       setBusyAction(action)
@@ -1594,10 +1595,9 @@ export default function MigrationDetailsPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             migrationId: migration.id,
-            mode: workerMode,
+            mode: migration.options.executionMode === "migration_workers" ? "migration" : workerMode,
             pool: migration.options.executionMode === "migration_workers",
             poolAgentIds: migration.options.executionMode === "migration_workers" ? workerIds : undefined,
-            workflowSupportsRuntimeInputs: true,
           }),
         })
         const json: unknown = await res.json().catch(() => ({}))
@@ -1726,7 +1726,7 @@ export default function MigrationDetailsPage() {
             {sourceLabel} - {targetLabel} - {migration.options.overwrite ? "Overwrite on destination" : "No overwrite"} -{" "}
             {Math.max(1, Math.min(3, migration.options.concurrency ?? 3))} concurrent bucket preparations
             {migration.options.executionMode === "migration_workers"
-              ? ` - ${Math.max(1, Math.min(128, migration.options.workerShardCount ?? 32))} shared object shards`
+              ? " - scanner-indexed per-file queue"
               : ""}
           </CardDescription>
         </CardHeader>
@@ -1895,6 +1895,30 @@ export default function MigrationDetailsPage() {
                     >
                       <AlertCircle className="h-4 w-4 mr-0" />
                       Failed Diagnostics
+                    </Button>
+                  ) : null}
+
+                  {workerPoolMigration && (allBucketsTerminal || ["completed", "failed"].includes(String(effectiveMigrationStatus))) ? (
+                    <Button
+                      onClick={() => void runMigrationAction("verify_all")}
+                      loading={busyAction === "verify_all"}
+                      disabled={Boolean(busyAction)}
+                      variant="outline"
+                    >
+                      {busyAction !== "verify_all" ? <ShieldCheck className="h-4 w-4 mr-0" /> : null}
+                      Verify
+                    </Button>
+                  ) : null}
+
+                  {workerPoolMigration && (failedBuckets.length > 0 || overviewProgress.verifyIssues > 0 || effectiveMigrationStatus === "failed") ? (
+                    <Button
+                      onClick={() => void runMigrationAction("repair_migration")}
+                      loading={busyAction === "repair_migration"}
+                      disabled={Boolean(busyAction)}
+                      variant="outline"
+                    >
+                      {busyAction !== "repair_migration" ? <RefreshCw className="h-4 w-4 mr-0" /> : null}
+                      Repair
                     </Button>
                   ) : null}
 
@@ -2834,7 +2858,7 @@ export default function MigrationDetailsPage() {
             <DialogTitle>{migration.options.executionMode === "migration_workers" ? "Dispatch migration workers" : "Run with worker"}</DialogTitle>
             <DialogDescription>
               {migration.options.executionMode === "migration_workers"
-                ? "Dispatch any number of workers. Workers claim disjoint object shards from one shared queue and keep polling for more work."
+                ? "Dispatch the selected workflow capacity. Each worker claims independent files from the scanner-built migration queue."
                 : "Run a worker across all buckets. It scans every bucket, repairs what it can, then verifies destination against source bucket-by-bucket before completion."}
             </DialogDescription>
           </DialogHeader>
@@ -2872,7 +2896,7 @@ export default function MigrationDetailsPage() {
                 </Select>
               )}
             </div>
-            <div className="space-y-2">
+            {migration.options.executionMode !== "migration_workers" ? <div className="space-y-2">
               <Label>Mode</Label>
               <Select value={workerMode} onValueChange={(value) => setWorkerMode(value as typeof workerMode)}>
                 <SelectTrigger>
@@ -2883,7 +2907,7 @@ export default function MigrationDetailsPage() {
                   <SelectItem value="verify_only">Verify only</SelectItem>
                 </SelectContent>
               </Select>
-            </div>
+            </div> : null}
             <Button className="w-full" loading={Boolean(dispatchingWorkerId)} disabled={workersLoading || (migration.options.executionMode === "migration_workers" ? selectedWorkerIds.length === 0 : !selectedWorkerId) || Boolean(dispatchingWorkerId)} onClick={() => void dispatchMigrationWorker()}>
               {!dispatchingWorkerId ? <Play className="h-4 w-4 mr-0" /> : null}
               {migration.options.executionMode === "migration_workers" ? `Dispatch ${selectedWorkerIds.length || ""} worker${selectedWorkerIds.length === 1 ? "" : "s"}` : "Dispatch worker"}

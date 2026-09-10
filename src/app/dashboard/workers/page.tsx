@@ -92,7 +92,7 @@ type RepairJobRow = {
   requestedByAgentId?: string
   claimedByAgentId?: string
   status: "pending" | "claimed" | "running" | "completed" | "failed" | "canceled"
-  mode: "verify_only" | "repair_only" | "repair_and_verify"
+  mode: "verify_only" | "repair_only" | "repair_and_verify" | "migration"
   payload?: Record<string, unknown>
   progress?: Record<string, unknown>
   result?: Record<string, unknown>
@@ -818,9 +818,14 @@ export default function WorkersPage() {
   const totalOnline = agents.filter((agent) => getEffectiveStatus(agent) === "online").length
   const totalGithub = agents.filter((agent) => agent.provider === "github_actions").length
   const totalSelfHosted = agents.filter((agent) => agent.provider === "self_hosted" || agent.provider === "local").length
-  const totalWorkers = agents.length
+  // A GitHub agent row represents one registered workflow configuration, not
+  // one worker process. Its configured capacity can launch up to workerCount
+  // independent workers; self-hosted/local registrations represent one each.
+  const totalWorkers = agents.reduce(
+    (total, agent) => total + (agent.provider === "github_actions" ? agent.workerCount : 1),
+    0
+  )
   const activeJobs = repairJobs.filter((job) => !["completed", "failed", "canceled"].includes(job.status)).length
-  const pendingRegistration = agents.filter((agent) => getEffectiveStatus(agent) === "pending_registration").length
   const visibleWorkers = agents
   const visibleRepairJobs = repairJobs.slice(0, 3)
   const getWorkerLinkedJobs = React.useCallback(
@@ -912,7 +917,6 @@ export default function WorkersPage() {
         body: JSON.stringify({
           migrationId: dispatchMigrationId.trim(),
           mode: dispatchMode,
-          workflowSupportsRuntimeInputs: true,
         }),
       })
       const json: unknown = await res.json().catch(() => ({}))
@@ -1262,7 +1266,7 @@ export default function WorkersPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{loading ? "-" : totalWorkers}</div>
-            <p className="text-xs text-muted-foreground">{pendingRegistration} pending registration</p>
+            <p className="text-xs text-muted-foreground">Configured worker capacity</p>
           </CardContent>
         </Card>
         <Card>
@@ -1277,12 +1281,12 @@ export default function WorkersPage() {
         </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">GitHub-backed</CardTitle>
+            <CardTitle className="text-sm font-medium">Registered Workflows</CardTitle>
             <Github className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{loading ? "-" : totalGithub}</div>
-            <p className="text-xs text-muted-foreground">{totalSelfHosted} Self Hosted workers</p>
+            <p className="text-xs text-muted-foreground">{totalSelfHosted} self-hosted worker{totalSelfHosted === 1 ? "" : "s"}</p>
           </CardContent>
         </Card>
         <Card>

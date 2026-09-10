@@ -801,7 +801,7 @@ create table if not exists drive_bucket_scans (
   id uuid primary key,
   account_id uuid not null references drive_accounts(id) on delete cascade,
   bucket_name text not null,
-  kind text not null default 'source', -- source | dest
+  kind text not null default 'source', -- source | dest; migration scope is carried by migration_id/item_id
   migration_id uuid references drive_migrations(id) on delete cascade,
   migration_item_id uuid references drive_migration_items(id) on delete cascade,
   prefix text,
@@ -918,7 +918,7 @@ create table if not exists drive_repair_jobs (
   claimed_by_agent_id uuid references drive_agents(id) on delete set null,
   claim_token uuid,
   status text not null default 'pending', -- pending | claimed | running | completed | failed | canceled
-  mode text not null default 'repair_and_verify', -- verify_only | repair_only | repair_and_verify
+  mode text not null default 'repair_and_verify', -- verify_only | repair_only | repair_and_verify | migration
   work_key text,
   payload jsonb not null default '{}'::jsonb,
   progress jsonb not null default '{}'::jsonb,

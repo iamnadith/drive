@@ -235,7 +235,6 @@ export default function MigrationsPage() {
   const [overwrite, setOverwrite] = React.useState(true)
   const [concurrency, setConcurrency] = React.useState("3")
   const [executionMode, setExecutionMode] = React.useState<"super_slurper" | "migration_workers">("super_slurper")
-  const [workerShardCount, setWorkerShardCount] = React.useState("32")
   const [pathPrefix, setPathPrefix] = React.useState("")
   const [bucketQuery, setBucketQuery] = React.useState("")
   const [selectedBuckets, setSelectedBuckets] = React.useState<Record<string, boolean>>({})
@@ -508,7 +507,6 @@ export default function MigrationsPage() {
             overwrite,
             concurrency: Number.isFinite(parsedConcurrency) ? concurrencyNumber : 3,
             executionMode,
-            ...(executionMode === "migration_workers" ? { workerShardCount: Number(workerShardCount) || 32 } : {}),
             pathPrefix: pathPrefix.trim() ? pathPrefix.trim() : undefined,
             includeBuckets: chosen,
         }),
@@ -770,7 +768,7 @@ export default function MigrationsPage() {
                 </Select>
                 <p className="text-xs text-muted-foreground">
                   {executionMode === "migration_workers"
-                    ? "Splits every bucket into deterministic object shards. Workers claim shards from one shared queue, so each file has one owner at a time."
+                    ? "The File Scanner builds one durable per-file queue. Dispatched workers claim files independently, while final verification remains owned by the File Scanner."
                     : "Uses Cloudflare-managed Super Slurper jobs and its existing three-job limit."}
                 </p>
               </div>
@@ -813,30 +811,6 @@ export default function MigrationsPage() {
                     : "Cloudflare allows up to 3 concurrent Super Slurper jobs."}
                 </p>
               </div>
-
-              {executionMode === "migration_workers" ? (
-                <>
-                  <Separator />
-                  <div className="space-y-2">
-                    <Label>Parallel object shards</Label>
-                    <Select value={workerShardCount} onValueChange={setWorkerShardCount}>
-                      <SelectTrigger className="h-11">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {[8, 16, 32, 64, 128].map((count) => (
-                          <SelectItem key={count} value={String(count)}>
-                            {count} shared shards
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-xs text-muted-foreground">
-                      Files are assigned by a stable hash across all buckets. Use at least as many shards as workers you expect to run.
-                    </p>
-                  </div>
-                </>
-              ) : null}
 
               <Separator />
 

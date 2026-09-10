@@ -24,7 +24,7 @@ type RepairJobRow = {
   migrationId: string
   claimedByAgentId?: string
   status: "pending" | "claimed" | "running" | "completed" | "failed" | "canceled"
-  mode: "verify_only" | "repair_only" | "repair_and_verify"
+  mode: "verify_only" | "repair_only" | "repair_and_verify" | "migration"
   payload?: Record<string, unknown>
   progress?: Record<string, unknown>
   result?: Record<string, unknown>

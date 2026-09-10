@@ -10,6 +10,8 @@ import { createInitialBucketVerifyState } from "@/lib/bucket-verifier"
 import { requireAdmin } from "@/lib/server-auth"
 import { syncMigrationBucketSettings } from "@/lib/migration-settings-sync"
 import { getMigrationReadOnlyState, isPermanentAccountCommunicationFailure } from "@/lib/migration-read-only"
+import { queryDb } from "@/lib/db"
+import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
 
 export const runtime = "nodejs"
 
@@ -52,6 +54,20 @@ function getGitHubTokenFallback(): string {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function wakeMigrationService(kind: "scanner" | "orchestrator"): Promise<void> {
+  const settings = await getMigrationOrchestratorSettings()
+  const url = kind === "scanner" ? settings.fileScannerUrl : settings.orchestratorUrl
+  const secret = kind === "scanner" ? settings.fileScannerSecret : settings.sharedSecret
+  const enabled = kind === "scanner" ? settings.fileScannerEnabled : settings.migrationEnabled
+  if (!enabled || !url || !secret) throw new Error(`${kind === "scanner" ? "File Scanner" : "Migration Orchestrator"} is not configured and enabled`)
+  const response = await fetch(`${url.replace(/\/+$/, "")}/run`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${secret}` },
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (!response.ok) throw new Error(`${kind === "scanner" ? "File Scanner" : "Migration Orchestrator"} wake-up returned HTTP ${response.status}`)
 }
 
 function normalizeGitHubRunTerminalStatus(status: string, conclusion: string): "completed" | "failed" | "canceled" | "running" {
@@ -252,7 +268,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const migration = await getMigration(id)
     if (!migration) return NextResponse.json({ error: "Migration not found" }, { status: 404 })
     const readOnly = getMigrationReadOnlyState(migration)
-    if (readOnly.readOnly) {
+    const workerMaintenanceAction =
+      migration.options.executionMode === "migration_workers" &&
+      (action === "verify_all" || action === "repair_migration")
+    if (readOnly.readOnly && !workerMaintenanceAction) {
       return NextResponse.json({ error: `Migration history is read-only: ${readOnly.reason}` }, { status: 409 })
     }
 
@@ -267,6 +286,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     const items = await listMigrationItems(id)
+    if (workerMaintenanceAction && items.length === 0) {
+      return NextResponse.json({ error: "Migration item history has been compacted; there are no bucket records available to verify or repair" }, { status: 409 })
+    }
     const accounts = await getAllAccounts()
     const target = accounts.find((a) => a.id === migration.targetAccountId)
     if (!target?.cloudflareAccountId) {
@@ -498,6 +520,30 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     if (action === "verify_all") {
+      if (migration.options.executionMode === "migration_workers") {
+        const generation =
+          typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
+            ? Math.max(1, Math.floor(migration.options.workerGeneration))
+            : 1
+        await queryDb(`
+          insert into drive_migration_verification_state(migration_item_id,migration_id,generation,status,phase,updated_at)
+          select id,migration_id,$2,'pending','source',now() from drive_migration_items where migration_id=$1
+          on conflict(migration_item_id) do update set
+            generation=$2,status='pending',phase='source',source_scan_id=null,destination_scan_id=null,
+            source_cursor=null,destination_cursor=null,source_objects=0,source_bytes=0,destination_objects=0,destination_bytes=0,
+            missing_objects=0,mismatched_objects=0,extra_objects=0,attempt_count=0,attempt_generation=null,last_error=null,
+            lease_owner=null,lease_expires_at=null,completed_at=null,updated_at=now()
+        `, [id, generation])
+        await updateMigration(id, {
+          status: "verifying",
+          completedAt: null,
+          syncStatus: "syncing",
+          syncMessage: "File Scanner verification requested",
+          lastSyncedAt: now,
+        })
+        await wakeMigrationService("scanner")
+        return NextResponse.json({ ok: true, verifying: items.length, scanner: true }, { status: 200 })
+      }
       const prefix =
         typeof migration.options?.pathPrefix === "string" && migration.options.pathPrefix.trim().length > 0
           ? migration.options.pathPrefix
@@ -526,6 +572,44 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       })
 
       return NextResponse.json({ ok: true, verifying: candidates.length }, { status: 200 })
+    }
+
+    if (action === "repair_migration") {
+      if (migration.options.executionMode !== "migration_workers") {
+        return NextResponse.json({ error: "Fleet repair is only available for worker-pool migrations" }, { status: 409 })
+      }
+      const activeWorkerJobs = (await listRepairJobsByMigration(id, 500).catch(() => []))
+        .filter((job) => ["pending", "claimed", "running"].includes(job.status))
+      await Promise.all(activeWorkerJobs.map((job) => abortRepairJob(job.id).catch(() => undefined)))
+      const nextGeneration =
+        (typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
+          ? Math.max(1, Math.floor(migration.options.workerGeneration))
+          : 1) + 1
+      for (const item of items) {
+        const progress = isRecord(item.progress) ? item.progress : {}
+        await updateMigrationItem(item.id, {
+          slurperStatus: "scanning",
+          progress: {
+            ...progress,
+            stage: "scanning_source",
+            migrationInventory: { generation: nextGeneration, status: "pending" },
+            repairWorker: null,
+            live: null,
+            lastAction: { action, at: now },
+          },
+          lastProgressAt: now,
+        })
+      }
+      await updateMigration(id, {
+        status: "running",
+        completedAt: null,
+        syncStatus: "syncing",
+        syncMessage: "Fleet repair requested; File Scanner inventory pending",
+        lastSyncedAt: now,
+        options: { ...migration.options, workerGeneration: nextGeneration, manualCompleted: false, targetActivatedAt: undefined },
+      })
+      await wakeMigrationService("orchestrator")
+      return NextResponse.json({ ok: true, repairing: items.length, generation: nextGeneration }, { status: 200 })
     }
 
     if (action === "retry_migration") {

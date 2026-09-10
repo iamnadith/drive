@@ -126,15 +126,14 @@ export async function POST(
     if (effectiveStatus === "completed" || effectiveStatus === "failed" || effectiveStatus === "canceled") {
       const linkedRun = await getLatestAgentRunByJobReference(jobId).catch(() => null)
       // A GitHub pool workflow is a long-lived dispatcher. Its run is linked
-      // to the shard currently being processed only so the next claim can be
-      // scoped to the same run. Completing one shard must release that link
-      // and keep the workflow alive for the next shard; treating it like a
-      // one-job repair run would cancel the workflow after the first shard.
+      // to the file currently being processed only so the next claim can be
+      // scoped to the same run. Completing one file must release that link
+      // and keep the workflow alive for the next file.
       const keepPoolRunAlive =
         effectiveStatus !== "canceled" &&
-        job.payload?.kind === "migration_shard" &&
+        (job.payload?.kind === "migration_inventory_file" || job.payload?.kind === "migration_shard") &&
         typeof job.workKey === "string" &&
-        job.workKey.includes(":shard:") &&
+        (job.workKey.includes(":inventory:") || job.workKey.includes(":shard:")) &&
         linkedRun?.payload?.pool === true
 
       if (
@@ -167,7 +166,7 @@ export async function POST(
             status: "running",
             jobReference: null,
             completedAt: null,
-            summary: `Worker pool shard ${effectiveStatus}; waiting for the next shard`,
+            summary: `Migration file ${effectiveStatus}; waiting for the next file`,
             payload: {
               ...(linkedRun.payload ?? {}),
               pool: true,

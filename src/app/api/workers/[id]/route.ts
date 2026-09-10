@@ -121,7 +121,7 @@ async function resolveGitHubRunIdsForWorkerStop(input: {
       repo: input.repo,
       workflow: input.workflow,
       branch: input.branch,
-      event: "workflow_dispatch",
+      event: "repository_dispatch",
       perPage: 20,
     }).catch(() => [])
 

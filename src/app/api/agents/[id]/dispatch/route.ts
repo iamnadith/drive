@@ -89,14 +89,11 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
     const migrationId = typeof body.migrationId === "string" ? body.migrationId.trim() : ""
-    const mode = (
+    const requestedMode = (
       typeof body.mode === "string" && ["verify_only", "repair_only", "repair_and_verify"].includes(body.mode)
         ? body.mode
         : "repair_and_verify"
     ) as RepairJobMode
-    const dispatchInputs =
-      typeof body.inputs === "object" && body.inputs !== null ? (body.inputs as Record<string, unknown>) : {}
-    const workflowSupportsRuntimeInputs = body.workflowSupportsRuntimeInputs !== false
     const poolAgentIds = Array.isArray(body.poolAgentIds)
       ? Array.from(new Set(body.poolAgentIds.filter((value): value is string => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value))) )
       : []
@@ -106,6 +103,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (!migration) return NextResponse.json({ error: "Migration not found" }, { status: 404 })
     const items = await listMigrationItems(migrationId)
     const pool = body.pool === true || migration.options.executionMode === "migration_workers"
+    // A worker-pool dispatch is a first-class migration operation. Repair and
+    // verify modes remain available only to the existing non-pool worker path.
+    const mode: RepairJobMode = pool ? "migration" : requestedMode
     if (body.pool === true && migration.options.executionMode !== "migration_workers") {
       return NextResponse.json({ error: "Worker pool dispatch requires a migration created with the worker engine" }, { status: 409 })
     }
@@ -189,12 +189,35 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     if (pool) {
       const selectedIds = poolAgentIds.length > 0 ? poolAgentIds : [id]
-      await enrollMigrationWorkerAgents(migrationId, selectedIds)
-      await ensureMigrationWorkerJobs({ migrationId, mode })
       const orchestrator = await getMigrationOrchestratorSettings()
       if (!orchestrator.orchestratorUrl || !orchestrator.sharedSecret) {
         return NextResponse.json({ error: "Migration Orchestrator URL and secret are required for worker-pool dispatch" }, { status: 409 })
       }
+      const workerSecret = (await getMigrationWorkerSettings()).sharedSecret
+      if (workerSecret.length < 24 || workerSecret.length > 512) {
+        return NextResponse.json({ error: "Configure the Migration Worker secret in Settings before dispatching a workflow" }, { status: 409 })
+      }
+      // Validate and synchronize every selected workflow before enrolling any
+      // of them. A partial enrollment must never leave an undispatchable fleet.
+      for (const selectedId of selectedIds) {
+        const selected = await getAgentById(selectedId)
+        if (!selected || selected.provider !== "github_actions" || !selected.githubRepoOwner || !selected.githubRepoName || !selected.githubWorkflowFile) {
+          return NextResponse.json({ error: `Selected workflow ${selectedId} is missing its GitHub repository configuration` }, { status: 409 })
+        }
+        const token = await getAgentGithubToken(selectedId)
+        if (!token) return NextResponse.json({ error: `Selected workflow ${selected.name} is missing its GitHub token` }, { status: 409 })
+        await syncGitHubWorkerSecrets({
+          token,
+          owner: selected.githubRepoOwner,
+          repo: selected.githubRepoName,
+          serverUrl: orchestrator.orchestratorUrl,
+          sharedSecret: workerSecret,
+          agentId: selected.id,
+          includeLegacyAgentId: false,
+        })
+      }
+      await enrollMigrationWorkerAgents(migrationId, selectedIds)
+      await ensureMigrationWorkerJobs({ migrationId, mode })
       const wake = await fetch(`${orchestrator.orchestratorUrl.replace(/\/+$/, "")}/run`, {
         method: "POST",
         headers: { Authorization: `Bearer ${orchestrator.sharedSecret}` },
@@ -270,7 +293,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const runIdsBeforeDispatch = new Set(runsBeforeDispatch.map((candidate) => candidate.id))
     let secretSyncError: string | null = null
     try {
-      await syncGitHubWorkerSecrets({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, sharedSecret, agentId: id, includeLegacyAgentId: !workflowSupportsRuntimeInputs })
+      await syncGitHubWorkerSecrets({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, sharedSecret, agentId: id, includeLegacyAgentId: false })
     } catch (error: unknown) {
       secretSyncError = errorMessage(error, "Unable to sync GitHub worker secrets")
     }
@@ -330,9 +353,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       },
     }).catch(() => undefined)
 
-    const dispatchWorkflow = async (includeRuntimeInputs: boolean, instanceId: string) =>
+    const dispatchWorkflow = async (instanceId: string) =>
       fetch(
-        `https://api.github.com/repos/${encodeURIComponent(githubRepoOwner)}/${encodeURIComponent(githubRepoName)}/actions/workflows/${encodeURIComponent(githubWorkflowFile)}/dispatches`,
+        `https://api.github.com/repos/${encodeURIComponent(githubRepoOwner)}/${encodeURIComponent(githubRepoName)}/dispatches`,
         {
           method: "POST",
           headers: {
@@ -342,34 +365,21 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            ref: agent.githubRef || "main",
-            inputs: includeRuntimeInputs
-              ? {
-                  migration_id: migrationId,
-                  ...(job?.id ? { repair_job_id: job.id } : {}),
-                  agent_id: id,
-                  worker_instance_id: instanceId,
-                  ...Object.fromEntries(
-                    Object.entries(dispatchInputs).filter(
-                      ([key]) => !["agent_token", "repair_job_id", "agent_id", "server_url", "worker_instance_id"].includes(key)
-                    )
-                  ),
-                }
-              : {},
+            event_type: "drive-migration-worker",
+            client_payload: {
+              migration_id: migrationId,
+              ...(job?.id ? { repair_job_id: job.id } : {}),
+              agent_id: id,
+              worker_instance_id: instanceId,
+              workflow_file: githubWorkflowFile,
+            },
           }),
         }
       )
 
     let response: Response
-    let usedRuntimeInputs = workflowSupportsRuntimeInputs
     try {
-      response = await dispatchWorkflow(workflowSupportsRuntimeInputs, workerInstanceId)
-      if (!response.ok && workflowSupportsRuntimeInputs) {
-        const firstBody = await response.text().catch(() => "")
-        // An older workflow cannot safely receive a per-worker credential:
-        // retrying without inputs would start it with no identity or secret.
-        response = new Response(firstBody, { status: response.status, statusText: response.statusText, headers: response.headers })
-      }
+      response = await dispatchWorkflow(workerInstanceId)
     } catch (error: unknown) {
       if (job?.id) await abortRepairJob(job.id).catch(() => undefined)
       return NextResponse.json({ error: errorMessage(error, "Unable to send GitHub workflow dispatch request") }, { status: 400 })
@@ -426,7 +436,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         ref: agent.githubRef || "main",
         dispatchRequestedAt,
         githubRunIdsBeforeDispatch: Array.from(runIdsBeforeDispatch),
-        usedRuntimeInputs,
+        dispatchTransport: "repository_dispatch",
         ...(secretSyncError ? { secretSyncWarning: secretSyncError } : {}),
         ...(matchedRun?.htmlUrl ? { htmlUrl: matchedRun.htmlUrl } : {}),
       },
@@ -460,7 +470,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       })
       let additionalResponse: Response
       try {
-        additionalResponse = await dispatchWorkflow(workflowSupportsRuntimeInputs, additionalInstanceId)
+        additionalResponse = await dispatchWorkflow(additionalInstanceId)
       } catch (error: unknown) {
         await updateAgentRun(pendingRun.id, {
           status: "failed",
@@ -489,7 +499,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           : "Independent workflow worker dispatched; waiting for GitHub to index the run",
         payload: {
           ...(pendingRun.payload ?? {}),
-          usedRuntimeInputs,
+          dispatchTransport: "repository_dispatch",
           ...(additionalMatch?.htmlUrl ? { htmlUrl: additionalMatch.htmlUrl } : {}),
         },
         ...(additionalMatch?.status === "completed" ? { completedAt: new Date().toISOString() } : {}),

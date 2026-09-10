@@ -231,7 +231,7 @@ function mapRepairJobRow(row: RepairJobRow): DriveRepairJob {
   const status = ["pending", "claimed", "running", "completed", "failed", "canceled"].includes(row.status)
     ? row.status
     : "pending"
-  const mode = ["verify_only", "repair_only", "repair_and_verify"].includes(row.mode) ? row.mode : "repair_and_verify"
+  const mode = ["verify_only", "repair_only", "repair_and_verify", "migration"].includes(row.mode) ? row.mode : "repair_and_verify"
   return {
     id: row.id,
     migrationId: row.migration_id,

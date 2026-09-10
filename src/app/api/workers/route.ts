@@ -154,7 +154,7 @@ export async function GET() {
           repo: agent.githubRepoName,
           workflow: agent.githubWorkflowFile,
           branch: agent.githubRef || "main",
-          event: "workflow_dispatch",
+          event: "repository_dispatch",
           perPage: 10,
         }).catch(() => [])
         githubRun = matchGithubRunToDispatch(

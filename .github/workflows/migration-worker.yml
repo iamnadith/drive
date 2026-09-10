@@ -1,13 +1,11 @@
 name: Migration Worker
 run-name: >-
   Migration Worker / ${{
-    inputs.agent_id ||
     github.event.client_payload.agent_id ||
     github.run_id
   }} / ${{
-    inputs.worker_instance_id ||
-    inputs.repair_job_id ||
     github.event.client_payload.repair_job_id ||
+    github.event.client_payload.worker_instance_id ||
     github.run_id
   }}
 
@@ -15,30 +13,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: drive-migration-worker-${{ inputs.worker_instance_id || github.event.client_payload.worker_instance_id || github.run_id }}
+  group: drive-migration-worker-${{ github.event.client_payload.worker_instance_id || github.run_id }}
   cancel-in-progress: true
 
 on:
-  workflow_dispatch:
-    inputs:
-      migration_id:
-        description: Migration id to process
-        required: false
-      repair_job_id:
-        description: Repair job id queued by the website
-        required: false
-      agent_id:
-        description: Agent id requesting dispatch
-        required: false
-      worker_instance_id:
-        description: Unique identity for this dispatched worker process
-        required: false
   repository_dispatch:
     types: [drive-migration-worker]
 
 jobs:
   run-migration-worker:
-    name: Run ${{ github.run_number }} / Worker ${{ inputs.worker_instance_id || github.run_id }}
+    if: contains(github.workflow_ref, github.event.client_payload.workflow_file)
+    name: Run ${{ github.run_number }} / Worker ${{ github.event.client_payload.worker_instance_id || github.run_id }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     defaults:
@@ -61,28 +46,10 @@ jobs:
       - name: Run migration worker
         env:
           SERVER_URL: ${{ secrets.DRIVE_MIGRATION_ORCHESTRATOR_URL }}
-          AGENT_ID: ${{ inputs.agent_id || github.event.client_payload.agent_id || secrets.DRIVE_AGENT_ID || secrets.AGENT_ID || vars.DRIVE_AGENT_ID || vars.AGENT_ID }}
-          WORKER_INSTANCE_ID: ${{ inputs.worker_instance_id || github.run_id }}
-          # A migration id is always scoped to this dispatch. Do not fall back
-          # to a repository-wide variable: that can restart an old pool when a
-          # workflow is run manually and can make concurrent workers collide.
-          DRIVE_MIGRATION_ID: ${{ inputs.migration_id || github.event.client_payload.migration_id || '' }}
-          DRIVE_REPAIR_JOB_ID: ${{ inputs.repair_job_id || github.event.client_payload.repair_job_id || '' }}
+          AGENT_ID: ${{ github.event.client_payload.agent_id }}
+          WORKER_INSTANCE_ID: ${{ github.event.client_payload.worker_instance_id || github.run_id }}
+          DRIVE_MIGRATION_ID: ${{ github.event.client_payload.migration_id }}
+          DRIVE_REPAIR_JOB_ID: ${{ github.event.client_payload.repair_job_id || '' }}
           TOKEN: ${{ secrets.DRIVE_WORKER_SHARED_SECRET }}
-          POLL_MS: ${{ vars.POLL_MS || '15000' }}
-          HEARTBEAT_MS: ${{ vars.HEARTBEAT_MS || '20000' }}
-          MAX_OBJECTS: ${{ vars.MAX_OBJECTS || '2000000' }}
-          API_TIMEOUT_MS: ${{ vars.API_TIMEOUT_MS || '30000' }}
-          API_RETRIES: ${{ vars.API_RETRIES || '3' }}
-          S3_RETRIES: ${{ vars.S3_RETRIES || '3' }}
-          COPY_CONCURRENCY: ${{ vars.COPY_CONCURRENCY || '8' }}
-          UPLOAD_QUEUE_SIZE: ${{ vars.UPLOAD_QUEUE_SIZE || '4' }}
-          UPLOAD_PART_SIZE_MB: ${{ vars.UPLOAD_PART_SIZE_MB || '16' }}
-          RANGE_COPY_THRESHOLD_MB: ${{ vars.RANGE_COPY_THRESHOLD_MB || '64' }}
-          RANGE_COPY_CONCURRENCY: ${{ vars.RANGE_COPY_CONCURRENCY || '4' }}
-          SUPABASE_TIMEOUT_MS: ${{ vars.SUPABASE_TIMEOUT_MS || '5000' }}
-          # Pool runs stay alive to claim successive shards. Exact repair runs
-          # exit after their single job so an idle GitHub runner is not held
-          # until the six-hour Actions timeout.
-          EXIT_AFTER_JOB: ${{ vars.EXIT_AFTER_JOB || ((inputs.repair_job_id || github.event.client_payload.repair_job_id) && 'true' || 'false') }}
+          EXIT_AFTER_JOB: ${{ github.event.client_payload.repair_job_id && 'true' || 'false' }}
         run: npm start

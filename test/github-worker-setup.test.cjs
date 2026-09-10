@@ -251,21 +251,21 @@ test('dashboard workflow picker has no repository-independent fallback item', ()
 })
 test('migration worker workflow exposes the dispatch contract used by the panel', () => {
   const workflowFile = fs.readFileSync(path.resolve('.github/workflows/migration-worker.yml'), 'utf8')
-  assert.match(workflowFile, /workflow_dispatch:/)
-  for (const input of ['migration_id', 'repair_job_id', 'agent_id', 'worker_instance_id']) {
-    assert.match(workflowFile, new RegExp(`^      ${input}:`, 'm'))
-  }
+  assert.doesNotMatch(workflowFile, /workflow_dispatch:/)
+  assert.match(workflowFile, /repository_dispatch:/)
+  assert.match(workflowFile, /types: \[drive-migration-worker\]/)
   assert.match(workflowFile, /working-directory: workers\/migration-worker/)
   assert.match(workflowFile, /cache-dependency-path: workers\/migration-worker\/package-lock\.json/)
   assert.match(workflowFile, /run: npm ci/)
   assert.match(workflowFile, /run: npm start/)
   assert.match(workflowFile, /AGENT_ID:/)
-  assert.match(workflowFile, /worker_instance_id:/)
+  assert.match(workflowFile, /github\.event\.client_payload\.worker_instance_id/)
   assert.match(workflowFile, /Run \$\{\{ github\.run_number \}\} \/ Worker/)
-  assert.match(workflowFile, /WORKER_INSTANCE_ID: \$\{\{ inputs\.worker_instance_id \|\| github\.run_id \}\}/)
+  assert.match(workflowFile, /WORKER_INSTANCE_ID: \$\{\{ github\.event\.client_payload\.worker_instance_id \|\| github\.run_id \}\}/)
   assert.match(workflowFile, /SERVER_URL: \$\{\{ secrets\.DRIVE_MIGRATION_ORCHESTRATOR_URL \}\}/)
   assert.match(workflowFile, /TOKEN: \$\{\{ secrets\.DRIVE_WORKER_SHARED_SECRET \}\}/)
   assert.doesNotMatch(workflowFile, /^\s+POSTGRES_URL:/m)
+  assert.doesNotMatch(workflowFile, /^\s+inputs:/m)
 })
 
 test('registered workflows dispatch only vacant independent worker capacity', () => {
@@ -312,20 +312,42 @@ test('workflow compatibility requires the orchestrator URL and shared worker sec
 
 test('migration UI exposes both engines while preserving Super Slurper as the default', () => {
   const page = fs.readFileSync(path.resolve('src/app/dashboard/migrations/page.tsx'), 'utf8')
+  const details = fs.readFileSync(path.resolve('src/app/dashboard/migrations/[id]/page.tsx'), 'utf8')
+  const dispatch = fs.readFileSync(path.resolve('src/app/api/agents/[id]/dispatch/route.ts'), 'utf8')
   assert.match(page, /useState<"super_slurper" \| "migration_workers">\("super_slurper"\)/)
   assert.match(page, /<SelectItem value="super_slurper">Cloudflare Super Slurper<\/SelectItem>/)
   assert.match(page, /<SelectItem value="migration_workers">Drive migration worker pool<\/SelectItem>/)
-  assert.match(page, /workerShardCount/)
+  assert.doesNotMatch(page, /Parallel object shards/)
+  assert.match(details, /scanner-indexed per-file queue/)
+  assert.match(details, /executionMode === "migration_workers" \? "migration" : workerMode/)
+  assert.match(details, /if \(mode === "migration"\) return "Migration"/)
+  assert.match(dispatch, /const mode: RepairJobMode = pool \? "migration" : requestedMode/)
+})
+
+test('worker totals sum configured workflow capacity instead of counting workflow rows', () => {
+  const workers = fs.readFileSync(path.resolve('src/app/dashboard/workers/page.tsx'), 'utf8')
+  assert.match(workers, /agent\.provider === "github_actions" \? agent\.workerCount : 1/)
+  assert.match(workers, /Registered Workflows/)
+  assert.match(workers, /Configured worker capacity/)
 })
 
 test('migration worker pool documentation and schema keep the shared queue contract explicit', () => {
   const schema = fs.readFileSync(path.resolve('supabase/drive_schema.sql'), 'utf8')
   const orchestratorReadme = fs.readFileSync(path.resolve('workers/migration-orchestrator/README.md'), 'utf8')
+  const workerReadme = fs.readFileSync(path.resolve('workers/migration-worker/README.md'), 'utf8')
+  const orchestrator = fs.readFileSync(path.resolve('workers/migration-orchestrator/src/index.ts'), 'utf8')
+  const action = fs.readFileSync(path.resolve('src/app/api/migrations/[id]/action/route.ts'), 'utf8')
   assert.match(schema, /work_key text/)
   assert.match(schema, /drive_repair_jobs_work_key_unique/)
   assert.match(schema, /create table if not exists drive_app_settings/)
   assert.match(orchestratorReadme, /File Scanner inventory/)
   assert.match(orchestratorReadme, /migration_workers/)
+  assert.match(workerReadme, /scanner-indexed source file/)
+  assert.match(orchestrator, /'pending','migration'/)
+  assert.doesNotMatch(orchestrator, /Verification issues queued for repair/)
+  assert.match(action, /action === "repair_migration"/)
+  assert.match(action, /action === "verify_all"/)
+  assert.match(action, /wakeMigrationService\("scanner"\)/)
 })
 
 test('migration and file orchestrators operate through durable shared state without runtime panel callbacks', () => {

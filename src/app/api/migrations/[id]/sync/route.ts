@@ -37,7 +37,6 @@ import {
 import { syncMigrationLiveState } from "@/lib/migration-live-state"
 import {
   ensureMigrationWorkerJobs,
-  finalizeCompletedMigrationWorkerShards,
   requeueStaleMigrationWorkerJobs,
 } from "@/lib/repair-jobs-store"
 import { getMigrationReadOnlyState, isPermanentAccountCommunicationFailure } from "@/lib/migration-read-only"
@@ -573,13 +572,20 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       // panel refresh explicitly advances the scan and immediately reflects
       // scanner-owned counts; never create migration jobs from cached stats.
       let workerItems = await listMigrationItems(id)
+      const workerGeneration =
+        typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
+          ? Math.max(1, Math.floor(migration.options.workerGeneration))
+          : 1
       const scanPrefix = typeof migration.options.pathPrefix === "string" && migration.options.pathPrefix.trim().length > 0
         ? migration.options.pathPrefix
         : null
       await promisePool(workerItems, 2, async (item) => {
         const progress = isRecord(item.progress) ? item.progress : {}
         const inventory = isRecord(progress.migrationInventory) ? progress.migrationInventory : {}
-        let scanId = typeof inventory.sourceScanId === "string" ? inventory.sourceScanId : ""
+        const matchingGeneration =
+          Number(inventory.generation) === workerGeneration ||
+          (workerGeneration === 1 && inventory.generation == null)
+        let scanId = matchingGeneration && typeof inventory.sourceScanId === "string" ? inventory.sourceScanId : ""
         if (!scanId) {
           const scan = await ensureBucketScan({
             accountId: migration.sourceAccountId,
@@ -595,7 +601,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           scanId = scan.id
           await updateMigrationItem(item.id, {
             slurperStatus: "scanning",
-            progress: { ...progress, stage: "scanning_source", migrationInventory: { sourceScanId: scanId, status: "scanning" } },
+            progress: { ...progress, stage: "scanning_source", migrationInventory: { sourceScanId: scanId, generation: workerGeneration, status: "scanning" } },
             lastProgressAt: new Date().toISOString(),
           })
         }
@@ -604,7 +610,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       const workerScans = await Promise.all(workerItems.map(async (item) => {
         const progress = isRecord(item.progress) ? item.progress : {}
         const inventory = isRecord(progress.migrationInventory) ? progress.migrationInventory : {}
-        const scanId = typeof inventory.sourceScanId === "string" ? inventory.sourceScanId : ""
+        const matchingGeneration =
+          Number(inventory.generation) === workerGeneration ||
+          (workerGeneration === 1 && inventory.generation == null)
+        const scanId = matchingGeneration && typeof inventory.sourceScanId === "string" ? inventory.sourceScanId : ""
         return { item, scan: scanId ? await getBucketScan(scanId).catch(() => null) : null }
       }))
       const pendingScans = workerScans.filter(({ scan }) => !scan || (scan.status !== "completed" && scan.status !== "failed"))
@@ -625,6 +634,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
               stage: scan.status === "completed" ? "scan_completed" : "scanning_source",
               migrationInventory: {
                 ...inventory,
+                generation: workerGeneration,
                 status: scan.status,
                 objects: scan.objects,
                 bytes: scan.bytes,
@@ -647,12 +657,11 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
       // All scanner inventories are complete; only now materialize durable
       // per-file jobs for workers to claim.
-      const queued = await ensureMigrationWorkerJobs({ migrationId: id, mode: "repair_and_verify" })
+      const queued = await ensureMigrationWorkerJobs({ migrationId: id, mode: "migration" })
       const requeued = await requeueStaleMigrationWorkerJobs({ migrationId: id }).catch(() => 0)
-      const finalized = await finalizeCompletedMigrationWorkerShards(id).catch(() => ({ finalized: false, shardCount: 0, jobs: 0, items: 0 }))
       await syncMigrationLiveState(id, { runSettingsSync: finalizeSettings }).catch(() => undefined)
       return NextResponse.json(
-        { migration: await getMigration(id), items: await listMigrationItems(id), workerJobs: queued.jobs, requeued, finalized },
+        { migration: await getMigration(id), items: await listMigrationItems(id), workerJobs: queued.jobs, requeued },
         { status: 200 }
       )
     }

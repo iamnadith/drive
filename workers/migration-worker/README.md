@@ -15,7 +15,7 @@ The worker requires only two deployment values:
 - `POSTGRES_URL`
 - `AGENT_ID`
 
-It loads the shared worker secret and optional panel origin from PostgreSQL. It claims and updates fenced shard jobs directly, so panel downtime does not stop a migration. Existing panel API and Supabase variables remain accepted for compatibility.
+It loads the shared worker secret and optional panel origin from PostgreSQL. It claims and updates fenced per-file migration jobs directly, so panel downtime does not stop a migration. Existing panel API and Supabase variables remain accepted for compatibility.
 
 ## Local run
 
@@ -48,7 +48,7 @@ Required repository secret:
 
 The agent id is passed per dispatch, so one GitHub account and repository can host many separately identified worker registrations. Non-secret tuning values can be added as repository variables, such as `COPY_CONCURRENCY`, `UPLOAD_QUEUE_SIZE`, and `UPLOAD_PART_SIZE_MB`.
 
-When the panel dispatches a GitHub worker, it passes the migration and unique agent id as workflow inputs and synchronizes `POSTGRES_URL`. The shared secret remains in the database and is common to every migration worker; the agent id keeps concurrent workers separately identifiable. A per-claim UUID fences stale processes after recovery. Each worker claims one durable object shard at a time and keeps polling for more work. Every shard spans all selected buckets and uses a stable bucket/key hash, so each object has one owner in a generation.
+When the panel dispatches a GitHub worker, it passes the migration and unique agent id as workflow inputs and synchronizes `POSTGRES_URL`. The shared secret remains in the database and is common to every migration worker; the agent id keeps concurrent workers separately identifiable. A per-claim UUID fences stale processes after recovery. Each worker claims one scanner-generated per-file job at a time and keeps polling for more work. The generation-scoped unique work key gives every source object one durable queue record.
 
 ## Legacy Supabase compatibility
 
@@ -84,14 +84,14 @@ Optional environment variables:
   requests are bounded so a network outage cannot hold a lease renewal for
   several minutes.
 - `MAX_OBJECTS`: maximum objects inventoried per bucket. Default: `2000000`; if
-  the limit would truncate a listing, the worker fails the shard explicitly
+  the limit would truncate an assigned inventory, the worker fails the file job explicitly
   and asks you to increase the value instead of silently completing a partial
   migration.
 - `DRIVE_MIGRATION_ID`: optional migration scope used by pool workers when a
   workflow is started manually. GitHub dispatches receive this automatically.
 - `DRIVE_REPAIR_JOB_ID`: optional exact job binding. GitHub Actions runs are automatically bound using `GITHUB_RUN_ID`.
 - `EXIT_AFTER_JOB`: pool workers default to `false`, so a GitHub or self-hosted
-  process keeps polling and can claim successive shards. A pool worker exits
+  process keeps polling and can claim successive file jobs. A pool worker exits
   cleanly when the panel reports that the current generation is fully
   terminal. A standalone GitHub Actions repair run defaults to one-shot; set
   this to `false` when intentionally keeping it alive, or to `true` for any
@@ -117,6 +117,6 @@ If Cloudflare/R2 starts throttling or requests fail, lower `COPY_CONCURRENCY`.
 
 - Identity is based on `agent id + the panel's shared worker secret`, not IP/domain. Legacy per-agent tokens remain accepted for existing installations.
 - The worker scans source and destination buckets live, repairs missing/mismatched files, and reports results back.
-- A migration worker job is a shard of the complete migration, not a bucket assignment. The panel creates a configurable shard count (8-128); dispatch at least as many workers as useful and each worker claims the next unclaimed shard. Stable ownership keys and durable leases prevent duplicate claims during normal operation; expired leases are requeued for crash recovery.
-- Pool workers send the migration scope on every claim request and keep the process alive until the queue is empty. The panel must treat a pool claim as a migration-scoped claim even after the same GitHub run has already claimed a previous shard.
+- A migration worker job represents one scanner-indexed source file, not a bucket assignment. Dispatch as many configured workers as useful and each worker claims the next unclaimed file. Generation-scoped ownership keys and durable leases prevent duplicate claims; expired leases are requeued for crash recovery.
+- Pool workers send the migration scope on every claim request and keep the process alive until the queue is empty. The panel treats every claim as migration-scoped even after the same GitHub run has already completed a previous file.
 - This package is intended to live in its own repo.
