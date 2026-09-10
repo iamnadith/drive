@@ -533,7 +533,7 @@ type LogLine = {
   message: string
 }
 
-function collectLogLines(items: MigrationItem[]): LogLine[] {
+function collectLogLines(items: MigrationItem[], workerRuns: MigrationWorkerRun[] = []): LogLine[] {
   const lines: LogLine[] = []
 
   for (const item of items) {
@@ -576,6 +576,11 @@ function collectLogLines(items: MigrationItem[]): LogLine[] {
     }
   }
 
+  for (const run of workerRuns) {
+    const atIso = run.updatedAt || run.createdAt
+    const at = Date.parse(atIso)
+    if (Number.isFinite(at)) lines.push({ at, atIso, bucket: "worker-pool", stage: "migration_worker", status: run.status, message: `Worker ${run.instanceId || run.id} ${run.status}; ${run.completedFiles} files completed` })
+  }
   lines.sort((a, b) => a.at - b.at)
   return lines
 }
@@ -898,10 +903,10 @@ export default function MigrationDetailsPage() {
     [failedData]
   )
 
-  const logLines = React.useMemo(() => collectLogLines(items), [items])
+  const logLines = React.useMemo(() => collectLogLines(items, workerRuns), [items, workerRuns])
   const bucketLogLines = React.useMemo(
-    () => collectLogLines(dialogLogItem ? [dialogLogItem] : []),
-    [dialogLogItem]
+    () => collectLogLines(dialogLogItem ? [dialogLogItem] : [], workerRuns),
+    [dialogLogItem, workerRuns]
   )
   const diagnosticsSummary = React.useMemo(() => {
     return {
