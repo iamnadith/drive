@@ -1,7 +1,6 @@
 "use client"
 
 import * as React from "react"
-import Link from "next/link"
 import { Activity, Bot, CircleDot, Clock3, Copy, Eye, Github, HardDrive, Play, Plus, RefreshCw, Search, Server, Shield, Square, Trash2, Workflow } from "lucide-react"
 import { toast } from "sonner"
 import { useRouter, useSearchParams } from "next/navigation"
@@ -374,7 +373,10 @@ export default function WorkersPage() {
         const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to load migration work items"
         throw new Error(message)
       }
-      setRepairJobs(typeof json === "object" && json !== null && Array.isArray((json as any).jobs) ? (json as any).jobs : [])
+      const jobs = typeof json === "object" && json !== null && Array.isArray((json as any).jobs) ? (json as any).jobs as RepairJobRow[] : []
+      // Per-file migration records are internal durable queue state. Only
+      // explicit repair/verify work belongs in the user-facing jobs UI.
+      setRepairJobs(jobs.filter((job) => job.mode !== "migration"))
     } catch (error) {
       if (notify) {
         toast.error(error instanceof Error ? error.message : "Unable to load migration work items")
@@ -1584,7 +1586,19 @@ export default function WorkersPage() {
                       <div className="space-y-2">
                         {activeWorkflowRuns.map((run) => {
                           const instanceId = typeof run.payload?.workerInstanceId === "string" ? run.payload.workerInstanceId : run.id
-                          const currentJob = run.jobReference ? repairJobs.find((job) => job.id === run.jobReference) : undefined
+                          const currentWork = typeof run.payload?.currentWork === "object" && run.payload.currentWork !== null
+                            ? run.payload.currentWork as Record<string, unknown>
+                            : null
+                          const currentJob = currentWork
+                            ? {
+                                status: (["pending", "claimed", "running", "completed", "failed", "canceled"].includes(String(currentWork.status))
+                                  ? String(currentWork.status)
+                                  : "pending") as RepairJobRow["status"],
+                                payload: typeof currentWork.payload === "object" && currentWork.payload !== null ? currentWork.payload as Record<string, unknown> : {},
+                                progress: typeof currentWork.progress === "object" && currentWork.progress !== null ? currentWork.progress as Record<string, unknown> : {},
+                                lastHeartbeatAt: typeof currentWork.lastHeartbeatAt === "string" ? currentWork.lastHeartbeatAt : undefined,
+                              }
+                            : undefined
                           const inventoryObjects = Array.isArray(currentJob?.payload?.inventoryObjects) ? currentJob.payload.inventoryObjects : []
                           const currentObject = inventoryObjects[0] && typeof inventoryObjects[0] === "object" ? inventoryObjects[0] as Record<string, unknown> : null
                           const currentFile = typeof currentJob?.progress?.currentFile === "object" && currentJob.progress.currentFile !== null
@@ -1697,73 +1711,6 @@ export default function WorkersPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <CardTitle className="text-base">Migration Worker Pool</CardTitle>
-              <CardDescription>Live and recent file work handled by independent migration workflow instances.</CardDescription>
-            </div>
-            {repairJobs.length > 3 ? (
-              <Button asChild variant="outline" size="sm">
-                <Link href="/dashboard/workers/jobs">View all</Link>
-              </Button>
-            ) : null}
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {repairJobs.length === 0 ? (
-            <div className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">No migration work yet.</div>
-          ) : (
-            <div className="space-y-2">
-              {visibleRepairJobs.map((job) => (
-                <div key={job.id} className="rounded-xl border p-4 text-sm">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="truncate font-mono text-xs text-muted-foreground">{job.id}</div>
-                      <div className="mt-2 font-medium">Migration {job.migrationId}</div>
-                      <div className="mt-1 text-xs text-muted-foreground">Mode: {job.mode}</div>
-                    </div>
-                    {jobStatusBadge(job.status)}
-                  </div>
-                  <div className="mt-3 rounded-lg bg-muted/40 p-3 text-xs text-muted-foreground">
-                    <div>Claimed by: {job.claimedByAgentId || "-"}</div>
-                    <div>Updated: {formatDate(job.updatedAt)}</div>
-                  </div>
-                  <div className="mt-3">{job.summary || job.error || readLogLines(job)[0] || "-"}</div>
-                  <div className="mt-4 flex flex-wrap justify-end gap-2">
-                    {!["completed", "failed", "canceled"].includes(job.status) ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={abortingJobId === job.id}
-                        onClick={() => void abortRepairJobRecord(job)}
-                      >
-                        <Square className="mr-1 h-4 w-4" />
-                        {abortingJobId === job.id ? "Aborting..." : "Abort"}
-                      </Button>
-                    ) : null}
-                    <Button variant="outline" size="sm" onClick={() => void viewRepairJob(job.id)}>
-                      <Eye className="mr-1 h-4 w-4" />
-                      Details
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={deletingJobId === job.id}
-                      onClick={() => void deleteRepairJobRecord(job)}
-                    >
-                      <Trash2 className="mr-1 h-4 w-4" />
-                      {deletingJobId === job.id ? "Deleting..." : "Delete"}
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
 
       <Card>
         <CardHeader>

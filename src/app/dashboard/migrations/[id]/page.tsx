@@ -241,6 +241,22 @@ function readRepairItems(job: RepairJob | null | undefined): Array<Record<string
   return []
 }
 
+type MigrationWorkerRun = {
+  id: string
+  agentId: string
+  status: string
+  externalRunId?: string
+  instanceId?: string
+  currentFile?: Record<string, unknown>
+  currentStatus?: string
+  lastHeartbeatAt?: string
+  completedFiles: number
+  failedFiles: number
+  completedBytes: number
+  createdAt: string
+  updatedAt: string
+}
+
 function getEffectiveSourceBytes(
   item: MigrationItem,
   repairResultItem?: Record<string, unknown>,
@@ -749,6 +765,7 @@ export default function MigrationDetailsPage() {
   const [workersLoading, setWorkersLoading] = React.useState(false)
   const [workers, setWorkers] = React.useState<WorkerOption[]>([])
   const [repairJobs, setRepairJobs] = React.useState<RepairJob[]>([])
+  const [workerRuns, setWorkerRuns] = React.useState<MigrationWorkerRun[]>([])
   const [selectedWorkerId, setSelectedWorkerId] = React.useState("")
   const [selectedWorkerIds, setSelectedWorkerIds] = React.useState<string[]>([])
   const [workerMode, setWorkerMode] = React.useState<"verify_only" | "repair_and_verify">("repair_and_verify")
@@ -1161,9 +1178,12 @@ export default function MigrationDetailsPage() {
         isRecord(detailsJson) && Array.isArray(detailsJson.items) ? (detailsJson.items as MigrationItem[]) : []
       const nextRepairJobs =
         isRecord(detailsJson) && Array.isArray(detailsJson.repairJobs) ? (detailsJson.repairJobs as RepairJob[]) : []
+      const nextWorkerRuns =
+        isRecord(detailsJson) && Array.isArray(detailsJson.workerRuns) ? (detailsJson.workerRuns as MigrationWorkerRun[]) : []
       setMigration(nextMigration)
       setItems((prev) => mergeIncomingItems(prev, nextItems))
       setRepairJobs(nextRepairJobs)
+      setWorkerRuns(nextWorkerRuns)
     } catch (e: unknown) {
       const message =
         typeof e === "object" && e !== null && "message" in e
@@ -1239,6 +1259,7 @@ export default function MigrationDetailsPage() {
             setItems((prev) => mergeIncomingItems(prev, nextItems))
           }
           if (isRecord(data) && Array.isArray(data.repairJobs)) setRepairJobs(data.repairJobs as RepairJob[])
+          if (isRecord(data) && Array.isArray(data.workerRuns)) setWorkerRuns(data.workerRuns as MigrationWorkerRun[])
         } catch {
           // ignore
         }
@@ -1275,6 +1296,9 @@ export default function MigrationDetailsPage() {
   React.useEffect(() => {
     if (!id) return
     if (!migration) return
+    // Worker-pool progress is projected durably by Migration Orchestrator and
+    // consumed through SSE. Do not run the legacy panel orchestrator here.
+    if (migration.options.executionMode === "migration_workers") return
     if (bucketCounts.scanning === 0 && bucketCounts.running === 0 && bucketCounts.verifying === 0) return
 
     let stopped = false
@@ -1985,6 +2009,48 @@ export default function MigrationDetailsPage() {
           </div>
         </CardContent>
       </Card>
+      {migration.options.executionMode === "migration_workers" ? (
+        <Card className="gap-2">
+          <CardHeader className="pb-1">
+            <CardTitle>Migration workflow workers</CardTitle>
+            <CardDescription>Live workflow instances and their current file. Per-file queue records remain internal and resumable.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 pt-0">
+            {workerRuns.length === 0 ? (
+              <div className="rounded-xl border border-dashed p-5 text-sm text-muted-foreground">Waiting for workflow dispatch.</div>
+            ) : workerRuns.map((run) => {
+              const file = run.currentFile && typeof run.currentFile === "object" ? run.currentFile : null
+              const key = typeof file?.key === "string" ? file.key : "Waiting for next file"
+              const bytesTransferred = Number(file?.bytesTransferred ?? 0)
+              const bytesTotal = Number(file?.bytesTotal ?? file?.size ?? 0)
+              const percent = bytesTotal > 0 ? Math.min(100, Math.max(0, (bytesTransferred / bytesTotal) * 100)) : 0
+              return (
+                <div key={run.id} className="rounded-xl border p-4 text-sm">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium">Worker {(run.instanceId || run.id).slice(0, 8)}</div>
+                      <div className="mt-1 truncate font-mono text-xs" title={key}>{key}</div>
+                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
+                        <div className="h-full bg-primary transition-all" style={{ width: `${percent}%` }} />
+                      </div>
+                      <div className="mt-2 text-xs text-muted-foreground">
+                        {run.currentStatus || run.status} · {bytesTotal > 0 ? `${formatBytes(bytesTransferred)} / ${formatBytes(bytesTotal)}` : "idle"} · heartbeat {formatDate(run.lastHeartbeatAt)}
+                      </div>
+                    </div>
+                    {repairJobBadge(["pending", "running", "completed", "failed", "canceled"].includes(run.status) ? run.status as RepairJob["status"] : "pending")}
+                  </div>
+                  <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+                    <div>Completed files: <span className="font-medium text-foreground">{formatNumber(run.completedFiles)}</span></div>
+                    <div>Completed bytes: <span className="font-medium text-foreground">{formatBytes(run.completedBytes)}</span></div>
+                    <div>Failed files: <span className="font-medium text-foreground">{formatNumber(run.failedFiles)}</span></div>
+                  </div>
+                </div>
+              )
+            })}
+          </CardContent>
+        </Card>
+      ) : null}
+
       {latestRepairJob ? (
         <Card className="gap-2">
           <CardHeader className="pb-1">

@@ -39,14 +39,15 @@ export function getMigrationReadOnlyState(migration: MigrationLike): {
   readOnly: boolean
   reason: string | null
 } {
-  if (migration.options?.historyReadOnlyAt) {
+  const terminal = ["completed", "failed", "canceled"].includes(String(migration.status ?? "").toLowerCase())
+  // A transient provider/network error must never freeze active work.
+  if (terminal && migration.options?.historyReadOnlyAt) {
     return {
       readOnly: true,
       reason: migration.options.historyReadOnlyReason || "Account communication is unavailable",
     }
   }
 
-  const terminal = ["completed", "failed", "canceled"].includes(String(migration.status ?? "").toLowerCase())
   const completedAt = migration.completedAt ? Date.parse(migration.completedAt) : Number.NaN
   if (terminal && Number.isFinite(completedAt) && Date.now() - completedAt >= TERMINAL_HISTORY_GRACE_MS) {
     return { readOnly: true, reason: "Terminal migration history older than 7 days" }

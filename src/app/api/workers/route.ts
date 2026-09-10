@@ -347,10 +347,33 @@ export async function GET() {
     }
 
     const freshAgents = await listAgents()
+    const referencedJobIds = Array.from(new Set(freshAgents.flatMap((agent) => agent.runs.map((run) => run.jobReference).filter((id): id is string => Boolean(id)))))
+    const referencedJobs = await Promise.all(referencedJobIds.map((jobId) => getRepairJob(jobId).catch(() => null)))
+    const activeJobById = new Map(referencedJobs.filter((job) => job !== null).map((job) => [job.id, job]))
+    const attachCurrentWork = <T extends { jobReference?: string; payload?: Record<string, unknown> }>(run: T): T => {
+      const job = run.jobReference ? activeJobById.get(run.jobReference) : null
+      if (!job || job.mode !== "migration") return run
+      return {
+        ...run,
+        payload: {
+          ...(run.payload ?? {}),
+          currentWork: {
+            status: job.status,
+            payload: job.payload,
+            progress: job.progress,
+            summary: job.summary,
+            lastHeartbeatAt: job.lastHeartbeatAt,
+            updatedAt: job.updatedAt,
+          },
+        },
+      }
+    }
     return NextResponse.json({
       agents: freshAgents.map((agent) => ({
         ...agent,
         status: getEffectiveStatus(agent),
+        latestRun: agent.latestRun ? attachCurrentWork(agent.latestRun) : null,
+        runs: agent.runs.map(attachCurrentWork),
       })),
     })
   } catch (error: unknown) {

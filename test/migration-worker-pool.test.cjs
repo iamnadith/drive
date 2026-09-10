@@ -58,3 +58,29 @@ test('orchestrator queues scanner pages incrementally without closing a running 
   assert.match(orchestrator, /jsonb_build_object\('status',s\.status,'objects',s\.objects,'bytes',s\.bytes/)
   assert.match(orchestrator, /temporarily empty running scan block another bucket/)
 })
+
+test('worker file records stay internal while workflow instances carry current work telemetry', () => {
+  const workerPage = read('src/app/dashboard/workers/page.tsx')
+  const workerApi = read('src/app/api/workers/route.ts')
+  const repairApi = read('src/app/api/repair-jobs/route.ts')
+  assert.doesNotMatch(workerPage, /Migration Worker Pool/)
+  assert.match(workerPage, /currentWork/)
+  assert.match(workerApi, /currentWork:/)
+  assert.match(repairApi, /filter\(\(job\) => job\.mode !== "migration"\)/)
+})
+
+test('active worker migrations cannot be frozen by historical read-only markers', () => {
+  const readOnly = read('src/lib/migration-read-only.ts')
+  const detailsRoute = read('src/app/api/migrations/[id]/route.ts')
+  const detailsPage = read('src/app/dashboard/migrations/[id]/page.tsx')
+  assert.match(readOnly, /terminal && migration\.options\?\.historyReadOnlyAt/)
+  assert.match(detailsRoute, /executionMode !== "migration_workers"/)
+  assert.match(detailsPage, /executionMode === "migration_workers"\) return/)
+})
+
+test('migration orchestrator projects durable per-file completion into live bucket counts', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(orchestrator, /async function refreshWorkerItemProgress/)
+  assert.match(orchestrator, /'transferredObjects',coalesce\(a\.completed_objects,0\)/)
+  assert.match(orchestrator, /await refreshWorkerItemProgress\(db, migration, shards\.generation\)/)
+})

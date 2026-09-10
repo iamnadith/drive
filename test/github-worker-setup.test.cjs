@@ -372,7 +372,7 @@ test('migration and file orchestrators operate through durable shared state with
   assert.match(file, /ListObjectsV2Command/)
   assert.match(file, /c\.r2_access_key_id,c\.r2_secret_access_key/)
   assert.doesNotMatch(file, /c\.api_token/)
-  assert.match(orchestrator, /!shards\.inventoryPending/)
+  assert.match(orchestrator, /const hasRunnableFiles = shards\.shardCount > 0 \|\| shards\.created > 0/)
   assert.doesNotMatch(file, /m\.options->>'executionMode'='migration_workers'/)
   assert.doesNotMatch(file, /s\.migration_item_id is null/)
   const sourceScanQueue = panelSync.slice(

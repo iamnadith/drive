@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 11
+const BUILD = 12
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -182,6 +182,47 @@ async function recoverJobs(db: Client, migrationId: string, generation: number, 
     where migration_id=$1 and work_key like $2 and work_key like $3 and ((status='failed' and coalesce((result->>'retryCount')::int,0)<3) or status='canceled' or (status in('claimed','running') and coalesce(last_heartbeat_at,started_at,claimed_at,updated_at)<now()-interval '3 minutes'))
   `, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`, `%`])
   return result.rowCount || 0
+}
+async function refreshWorkerItemProgress(db: Client, migration: Row, generation: number) {
+  await db.query(`
+    with aggregate as (
+      select (payload->'itemIds'->>0)::uuid item_id,
+        count(*)::bigint queued_objects,
+        count(*) filter(where status='completed')::bigint completed_objects,
+        count(*) filter(where status in('claimed','running'))::bigint active_objects,
+        count(*) filter(where status='failed')::bigint failed_objects,
+        coalesce(sum((payload->'inventoryObjects'->0->>'size')::bigint) filter(where status='completed'),0)::bigint completed_bytes
+      from drive_repair_jobs
+      where migration_id=$1 and work_key like $2
+      group by (payload->'itemIds'->>0)::uuid
+    )
+    update drive_migration_items i set
+      slurper_status=case
+        when coalesce(a.active_objects,0)>0 or coalesce(a.completed_objects,0)>0 then 'running'
+        when coalesce(a.queued_objects,0)>0 then 'queued'
+        else i.slurper_status
+      end,
+      last_progress_at=now(),updated_at=now(),
+      progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{live}',jsonb_build_object(
+        'updatedAt',now(),
+        'status',case
+          when coalesce(a.active_objects,0)>0 or coalesce(a.completed_objects,0)>0 then 'running'
+          when coalesce(a.queued_objects,0)>0 then 'queued'
+          else 'scanning'
+        end,
+        'transferredObjects',coalesce(a.completed_objects,0),
+        'transferredBytes',coalesce(a.completed_bytes,0),
+        'skippedObjects',0,
+        'failedObjects',coalesce(a.failed_objects,0),
+        'unaccountedObjects',greatest(coalesce(i.source_objects,0)-coalesce(a.completed_objects,0)-coalesce(a.failed_objects,0),0),
+        'verifyIssues',0,
+        'totalObjects',coalesce(i.source_objects,0),
+        'workerStatus',case when coalesce(a.active_objects,0)>0 then 'running' else 'queued' end,
+        'workerStage','migration',
+        'queuedObjects',coalesce(a.queued_objects,0)
+      ))
+    from aggregate a where i.id=a.item_id and i.migration_id=$1
+  `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
 }
 async function finalizeShards(db: Client, migration: Row, generation: number, shardCount: number) {
   const counts = await db.query(`select status,count(*)::int count from drive_repair_jobs where migration_id=$1 and work_key like $2 group by status`, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
@@ -488,7 +529,19 @@ async function workerRequest(request: Request, env: Env, path: string) {
     if (current.status === "canceled") return json({ ok: true, canceled: true, job: current })
     const status = ["pending", "claimed", "running", "completed", "failed", "canceled"].includes(String(body.status)) ? String(body.status) : current.status
     const updated = await db.query(`update drive_repair_jobs set status=$3,progress=coalesce(progress,'{}'::jsonb)||$4::jsonb,result=coalesce(result,'{}'::jsonb)||$5::jsonb,summary=coalesce($6,summary),error=coalesce($7,error),last_heartbeat_at=now(),completed_at=case when $3 in ('completed','failed','canceled') then now() else completed_at end,updated_at=now() where id=$1 and claimed_by_agent_id=$2 returning *`, [jobId, agent.id, status, JSON.stringify(body.progress && typeof body.progress === "object" ? body.progress : {}), JSON.stringify(body.result && typeof body.result === "object" ? body.result : {}), typeof body.summary === "string" ? body.summary.slice(0, 2000) : null, typeof body.error === "string" ? body.error.slice(0, 4000) : null])
+    if (current.mode === "migration" && !["completed", "failed", "canceled"].includes(current.status) && ["completed", "failed"].includes(status)) {
+      const objectSize = Number(current.payload?.inventoryObjects?.[0]?.size || 0)
+      await db.query(`update drive_agent_runs set payload=payload||jsonb_build_object(
+        'completedFiles',coalesce((payload->>'completedFiles')::bigint,0)+case when $2='completed' then 1 else 0 end,
+        'failedFiles',coalesce((payload->>'failedFiles')::bigint,0)+case when $2='failed' then 1 else 0 end,
+        'completedBytes',coalesce((payload->>'completedBytes')::bigint,0)+case when $2='completed' then $3::bigint else 0 end
+      ),updated_at=now() where job_reference=$1`, [jobId, status, objectSize])
+    }
     await db.query(`update drive_agents set last_heartbeat_at=now(),status=case when $2 in ('completed','failed','canceled') then 'offline' else 'online' end,updated_at=now() where id=$1`, [agent.id, status])
+    if (current.mode === "migration" && (status !== current.status || ["completed", "failed", "canceled"].includes(status))) {
+      const migration = (await db.query(`select * from drive_migrations where id=$1`, [current.migration_id])).rows[0]
+      if (migration) await refreshWorkerItemProgress(db, migration, integer(opts(migration).workerGeneration, 1, 1, 1000000))
+    }
     return json({ ok: true, job: updated.rows[0] })
   })
 }
@@ -504,6 +557,7 @@ async function cycle(env: Env) {
       if (!migration) return complete(db, owner, null, { ok: true, idle: true })
       migrationId = migration.id
       const shards = await ensureShards(db, migration)
+      await refreshWorkerItemProgress(db, migration, shards.generation)
       const recovered = shards.inventoryPending || shards.queuePending ? 0 : await recoverJobs(db, migration.id, shards.generation, shards.shardCount)
       await renew(db, owner)
       const finalized = shards.terminalFailure || shards.inventoryPending || shards.queuePending
