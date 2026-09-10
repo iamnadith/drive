@@ -2023,7 +2023,23 @@ export default function MigrationDetailsPage() {
           <CardContent className="space-y-3 pt-0">
             {workerRuns.length === 0 ? (
               <div className="rounded-xl border border-dashed p-5 text-sm text-muted-foreground">Waiting for workflow dispatch.</div>
-            ) : workerRuns.map((run) => {
+            ) : <>
+              <div className="rounded-xl border bg-muted/15 p-4">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-medium">Worker pool overview</span>
+                  <span className="font-mono">{overviewProgress.totalObjects > 0 ? ((overviewProgress.transferred / overviewProgress.totalObjects) * 100).toFixed(1) : "0.0"}%</span>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
+                  <div className="h-full bg-primary transition-all" style={{ width: `${overviewProgress.totalObjects > 0 ? Math.min(100, (overviewProgress.transferred / overviewProgress.totalObjects) * 100) : 0}%` }} />
+                </div>
+                <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2 lg:grid-cols-4">
+                  <div>Transferred: <span className="font-medium text-foreground">{formatNumber(overviewProgress.transferred)} / {formatNumber(overviewProgress.totalObjects)}</span></div>
+                  <div>Transferred bytes: <span className="font-medium text-foreground">{formatBytes(items.reduce((n, item) => n + (readLiveBucketState(isRecord(item.progress) ? item.progress : {})?.transferredBytes || 0), 0))}</span></div>
+                  <div>Active workers: <span className="font-medium text-foreground">{workerRuns.filter((run) => run.status === "running").length}</span> / {workerRuns.length}</div>
+                  <div>Failures: <span className="font-medium text-foreground">{formatNumber(overviewProgress.copyFailed)}</span></div>
+                </div>
+              </div>
+              {workerRuns.map((run) => {
               const file = run.currentFile && typeof run.currentFile === "object" ? run.currentFile : null
               const key = typeof file?.key === "string" ? file.key : "Waiting for next file"
               const bytesTransferred = Number(file?.bytesTransferred ?? 0)
@@ -2051,7 +2067,8 @@ export default function MigrationDetailsPage() {
                   </div>
                 </div>
               )
-            })}
+              })}
+            </>}
           </CardContent>
         </Card>
       ) : null}
