@@ -47,6 +47,14 @@ test('orchestrator binds the migration id as one PostgreSQL type while materiali
 test('orchestrator dispatches the fleet as soon as durable file jobs are available', () => {
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   assert.match(orchestrator, /const hasRunnableFiles = shards\.shardCount > 0 \|\| shards\.created > 0/)
-  assert.match(orchestrator, /!shards\.inventoryPending && hasRunnableFiles \? await dispatchWorkers/)
+  assert.match(orchestrator, /status === "running" && hasRunnableFiles \? await dispatchWorkers/)
   assert.doesNotMatch(orchestrator, /!shards\.inventoryPending && !shards\.queuePending \? await dispatchWorkers/)
+})
+
+test('orchestrator queues scanner pages incrementally without closing a running inventory', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.doesNotMatch(orchestrator, /if \(inventoryPending\) return \{ generation, shardCount: 0, created: 0, inventoryPending \}/)
+  assert.match(orchestrator, /queueScan\?\.status === "completed" && page\.rowCount === 0/)
+  assert.match(orchestrator, /jsonb_build_object\('status',s\.status,'objects',s\.objects,'bytes',s\.bytes/)
+  assert.match(orchestrator, /temporarily empty running scan block another bucket/)
 })

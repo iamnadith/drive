@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 10
+const BUILD = 11
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -88,6 +88,7 @@ async function ensureShards(db: Client, migration: Row) {
     return { generation, shardCount: 0, created: 0, inventoryPending: 0, terminalFailure: true }
   }
   let inventoryPending = 0
+  const scansByItem = new Map<string, Row>()
   for (const item of items.rows) {
     const inventory = item.progress?.migrationInventory || {}
     const inventoryGeneration = Number(inventory.generation)
@@ -105,23 +106,43 @@ async function ensureShards(db: Client, migration: Row) {
         scanId = scan.rows[0].id
       }
       await db.query(`update drive_migration_items set progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{migrationInventory}',$2::jsonb),slurper_status='scanning',updated_at=now() where id=$1`, [item.id, JSON.stringify({ sourceScanId: scanId, generation, status: "scanning" })])
+      item.progress = { ...(item.progress || {}), migrationInventory: { sourceScanId: scanId, generation, status: "scanning" } }
     }
-    const scan = (await db.query(`select status,error from drive_bucket_scans where id=$1`, [scanId])).rows[0]
+    const scan = (await db.query(`select status,error,objects,bytes,completed_at from drive_bucket_scans where id=$1`, [scanId])).rows[0]
     if (scan?.status === "failed") throw new Error(scan.error || `Source inventory failed for ${item.source_bucket}`)
     if (scan?.status !== "completed") inventoryPending += 1
+    scansByItem.set(item.id, scan || {})
   }
-  if (inventoryPending) return { generation, shardCount: 0, created: 0, inventoryPending }
+  // Mirror scanner counters on every cycle, not only at completion, so live
+  // object/byte totals advance while inventory and queueing run concurrently.
   await db.query(`
     update drive_migration_items i set source_objects=s.objects,source_bytes=s.bytes,last_progress_at=now(),updated_at=now(),
-      progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{migrationInventory}',coalesce(i.progress->'migrationInventory','{}'::jsonb)||jsonb_build_object('status','completed','completedAt',s.completed_at))
-    from drive_bucket_scans s where i.migration_id=$1 and s.id=(i.progress->'migrationInventory'->>'sourceScanId')::uuid and s.status='completed'
+      progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{migrationInventory}',coalesce(i.progress->'migrationInventory','{}'::jsonb)||jsonb_build_object('status',s.status,'objects',s.objects,'bytes',s.bytes,'completedAt',s.completed_at))
+    from drive_bucket_scans s where i.migration_id=$1 and s.id=(i.progress->'migrationInventory'->>'sourceScanId')::uuid
   `, [migration.id])
-  const queueItem = items.rows.find((item) => Number(item.progress?.migrationQueue?.generation) !== generation || item.progress?.migrationQueue?.status !== "completed")
   let created = 0
-  if (queueItem) {
-    const scanId = String(queueItem.progress?.migrationInventory?.sourceScanId || "")
-    const lastKey = Number(queueItem.progress?.migrationQueue?.generation) === generation ? String(queueItem.progress?.migrationQueue?.lastKey || "") : ""
+  let queueItem: Row | undefined
+  let queuePage: { rows: Row[]; rowCount: number | null } | undefined
+  let queueScan: Row | undefined
+  // Do not let a temporarily empty running scan block another bucket whose
+  // scanner pages are already durable.
+  for (const candidate of items.rows) {
+    if (Number(candidate.progress?.migrationQueue?.generation) === generation && candidate.progress?.migrationQueue?.status === "completed") continue
+    const scanId = String(candidate.progress?.migrationInventory?.sourceScanId || "")
+    if (!scanId) continue
+    const lastKey = Number(candidate.progress?.migrationQueue?.generation) === generation ? String(candidate.progress?.migrationQueue?.lastKey || "") : ""
     const page = await db.query(`select key,size,etag from drive_bucket_scan_objects where scan_id=$1 and not is_dir_marker and key>$2 order by key limit 100`, [scanId, lastKey])
+    const scan = scansByItem.get(candidate.id) || {}
+    if ((page.rowCount || 0) > 0 || scan.status === "completed") {
+      queueItem = candidate
+      queuePage = page
+      queueScan = scan
+      break
+    }
+  }
+  if (queueItem) {
+    const lastKey = Number(queueItem.progress?.migrationQueue?.generation) === generation ? String(queueItem.progress?.migrationQueue?.lastKey || "") : ""
+    const page = queuePage!
     await db.query("begin")
     try {
       for (const object of page.rows) {
@@ -133,13 +154,16 @@ async function ensureShards(db: Client, migration: Row) {
         `, [migration.id, generation, queueItem.id, object.key, object.size, object.etag])
         created += inserted.rowCount || 0
       }
-      const completed = page.rowCount === 0
+      // A temporary end of the persisted prefix is not end-of-inventory while
+      // File Scanner is still listing. Only its completed state closes queueing.
+      const completed = queueScan?.status === "completed" && page.rowCount === 0
       const nextKey = page.rows[page.rows.length - 1]?.key || lastKey
       await db.query(`update drive_migration_items set progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{migrationQueue}',$2::jsonb),updated_at=now() where id=$1`, [queueItem.id, JSON.stringify({ generation, status: completed ? "completed" : "materializing", lastKey: nextKey, updatedAt: new Date().toISOString() })])
       await db.query("commit")
     } catch (error) { await db.query("rollback").catch(() => undefined); throw error }
-    return { generation, shardCount: 0, created, inventoryPending: 0, queuePending: 1 }
+    return { generation, shardCount: 0, created, inventoryPending, queuePending: 1 }
   }
+  if (inventoryPending) return { generation, shardCount: 0, created: 0, inventoryPending, queuePending: 1 }
   // Normalize pending jobs created by an older orchestrator build. Migration
   // mode has the same copy-and-verify guarantees, but keeps full migrations
   // distinct from ad-hoc repair jobs throughout the API and UI.
@@ -494,7 +518,7 @@ async function cycle(env: Env) {
       // materialized. Pool-state polling keeps runners alive until every page
       // is queued, so this does not create a completion race.
       const hasRunnableFiles = shards.shardCount > 0 || shards.created > 0
-      const dispatched = current?.status === "running" && !shards.inventoryPending && hasRunnableFiles ? await dispatchWorkers(db, env, current) : 0
+      const dispatched = current?.status === "running" && hasRunnableFiles ? await dispatchWorkers(db, env, current) : 0
       if (shards.inventoryPending || shards.queuePending) await env.GITHUB_DISPATCH_QUEUE.send({ control: "cycle" })
       await db.query(`update drive_migrations set last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
       return complete(db, owner, migration.id, { ok: true, migrationId, ...shards, recovered, finalized, ...verification, fileScanner, dispatched })
