@@ -2061,15 +2061,17 @@ export default function MigrationDetailsPage() {
               <div className="rounded-2xl border border-dashed p-5 text-sm text-muted-foreground">
                 Waiting for a migration worker to start.
               </div>
-            ) : workerRuns.map((run) => {
-              const file = run.currentFile && typeof run.currentFile === "object" ? run.currentFile : null
-              const key = typeof file?.key === "string" ? file.key : "Waiting for the next file"
-              const isActive = run.status === "running" || run.status === "claimed" || run.status === "pending"
-              const summaryText = run.currentStatus || (isActive ? "Migration worker is processing assigned files." : "Migration worker run finished.")
+            ) : (() => {
+              const activeRuns = workerRuns.filter((run) => ["pending", "claimed", "running"].includes(run.status))
+              const latestRun = [...workerRuns].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]
+              const isActive = activeRuns.length > 0
+              const status = isActive ? "running" : "completed"
+              const currentFiles = activeRuns.filter((run) => run.currentFile && typeof run.currentFile === "object").length
+              const startedAt = [...workerRuns].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0]?.createdAt
+              const completedFiles = workerRuns.reduce((sum, run) => sum + Number(run.completedFiles || 0), 0)
 
               return (
                 <div
-                  key={run.id}
                   className={cn(
                     "overflow-hidden rounded-2xl border text-sm",
                     isActive ? "border-primary/30 bg-primary/[0.04]" : "bg-muted/15"
@@ -2078,23 +2080,22 @@ export default function MigrationDetailsPage() {
                   <div className="flex flex-col gap-4 border-b px-4 py-4 lg:flex-row lg:items-start lg:justify-between">
                     <div className="min-w-0 flex-1 space-y-3">
                       <div className="flex flex-wrap items-center gap-2">
-                        {migrationWorkerBadge(run.status)}
+                        {migrationWorkerBadge(status)}
                         <Badge variant="outline">Migration transfer</Badge>
-                        <span className="text-xs text-muted-foreground">Updated {formatDate(run.lastHeartbeatAt || run.updatedAt)}</span>
+                        <span className="text-xs text-muted-foreground">Updated {formatDate(latestRun?.lastHeartbeatAt || latestRun?.updatedAt)}</span>
                       </div>
                       <div className="space-y-1">
-                        <div className="font-mono text-[11px] text-muted-foreground">{run.instanceId || run.externalRunId || run.id}</div>
-                        <div className="text-sm leading-relaxed text-muted-foreground">{summaryText}</div>
+                        <div className="font-mono text-[11px] text-muted-foreground">Migration worker pool</div>
+                        <div className="text-sm leading-relaxed text-muted-foreground">
+                          {isActive ? `${activeRuns.length} worker${activeRuns.length === 1 ? " is" : "s are"} processing this migration.` : "Migration worker pool run finished."}
+                        </div>
                       </div>
                     </div>
 
                     <div className="flex w-full items-start justify-end lg:w-auto">
                       <Button
                         variant="outline"
-                        disabled={!run.jobId}
-                        onClick={() => {
-                          if (run.jobId) router.push(`/dashboard/migrations/${encodeURIComponent(id)}/jobs/${encodeURIComponent(run.jobId)}`)
-                        }}
+                        onClick={() => router.push(`/dashboard/migrations/${encodeURIComponent(id)}/worker-pool`)}
                       >
                         Details
                       </Button>
@@ -2103,25 +2104,25 @@ export default function MigrationDetailsPage() {
 
                   <div className="grid gap-px bg-border sm:grid-cols-3 lg:grid-cols-4">
                     <div className="bg-background/80 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Worker</div>
-                      <div className="mt-1 truncate font-medium">{run.agentId || "-"}</div>
+                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Online workers</div>
+                      <div className="mt-1 truncate font-medium">{activeRuns.length}</div>
                     </div>
                     <div className="bg-background/80 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Status</div>
-                      <div className="mt-1 font-medium">{run.currentStatus || run.status || "-"}</div>
+                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Files transferred</div>
+                      <div className="mt-1 font-medium">{formatNumber(completedFiles)}</div>
                     </div>
                     <div className="bg-background/80 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Current file</div>
-                      <div className="mt-1 truncate font-mono text-xs" title={key}>{key}</div>
+                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Current files</div>
+                      <div className="mt-1 font-medium">{currentFiles}</div>
                     </div>
                     <div className="bg-background/80 px-4 py-3">
                       <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Started</div>
-                      <div className="mt-1 font-medium">{formatDate(run.createdAt)}</div>
+                      <div className="mt-1 font-medium">{formatDate(startedAt)}</div>
                     </div>
                   </div>
                 </div>
               )
-            })}
+            })()}
           </CardContent>
         </Card>
       ) : null}
