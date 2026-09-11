@@ -21,8 +21,11 @@ test("installer deploys in dependency order and saves configuration before enabl
   assert.ok(upload > 0 && upload < save && save < verify && verify < schedules && schedules < enable)
 })
 
-test("tokens are request-only and API is superadmin protected", () => {
-  assert.doesNotMatch(installer, /state\.tokens|api_token|cloudflare_token/i)
+test("tokens are encrypted at rest, redacted by default and API is superadmin protected", () => {
+  assert.match(installer, /aes-256-gcm/)
+  assert.match(installer, /encryptedTokens/)
+  assert.match(installer, /const \{ encryptedTokens, \.\.\.safe \} = state/)
+  assert.match(installer, /revealCloudflareTokens/)
   assert.match(route, /requireSuperAdmin\(\)/)
   assert.match(route, /mode === "separate"/)
 })

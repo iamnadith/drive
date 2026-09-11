@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto"
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto"
 
 import { queryDb, withDbAdvisoryLock, withDbTransaction } from "@/lib/db"
 import { getBackendOrchestratorSettings } from "@/lib/backend-orchestrator-settings-store"
@@ -11,7 +11,7 @@ type TokenMap = Record<HostedWorker, string>
 type Account = { id: string; name: string }
 type Artifact = { url: string; sha256: string; compatibilityDate: string; compatibilityFlags?: string[] }
 type Manifest = { version: string; workers: Record<HostedWorker, Artifact> }
-type WorkerState = { accountId?: string; accountName?: string; scriptName: string; url?: string; deployed?: boolean; verified?: boolean }
+type WorkerState = { accountId?: string; accountName?: string; scriptName: string; url?: string; deployed?: boolean; verified?: boolean; phase?: "queued" | "uploading" | "configuring" | "deployed" | "verifying" | "verified" | "failed"; deployedAt?: string; verifiedAt?: string; error?: string }
 type InstallState = {
   id: string
   mode: InstallMode
@@ -19,6 +19,7 @@ type InstallState = {
   status: "pending" | "running" | "ready" | "failed"
   step: string
   secrets: Record<HostedWorker, string>
+  encryptedTokens?: Partial<TokenMap>
   workers: Record<HostedWorker, WorkerState>
   error?: string
   updatedAt: string
@@ -31,6 +32,28 @@ type HostingPreference = { mode: "automatic" | "manual"; manual?: RuntimeSnapsho
 
 const API = "https://api.cloudflare.com/client/v4"
 const ORDER: HostedWorker[] = ["backend", "scanner", "migration"]
+
+function encryptionKey() {
+  const material = String(process.env.CLOUDFLARE_TOKEN_ENCRYPTION_KEY || process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET || process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL || "")
+  if (material.length < 24) throw new Error("Set CLOUDFLARE_TOKEN_ENCRYPTION_KEY to securely save Cloudflare tokens")
+  return createHash("sha256").update(`drive-cloudflare-token:${material}`).digest()
+}
+
+function encryptToken(token: string, installationId: string, worker: HostedWorker) {
+  const iv = randomBytes(12)
+  const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv)
+  cipher.setAAD(Buffer.from(`${installationId}:${worker}`))
+  const encrypted = Buffer.concat([cipher.update(token, "utf8"), cipher.final()])
+  return `v1.${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${encrypted.toString("base64url")}`
+}
+
+function decryptToken(value: string, installationId: string, worker: HostedWorker) {
+  const [version, iv, tag, encrypted] = String(value).split(".")
+  if (version !== "v1" || !iv || !tag || !encrypted) throw new Error("Saved Cloudflare token is invalid; replace it")
+  const decipher = createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(iv, "base64url"))
+  decipher.setAAD(Buffer.from(`${installationId}:${worker}`)); decipher.setAuthTag(Buffer.from(tag, "base64url"))
+  return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8")
+}
 
 function panelUrl() {
   const configured = String(process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.AUTH_URL || process.env.NEXTAUTH_URL || "").trim()
@@ -153,7 +176,7 @@ function freshState(mode: InstallMode): InstallState {
     id: randomUUID(), mode, status: "pending", step: "created",
     secrets: { backend: randomBytes(32).toString("base64url"), scanner: randomBytes(32).toString("base64url"), migration: randomBytes(32).toString("base64url") },
     workers: {
-      backend: { scriptName: names.scripts.backend }, scanner: { scriptName: names.scripts.scanner }, migration: { scriptName: names.scripts.migration },
+      backend: { scriptName: names.scripts.backend, phase: "queued" }, scanner: { scriptName: names.scripts.scanner, phase: "queued" }, migration: { scriptName: names.scripts.migration, phase: "queued" },
     },
     updatedAt: new Date().toISOString(),
   }
@@ -269,17 +292,26 @@ async function verify(url: string, secret: string) {
 export async function getCloudflareInstallation() {
   const state = await loadState()
   if (!state) return null
-  return { ...state, secrets: { backend: "", scanner: "", migration: "" } }
+  const { encryptedTokens, ...safe } = state
+  return { ...safe, secrets: { backend: "", scanner: "", migration: "" }, tokensSaved: ORDER.every((worker) => Boolean(encryptedTokens?.[worker])) }
+}
+
+export async function revealCloudflareTokens() {
+  const state = await loadState()
+  if (!state?.encryptedTokens || !ORDER.every((worker) => state.encryptedTokens?.[worker])) throw new Error("No saved Cloudflare token is available; enter it once and deploy")
+  const tokens = Object.fromEntries(ORDER.map((worker) => [worker, decryptToken(state.encryptedTokens![worker]!, state.id, worker)])) as TokenMap
+  return state.mode === "single" ? { mode: state.mode, token: tokens.backend } : { mode: state.mode, backendToken: tokens.backend, scannerToken: tokens.scanner, migrationToken: tokens.migration }
 }
 
 export async function installCloudflareWorkers(input: { mode: InstallMode; tokens: Partial<TokenMap>; restart?: boolean }) {
   return withDbAdvisoryLock("cloudflare-worker-install", "singleton", async () => {
-    const shared = String(input.tokens.backend || "").trim()
-    const tokens: TokenMap = input.mode === "single"
-      ? { backend: shared, scanner: shared, migration: shared }
-      : { backend: shared, scanner: String(input.tokens.scanner || "").trim(), migration: String(input.tokens.migration || "").trim() }
-    if (ORDER.some((worker) => tokens[worker].length < 20)) throw new Error("Every selected Cloudflare token is required")
     const previous = await loadState()
+    const supplied = input.mode === "single"
+      ? { backend: String(input.tokens.backend || "").trim(), scanner: String(input.tokens.backend || "").trim(), migration: String(input.tokens.backend || "").trim() }
+      : { backend: String(input.tokens.backend || "").trim(), scanner: String(input.tokens.scanner || "").trim(), migration: String(input.tokens.migration || "").trim() }
+    const tokens = {} as TokenMap
+    for (const worker of ORDER) tokens[worker] = supplied[worker] || (previous?.mode === input.mode && previous.encryptedTokens?.[worker] ? decryptToken(previous.encryptedTokens[worker]!, previous.id, worker) : "")
+    if (ORDER.some((worker) => tokens[worker].length < 20)) throw new Error("Enter every Cloudflare token once; saved tokens can then be reused")
     let state = input.restart ? null : previous
     if (!state || state.status === "ready" || state.mode !== input.mode) {
       state = freshState(input.mode)
@@ -288,6 +320,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       // even if a redeploy is interrupted between Workers.
       if (previous?.status === "ready") state.secrets = previous.secrets
     }
+    state.encryptedTokens = Object.fromEntries(ORDER.map((worker) => [worker, encryptToken(tokens[worker], state!.id, worker)]))
     state.status = "running"; state.error = undefined; await saveState(state)
     await setCloudflareHostingMode("automatic")
     try {
@@ -311,17 +344,20 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       state.step = "queues_ready"; await saveState(state)
       for (const worker of ORDER) {
         if (!state.workers[worker].deployed) {
+          state.workers[worker].phase = "uploading"; state.workers[worker].error = undefined; state.step = `${worker}_uploading`; await saveState(state)
           await uploadWorker({ worker, token: tokens[worker], accountId: accounts[worker].id, entry: manifest.workers[worker], code: await artifact(manifest.workers[worker]), state })
+          state.workers[worker].phase = "configuring"; state.step = `${worker}_configuring`; await saveState(state)
           if (worker === "scanner") await configureConsumer(tokens.scanner, accounts.scanner.id, names.scannerQueue, names.scannerDlq, state.workers.scanner.scriptName, 15)
           if (worker === "migration") await configureConsumer(tokens.migration, accounts.migration.id, names.migrationQueue, names.migrationDlq, state.workers.migration.scriptName, 30)
           state.workers[worker].url = await workersDevUrl(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
-          state.workers[worker].deployed = true; state.step = `${worker}_deployed`; await saveState(state)
+          state.workers[worker].deployed = true; state.workers[worker].phase = "deployed"; state.workers[worker].deployedAt = new Date().toISOString(); state.step = `${worker}_deployed`; await saveState(state)
         }
       }
       await saveRuntimeConfiguration(state, false)
       state.step = "configuration_saved"; await saveState(state)
       for (const worker of ORDER) {
-        await verify(state.workers[worker].url!, state.secrets[worker]); state.workers[worker].verified = true; await saveState(state)
+        state.workers[worker].phase = "verifying"; state.step = `${worker}_verifying`; await saveState(state)
+        await verify(state.workers[worker].url!, state.secrets[worker]); state.workers[worker].verified = true; state.workers[worker].phase = "verified"; state.workers[worker].verifiedAt = new Date().toISOString(); await saveState(state)
       }
       for (const worker of ORDER) await setSchedule(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
       state.step = "schedules_ready"; await saveState(state)
@@ -330,7 +366,10 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       state.status = "ready"; state.step = "enabled"; await saveState(state)
       return getCloudflareInstallation()
     } catch (error) {
-      state.status = "failed"; state.error = error instanceof Error ? error.message : "Installation failed"; await saveState(state); throw error
+      state.status = "failed"; state.error = error instanceof Error ? error.message : "Installation failed"
+      const active = ORDER.find((worker) => state.step.startsWith(`${worker}_`) && !state.workers[worker].verified)
+      if (active) { state.workers[active].phase = "failed"; state.workers[active].error = state.error }
+      await saveState(state); throw error
     }
   })
 }
