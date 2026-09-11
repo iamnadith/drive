@@ -910,6 +910,9 @@ create table if not exists drive_agent_runs (
 );
 
 create index if not exists drive_agent_runs_agent_idx on drive_agent_runs (agent_id, created_at desc);
+create index if not exists drive_agent_runs_migration_idx
+  on drive_agent_runs ((payload->>'migrationId'), status)
+  where run_type = 'github_dispatch';
 
 create table if not exists drive_repair_jobs (
   id uuid primary key,
@@ -1141,3 +1144,20 @@ alter table if exists public.drive_activity_events add column if not exists undo
 alter table if exists public.drive_activity_events add column if not exists undo_payload jsonb;
 alter table if exists public.drive_activity_events add column if not exists undone_at timestamptz;
 alter table if exists public.drive_activity_events add column if not exists undone_by_user_id uuid references public.drive_users(id) on delete set null;
+
+create table if not exists public.drive_migration_worker_live_state (
+  migration_id uuid primary key references public.drive_migrations(id) on delete cascade,
+  snapshot jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+-- Runtime schema guards compare this marker before running compatibility DDL.
+-- Bump it together with DRIVE_SCHEMA_VERSION in src/lib/db.ts.
+create table if not exists public.drive_schema_meta (
+  id boolean primary key default true check (id),
+  version bigint not null,
+  updated_at timestamptz not null default now()
+);
+insert into public.drive_schema_meta(id, version, updated_at)
+values (true, 2026091101, now())
+on conflict (id) do update set version = excluded.version, updated_at = now();

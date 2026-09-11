@@ -26,6 +26,14 @@ function isRecentIso(value: string | undefined, maxAgeMs: number): boolean {
   return Date.now() - time <= maxAgeMs
 }
 
+async function mapBounded<T, R>(values: T[], concurrency: number, task: (value: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = []
+  for (let index = 0; index < values.length; index += concurrency) {
+    results.push(...await Promise.all(values.slice(index, index + concurrency).map(task)))
+  }
+  return results
+}
+
 function getEffectiveStatus<T extends { provider: string; status: string; lastHeartbeatAt?: string }>(agent: T): string {
   if (agent.provider === "github_actions") {
     if (isRecentIso(agent.lastHeartbeatAt, 90_000)) return "online"
@@ -348,7 +356,7 @@ export async function GET() {
 
     const freshAgents = await listAgents()
     const referencedJobIds = Array.from(new Set(freshAgents.flatMap((agent) => agent.runs.map((run) => run.jobReference).filter((id): id is string => Boolean(id)))))
-    const referencedJobs = await Promise.all(referencedJobIds.map((jobId) => getRepairJob(jobId).catch(() => null)))
+    const referencedJobs = await mapBounded(referencedJobIds, 8, (jobId) => getRepairJob(jobId).catch(() => null))
     const activeJobById = new Map(referencedJobs.filter((job) => job !== null).map((job) => [job.id, job]))
     const attachCurrentWork = <T extends { jobReference?: string; payload?: Record<string, unknown> }>(run: T): T => {
       const job = run.jobReference ? activeJobById.get(run.jobReference) : null

@@ -1,6 +1,8 @@
 import { Pool } from "pg"
 import type { PoolClient, QueryResultRow } from "pg"
 
+const DRIVE_SCHEMA_VERSION = 2026091101
+
 declare global {
   var __drivePgPool: Pool | undefined
   var __driveEnsureSchema: Promise<void> | undefined
@@ -249,7 +251,12 @@ export async function ensureDriveSchema(): Promise<void> {
   if (!isPostgresConfigured()) return
 
   if (!global.__driveEnsureSchema) {
-    global.__driveEnsureSchema = (async () => {
+    const schemaPromise = (async () => {
+      const registry = await queryDb<{ registry: string | null }>(`select to_regclass('public.drive_schema_meta')::text registry`)
+      if (registry.rows[0]?.registry) {
+        const current = await queryDb<{ version: string | number }>(`select version from drive_schema_meta where id=true limit 1`)
+        if (Number(current.rows[0]?.version || 0) >= DRIVE_SCHEMA_VERSION) return
+      }
       await queryDb(`create extension if not exists pgcrypto;`)
 
       await queryDb(`
@@ -1029,6 +1036,7 @@ export async function ensureDriveSchema(): Promise<void> {
       `)
 
       await queryDb(`create index if not exists drive_agent_runs_agent_idx on drive_agent_runs (agent_id, created_at desc);`)
+      await queryDb(`create index if not exists drive_agent_runs_migration_idx on drive_agent_runs ((payload->>'migrationId'), status) where run_type='github_dispatch';`)
 
       await queryDb(`
         create table if not exists drive_repair_jobs (
@@ -1195,7 +1203,13 @@ export async function ensureDriveSchema(): Promise<void> {
         );
       `)
       await queryDb(`alter table if exists drive_file_scanner_state add column if not exists lease_owner text;`)
+      await queryDb(`create table if not exists drive_schema_meta (id boolean primary key default true check(id),version bigint not null,updated_at timestamptz not null default now());`)
+      await queryDb(`insert into drive_schema_meta(id,version,updated_at) values(true,$1,now()) on conflict(id) do update set version=excluded.version,updated_at=now();`, [DRIVE_SCHEMA_VERSION])
     })()
+    global.__driveEnsureSchema = schemaPromise.catch((error) => {
+      global.__driveEnsureSchema = undefined
+      throw error
+    })
   }
 
   return global.__driveEnsureSchema

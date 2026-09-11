@@ -18,6 +18,12 @@ function jsonBad(error: string, status = 400, extra?: Record<string, unknown>) {
   return NextResponse.json({ error, ...(extra ?? {}) }, { status })
 }
 
+async function runBounded<T>(values: T[], concurrency: number, task: (value: T) => Promise<unknown>) {
+  for (let index = 0; index < values.length; index += concurrency) {
+    await Promise.all(values.slice(index, index + concurrency).map(task))
+  }
+}
+
 export async function GET() {
   try {
     const auth = await requireAdmin()
@@ -26,9 +32,9 @@ export async function GET() {
     const migrations = await listMigrations()
 
     const candidates = migrations
-      .filter((m) => m.status !== "draft" && m.status !== "canceled")
+      .filter((m) => m.status !== "draft" && m.status !== "canceled" && m.options.executionMode !== "migration_workers")
       .slice(0, 20)
-    await Promise.all(candidates.map((migration) => syncMigrationLiveState(migration.id).catch(() => undefined)))
+    await runBounded(candidates, 4, (migration) => syncMigrationLiveState(migration.id).catch(() => undefined))
 
     const refreshed = await listMigrations()
     return jsonOk({ migrations: refreshed })

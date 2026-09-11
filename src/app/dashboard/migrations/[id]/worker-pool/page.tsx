@@ -39,7 +39,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-type WorkerRun = { id: string; online: boolean };
 type WorkerJob = {
   id: string;
   status: string;
@@ -176,7 +175,6 @@ function PageSkeleton() {
 export default function MigrationWorkerPoolDetailsPage() {
   const params = useParams<{ id: string }>();
   const migrationId = typeof params?.id === "string" ? params.id : "";
-  const [runs, setRuns] = React.useState<WorkerRun[]>([]);
   const [jobs, setJobs] = React.useState<WorkerJob[]>([]);
   const [snapshot, setSnapshot] = React.useState<PoolSnapshot>({});
   const [source, setSource] = React.useState<"database" | "orchestrator">(
@@ -187,11 +185,11 @@ export default function MigrationWorkerPoolDetailsPage() {
   const [refreshing, setRefreshing] = React.useState(false);
 
   const load = React.useCallback(
-    async (live = false, showRefreshing = false) => {
+    async (live = false, showRefreshing = false, background = false) => {
       if (!migrationId) return;
       try {
         if (showRefreshing) setRefreshing(true);
-        else if (!live) setLoading(true);
+        else if (!live && !background) setLoading(true);
         const response = await fetch(
           `/api/migrations/${encodeURIComponent(migrationId)}/worker-pool${live ? "?live=1" : ""}`,
           { cache: "no-store" },
@@ -199,7 +197,6 @@ export default function MigrationWorkerPoolDetailsPage() {
         const data = await response.json().catch(() => ({}));
         if (!response.ok)
           throw new Error(data.error || "Unable to load migration worker job");
-        setRuns(Array.isArray(data.runs) ? data.runs : []);
         setJobs(Array.isArray(data.jobs) ? data.jobs : []);
         setSnapshot(
           isRecord(data.snapshot) ? (data.snapshot as PoolSnapshot) : {},
@@ -224,18 +221,17 @@ export default function MigrationWorkerPoolDetailsPage() {
   );
 
   React.useEffect(() => {
-    void load(false).then(() => void load(true));
+    void load(false);
   }, [load]);
   React.useEffect(() => {
     if (loading) return;
-    const online =
-      num(snapshot.onlineWorkers) > 0 || runs.some((run) => run.online);
+    const online = num(snapshot.onlineWorkers) > 0;
     const timer = window.setTimeout(
-      () => void load(true),
-      online ? 2500 : 15000,
+      () => void load(false, false, true),
+      online ? 6000 : 20000,
     );
     return () => window.clearTimeout(timer);
-  }, [loading, load, runs, snapshot.onlineWorkers]);
+  }, [loading, load, snapshot.onlineWorkers]);
 
   const telemetry = React.useMemo(() => {
     const files: Array<Record<string, unknown>> = [];

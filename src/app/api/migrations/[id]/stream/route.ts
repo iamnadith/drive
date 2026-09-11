@@ -53,8 +53,11 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       request.signal.addEventListener("abort", close, { once: true })
 
       const loop = async () => {
+        let lastSnapshot = ""
+        let lastSentAt = 0
         // Basic heartbeat + DB state. Cloudflare syncing is driven by /sync.
         while (!closed && !request.signal.aborted) {
+          let nextDelay = 10_000
           try {
             const migration = await getMigration(id)
             if (!migration) {
@@ -66,7 +69,17 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
               migration.options.executionMode === "migration_workers" ? Promise.resolve([]) : listRepairJobsByMigration(id, 20).catch(() => []),
               migration.options.executionMode === "migration_workers" ? listMigrationWorkerRuns(id).catch(() => []) : Promise.resolve([]),
             ])
-            send("snapshot", { migration, items, repairJobs: repairJobs.filter((job) => job.mode !== "migration"), workerRuns, serverTime: new Date().toISOString() })
+            const snapshot = { migration, items, repairJobs: repairJobs.filter((job) => job.mode !== "migration"), workerRuns }
+            const serialized = JSON.stringify(snapshot)
+            const now = Date.now()
+            if (serialized !== lastSnapshot || now - lastSentAt >= 15_000) {
+              send("snapshot", { ...snapshot, serverTime: new Date(now).toISOString() })
+              lastSnapshot = serialized
+              lastSentAt = now
+            } else {
+              safeEnqueue(encoder.encode(": keepalive\n\n"))
+            }
+            nextDelay = ["running", "verifying", "queued"].includes(migration.status) ? 4_000 : 15_000
           } catch (e: unknown) {
             const message =
               typeof e === "object" && e !== null && "message" in e
@@ -74,7 +87,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
                 : "Stream error"
             send("error", { error: message })
           }
-          await sleep(1000)
+          await sleep(nextDelay)
         }
 
         close()
