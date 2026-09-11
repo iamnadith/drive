@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 
 type Mode = "single" | "separate"
+type SetupMode = "automatic" | "manual"
 type WorkerKey = "backend" | "scanner" | "migration"
 type Installation = {
   status: "pending" | "running" | "ready" | "failed"
@@ -24,6 +25,7 @@ type Connection = { url: string; secret: string; enabled: boolean; secretConfigu
 const labels: Record<WorkerKey, string> = { backend: "Backend Orchestrator", scanner: "File Scanner", migration: "Migration Orchestrator" }
 
 export function CloudflareWorkerHosting() {
+  const [setupMode, setSetupMode] = React.useState<SetupMode>("automatic")
   const [mode, setMode] = React.useState<Mode>("single")
   const [token, setToken] = React.useState("")
   const [scannerToken, setScannerToken] = React.useState("")
@@ -53,9 +55,10 @@ export function CloudflareWorkerHosting() {
 
   const refresh = React.useCallback(async () => {
     const response = await fetch("/api/workers/cloudflare-install", { cache: "no-store" })
-    const payload = await response.json().catch(() => ({})) as { installation?: Installation; error?: string }
+    const payload = await response.json().catch(() => ({})) as { installation?: Installation; hosting?: { mode?: SetupMode }; error?: string }
     if (!response.ok) throw new Error(payload.error || "Unable to load Cloudflare hosting status")
     setInstallation(payload.installation || null)
+    if (payload.hosting?.mode) setSetupMode(payload.hosting.mode)
   }, [])
   React.useEffect(() => { void Promise.all([refresh(), loadConnections()]).catch(() => undefined) }, [refresh, loadConnections])
 
@@ -80,6 +83,20 @@ export function CloudflareWorkerHosting() {
 
   const updateConnection = (worker: WorkerKey, patch: Partial<Connection>) => setConnections((current) => ({ ...current, [worker]: { ...current[worker], ...patch } }))
 
+  const changeSetupMode = async (next: SetupMode) => {
+    if (next === setupMode) return
+    setBusy(true)
+    try {
+      const response = await fetch("/api/workers/cloudflare-install", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: next }) })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || "Unable to change hosting mode")
+      setSetupMode(next)
+      await loadConnections()
+      toast.success(next === "automatic" ? "Automatic hosting selected; manual Workers are no longer active" : "Saved manual Worker configuration restored")
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to change hosting mode") }
+    finally { setBusy(false) }
+  }
+
   const saveConnection = async (worker: WorkerKey) => {
     setBusy(true)
     try {
@@ -93,6 +110,11 @@ export function CloudflareWorkerHosting() {
       const response = await fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       const payload = await response.json().catch(() => ({})) as { error?: string }
       if (!response.ok) throw new Error(payload.error || "Unable to save Worker connection")
+      const snapshotResponse = await fetch("/api/workers/cloudflare-install", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "manual", refreshManual: true }) })
+      if (!snapshotResponse.ok) {
+        const snapshotPayload = await snapshotResponse.json().catch(() => ({})) as { error?: string }
+        throw new Error(snapshotPayload.error || "Worker was saved but its manual-mode snapshot could not be synchronized")
+      }
       await loadConnections(); toast.success(`${labels[worker]} connection saved`)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save Worker connection") }
     finally { setBusy(false) }
@@ -119,9 +141,15 @@ export function CloudflareWorkerHosting() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2"><Cloud className="h-5 w-5" />Cloudflare Worker hosting</CardTitle>
-          <CardDescription>Enter one account-scoped token for all Workers, or a separate token for each Worker. Tokens are used only during this request and are never saved.</CardDescription>
+          <CardDescription>Choose automatic token deployment or manually connect Workers that are already deployed.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <ToggleGroup type="single" value={setupMode} onValueChange={(value) => { if (value) void changeSetupMode(value as SetupMode) }} disabled={busy}>
+            <ToggleGroupItem value="automatic">Automatic</ToggleGroupItem>
+            <ToggleGroupItem value="manual">Manual</ToggleGroupItem>
+          </ToggleGroup>
+          {setupMode === "automatic" ? <>
+          <p className="text-sm text-muted-foreground">Deploy all three Workers automatically. Choose whether they share one Cloudflare account or use separate accounts.</p>
           <ToggleGroup type="single" value={mode} onValueChange={(value) => { if (value) setMode(value as Mode) }} disabled={busy}>
             <ToggleGroupItem value="single">One Cloudflare account</ToggleGroupItem>
             <ToggleGroupItem value="separate">Separate accounts</ToggleGroupItem>
@@ -144,9 +172,10 @@ export function CloudflareWorkerHosting() {
           </div>
           {installation ? <p className="text-sm">Status: <Badge variant={installation.status === "ready" ? "default" : installation.status === "failed" ? "destructive" : "secondary"}>{installation.status}</Badge> · Step: {installation.step}{installation.releaseVersion ? ` · Release: ${installation.releaseVersion}` : ""}</p> : null}
           {installation?.error ? <p className="text-sm text-destructive">{installation.error}</p> : null}
+          </> : <p className="text-sm text-muted-foreground">Enter the URL and secret for each existing Worker below.</p>}
         </CardContent>
       </Card>
-      <div className="grid gap-4 xl:grid-cols-3">
+      {setupMode === "manual" ? <div className="grid gap-4 xl:grid-cols-3">
         {(["backend", "scanner", "migration"] as WorkerKey[]).map((worker) => {
           const current = installation?.workers[worker]
           const connection = connections[worker]
@@ -158,7 +187,7 @@ export function CloudflareWorkerHosting() {
             <div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => void saveConnection(worker)} disabled={busy || !connection.url || (!connection.secret && !connection.secretConfigured)}>Save</Button><Button size="sm" variant="outline" onClick={() => void workerAction(worker, "test")} disabled={busy || !connection.url || !connection.secretConfigured}>Test</Button><Button size="sm" variant="outline" onClick={() => void workerAction(worker, "toggle")} disabled={busy || !connection.url || !connection.secretConfigured}>{connection.enabled ? "Disable" : "Enable"}</Button><Button size="sm" variant="outline" onClick={() => void workerAction(worker, "run")} disabled={busy || !connection.enabled}>Run now</Button></div>
           </CardContent></Card>
         })}
-      </div>
+      </div> : null}
     </section>
   )
 }

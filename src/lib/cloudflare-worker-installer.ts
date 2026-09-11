@@ -23,6 +23,11 @@ type InstallState = {
   error?: string
   updatedAt: string
 }
+type RuntimeSnapshot = {
+  backend: { enabled: boolean; orchestratorUrl: string; sharedSecret: string; syncIntervalMinutes: number }
+  migration: { enabled: boolean; migrationEnabled: boolean; fileScannerEnabled: boolean; orchestratorUrl: string; fileScannerUrl: string; sharedSecret: string; fileScannerSecret: string }
+}
+type HostingPreference = { mode: "automatic" | "manual"; manual?: RuntimeSnapshot }
 
 const API = "https://api.cloudflare.com/client/v4"
 const ORDER: HostedWorker[] = ["backend", "scanner", "migration"]
@@ -94,6 +99,52 @@ async function saveRuntimeConfiguration(state: InstallState, enabled: boolean) {
     await client.query(`insert into drive_app_settings(key,value,updated_at) values('backend-orchestrator',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`, [JSON.stringify(backendValue)])
     await client.query(`insert into drive_app_settings(key,value,updated_at) values('migration-orchestrator',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`, [JSON.stringify(migrationValue)])
   })
+}
+
+async function currentRuntimeSnapshot(): Promise<RuntimeSnapshot> {
+  const [backend, migration] = await Promise.all([getBackendOrchestratorSettings(), getMigrationOrchestratorSettings()])
+  return {
+    backend: { enabled: backend.enabled, orchestratorUrl: backend.orchestratorUrl, sharedSecret: backend.sharedSecret, syncIntervalMinutes: backend.syncIntervalMinutes },
+    migration: { enabled: migration.enabled, migrationEnabled: migration.migrationEnabled, fileScannerEnabled: migration.fileScannerEnabled, orchestratorUrl: migration.orchestratorUrl, fileScannerUrl: migration.fileScannerUrl, sharedSecret: migration.sharedSecret, fileScannerSecret: migration.fileScannerSecret },
+  }
+}
+
+async function writeRuntimeSnapshot(snapshot: RuntimeSnapshot) {
+  await withDbTransaction(async (client) => {
+    await client.query(`insert into drive_app_settings(key,value,updated_at) values('backend-orchestrator',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`, [JSON.stringify(snapshot.backend)])
+    await client.query(`insert into drive_app_settings(key,value,updated_at) values('migration-orchestrator',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`, [JSON.stringify(snapshot.migration)])
+  })
+}
+
+export async function getCloudflareHostingPreference(): Promise<HostingPreference> {
+  const result = await queryDb<{ value: unknown }>(`select value from drive_app_settings where key='cloudflare-worker-hosting' limit 1`)
+  const value = result.rows[0]?.value
+  if (!value || typeof value !== "object") return { mode: "manual" }
+  const row = value as Partial<HostingPreference>
+  return { mode: row.mode === "automatic" ? "automatic" : "manual", manual: row.manual }
+}
+
+export async function setCloudflareHostingMode(mode: "automatic" | "manual", refreshManual = false) {
+  const current = await getCloudflareHostingPreference()
+  let manual = current.manual
+  if ((current.mode === "manual" && mode === "automatic") || (mode === "manual" && refreshManual)) manual = await currentRuntimeSnapshot()
+  if (mode === "manual") {
+    if (manual) await writeRuntimeSnapshot(manual)
+  } else {
+    const installation = await loadState()
+    if (installation?.status === "ready") await saveRuntimeConfiguration(installation, true)
+    else {
+      const disabled = await currentRuntimeSnapshot()
+      disabled.backend.enabled = false
+      disabled.migration.enabled = false
+      disabled.migration.migrationEnabled = false
+      disabled.migration.fileScannerEnabled = false
+      await writeRuntimeSnapshot(disabled)
+    }
+  }
+  const preference: HostingPreference = { mode, manual }
+  await queryDb(`insert into drive_app_settings(key,value,updated_at) values('cloudflare-worker-hosting',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`, [JSON.stringify(preference)])
+  return { mode }
 }
 
 function freshState(mode: InstallMode): InstallState {
@@ -238,6 +289,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       if (previous?.status === "ready") state.secrets = previous.secrets
     }
     state.status = "running"; state.error = undefined; await saveState(state)
+    await setCloudflareHostingMode("automatic")
     try {
       const names = resourceNames()
       const accounts = {} as Record<HostedWorker, Account>
@@ -274,6 +326,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       for (const worker of ORDER) await setSchedule(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
       state.step = "schedules_ready"; await saveState(state)
       await saveRuntimeConfiguration(state, true)
+      await queryDb(`insert into drive_app_settings(key,value,updated_at) values('cloudflare-worker-hosting',$1::jsonb,now()) on conflict(key) do update set value=jsonb_set(excluded.value,'{manual}',coalesce(drive_app_settings.value->'manual','null'::jsonb)),updated_at=now()`, [JSON.stringify({ mode: "automatic" })])
       state.status = "ready"; state.step = "enabled"; await saveState(state)
       return getCloudflareInstallation()
     } catch (error) {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getCloudflareInstallation, installCloudflareWorkers } from "@/lib/cloudflare-worker-installer"
+import { getCloudflareHostingPreference, getCloudflareInstallation, installCloudflareWorkers, setCloudflareHostingMode } from "@/lib/cloudflare-worker-installer"
 import { requireSuperAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
@@ -7,7 +7,18 @@ export const maxDuration = 300
 
 export async function GET() {
   const session = await requireSuperAdmin(); if (!session.ok) return session.response
-  return NextResponse.json({ installation: await getCloudflareInstallation() })
+  return NextResponse.json({ installation: await getCloudflareInstallation(), hosting: await getCloudflareHostingPreference() })
+}
+
+export async function PATCH(request: NextRequest) {
+  const session = await requireSuperAdmin(); if (!session.ok) return session.response
+  try {
+    const body = await request.json() as { mode?: unknown; refreshManual?: unknown }
+    if (body.mode !== "automatic" && body.mode !== "manual") throw new Error("Hosting mode must be automatic or manual")
+    return NextResponse.json({ hosting: await setCloudflareHostingMode(body.mode, body.refreshManual === true) })
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to change hosting mode" }, { status: 400 })
+  }
 }
 
 export async function POST(request: NextRequest) {
