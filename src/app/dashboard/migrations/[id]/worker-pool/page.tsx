@@ -17,6 +17,7 @@ type WorkerRun = {
   jobId?: string
   agentId: string
   status: string
+  online: boolean
   instanceId?: string
   currentFile?: Record<string, unknown>
   currentStatus?: string
@@ -76,48 +77,47 @@ export default function MigrationWorkerPoolDetailsPage() {
   const migrationId = typeof params?.id === "string" ? params.id : ""
   const [runs, setRuns] = React.useState<WorkerRun[]>([])
   const [jobs, setJobs] = React.useState<WorkerJob[]>([])
+  const [snapshot, setSnapshot] = React.useState<Record<string, unknown> | null>(null)
+  const [source, setSource] = React.useState<"database" | "orchestrator">("database")
   const [loading, setLoading] = React.useState(true)
   const [refreshing, setRefreshing] = React.useState(false)
 
-  const load = React.useCallback(async (silent = false) => {
+  const load = React.useCallback(async (live = false, showRefreshing = false) => {
     if (!migrationId) return
     try {
-      if (silent) setRefreshing(true)
-      else setLoading(true)
-      const response = await fetch(`/api/migrations/${encodeURIComponent(migrationId)}`, { cache: "no-store" })
+      if (showRefreshing) setRefreshing(true)
+      else if (!live) setLoading(true)
+      const response = await fetch(`/api/migrations/${encodeURIComponent(migrationId)}/worker-pool${live ? "?live=1" : ""}`, { cache: "no-store" })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(data.error || "Unable to load migration worker pool")
-      const nextRuns = Array.isArray(data.workerRuns) ? data.workerRuns as WorkerRun[] : []
-      setRuns(nextRuns)
-      const jobResponses = await Promise.all(nextRuns.flatMap((run) => run.jobId ? [fetch(`/api/repair-jobs/${encodeURIComponent(run.jobId)}`, { cache: "no-store" })] : []))
-      const nextJobs = await Promise.all(jobResponses.map(async (jobResponse) => {
-        if (!jobResponse.ok) return null
-        const body = await jobResponse.json().catch(() => ({}))
-        return isRecord(body.job) ? body.job as WorkerJob : null
-      }))
-      setJobs(nextJobs.filter((job): job is WorkerJob => Boolean(job)))
+      setRuns(Array.isArray(data.runs) ? data.runs as WorkerRun[] : [])
+      setJobs(Array.isArray(data.jobs) ? data.jobs as WorkerJob[] : [])
+      setSnapshot(isRecord(data.snapshot) ? data.snapshot : null)
+      setSource(data.source === "orchestrator" ? "orchestrator" : "database")
     } catch (error) {
-      if (!silent) toast.error(error instanceof Error ? error.message : "Unable to load migration worker pool")
+      if (!live) toast.error(error instanceof Error ? error.message : "Unable to load migration worker pool")
     } finally {
       setLoading(false)
       setRefreshing(false)
     }
   }, [migrationId])
 
-  React.useEffect(() => { void load() }, [load])
+  React.useEffect(() => {
+    void load(false).then(() => void load(true))
+  }, [load])
   React.useEffect(() => {
     if (loading) return
-    const active = runs.some((run) => ["pending", "claimed", "running"].includes(run.status))
-    const timer = window.setTimeout(() => void load(true), active ? 4000 : 15000)
+    const active = runs.some((run) => run.online)
+    const timer = window.setTimeout(() => void load(true), active ? 2500 : 15000)
     return () => window.clearTimeout(timer)
   }, [loading, load, runs])
 
   const totals = React.useMemo(() => ({
-    completedFiles: runs.reduce((sum, run) => sum + Number(run.completedFiles || 0), 0),
-    failedFiles: runs.reduce((sum, run) => sum + Number(run.failedFiles || 0), 0),
-    completedBytes: runs.reduce((sum, run) => sum + Number(run.completedBytes || 0), 0),
-    active: runs.filter((run) => ["pending", "claimed", "running"].includes(run.status)).length,
-  }), [runs])
+    completedFiles: Number(snapshot?.transferred ?? runs.reduce((sum, run) => sum + Number(run.completedFiles || 0), 0)),
+    failedFiles: Number(snapshot?.failed ?? runs.reduce((sum, run) => sum + Number(run.failedFiles || 0), 0)),
+    completedBytes: Number(snapshot?.completedBytes ?? runs.reduce((sum, run) => sum + Number(run.completedBytes || 0), 0)),
+    active: Number(snapshot?.onlineWorkers ?? runs.filter((run) => run.online).length),
+  }), [runs, snapshot])
 
   const telemetry = React.useMemo(() => {
     let totalFiles = 0
@@ -152,10 +152,13 @@ export default function MigrationWorkerPoolDetailsPage() {
   }, [jobs])
 
   if (loading) return <div className="p-6 text-sm text-muted-foreground">Loading migration worker pool...</div>
-  const percent = telemetry.totalFiles > 0 ? Math.min(100, (telemetry.processedFiles / telemetry.totalFiles) * 100) : 0
-  const activeTransfers = runs.filter((run) => ["pending", "claimed", "running"].includes(run.status) && isRecord(run.currentFile)).length
+  const totalFiles = Number(snapshot?.totalFiles ?? telemetry.totalFiles)
+  const processedFiles = Number(snapshot?.processedFiles ?? telemetry.processedFiles)
+  const transferred = Number(snapshot?.transferred ?? telemetry.transferred)
+  const percent = totalFiles > 0 ? Math.min(100, (processedFiles / totalFiles) * 100) : 0
+  const activeTransfers = runs.filter((run) => run.online && isRecord(run.currentFile)).length
   const latestHeartbeat = runs
-    .filter((run) => ["pending", "claimed", "running"].includes(run.status))
+    .filter((run) => run.online)
     .map((run) => run.lastHeartbeatAt || run.updatedAt)
     .sort((a, b) => String(b).localeCompare(String(a)))[0]
 
@@ -169,14 +172,14 @@ export default function MigrationWorkerPoolDetailsPage() {
         </div>
         <div className="flex gap-2">
           <Button asChild variant="outline"><Link href={`/dashboard/migrations/${encodeURIComponent(migrationId)}`}><ArrowLeft className="mr-2 h-4 w-4" />Back</Link></Button>
-          <Button variant="outline" onClick={() => void load(true)} disabled={refreshing}><RefreshCw className={`mr-2 h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />Refresh</Button>
+          <Button variant="outline" onClick={() => void load(true, true)} disabled={refreshing}><RefreshCw className={`mr-2 h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />Refresh</Button>
         </div>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-4">
-        <Card className="xl:col-span-2"><CardHeader><CardTitle className="text-base">Overall progress</CardTitle><CardDescription>Combined progress across the complete migration worker pool.</CardDescription></CardHeader><CardContent className="space-y-4"><div className="flex justify-between text-sm"><span>{totals.active} active / {runs.length} workers</span><span className="font-mono">{percent.toFixed(1)}%</span></div><Progress value={percent} className="h-2" /><div className="grid gap-3 sm:grid-cols-3"><div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Processed files</div><div className="mt-1 text-lg font-semibold">{telemetry.processedFiles || totals.completedFiles} / {telemetry.totalFiles || "-"}</div></div><div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Transferred</div><div className="mt-1 text-lg font-semibold">{telemetry.transferred || totals.completedFiles}</div></div><div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Failed</div><div className="mt-1 text-lg font-semibold">{totals.failedFiles}</div></div></div></CardContent></Card>
-        <Card><CardHeader><CardTitle className="text-base">Transfer totals</CardTitle></CardHeader><CardContent className="space-y-2 text-sm"><div className="flex justify-between"><span className="text-muted-foreground">Transferred bytes</span><span>{formatBytes(totals.completedBytes)}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Skipped</span><span>{telemetry.skipped}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Missing</span><span>{telemetry.missing}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Mismatched</span><span>{telemetry.mismatched}</span></div></CardContent></Card>
-        <Card><CardHeader><CardTitle className="text-base">Live capacity</CardTitle><CardDescription>Only workers online for the current pool run.</CardDescription></CardHeader><CardContent className="space-y-2 text-sm"><div className="flex justify-between"><span className="text-muted-foreground">Online workers</span><span>{totals.active}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Active transfers</span><span>{activeTransfers}</span></div><div className="flex justify-between gap-4"><span className="text-muted-foreground">Latest update</span><span className="text-right">{formatDate(latestHeartbeat)}</span></div></CardContent></Card>
+        <Card className="xl:col-span-2"><CardHeader><CardTitle className="text-base">Overall progress</CardTitle><CardDescription>Combined progress across the complete migration worker pool.</CardDescription></CardHeader><CardContent className="space-y-4"><div className="flex justify-between text-sm"><span>{totals.active} online workers</span><span className="font-mono">{percent.toFixed(1)}%</span></div><Progress value={percent} className="h-2" /><div className="grid gap-3 sm:grid-cols-3"><div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Processed files</div><div className="mt-1 text-lg font-semibold">{processedFiles} / {totalFiles || "-"}</div></div><div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Transferred</div><div className="mt-1 text-lg font-semibold">{transferred}</div></div><div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Failed</div><div className="mt-1 text-lg font-semibold">{totals.failedFiles}</div></div></div></CardContent></Card>
+        <Card><CardHeader><CardTitle className="text-base">Transfer totals</CardTitle></CardHeader><CardContent className="space-y-2 text-sm"><div className="flex justify-between"><span className="text-muted-foreground">Transferred bytes</span><span>{formatBytes(totals.completedBytes)}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Skipped</span><span>{Number(snapshot?.skipped ?? telemetry.skipped)}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Missing</span><span>{Number(snapshot?.missing ?? telemetry.missing)}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Mismatched</span><span>{Number(snapshot?.mismatched ?? telemetry.mismatched)}</span></div></CardContent></Card>
+        <Card><CardHeader><CardTitle className="text-base">Live capacity</CardTitle><CardDescription>{source === "orchestrator" ? "Live from Migration Orchestrator." : "Last database snapshot; reconnecting live."}</CardDescription></CardHeader><CardContent className="space-y-2 text-sm"><div className="flex justify-between"><span className="text-muted-foreground">Online workers</span><span>{totals.active}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Active transfers</span><span>{Number(snapshot?.activeTransfers ?? activeTransfers)}</span></div><div className="flex justify-between gap-4"><span className="text-muted-foreground">Latest update</span><span className="text-right">{formatDate(typeof snapshot?.updatedAt === "string" ? snapshot.updatedAt : latestHeartbeat)}</span></div></CardContent></Card>
       </div>
 
       <Card>

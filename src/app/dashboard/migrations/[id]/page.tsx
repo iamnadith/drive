@@ -246,6 +246,7 @@ type MigrationWorkerRun = {
   jobId?: string
   agentId: string
   status: string
+  online: boolean
   externalRunId?: string
   instanceId?: string
   currentFile?: Record<string, unknown>
@@ -2062,7 +2063,7 @@ export default function MigrationDetailsPage() {
                 Waiting for a migration worker to start.
               </div>
             ) : (() => {
-              const activeRuns = workerRuns.filter((run) => ["pending", "claimed", "running"].includes(run.status))
+              const activeRuns = workerRuns.filter((run) => run.online)
               const latestRun = [...workerRuns].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]
               const isActive = activeRuns.length > 0
               const status = isActive ? "running" : "completed"

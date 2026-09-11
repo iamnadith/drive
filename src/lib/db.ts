@@ -1143,6 +1143,13 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(`alter table if exists drive_migration_orchestrator_state add column if not exists lease_owner text;`)
       await queryDb(`alter table if exists drive_migration_orchestrator_state add column if not exists lease_expires_at timestamptz;`)
       await queryDb(`
+        create table if not exists drive_migration_worker_live_state (
+          migration_id uuid primary key references drive_migrations(id) on delete cascade,
+          snapshot jsonb not null default '{}'::jsonb,
+          updated_at timestamptz not null default now()
+        );
+      `)
+      await queryDb(`
         create table if not exists drive_migration_verification_state (
           migration_item_id uuid primary key references drive_migration_items(id) on delete cascade,
           migration_id uuid not null references drive_migrations(id) on delete cascade,

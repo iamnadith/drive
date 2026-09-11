@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 15
+const BUILD = 16
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -55,6 +55,11 @@ async function ensureSchema(db: Client) {
       missing_objects bigint not null default 0, mismatched_objects bigint not null default 0, extra_objects bigint not null default 0,
       attempt_count integer not null default 0, last_error text, lease_owner text, lease_expires_at timestamptz,
       completed_at timestamptz, created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+    );
+    create table if not exists drive_migration_worker_live_state (
+      migration_id uuid primary key references drive_migrations(id) on delete cascade,
+      snapshot jsonb not null default '{}'::jsonb,
+      updated_at timestamptz not null default now()
     );
     alter table if exists drive_migration_verification_state add column if not exists attempt_generation integer;
   `)
@@ -175,6 +180,26 @@ async function ensureShards(db: Client, migration: Row) {
     await db.query(`update drive_migration_items set slurper_status='completed',source_objects=0,source_bytes=00,updated_at=now() where migration_id=$1`, [migration.id])
   }
   return { generation, shardCount, created, inventoryPending: 0, queuePending: 0 }
+}
+
+async function migrationLiveState(db: Client, migrationId: string) {
+  const [jobsResult, runsResult, aggregateResult] = await Promise.all([
+    db.query(`select id,status,progress,result,summary,error,created_at,updated_at,last_heartbeat_at from drive_repair_jobs where migration_id=$1 and mode='migration' order by updated_at desc limit 500`, [migrationId]),
+    db.query(`select r.id,r.status,r.job_reference,r.payload,r.created_at,r.updated_at,a.status agent_status,a.last_heartbeat_at agent_heartbeat from drive_agent_runs r left join drive_agents a on a.id=r.agent_id where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1 order by r.created_at`, [migrationId]),
+    db.query(`select count(*)::bigint total_files,count(*) filter(where status in('completed','failed','canceled'))::bigint processed_files,count(*) filter(where status='completed')::bigint transferred,count(*) filter(where status='failed')::bigint failed,coalesce(sum(case when status='completed' then coalesce(nullif(payload->'inventoryObjects'->0->>'size','')::bigint,0) else 0 end),0)::bigint completed_bytes from drive_repair_jobs where migration_id=$1 and mode='migration'`, [migrationId]),
+  ])
+  const jobs = jobsResult.rows
+  const runs = runsResult.rows
+  const activeRuns = runs.filter((run) => String(run.status) === "running" && String(run.agent_status) === "online" && Date.now() - Date.parse(String(run.agent_heartbeat || "")) < 90_000)
+  const aggregate = aggregateResult.rows[0] || {}
+  const totals = { onlineWorkers: activeRuns.length, activeTransfers: 0, transferred: Number(aggregate.transferred || 0), failed: Number(aggregate.failed || 0), skipped: 0, missing: 0, mismatched: 0, processedFiles: Number(aggregate.processed_files || 0), totalFiles: Number(aggregate.total_files || 0), completedBytes: Number(aggregate.completed_bytes || 0) }
+  for (const job of jobs) {
+    const progress = job.progress && typeof job.progress === "object" ? job.progress : {}
+    if (["claimed", "running"].includes(String(job.status)) && progress.currentFile && Date.now() - Date.parse(String(job.last_heartbeat_at || "")) < 90_000) totals.activeTransfers += 1
+  }
+  const snapshot = { migrationId, ...totals, updatedAt: new Date().toISOString() }
+  await db.query(`insert into drive_migration_worker_live_state(migration_id,snapshot,updated_at) values($1,$2::jsonb,now()) on conflict(migration_id) do update set snapshot=excluded.snapshot,updated_at=now()`, [migrationId, JSON.stringify(snapshot)])
+  return { snapshot, jobs, runs }
 }
 async function recoverJobs(db: Client, migrationId: string, generation: number, shardCount: number) {
   const result = await db.query(`
@@ -666,6 +691,7 @@ async function workerRequest(request: Request, env: Env, path: string) {
       const migration = (await db.query(`select * from drive_migrations where id=$1`, [current.migration_id])).rows[0]
       if (migration) await refreshWorkerItemProgress(db, migration, integer(opts(migration).workerGeneration, 1, 1, 1000000))
     }
+    if (current.mode === "migration") await migrationLiveState(db, current.migration_id)
     return json({ ok: true, job: updated.rows[0] })
   })
 }
@@ -733,6 +759,8 @@ export default {
     }
     if (!(await authorized(request, env))) return json({ error: "Unauthorized" }, 401)
     if (url.pathname === "/status" && request.method === "GET") return json(await database(env, async (db) => { const row = await db.query(`select * from drive_migration_orchestrator_state where id=true`); return { ok: true, service: "migration-orchestrator", build: BUILD, state: row.rows[0] || null } }))
+    const liveMatch = /^\/migrations\/([0-9a-f-]{36})\/live$/i.exec(url.pathname)
+    if (liveMatch && request.method === "GET") return json(await database(env, async (db) => { await ensureSchema(db); return { ok: true, ...(await migrationLiveState(db, liveMatch[1])) } }))
     if (url.pathname === "/run" && request.method === "POST") { try { return json(await cycle(env)) } catch (error) { return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 503) } }
     return json({ error: "Not found" }, 404)
   },

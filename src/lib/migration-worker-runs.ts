@@ -5,6 +5,7 @@ export type MigrationWorkerRun = {
   jobId?: string
   agentId: string
   status: string
+  online: boolean
   externalRunId?: string
   instanceId?: string
   currentFile?: Record<string, unknown>
@@ -22,6 +23,7 @@ type RunRow = {
   job_reference: string | null
   agent_id: string
   status: string
+  online: boolean
   external_run_id: string | null
   instance_id: string | null
   job_status: string | null
@@ -38,11 +40,13 @@ type RunRow = {
 export async function listMigrationWorkerRuns(migrationId: string): Promise<MigrationWorkerRun[]> {
   const result = await queryDb<RunRow>(`
     select r.id,r.job_reference,r.agent_id,r.status,r.external_run_id,r.payload->>'workerInstanceId' instance_id,
+      (r.status='running' and a.status='online' and a.last_heartbeat_at>now()-interval '90 seconds') online,
       j.status job_status,j.payload job_payload,j.progress job_progress,j.last_heartbeat_at job_heartbeat,
       coalesce((r.payload->>'completedFiles')::bigint,0) completed_files,
       coalesce((r.payload->>'failedFiles')::bigint,0) failed_files,
       coalesce((r.payload->>'completedBytes')::bigint,0) completed_bytes,r.created_at,r.updated_at
     from drive_agent_runs r
+    left join drive_agents a on a.id=r.agent_id
     -- job_reference is legacy text while repair job ids are uuid. Compare
     -- using the uuid's text representation so the projection cannot fail on
     -- non-UUID/legacy references (the API previously swallowed this error
@@ -65,6 +69,7 @@ export async function listMigrationWorkerRuns(migrationId: string): Promise<Migr
       jobId: row.job_reference ?? undefined,
       agentId: row.agent_id,
       status: row.status,
+      online: row.online === true,
       externalRunId: row.external_run_id ?? undefined,
       instanceId: row.instance_id ?? undefined,
       currentFile,
