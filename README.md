@@ -91,3 +91,9 @@ Auto mode asks you to choose if several repositories match. It checks admin/push
 If a complete scan finds no match, setup creates a fork in the connected user's personal account, using the stable name `drive-worker-<upstream repository ID>`. Existing unrelated repositories are never overwritten. The upstream defaults to `iamnadith/Drive`; deployments can override it with the server environment variable `GITHUB_WORKER_SOURCE_REPO=owner/repository`.
 
 **Detect or continue setup** resumes a signed, account-bound checkpoint kept in the browser tab (valid for one hour). It also resumes after a reload. **Start fresh** rescans GitHub. Rate limits and permission failures stop detection without treating an incomplete scan as "no repository." An older fork missing worker files must be updated from upstream. Saving the worker and dispatching it remain separate steps.
+
+### One-click Cloudflare orchestrator hosting
+
+The **Workers** page deploys Backend Orchestrator, File Scanner, and Migration Orchestrator from immutable release bundles. A superadmin can use one account-scoped Cloudflare token for every Worker or a separate token for each role. Tokens are request-only and are never persisted. The installer creates the required Queues, injects PostgreSQL and role secrets, deploys in dependency order, saves peer URLs atomically, verifies authenticated status, and enables the Workers only after every check succeeds.
+
+By default the panel reads `https://github.com/iamnadith/Drive/releases/latest/download/manifest.json`. Override the repository with `GITHUB_WORKER_SOURCE_REPO` or the full location with `CLOUDFLARE_WORKER_MANIFEST_URL`. Every push to `main` publishes a checksum-protected release named from the commit SHA; `workers-v*` tags and manual runs are also supported. Failed installations retain a durable non-token checkpoint and can be resumed with the same account tokens or restarted explicitly.

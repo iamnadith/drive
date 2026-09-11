@@ -1151,6 +1151,15 @@ create table if not exists public.drive_migration_worker_live_state (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.drive_cloudflare_worker_installations (
+  id uuid primary key,
+  state jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists drive_cloudflare_worker_installations_updated_idx
+  on public.drive_cloudflare_worker_installations(updated_at desc);
+
 -- Runtime schema guards compare this marker before running compatibility DDL.
 -- Bump it together with DRIVE_SCHEMA_VERSION in src/lib/db.ts.
 create table if not exists public.drive_schema_meta (
@@ -1159,5 +1168,5 @@ create table if not exists public.drive_schema_meta (
   updated_at timestamptz not null default now()
 );
 insert into public.drive_schema_meta(id, version, updated_at)
-values (true, 2026091101, now())
+values (true, 2026091102, now())
 on conflict (id) do update set version = excluded.version, updated_at = now();

@@ -43,3 +43,5 @@ tools/drive-sync/gui/obj/
 *.njsproj
 *.sln
 *.sw?
+.tmp-worker-build/
+worker-release/

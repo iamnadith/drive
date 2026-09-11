@@ -1,0 +1,63 @@
+name: Build Cloudflare Worker release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Immutable release version, for example v1.2.0
+        required: true
+  push:
+    branches:
+      - main
+    tags:
+      - "workers-v*"
+
+concurrency:
+  group: cloudflare-worker-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+      - name: Resolve release version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            VERSION="$REQUESTED_VERSION"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="workers-${GITHUB_SHA:0:12}"
+          fi
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Install Worker dependencies
+        shell: bash
+        run: |
+          npm ci --prefix workers/backend-orchestrator
+          npm ci --prefix workers/file-scanner
+          npm ci --prefix workers/migration-orchestrator
+      - name: Build immutable bundles and checksums
+        env:
+          WORKER_RELEASE_VERSION: ${{ steps.version.outputs.value }}
+          WORKER_RELEASE_BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.value }}
+        run: node scripts/build-worker-release.mjs
+      - name: Publish release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release view "${{ steps.version.outputs.value }}" >/dev/null 2>&1 || gh release create "${{ steps.version.outputs.value }}" --target "${{ github.sha }}" --generate-notes --latest
+          gh release upload "${{ steps.version.outputs.value }}" worker-release/* --clobber
+          gh release edit "${{ steps.version.outputs.value }}" --latest

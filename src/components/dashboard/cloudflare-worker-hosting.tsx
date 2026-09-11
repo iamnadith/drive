@@ -1,0 +1,164 @@
+"use client"
+
+import * as React from "react"
+import { Cloud, RefreshCw } from "lucide-react"
+import { toast } from "sonner"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+
+type Mode = "single" | "separate"
+type WorkerKey = "backend" | "scanner" | "migration"
+type Installation = {
+  status: "pending" | "running" | "ready" | "failed"
+  step: string
+  releaseVersion?: string
+  error?: string
+  workers: Record<WorkerKey, { accountName?: string; scriptName: string; url?: string; deployed?: boolean; verified?: boolean }>
+}
+type Connection = { url: string; secret: string; enabled: boolean; secretConfigured: boolean }
+
+const labels: Record<WorkerKey, string> = { backend: "Backend Orchestrator", scanner: "File Scanner", migration: "Migration Orchestrator" }
+
+export function CloudflareWorkerHosting() {
+  const [mode, setMode] = React.useState<Mode>("single")
+  const [token, setToken] = React.useState("")
+  const [scannerToken, setScannerToken] = React.useState("")
+  const [migrationToken, setMigrationToken] = React.useState("")
+  const [installation, setInstallation] = React.useState<Installation | null>(null)
+  const [busy, setBusy] = React.useState(false)
+  const [connections, setConnections] = React.useState<Record<WorkerKey, Connection>>({
+    backend: { url: "", secret: "", enabled: false, secretConfigured: false },
+    scanner: { url: "", secret: "", enabled: false, secretConfigured: false },
+    migration: { url: "", secret: "", enabled: false, secretConfigured: false },
+  })
+
+  const loadConnections = React.useCallback(async () => {
+    const [backendResponse, migrationResponse] = await Promise.all([
+      fetch("/api/settings/backend-orchestrator", { cache: "no-store" }),
+      fetch("/api/settings/migration-orchestrator", { cache: "no-store" }),
+    ])
+    const backend = await backendResponse.json().catch(() => ({})) as { settings?: Record<string, unknown>; error?: string }
+    const migration = await migrationResponse.json().catch(() => ({})) as { settings?: Record<string, unknown>; error?: string }
+    if (!backendResponse.ok || !migrationResponse.ok) throw new Error(backend.error || migration.error || "Unable to load Worker connections")
+    setConnections({
+      backend: { url: String(backend.settings?.orchestratorUrl || ""), secret: String(backend.settings?.sharedSecret || ""), enabled: backend.settings?.enabled === true, secretConfigured: backend.settings?.secretConfigured === true },
+      scanner: { url: String(migration.settings?.fileScannerUrl || ""), secret: String(migration.settings?.fileScannerSecret || ""), enabled: migration.settings?.fileScannerEnabled === true, secretConfigured: migration.settings?.fileScannerSecretConfigured === true },
+      migration: { url: String(migration.settings?.orchestratorUrl || ""), secret: String(migration.settings?.sharedSecret || ""), enabled: migration.settings?.migrationEnabled === true, secretConfigured: migration.settings?.secretConfigured === true },
+    })
+  }, [])
+
+  const refresh = React.useCallback(async () => {
+    const response = await fetch("/api/workers/cloudflare-install", { cache: "no-store" })
+    const payload = await response.json().catch(() => ({})) as { installation?: Installation; error?: string }
+    if (!response.ok) throw new Error(payload.error || "Unable to load Cloudflare hosting status")
+    setInstallation(payload.installation || null)
+  }, [])
+  React.useEffect(() => { void Promise.all([refresh(), loadConnections()]).catch(() => undefined) }, [refresh, loadConnections])
+
+  const deploy = async (restart = false) => {
+    setBusy(true)
+    try {
+      const body = mode === "single"
+        ? { mode, token, restart }
+        : { mode, backendToken: token, scannerToken, migrationToken, restart }
+      const response = await fetch("/api/workers/cloudflare-install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      const payload = await response.json().catch(() => ({})) as { installation?: Installation; error?: string }
+      if (payload.installation) setInstallation(payload.installation)
+      if (!response.ok) throw new Error(payload.error || "Cloudflare Worker installation failed")
+      setToken(""); setScannerToken(""); setMigrationToken("")
+      await loadConnections()
+      toast.success("All Cloudflare Workers were deployed, verified and enabled")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Cloudflare Worker installation failed")
+      await refresh().catch(() => undefined)
+    } finally { setBusy(false) }
+  }
+
+  const updateConnection = (worker: WorkerKey, patch: Partial<Connection>) => setConnections((current) => ({ ...current, [worker]: { ...current[worker], ...patch } }))
+
+  const saveConnection = async (worker: WorkerKey) => {
+    setBusy(true)
+    try {
+      const connection = connections[worker]
+      const url = worker === "backend" ? "/api/settings/backend-orchestrator" : "/api/settings/migration-orchestrator"
+      const body = worker === "backend"
+        ? { orchestratorUrl: connection.url, sharedSecret: connection.secret }
+        : worker === "scanner"
+          ? { worker: "file", fileScannerUrl: connection.url, fileScannerSecret: connection.secret }
+          : { worker: "migration", orchestratorUrl: connection.url, sharedSecret: connection.secret }
+      const response = await fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || "Unable to save Worker connection")
+      await loadConnections(); toast.success(`${labels[worker]} connection saved`)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save Worker connection") }
+    finally { setBusy(false) }
+  }
+
+  const workerAction = async (worker: WorkerKey, action: "test" | "run" | "toggle") => {
+    setBusy(true)
+    try {
+      const connection = connections[worker]
+      const url = worker === "backend" ? "/api/settings/backend-orchestrator" : "/api/settings/migration-orchestrator"
+      const options = action === "toggle"
+        ? { method: "PATCH", body: JSON.stringify(worker === "backend" ? { enabled: !connection.enabled } : { worker: worker === "scanner" ? "file" : "migration", enabled: !connection.enabled }) }
+        : { method: "POST", body: JSON.stringify({ action: worker === "backend" ? action : action === "test" ? `test_${worker === "scanner" ? "file" : "migration"}` : worker === "scanner" ? "run_file" : "run" }) }
+      const response = await fetch(url, { ...options, headers: { "Content-Type": "application/json" } })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || `${labels[worker]} action failed`)
+      await loadConnections(); toast.success(`${labels[worker]} ${action === "toggle" ? connection.enabled ? "disabled" : "enabled" : action === "test" ? "verified" : "cycle completed"}`)
+    } catch (error) { toast.error(error instanceof Error ? error.message : `${labels[worker]} action failed`) }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <section className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><Cloud className="h-5 w-5" />Cloudflare Worker hosting</CardTitle>
+          <CardDescription>Enter one account-scoped token for all Workers, or a separate token for each Worker. Tokens are used only during this request and are never saved.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <ToggleGroup type="single" value={mode} onValueChange={(value) => { if (value) setMode(value as Mode) }} disabled={busy}>
+            <ToggleGroupItem value="single">One Cloudflare account</ToggleGroupItem>
+            <ToggleGroupItem value="separate">Separate accounts</ToggleGroupItem>
+          </ToggleGroup>
+          <div className="grid gap-4 lg:grid-cols-3">
+            <div className="space-y-2 lg:col-span-3">
+              <Label htmlFor="cf-backend-token">{mode === "single" ? "Cloudflare API token" : "Backend Orchestrator token"}</Label>
+              <Input id="cf-backend-token" type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} disabled={busy} />
+            </div>
+            {mode === "separate" ? <>
+              <div className="space-y-2"><Label htmlFor="cf-scanner-token">File Scanner token</Label><Input id="cf-scanner-token" type="password" autoComplete="off" value={scannerToken} onChange={(event) => setScannerToken(event.target.value)} disabled={busy} /></div>
+              <div className="space-y-2"><Label htmlFor="cf-migration-token">Migration Orchestrator token</Label><Input id="cf-migration-token" type="password" autoComplete="off" value={migrationToken} onChange={(event) => setMigrationToken(event.target.value)} disabled={busy} /></div>
+            </> : null}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => void deploy(false)} disabled={busy || !token || (mode === "separate" && (!scannerToken || !migrationToken))}>{busy ? "Deploying…" : installation?.status === "failed" || installation?.status === "running" ? "Continue deployment" : "Deploy all Workers"}</Button>
+            {installation?.status === "failed" ? <Button variant="outline" onClick={() => void deploy(true)} disabled={busy || !token || (mode === "separate" && (!scannerToken || !migrationToken))}>Start fresh</Button> : null}
+            <Button variant="outline" onClick={() => void refresh()} disabled={busy}><RefreshCw className="mr-2 h-4 w-4" />Refresh status</Button>
+            {installation?.status === "ready" ? <Button variant="outline" onClick={() => void deploy(true)} disabled={busy || !token || (mode === "separate" && (!scannerToken || !migrationToken))}>Redeploy release</Button> : null}
+          </div>
+          {installation ? <p className="text-sm">Status: <Badge variant={installation.status === "ready" ? "default" : installation.status === "failed" ? "destructive" : "secondary"}>{installation.status}</Badge> · Step: {installation.step}{installation.releaseVersion ? ` · Release: ${installation.releaseVersion}` : ""}</p> : null}
+          {installation?.error ? <p className="text-sm text-destructive">{installation.error}</p> : null}
+        </CardContent>
+      </Card>
+      <div className="grid gap-4 xl:grid-cols-3">
+        {(["backend", "scanner", "migration"] as WorkerKey[]).map((worker) => {
+          const current = installation?.workers[worker]
+          const connection = connections[worker]
+          return <Card key={worker}><CardHeader><CardTitle className="text-base">{labels[worker]}</CardTitle><CardDescription>{current?.scriptName || "Manual or not installed"}</CardDescription></CardHeader><CardContent className="space-y-3 text-sm">
+            <p>Account: {current?.accountName || "—"} · <Badge variant={connection.enabled ? "default" : "secondary"}>{connection.enabled ? "Enabled" : "Disabled"}</Badge></p>
+            <div className="space-y-1"><Label htmlFor={`${worker}-url`}>Worker URL</Label><Input id={`${worker}-url`} value={connection.url} onChange={(event) => updateConnection(worker, { url: event.target.value })} disabled={busy} /></div>
+            <div className="space-y-1"><Label htmlFor={`${worker}-secret`}>Worker secret</Label><Input id={`${worker}-secret`} type="password" autoComplete="off" value={connection.secret} onChange={(event) => updateConnection(worker, { secret: event.target.value })} disabled={busy} /></div>
+            <p>Deployment: {current?.verified ? "Verified" : current?.deployed ? "Awaiting verification" : connection.url ? "Configured manually" : "Not deployed"}</p>
+            <div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => void saveConnection(worker)} disabled={busy || !connection.url || (!connection.secret && !connection.secretConfigured)}>Save</Button><Button size="sm" variant="outline" onClick={() => void workerAction(worker, "test")} disabled={busy || !connection.url || !connection.secretConfigured}>Test</Button><Button size="sm" variant="outline" onClick={() => void workerAction(worker, "toggle")} disabled={busy || !connection.url || !connection.secretConfigured}>{connection.enabled ? "Disable" : "Enable"}</Button><Button size="sm" variant="outline" onClick={() => void workerAction(worker, "run")} disabled={busy || !connection.enabled}>Run now</Button></div>
+          </CardContent></Card>
+        })}
+      </div>
+    </section>
+  )
+}

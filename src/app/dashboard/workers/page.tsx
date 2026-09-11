@@ -5,6 +5,7 @@ import { Activity, Bot, CircleDot, Clock3, Copy, Eye, Github, HardDrive, Play, P
 import { toast } from "sonner"
 import { useRouter, useSearchParams } from "next/navigation"
 import { GitHubWorkerSetup } from "@/components/dashboard/github-worker-setup"
+import { CloudflareWorkerHosting } from "@/components/dashboard/cloudflare-worker-hosting"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -1179,6 +1180,7 @@ export default function WorkersPage() {
           </Dialog>
         </div>
       </div>
+      <CloudflareWorkerHosting />
 
       <Dialog
         open={workerDetailsOpen}

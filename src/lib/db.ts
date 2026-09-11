@@ -1,7 +1,7 @@
 import { Pool } from "pg"
 import type { PoolClient, QueryResultRow } from "pg"
 
-const DRIVE_SCHEMA_VERSION = 2026091101
+const DRIVE_SCHEMA_VERSION = 2026091102
 
 declare global {
   var __drivePgPool: Pool | undefined
@@ -1203,6 +1203,15 @@ export async function ensureDriveSchema(): Promise<void> {
         );
       `)
       await queryDb(`alter table if exists drive_file_scanner_state add column if not exists lease_owner text;`)
+      await queryDb(`
+        create table if not exists drive_cloudflare_worker_installations (
+          id uuid primary key,
+          state jsonb not null default '{}'::jsonb,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+      `)
+      await queryDb(`create index if not exists drive_cloudflare_worker_installations_updated_idx on drive_cloudflare_worker_installations(updated_at desc);`)
       await queryDb(`create table if not exists drive_schema_meta (id boolean primary key default true check(id),version bigint not null,updated_at timestamptz not null default now());`)
       await queryDb(`insert into drive_schema_meta(id,version,updated_at) values(true,$1,now()) on conflict(id) do update set version=excluded.version,updated_at=now();`, [DRIVE_SCHEMA_VERSION])
     })()

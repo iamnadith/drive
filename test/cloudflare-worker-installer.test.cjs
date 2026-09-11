@@ -1,0 +1,51 @@
+const test = require("node:test")
+const assert = require("node:assert/strict")
+const fs = require("node:fs")
+const path = require("node:path")
+
+const root = path.resolve(__dirname, "..")
+const installer = fs.readFileSync(path.join(root, "src/lib/cloudflare-worker-installer.ts"), "utf8")
+const route = fs.readFileSync(path.join(root, "src/app/api/workers/cloudflare-install/route.ts"), "utf8")
+const workersPage = fs.readFileSync(path.join(root, "src/app/dashboard/workers/page.tsx"), "utf8")
+const settingsPage = fs.readFileSync(path.join(root, "src/app/dashboard/settings/page.tsx"), "utf8")
+const workflow = fs.readFileSync(path.join(root, ".github/workflows/worker-release.yml"), "utf8")
+
+test("installer deploys in dependency order and saves configuration before enabling", () => {
+  assert.match(installer, /const ORDER: HostedWorker\[\] = \["backend", "scanner", "migration"\]/)
+  const upload = installer.indexOf("for (const worker of ORDER)", installer.indexOf("queues_ready"))
+  const save = installer.indexOf("configuration_saved")
+  const verify = installer.indexOf("await verify", save)
+  const schedules = installer.indexOf('state.step = "schedules_ready"', verify)
+  const enable = installer.indexOf("saveRuntimeConfiguration(state, true)", verify)
+  assert.ok(upload > 0 && upload < save && save < verify && verify < schedules && schedules < enable)
+})
+
+test("tokens are request-only and API is superadmin protected", () => {
+  assert.doesNotMatch(installer, /state\.tokens|api_token|cloudflare_token/i)
+  assert.match(route, /requireSuperAdmin\(\)/)
+  assert.match(route, /mode === "separate"/)
+})
+
+test("installer is resumable, locked and keeps secrets on release redeploy", () => {
+  assert.match(installer, /withDbAdvisoryLock\("cloudflare-worker-install", "singleton"/)
+  assert.match(installer, /if \(!state\.workers\[worker\]\.deployed\)/)
+  assert.match(installer, /state\.secrets = previous\.secrets/)
+  assert.match(installer, /status = "failed"/)
+  assert.match(installer, /for \(let attempt = 0; attempt < 5/)
+  assert.match(installer, /drive-file-scanner-\$\{suffix\}/)
+})
+
+test("release artifacts are immutable checksummed bundles", () => {
+  assert.match(installer, /checksum mismatch/)
+  assert.match(workflow, /build-worker-release\.mjs/)
+  assert.match(workflow, /gh release upload/)
+  assert.match(workflow, /branches:\s*\n\s*- main/)
+  assert.match(workflow, /workers-\$\{GITHUB_SHA:0:12\}/)
+  assert.match(workflow, /--latest/)
+})
+
+test("Cloudflare hosting is presented on Workers and hidden from Settings", () => {
+  assert.match(workersPage, /<CloudflareWorkerHosting \/>/)
+  assert.match(settingsPage, /<Card className="hidden" aria-hidden="true">/)
+  assert.match(settingsPage, /<div className="hidden" aria-hidden="true">/)
+})

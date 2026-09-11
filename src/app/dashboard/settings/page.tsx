@@ -391,7 +391,7 @@ export default function DashboardSettingsPage() {
         }
       />
 
-      <Card>
+      <Card className="hidden" aria-hidden="true">
         <CardHeader>
           <CardTitle>Backend Orchestrator</CardTitle>
           <CardDescription>
@@ -481,7 +481,7 @@ export default function DashboardSettingsPage() {
         </CardFooter>
       </Card>
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="hidden" aria-hidden="true">
         <Card>
           <CardHeader>
             <CardTitle>Migration Orchestrator</CardTitle>
