@@ -243,6 +243,7 @@ function readRepairItems(job: RepairJob | null | undefined): Array<Record<string
 
 type MigrationWorkerRun = {
   id: string
+  jobId?: string
   agentId: string
   status: string
   externalRunId?: string
@@ -334,6 +335,17 @@ function repairJobBadge(status: RepairJob["status"] | undefined) {
   if (status === "failed") return <Badge className="bg-red-600">Worker failed</Badge>
   if (status === "canceled") return <Badge variant="outline">Worker aborted</Badge>
   return <Badge variant="outline">No worker run</Badge>
+}
+
+function migrationWorkerBadge(status: string | undefined) {
+  const value = String(status || "").toLowerCase()
+  if (value === "completed") return <Badge className="bg-green-600">Worker completed</Badge>
+  if (value === "running") return <Badge className="bg-primary text-primary-foreground">Worker running</Badge>
+  if (value === "claimed") return <Badge className="bg-sky-600">Worker claimed</Badge>
+  if (value === "pending" || value === "queued") return <Badge variant="secondary">Worker queued</Badge>
+  if (value === "failed") return <Badge className="bg-red-600">Worker failed</Badge>
+  if (value === "canceled" || value === "aborted") return <Badge variant="outline">Worker stopped</Badge>
+  return <Badge variant="outline">{value || "Worker idle"}</Badge>
 }
 
 function formatRepairMode(mode: RepairJob["mode"] | string | undefined): string {
@@ -2039,63 +2051,77 @@ export default function MigrationDetailsPage() {
       {migration.options.executionMode === "migration_workers" ? (
         <Card className="gap-2">
           <CardHeader className="pb-1">
-            <CardTitle>Worker Overview</CardTitle>
-            <CardDescription>Live migration worker execution, progress, current files, and workflow instances.</CardDescription>
+            <div className="space-y-1">
+              <CardTitle>Migration Workers</CardTitle>
+              <CardDescription>Worker instances executing this migration.</CardDescription>
+            </div>
           </CardHeader>
           <CardContent className="space-y-3 pt-0">
             {workerRuns.length === 0 ? (
-              <div className="rounded-xl border border-dashed p-5 text-sm text-muted-foreground">Waiting for workflow dispatch.</div>
-            ) : <>
-              <div className="rounded-2xl border bg-muted/15 p-4">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="font-medium">Overall progress</span>
-                  <span className="font-mono">{overviewProgress.totalObjects > 0 ? ((overviewProgress.transferred / overviewProgress.totalObjects) * 100).toFixed(1) : "0.0"}%</span>
-                </div>
-                <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
-                  <div className="h-full bg-primary transition-all" style={{ width: `${overviewProgress.totalObjects > 0 ? Math.min(100, (overviewProgress.transferred / overviewProgress.totalObjects) * 100) : 0}%` }} />
-                </div>
-                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Processed files</div><div className="mt-1 text-lg font-semibold">{formatNumber(overviewProgress.transferred + overviewProgress.copyFailed + overviewProgress.skipped)} / {formatNumber(overviewProgress.totalObjects)}</div></div>
-                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Transferred</div><div className="mt-1 text-lg font-semibold">{formatNumber(overviewProgress.transferred)}</div></div>
-                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Transferred bytes</div><div className="mt-1 text-lg font-semibold">{formatBytes(items.reduce((n, item) => n + (readLiveBucketState(isRecord(item.progress) ? item.progress : {})?.transferredBytes || 0), 0))}</div></div>
-                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Failed</div><div className="mt-1 text-lg font-semibold">{formatNumber(overviewProgress.copyFailed)}</div></div>
-                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Workers</div><div className="mt-1 text-lg font-semibold">{workerRuns.filter((run) => run.status === "running").length} / {workerRuns.length}</div></div>
-                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Buckets completed</div><div className="mt-1 text-lg font-semibold">{bucketCounts.completed} / {bucketCounts.total}</div></div>
-                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Verification issues</div><div className="mt-1 text-lg font-semibold">{formatNumber(overviewProgress.verifyIssues)}</div></div>
-                  <div className="rounded-lg border bg-background/80 p-3"><div className="text-xs text-muted-foreground">Remaining</div><div className="mt-1 text-lg font-semibold">{formatNumber(Math.max(0, overviewProgress.totalObjects - overviewProgress.transferred - overviewProgress.skipped - overviewProgress.copyFailed))}</div></div>
-                </div>
+              <div className="rounded-2xl border border-dashed p-5 text-sm text-muted-foreground">
+                Waiting for a migration worker to start.
               </div>
-              <div className="pt-1 text-sm font-medium">Workflow instances</div>
-              {workerRuns.map((run) => {
+            ) : workerRuns.map((run) => {
               const file = run.currentFile && typeof run.currentFile === "object" ? run.currentFile : null
-              const key = typeof file?.key === "string" ? file.key : "Waiting for next file"
-              const bytesTransferred = Number(file?.bytesTransferred ?? 0)
-              const bytesTotal = Number(file?.bytesTotal ?? file?.size ?? 0)
-              const percent = bytesTotal > 0 ? Math.min(100, Math.max(0, (bytesTransferred / bytesTotal) * 100)) : 0
+              const key = typeof file?.key === "string" ? file.key : "Waiting for the next file"
+              const isActive = run.status === "running" || run.status === "claimed" || run.status === "pending"
+              const summaryText = run.currentStatus || (isActive ? "Migration worker is processing assigned files." : "Migration worker run finished.")
+
               return (
-                <div key={run.id} className="rounded-xl border p-4 text-sm">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="font-medium">Worker {(run.instanceId || run.id).slice(0, 8)}</div>
-                      <div className="mt-1 truncate font-mono text-xs" title={key}>{key}</div>
-                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
-                        <div className="h-full bg-primary transition-all" style={{ width: `${percent}%` }} />
+                <div
+                  key={run.id}
+                  className={cn(
+                    "overflow-hidden rounded-2xl border text-sm",
+                    isActive ? "border-primary/30 bg-primary/[0.04]" : "bg-muted/15"
+                  )}
+                >
+                  <div className="flex flex-col gap-4 border-b px-4 py-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="min-w-0 flex-1 space-y-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {migrationWorkerBadge(run.status)}
+                        <Badge variant="outline">Migration transfer</Badge>
+                        <span className="text-xs text-muted-foreground">Updated {formatDate(run.lastHeartbeatAt || run.updatedAt)}</span>
                       </div>
-                      <div className="mt-2 text-xs text-muted-foreground">
-                        {run.currentStatus || run.status} · {bytesTotal > 0 ? `${formatBytes(bytesTransferred)} / ${formatBytes(bytesTotal)}` : "idle"} · heartbeat {formatDate(run.lastHeartbeatAt)}
+                      <div className="space-y-1">
+                        <div className="font-mono text-[11px] text-muted-foreground">{run.instanceId || run.externalRunId || run.id}</div>
+                        <div className="text-sm leading-relaxed text-muted-foreground">{summaryText}</div>
                       </div>
                     </div>
-                    {repairJobBadge(["pending", "running", "completed", "failed", "canceled"].includes(run.status) ? run.status as RepairJob["status"] : "pending")}
+
+                    <div className="flex w-full items-start justify-end lg:w-auto">
+                      <Button
+                        variant="outline"
+                        disabled={!run.jobId}
+                        onClick={() => {
+                          if (run.jobId) router.push(`/dashboard/migrations/${encodeURIComponent(id)}/jobs/${encodeURIComponent(run.jobId)}`)
+                        }}
+                      >
+                        Details
+                      </Button>
+                    </div>
                   </div>
-                  <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
-                    <div>Completed files: <span className="font-medium text-foreground">{formatNumber(run.completedFiles)}</span></div>
-                    <div>Completed bytes: <span className="font-medium text-foreground">{formatBytes(run.completedBytes)}</span></div>
-                    <div>Failed files: <span className="font-medium text-foreground">{formatNumber(run.failedFiles)}</span></div>
+
+                  <div className="grid gap-px bg-border sm:grid-cols-3 lg:grid-cols-4">
+                    <div className="bg-background/80 px-4 py-3">
+                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Worker</div>
+                      <div className="mt-1 truncate font-medium">{run.agentId || "-"}</div>
+                    </div>
+                    <div className="bg-background/80 px-4 py-3">
+                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Status</div>
+                      <div className="mt-1 font-medium">{run.currentStatus || run.status || "-"}</div>
+                    </div>
+                    <div className="bg-background/80 px-4 py-3">
+                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Current file</div>
+                      <div className="mt-1 truncate font-mono text-xs" title={key}>{key}</div>
+                    </div>
+                    <div className="bg-background/80 px-4 py-3">
+                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Started</div>
+                      <div className="mt-1 font-medium">{formatDate(run.createdAt)}</div>
+                    </div>
                   </div>
                 </div>
               )
-              })}
-            </>}
+            })}
           </CardContent>
         </Card>
       ) : null}

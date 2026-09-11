@@ -154,10 +154,10 @@ export default function MigrationWorkerJobDetailsPage() {
         else setLoading(true)
         const res = await fetch(`/api/repair-jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" })
         const json = await res.json().catch(() => ({}))
-        if (!res.ok) throw new Error(json.error || "Unable to load repair job")
+        if (!res.ok) throw new Error(json.error || "Unable to load worker job")
         setJob((json.job ?? null) as RepairJob | null)
       } catch (error) {
-        if (!silent) toast.error(error instanceof Error ? error.message : "Unable to load repair job")
+        if (!silent) toast.error(error instanceof Error ? error.message : "Unable to load worker job")
       } finally {
         setLoading(false)
         setRefreshing(false)
@@ -188,6 +188,7 @@ export default function MigrationWorkerJobDetailsPage() {
   const activeFileEvent = React.useMemo(() => findActiveFileEvent(fileEvents), [fileEvents])
   const currentFile = currentFileFromProgress ?? activeFileEvent
   const stats = isRecord(job?.progress?.stats) ? (job?.progress?.stats as Record<string, unknown>) : null
+  const isMigrationJob = job?.mode === "migration"
 
   const bucketItems = React.useMemo(() => {
     const byId = new Map<string, Record<string, unknown>>()
@@ -408,13 +409,13 @@ export default function MigrationWorkerJobDetailsPage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Live stats</CardTitle>
-            <CardDescription>Worker scan, verify, and bucket totals.</CardDescription>
+            <CardDescription>{isMigrationJob ? "Worker transfer and bucket totals." : "Worker scan, verify, and bucket totals."}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2 text-sm">
             <div className="flex items-center justify-between"><span className="text-muted-foreground">Scanned source</span><span>{Number(stats?.scannedSourceObjects || 0)}</span></div>
             <div className="flex items-center justify-between"><span className="text-muted-foreground">Scanned destination</span><span>{Number(stats?.scannedDestinationObjects || 0)}</span></div>
             <div className="flex items-center justify-between"><span className="text-muted-foreground">Verified objects</span><span>{Number(stats?.verifiedObjects || 0)}</span></div>
-            <div className="flex items-center justify-between"><span className="text-muted-foreground">Repair candidates</span><span>{Number(stats?.repairCandidates || 0)}</span></div>
+            <div className="flex items-center justify-between"><span className="text-muted-foreground">{isMigrationJob ? "Transfer candidates" : "Repair candidates"}</span><span>{Number(stats?.repairCandidates || 0)}</span></div>
             <div className="flex items-center justify-between"><span className="text-muted-foreground">Completed buckets</span><span>{Number(stats?.completedBuckets || 0)}</span></div>
             <div className="flex items-center justify-between"><span className="text-muted-foreground">Failed buckets</span><span>{Number(stats?.failedBuckets || 0)}</span></div>
           </CardContent>

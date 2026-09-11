@@ -2,6 +2,7 @@ import { queryDb } from "./db"
 
 export type MigrationWorkerRun = {
   id: string
+  jobId?: string
   agentId: string
   status: string
   externalRunId?: string
@@ -18,6 +19,7 @@ export type MigrationWorkerRun = {
 
 type RunRow = {
   id: string
+  job_reference: string | null
   agent_id: string
   status: string
   external_run_id: string | null
@@ -35,7 +37,7 @@ type RunRow = {
 
 export async function listMigrationWorkerRuns(migrationId: string): Promise<MigrationWorkerRun[]> {
   const result = await queryDb<RunRow>(`
-    select r.id,r.agent_id,r.status,r.external_run_id,r.payload->>'workerInstanceId' instance_id,
+    select r.id,r.job_reference,r.agent_id,r.status,r.external_run_id,r.payload->>'workerInstanceId' instance_id,
       j.status job_status,j.payload job_payload,j.progress job_progress,j.last_heartbeat_at job_heartbeat,
       coalesce((r.payload->>'completedFiles')::bigint,0) completed_files,
       coalesce((r.payload->>'failedFiles')::bigint,0) failed_files,
@@ -60,6 +62,7 @@ export async function listMigrationWorkerRuns(migrationId: string): Promise<Migr
         : undefined
     return {
       id: row.id,
+      jobId: row.job_reference ?? undefined,
       agentId: row.agent_id,
       status: row.status,
       externalRunId: row.external_run_id ?? undefined,
