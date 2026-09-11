@@ -31,6 +31,7 @@ import { Separator } from "@/components/ui/separator"
 import { Switch } from "@/components/ui/switch"
 import { useAuth } from "@/components/auth-provider"
 import { cn } from "@/lib/utils"
+import { useAuthCapabilities } from "@/hooks/use-auth-capabilities"
 
 function initials(name: string, email: string) {
   const source = name.trim() || email.split("@")[0] || "User"
@@ -111,6 +112,7 @@ async function resizeImageToUnderLimit(
 
 export default function ProfilePage() {
   const { user, updateSelf, loading, setUserDirect } = useAuth()
+  const capabilities = useAuthCapabilities()
   const router = useRouter()
   const [name, setName] = React.useState("")
   const [email, setEmail] = React.useState("")
@@ -627,7 +629,7 @@ export default function ProfilePage() {
 
                 <Separator />
 
-                <section className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                {capabilities.sms ? <section className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex min-w-0 items-start gap-3">
                     <Phone className="mt-0.5 h-4 w-4 text-muted-foreground" />
                     <div className="min-w-0">
@@ -649,11 +651,11 @@ export default function ProfilePage() {
                       </Link>
                     </Button>
                   </div>
-                </section>
+                </section> : null}
 
-                <Separator />
+                {capabilities.sms && capabilities.google ? <Separator /> : null}
 
-                <section className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                {capabilities.google ? <section className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex min-w-0 items-start gap-3">
                     {isGoogleLinked ? (
                       <Link2 className="mt-0.5 h-4 w-4 text-muted-foreground" />
@@ -679,7 +681,7 @@ export default function ProfilePage() {
                       Unlink
                     </Button>
                   )}
-                </section>
+                </section> : null}
               </CardContent>
             </Card>
           </div>

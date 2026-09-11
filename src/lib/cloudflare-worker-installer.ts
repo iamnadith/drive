@@ -11,7 +11,7 @@ type TokenMap = Record<HostedWorker, string>
 type Account = { id: string; name: string }
 type Artifact = { url: string; sha256: string; compatibilityDate: string; compatibilityFlags?: string[] }
 type Manifest = { version: string; workers: Record<HostedWorker, Artifact> }
-type WorkerState = { accountId?: string; accountName?: string; scriptName: string; url?: string; deployed?: boolean; verified?: boolean; phase?: "queued" | "uploading" | "configuring" | "deployed" | "verifying" | "verified" | "failed"; deployedAt?: string; verifiedAt?: string; error?: string }
+type WorkerState = { accountId?: string; accountName?: string; scriptName: string; url?: string; deployed?: boolean; verified?: boolean; phase?: "queued" | "uploading" | "configuring" | "deployed" | "verifying" | "verified" | "failed"; deployedAt?: string; verifiedAt?: string; lastCheckedAt?: string; latencyMs?: number; build?: string | number; error?: string }
 type InstallState = {
   id: string
   mode: InstallMode
@@ -22,6 +22,7 @@ type InstallState = {
   encryptedTokens?: Partial<TokenMap>
   workers: Record<HostedWorker, WorkerState>
   error?: string
+  lastReconciledAt?: string
   updatedAt: string
 }
 type RuntimeSnapshot = {
@@ -33,15 +34,20 @@ type HostingPreference = { mode: "automatic" | "manual"; manual?: RuntimeSnapsho
 const API = "https://api.cloudflare.com/client/v4"
 const ORDER: HostedWorker[] = ["backend", "scanner", "migration"]
 
-function encryptionKey() {
-  const material = String(process.env.CLOUDFLARE_TOKEN_ENCRYPTION_KEY || process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET || process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL || "")
-  if (material.length < 24) throw new Error("Set CLOUDFLARE_TOKEN_ENCRYPTION_KEY to securely save Cloudflare tokens")
-  return createHash("sha256").update(`drive-cloudflare-token:${material}`).digest()
+function encryptionKeys() {
+  const materials = [
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_KEY,
+    process.env.CLOUDFLARE_TOKEN_ENCRYPTION_KEY,
+    process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET,
+    process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL,
+  ].map((value) => String(value || "")).filter((value, index, values) => value.length >= 24 && values.indexOf(value) === index)
+  if (!materials.length) throw new Error("Configure the Supabase server key to securely save Cloudflare tokens")
+  return materials.map((material) => createHash("sha256").update(`drive-cloudflare-token:${material}`).digest())
 }
 
 function encryptToken(token: string, installationId: string, worker: HostedWorker) {
   const iv = randomBytes(12)
-  const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv)
+  const cipher = createCipheriv("aes-256-gcm", encryptionKeys()[0], iv)
   cipher.setAAD(Buffer.from(`${installationId}:${worker}`))
   const encrypted = Buffer.concat([cipher.update(token, "utf8"), cipher.final()])
   return `v1.${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${encrypted.toString("base64url")}`
@@ -50,9 +56,14 @@ function encryptToken(token: string, installationId: string, worker: HostedWorke
 function decryptToken(value: string, installationId: string, worker: HostedWorker) {
   const [version, iv, tag, encrypted] = String(value).split(".")
   if (version !== "v1" || !iv || !tag || !encrypted) throw new Error("Saved Cloudflare token is invalid; replace it")
-  const decipher = createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(iv, "base64url"))
-  decipher.setAAD(Buffer.from(`${installationId}:${worker}`)); decipher.setAuthTag(Buffer.from(tag, "base64url"))
-  return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8")
+  for (const key of encryptionKeys()) {
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"))
+      decipher.setAAD(Buffer.from(`${installationId}:${worker}`)); decipher.setAuthTag(Buffer.from(tag, "base64url"))
+      return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8")
+    } catch { /* Try legacy key material so saved tokens survive a safe key migration. */ }
+  }
+  throw new Error("Saved Cloudflare token cannot be decrypted; replace it")
 }
 
 function panelUrl() {
@@ -102,7 +113,7 @@ async function saveState(state: InstallState) {
 }
 
 async function saveRuntimeConfiguration(state: InstallState, enabled: boolean) {
-  const [backend, migration] = await Promise.all([getBackendOrchestratorSettings(), getMigrationOrchestratorSettings()])
+  const backend = await getBackendOrchestratorSettings()
   const backendValue = {
     enabled,
     orchestratorUrl: state.workers.backend.url || "",
@@ -130,6 +141,26 @@ async function currentRuntimeSnapshot(): Promise<RuntimeSnapshot> {
     backend: { enabled: backend.enabled, orchestratorUrl: backend.orchestratorUrl, sharedSecret: backend.sharedSecret, syncIntervalMinutes: backend.syncIntervalMinutes },
     migration: { enabled: migration.enabled, migrationEnabled: migration.migrationEnabled, fileScannerEnabled: migration.fileScannerEnabled, orchestratorUrl: migration.orchestratorUrl, fileScannerUrl: migration.fileScannerUrl, sharedSecret: migration.sharedSecret, fileScannerSecret: migration.fileScannerSecret },
   }
+}
+
+async function adoptExistingWorkers(state: InstallState, tokens: TokenMap, accounts: Record<HostedWorker, Account>) {
+  const snapshot = await currentRuntimeSnapshot()
+  const candidates: Record<HostedWorker, { url: string; secret: string }> = {
+    backend: { url: snapshot.backend.orchestratorUrl, secret: snapshot.backend.sharedSecret },
+    scanner: { url: snapshot.migration.fileScannerUrl, secret: snapshot.migration.fileScannerSecret },
+    migration: { url: snapshot.migration.orchestratorUrl, secret: snapshot.migration.sharedSecret },
+  }
+  await Promise.all(ORDER.map(async (worker) => {
+    const current = state.workers[worker]
+    const candidate = candidates[worker]
+    if (current.deployed || !candidate.url || candidate.secret.length < 24) return
+    try {
+      if (!(await scriptExists(tokens[worker], accounts[worker].id, current.scriptName))) return
+      const inspected = await inspectWorker(candidate.url, candidate.secret)
+      state.secrets[worker] = candidate.secret; current.url = candidate.url; current.deployed = true; current.verified = true; current.phase = "verified"
+      current.lastCheckedAt = new Date().toISOString(); current.latencyMs = inspected.latencyMs; current.build = inspected.build
+    } catch { /* Existing configuration is not authoritative; the installer will repair it. */ }
+  }))
 }
 
 async function writeRuntimeSnapshot(snapshot: RuntimeSnapshot) {
@@ -256,6 +287,11 @@ async function setSchedule(token: string, accountId: string, scriptName: string)
   await cf(token, `/accounts/${accountId}/workers/scripts/${scriptName}/schedules`, { method: "PUT", body: JSON.stringify([{ cron: "* * * * *" }]) })
 }
 
+async function ensureSchedule(token: string, accountId: string, scriptName: string) {
+  const schedules = await cf<Array<{ cron?: string }>>(token, `/accounts/${accountId}/workers/scripts/${scriptName}/schedules`)
+  if (!schedules.some((schedule) => schedule.cron === "* * * * *")) await setSchedule(token, accountId, scriptName)
+}
+
 async function configureConsumer(token: string, accountId: string, queueName: string, dlqName: string, scriptName: string, retryDelay: number) {
   const queue = await ensureQueue(token, accountId, queueName)
   await ensureQueue(token, accountId, dlqName)
@@ -265,6 +301,13 @@ async function configureConsumer(token: string, accountId: string, queueName: st
   await cf(token, existing
     ? `/accounts/${accountId}/queues/${queue.queue_id}/consumers/${existing.consumer_id}`
     : `/accounts/${accountId}/queues/${queue.queue_id}/consumers`, { method: existing ? "PUT" : "POST", body })
+}
+
+async function ensureConsumer(token: string, accountId: string, queueName: string, dlqName: string, scriptName: string, retryDelay: number) {
+  const queue = await ensureQueue(token, accountId, queueName)
+  await ensureQueue(token, accountId, dlqName)
+  const consumers = await cf<Array<{ script_name?: string }>>(token, `/accounts/${accountId}/queues/${queue.queue_id}/consumers`)
+  if (!consumers.some((consumer) => consumer.script_name === scriptName)) await configureConsumer(token, accountId, queueName, dlqName, scriptName, retryDelay)
 }
 
 async function workersDevUrl(token: string, accountId: string, scriptName: string) {
@@ -289,6 +332,76 @@ async function verify(url: string, secret: string) {
   throw new Error(lastError)
 }
 
+async function scriptExists(token: string, accountId: string, scriptName: string) {
+  const response = await fetch(`${API}/accounts/${accountId}/workers/scripts/${scriptName}/settings`, {
+    headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000), cache: "no-store",
+  })
+  if (response.status === 404) return false
+  const payload = await response.json().catch(() => ({})) as { success?: boolean; errors?: Array<{ message?: string }> }
+  if (!response.ok || payload.success === false) throw new Error(payload.errors?.[0]?.message || `Unable to inspect ${scriptName} (${response.status})`)
+  return true
+}
+
+async function inspectWorkerOnce(url: string, secret: string) {
+  const started = Date.now()
+  const [health, status] = await Promise.all([
+    fetch(`${url}/health`, { cache: "no-store", signal: AbortSignal.timeout(10_000) }),
+    fetch(`${url}/status`, { cache: "no-store", headers: { Authorization: `Bearer ${secret}` }, signal: AbortSignal.timeout(10_000) }),
+  ])
+  if (!health.ok) throw new Error(`Health check failed (${health.status})`)
+  if (!status.ok) throw new Error(`Authenticated status check failed (${status.status})`)
+  const payload = await status.json().catch(() => ({})) as { build?: string | number }
+  return { latencyMs: Date.now() - started, build: payload.build }
+}
+
+async function inspectWorker(url: string, secret: string) {
+  try { return await inspectWorkerOnce(url, secret) }
+  catch (firstError) {
+    await new Promise((resolve) => setTimeout(resolve, 750))
+    try { return await inspectWorkerOnce(url, secret) }
+    catch { throw firstError }
+  }
+}
+
+export async function reconcileCloudflareWorkers(force = false) {
+  return withDbAdvisoryLock("cloudflare-worker-reconcile", "singleton", async () => {
+    const state = await loadState()
+    if (!state || state.status !== "ready" || !state.encryptedTokens) return getCloudflareInstallation()
+    const encryptedTokens = state.encryptedTokens
+    if (!force && state.lastReconciledAt && Date.now() - new Date(state.lastReconciledAt).getTime() < 60_000) return getCloudflareInstallation()
+    await Promise.all(ORDER.map(async (worker) => {
+      const current = state.workers[worker]
+      try {
+        if (!current.accountId || !current.url || !encryptedTokens[worker]) throw new Error("Deployment metadata is incomplete")
+        const token = decryptToken(encryptedTokens[worker]!, state.id, worker)
+        if (!(await scriptExists(token, current.accountId, current.scriptName))) throw new Error("Worker script was not found in Cloudflare")
+        const inspected = await inspectWorker(current.url, state.secrets[worker])
+        const names = resourceNames()
+        if (worker === "scanner") await ensureConsumer(token, current.accountId, names.scannerQueue, names.scannerDlq, current.scriptName, 15)
+        if (worker === "migration") await ensureConsumer(token, current.accountId, names.migrationQueue, names.migrationDlq, current.scriptName, 30)
+        await ensureSchedule(token, current.accountId, current.scriptName)
+        current.deployed = true; current.verified = true; current.phase = "verified"; current.error = undefined
+        current.lastCheckedAt = new Date().toISOString(); current.latencyMs = inspected.latencyMs; current.build = inspected.build
+      } catch (error) {
+        current.deployed = false; current.verified = false; current.phase = "failed"
+        current.error = error instanceof Error ? error.message : "Worker reconciliation failed"; current.lastCheckedAt = new Date().toISOString()
+      }
+    }))
+    state.lastReconciledAt = new Date().toISOString()
+    const failed = ORDER.filter((worker) => !state.workers[worker].verified)
+    if (failed.length) { state.status = "failed"; state.step = "reconciliation_failed"; state.error = `${failed.length} Worker${failed.length === 1 ? "" : "s"} require repair` }
+    else { state.status = "ready"; state.step = "reconciled"; state.error = undefined }
+    await saveState(state)
+    return getCloudflareInstallation()
+  })
+}
+
+export async function reconcileAndRepairCloudflareWorkers(force = false) {
+  const installation = await reconcileCloudflareWorkers(force)
+  if (!installation || installation.status !== "failed" || !installation.tokensSaved) return installation
+  return installCloudflareWorkers({ mode: installation.mode, tokens: {} })
+}
+
 export async function getCloudflareInstallation() {
   const state = await loadState()
   if (!state) return null
@@ -301,6 +414,26 @@ export async function revealCloudflareTokens() {
   if (!state?.encryptedTokens || !ORDER.every((worker) => state.encryptedTokens?.[worker])) throw new Error("No saved Cloudflare token is available; enter it once and deploy")
   const tokens = Object.fromEntries(ORDER.map((worker) => [worker, decryptToken(state.encryptedTokens![worker]!, state.id, worker)])) as TokenMap
   return state.mode === "single" ? { mode: state.mode, token: tokens.backend } : { mode: state.mode, backendToken: tokens.backend, scannerToken: tokens.scanner, migrationToken: tokens.migration }
+}
+
+export async function replaceCloudflareTokens(input: { mode: InstallMode; tokens: Partial<TokenMap> }) {
+  return withDbAdvisoryLock("cloudflare-worker-install", "singleton", async () => {
+    const state = await loadState()
+    if (!state || state.status !== "ready") throw new Error("A verified installation is required before replacing its tokens")
+    const shared = String(input.tokens.backend || "").trim()
+    const tokens: TokenMap = input.mode === "single" ? { backend: shared, scanner: shared, migration: shared } : {
+      backend: shared, scanner: String(input.tokens.scanner || "").trim(), migration: String(input.tokens.migration || "").trim(),
+    }
+    if (ORDER.some((worker) => tokens[worker].length < 20)) throw new Error("Enter every replacement token")
+    for (const worker of ORDER) {
+      const account = await resolveAccount(tokens[worker])
+      if (account.id !== state.workers[worker].accountId) throw new Error(`${worker} replacement token does not belong to its deployed account`)
+    }
+    state.mode = input.mode
+    state.encryptedTokens = Object.fromEntries(ORDER.map((worker) => [worker, encryptToken(tokens[worker], state.id, worker)]))
+    await saveState(state)
+    return getCloudflareInstallation()
+  })
 }
 
 export async function installCloudflareWorkers(input: { mode: InstallMode; tokens: Partial<TokenMap>; restart?: boolean }) {
@@ -335,6 +468,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
         state.workers[worker].accountName = accounts[worker].name
       }
       state.step = "accounts_validated"; await saveState(state)
+      await adoptExistingWorkers(state, tokens, accounts); state.step = "existing_workers_checked"; await saveState(state)
       const manifest = await getManifest(); state.releaseVersion = manifest.version
       await saveState(state)
       await ensureQueue(tokens.scanner, accounts.scanner.id, names.scannerQueue)
@@ -347,17 +481,18 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
           state.workers[worker].phase = "uploading"; state.workers[worker].error = undefined; state.step = `${worker}_uploading`; await saveState(state)
           await uploadWorker({ worker, token: tokens[worker], accountId: accounts[worker].id, entry: manifest.workers[worker], code: await artifact(manifest.workers[worker]), state })
           state.workers[worker].phase = "configuring"; state.step = `${worker}_configuring`; await saveState(state)
-          if (worker === "scanner") await configureConsumer(tokens.scanner, accounts.scanner.id, names.scannerQueue, names.scannerDlq, state.workers.scanner.scriptName, 15)
-          if (worker === "migration") await configureConsumer(tokens.migration, accounts.migration.id, names.migrationQueue, names.migrationDlq, state.workers.migration.scriptName, 30)
           state.workers[worker].url = await workersDevUrl(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
           state.workers[worker].deployed = true; state.workers[worker].phase = "deployed"; state.workers[worker].deployedAt = new Date().toISOString(); state.step = `${worker}_deployed`; await saveState(state)
         }
       }
+      await configureConsumer(tokens.scanner, accounts.scanner.id, names.scannerQueue, names.scannerDlq, state.workers.scanner.scriptName, 15)
+      await configureConsumer(tokens.migration, accounts.migration.id, names.migrationQueue, names.migrationDlq, state.workers.migration.scriptName, 30)
+      state.step = "consumers_ready"; await saveState(state)
       await saveRuntimeConfiguration(state, false)
       state.step = "configuration_saved"; await saveState(state)
       for (const worker of ORDER) {
         state.workers[worker].phase = "verifying"; state.step = `${worker}_verifying`; await saveState(state)
-        await verify(state.workers[worker].url!, state.secrets[worker]); state.workers[worker].verified = true; state.workers[worker].phase = "verified"; state.workers[worker].verifiedAt = new Date().toISOString(); await saveState(state)
+        await verify(state.workers[worker].url!, state.secrets[worker]); state.workers[worker].verified = true; state.workers[worker].phase = "verified"; state.workers[worker].verifiedAt = new Date().toISOString(); state.workers[worker].lastCheckedAt = new Date().toISOString(); await saveState(state)
       }
       for (const worker of ORDER) await setSchedule(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
       state.step = "schedules_ready"; await saveState(state)

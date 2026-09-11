@@ -4,6 +4,7 @@ import { sendVerificationEmail, verifyEmailCode } from "@/lib/email-verification
 import { sendSmsVerificationCode, verifySmsCode } from "@/lib/sms-verification"
 import { findUserById, toPublicUser } from "@/lib/users-store"
 import { consumeUserTotpCode } from "@/lib/totp-verification"
+import { authCapabilities } from "@/lib/system-readiness"
 
 type VerificationMethod = "authenticator" | "email" | "sms"
 
@@ -21,7 +22,7 @@ function methodsFor(user: { totpEnabled?: boolean; mobileVerified?: boolean; mob
   const methods: VerificationMethod[] = []
   if (user.totpEnabled) methods.push("authenticator")
   methods.push("email")
-  if (user.mobileVerified && user.mobileNumber) methods.push("sms")
+  if (authCapabilities().sms && user.mobileVerified && user.mobileNumber) methods.push("sms")
   return methods
 }
 

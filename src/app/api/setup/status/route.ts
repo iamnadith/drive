@@ -4,24 +4,52 @@ import {
   hasAdminUser,
   hasSuperAdminUser,
 } from "@/lib/users-store"
+import { getSessionUser } from "@/lib/server-auth"
+import { getCloudflareInstallation, reconcileCloudflareWorkers } from "@/lib/cloudflare-worker-installer"
+import { getSystemReadiness } from "@/lib/system-readiness"
+import { queryDb } from "@/lib/db"
+import { cookies } from "next/headers"
 
 export const runtime = "nodejs"
 
 export async function GET() {
+  const readiness = await getSystemReadiness()
   try {
     const hasUsers = await hasAnyUsers()
     const hasAdmin = await hasAdminUser()
     const hasSuperAdmin = await hasSuperAdminUser()
-    return NextResponse.json({ hasUsers, hasAdmin, hasSuperAdmin })
+    const session = await getSessionUser().catch(() => null)
+    const mayManageSetup = !hasSuperAdmin || session?.role === "superadmin"
+    const mayInspectWorkers = readiness.ready && mayManageSetup
+    const installation = mayInspectWorkers ? await reconcileCloudflareWorkers(false).catch(() => getCloudflareInstallation()) : null
+    const workersReady = installation?.status === "ready" && installation.tokensSaved === true && Object.values(installation.workers || {}).every((worker) => worker.deployed && worker.verified)
+    const setupStep = !mayManageSetup ? "complete" : !readiness.ready ? "requirements" : !workersReady ? "workers" : !hasSuperAdmin ? "account" : "complete"
+    return NextResponse.json({ hasUsers, hasAdmin, hasSuperAdmin, readiness, workersReady, setupStep, setupRequired: setupStep !== "complete" })
   } catch (error: unknown) {
     const message =
       typeof error === "object" && error !== null && "message" in error
         ? String((error as { message?: unknown }).message ?? "Setup status check failed")
         : "Setup status check failed"
 
-    // Avoid breaking the UI if Supabase is temporarily unreachable.
+    // Supabase REST may be temporarily unavailable even though PostgreSQL is
+    // healthy. Fall back to the same durable user table so an existing site is
+    // never mistaken for a brand-new installation.
+    try {
+      const result = await queryDb<{ has_users: boolean; has_admin: boolean; has_superadmin: boolean }>(`select
+        exists(select 1 from drive_users) has_users,
+        exists(select 1 from drive_users where role='admin' and status='active') has_admin,
+        exists(select 1 from drive_users where role='superadmin' and status='active') has_superadmin`)
+      const fallback = result.rows[0]
+      const sessionUserId = (await cookies()).get("sessionUserId")?.value
+      const session = sessionUserId ? await queryDb<{ role: string }>(`select role from drive_users where id=$1 and status='active' limit 1`, [sessionUserId]) : null
+      const mayManageSetup = !fallback?.has_superadmin || session?.rows[0]?.role === "superadmin"
+      const installation = readiness.ready && mayManageSetup ? await getCloudflareInstallation().catch(() => null) : null
+      const workersReady = installation?.status === "ready" && installation.tokensSaved === true && Object.values(installation.workers || {}).every((worker) => worker.deployed && worker.verified)
+      const setupStep = !mayManageSetup ? "complete" : !readiness.ready ? "requirements" : !workersReady ? "workers" : !fallback?.has_superadmin ? "account" : "complete"
+      return NextResponse.json({ hasUsers: fallback?.has_users === true, hasAdmin: fallback?.has_admin === true, hasSuperAdmin: fallback?.has_superadmin === true, readiness, workersReady, setupStep, setupRequired: setupStep !== "complete", warning: message })
+    } catch { /* Database readiness card will carry the actionable failure. */ }
     return NextResponse.json(
-      { hasUsers: false, hasAdmin: false, hasSuperAdmin: false, error: message },
+      { hasUsers: false, hasAdmin: false, hasSuperAdmin: false, readiness, workersReady: false, setupStep: readiness.ready ? "account" : "requirements", setupRequired: true, error: message },
       { status: 200 }
     )
   }

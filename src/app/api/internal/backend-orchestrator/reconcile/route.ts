@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { after, NextResponse } from "next/server"
 import { authenticateBackendOrchestrator } from "@/lib/backend-orchestrator-auth"
 import { runDatabaseMaintenance } from "@/lib/database-maintenance"
 import { listMigrations } from "@/lib/migrations-store"
@@ -6,14 +6,17 @@ import { syncMigrationLiveState } from "@/lib/migration-live-state"
 import { reconcileRepairJobs } from "@/lib/repair-jobs-store"
 import { getAllAccounts } from "@/lib/accounts-store"
 import { reconcileAssignedProjectDeliveryCors } from "@/lib/bucket-delivery-settings-service"
+import { reconcileAndRepairCloudflareWorkers } from "@/lib/cloudflare-worker-installer"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
+export const maxDuration = 300
 
 export async function POST(request: Request) {
   const auth = await authenticateBackendOrchestrator(request)
   if (!auth.ok) return NextResponse.json({ error: "Invalid Backend Orchestrator secret" }, { status: 401 })
   if (!auth.settings.enabled) return NextResponse.json({ error: "Backend Orchestrator is disabled" }, { status: 403 })
+  after(async () => { await reconcileAndRepairCloudflareWorkers(false).catch((error) => console.error("Cloudflare Worker self-healing failed", error)) })
 
   const migrations = (await listMigrations(100))
     .filter((migration) => ["running", "verifying"].includes(migration.status) || migration.syncStatus === "syncing")

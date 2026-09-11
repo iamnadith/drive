@@ -20,6 +20,7 @@ const PUBLIC_API_PREFIXES = [
   "/api/auth",
   "/api/public",
   "/api/setup",
+  "/api/workers/cloudflare-install",
   "/api/v1",
   "/api/users/email-available",
   "/api/users/username-available",

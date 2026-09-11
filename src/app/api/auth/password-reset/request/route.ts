@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { sendVerificationEmail } from "@/lib/email-verification"
 import { findUserByEmail, findUserByUsername } from "@/lib/users-store"
 import { sendSmsVerificationCode } from "@/lib/sms-verification"
+import { authCapabilities } from "@/lib/system-readiness"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -54,13 +55,14 @@ export async function POST(request: Request) {
     const methods = [
       ...(user.totpEnabled ? ["authenticator"] : []),
       "email",
-      ...(user.mobileVerified && user.mobileNumber ? ["sms"] : []),
+      ...(authCapabilities().sms && user.mobileVerified && user.mobileNumber ? ["sms"] : []),
     ]
     const defaultMethod = user.totpEnabled ? "authenticator" : "email"
     const requestedMethod =
       body.method === "sms" ? "sms" : body.method === "authenticator" ? "authenticator" : body.method === "email" ? "email" : defaultMethod
 
     if (requestedMethod === "sms") {
+      if (!authCapabilities().sms) return NextResponse.json({ error: "SMS verification is not configured" }, { status: 400 })
       if (!user.mobileVerified || !user.mobileNumber) {
         return NextResponse.json({ error: "SMS verification is not available" }, { status: 400 })
       }

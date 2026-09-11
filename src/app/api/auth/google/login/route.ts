@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server"
 import crypto from "crypto"
 import { getPublicOrigin } from "@/lib/public-origin"
+import { authCapabilities, getSystemReadiness } from "@/lib/system-readiness"
+import { getCloudflareInstallation } from "@/lib/cloudflare-worker-installer"
 
 function getEnv(name: string): string {
   const value = process.env[name]
@@ -20,6 +22,7 @@ function base64UrlEncode(input: Buffer | string): string {
 }
 
 export async function GET(request: Request) {
+  if (!authCapabilities().google) return NextResponse.json({ error: "Google sign-in is not configured" }, { status: 404 })
   try {
     // Ensure env exists (throws if not)
     getEnv("GOOGLE_CLIENT_ID")
@@ -28,6 +31,11 @@ export async function GET(request: Request) {
     const url = new URL(request.url)
     const mode = url.searchParams.get("mode") ?? "login"
     const redirect = url.searchParams.get("redirect") ?? "/"
+    if (mode === "setup") {
+      const readiness = await getSystemReadiness()
+      const installation = await getCloudflareInstallation()
+      if (!readiness.ready || installation?.status !== "ready" || installation.tokensSaved !== true || !Object.values(installation.workers || {}).every((worker) => worker.deployed && worker.verified)) throw new Error("Complete environment and Worker setup before creating the administrator")
+    }
 
     const origin = getPublicOrigin(request)
     const originUrl = new URL(origin)

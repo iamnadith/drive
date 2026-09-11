@@ -14,10 +14,12 @@ import {
   FieldLabel,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import { useAuthCapabilities } from "@/hooks/use-auth-capabilities"
 
 export default function MobileVerificationPage() {
   const router = useRouter()
   const { user, loading, setUserDirect } = useAuth()
+  const capabilities = useAuthCapabilities()
   const [step, setStep] = React.useState<"number" | "code">("number")
   const [mobileNumber, setMobileNumber] = React.useState("")
   const [code, setCode] = React.useState("")
@@ -26,10 +28,13 @@ export default function MobileVerificationPage() {
   React.useEffect(() => {
     if (!user && !loading) router.replace("/login?redirect=/profile/mobile")
   }, [user, loading, router])
+  React.useEffect(() => { if (capabilities.loaded && !capabilities.sms) router.replace("/profile") }, [capabilities, router])
 
   React.useEffect(() => {
     setMobileNumber(user?.mobileNumber ?? "")
   }, [user])
+
+  if (capabilities.loaded && !capabilities.sms) return null
 
   function normalizeMobileInput(value: string) {
     const digits = value.replace(/\D/g, "").replace(/^0/, "")

@@ -23,6 +23,7 @@ import {
   InputOTPSlot,
 } from "@/components/ui/input-otp"
 import { cn } from "@/lib/utils"
+import { useAuthCapabilities } from "@/hooks/use-auth-capabilities"
 
 type Mode = "login" | "signup" | "reset"
 type LoginStep = "email" | "password" | "totp" | "verify"
@@ -38,6 +39,7 @@ export function LoginForm({
 }: React.ComponentProps<"div"> & { initialMode?: Mode; redirectTo?: string }) {
   const router = useRouter()
   const { login, user, loading, setUserDirect } = useAuth()
+  const capabilities = useAuthCapabilities()
 
   const [mode, setMode] = React.useState<Mode>(initialMode)
   const [loginStep, setLoginStep] = React.useState<LoginStep>("email")
@@ -524,8 +526,7 @@ export function LoginForm({
             <Field>
               <Button type="submit" loading={busy}>Login</Button>
             </Field>
-            <FieldSeparator>Or</FieldSeparator>
-            <GoogleButton onClick={() => handleGoogleLogin("login")} />
+            {capabilities.google ? <><FieldSeparator>Or</FieldSeparator><GoogleButton onClick={() => handleGoogleLogin("login")} /></> : null}
           </FieldGroup>
         </form>
       ) : null}
@@ -617,8 +618,7 @@ export function LoginForm({
             <Field>
               <Button type="submit" loading={busy}>Create account</Button>
             </Field>
-            <FieldSeparator>Or</FieldSeparator>
-            <GoogleButton onClick={() => handleGoogleLogin("signup")} />
+            {capabilities.google ? <><FieldSeparator>Or</FieldSeparator><GoogleButton onClick={() => handleGoogleLogin("signup")} /></> : null}
           </FieldGroup>
         </form>
       ) : null}

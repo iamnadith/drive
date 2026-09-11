@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { findUserById, toPublicUser, updateUser } from "@/lib/users-store"
 import { normalizeSriLankaMobile, sendSmsVerificationCode, verifySmsCode } from "@/lib/sms-verification"
+import { authCapabilities } from "@/lib/system-readiness"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -10,6 +11,7 @@ function errorMessage(error: unknown, fallback: string) {
 }
 
 export async function POST(request: Request) {
+  if (!authCapabilities().sms) return NextResponse.json({ error: "SMS verification is not configured" }, { status: 404 })
   try {
     const cookieStore = await cookies()
     const userId = cookieStore.get("sessionUserId")?.value

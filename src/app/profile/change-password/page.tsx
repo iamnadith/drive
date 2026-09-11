@@ -17,6 +17,7 @@ import {
   FieldLabel,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import { useAuthCapabilities } from "@/hooks/use-auth-capabilities"
 
 type VerificationMethod = "authenticator" | "email" | "sms"
 
@@ -27,6 +28,7 @@ function passwordIsStrong(value: string) {
 export default function ChangePasswordPage() {
   const router = useRouter()
   const { user, loading, setUserDirect } = useAuth()
+  const capabilities = useAuthCapabilities()
   const [step, setStep] = React.useState<"verify" | "password">("verify")
   const [method, setMethod] = React.useState<VerificationMethod>("email")
   const [code, setCode] = React.useState("")
@@ -50,7 +52,7 @@ export default function ChangePasswordPage() {
   const methods: Array<{ id: VerificationMethod; label: string }> = [
     ...(user.totpEnabled ? [{ id: "authenticator" as const, label: "Authenticator app" }] : []),
     { id: "email" as const, label: "Email OTP" },
-    ...(user.mobileVerified && user.mobileNumber ? [{ id: "sms" as const, label: "SMS OTP" }] : []),
+    ...(capabilities.sms && user.mobileVerified && user.mobileNumber ? [{ id: "sms" as const, label: "SMS OTP" }] : []),
   ]
 
   async function sendCode(nextMethod: VerificationMethod = method) {

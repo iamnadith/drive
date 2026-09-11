@@ -7,6 +7,8 @@ import {
   PublicUser,
 } from "@/lib/users-store"
 import { sendVerificationEmail } from "@/lib/email-verification"
+import { getCloudflareInstallation } from "@/lib/cloudflare-worker-installer"
+import { getSystemReadiness } from "@/lib/system-readiness"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -16,6 +18,10 @@ function errorMessage(error: unknown, fallback: string) {
 
 export async function POST(request: Request) {
   try {
+    const readiness = await getSystemReadiness()
+    if (!readiness.ready) return NextResponse.json({ error: "Complete the required environment configuration first" }, { status: 409 })
+    const installation = await getCloudflareInstallation()
+    if (installation?.status !== "ready" || installation.tokensSaved !== true || !Object.values(installation.workers || {}).every((worker) => worker.deployed && worker.verified)) return NextResponse.json({ error: "Deploy and verify all required Workers first" }, { status: 409 })
     if (await hasSuperAdminUser()) {
       return NextResponse.json(
         { error: "Super admin already initialized" },

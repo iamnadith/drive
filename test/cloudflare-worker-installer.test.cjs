@@ -39,6 +39,12 @@ test("installer is resumable, locked and keeps secrets on release redeploy", () 
   assert.match(installer, /drive-file-scanner-\$\{suffix\}/)
   assert.match(installer, /setCloudflareHostingMode/)
   assert.match(installer, /installation\?\.status === "ready"/)
+  assert.match(installer, /reconcileCloudflareWorkers/)
+  assert.match(installer, /scriptExists/)
+  assert.match(installer, /await Promise\.all\(ORDER\.map/)
+  assert.match(installer, /current\.deployed = false; current\.verified = false/)
+  assert.match(hosting, /installation\?\.status !== "ready" \? <Button/)
+  assert.match(hosting, /repairAttempted/)
 })
 
 test("release artifacts are immutable checksummed bundles", () => {

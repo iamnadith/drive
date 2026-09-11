@@ -2,13 +2,17 @@
 
 import * as React from "react"
 import Link from "next/link"
-import { GalleryVerticalEnd } from "lucide-react"
+import { CheckCircle2, CircleDashed, Database, GalleryVerticalEnd, Mail, RefreshCw, ServerCog, ShieldCheck, TriangleAlert } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 
 import { type AuthUser, useAuth } from "@/components/auth-provider"
 import { OtpInputField } from "@/components/profile-security-flow"
 import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { Progress } from "@/components/ui/progress"
+import { CloudflareWorkerHosting } from "@/components/dashboard/cloudflare-worker-hosting"
 import {
   Field,
   FieldDescription,
@@ -21,6 +25,12 @@ import { cn } from "@/lib/utils"
 
 type SetupStep = "email" | "firstName" | "lastName" | "username" | "password" | "verify"
 type Availability = "idle" | "checking" | "available" | "taken" | "invalid"
+type SetupStatus = {
+  hasSuperAdmin: boolean
+  workersReady: boolean
+  setupStep: "requirements" | "workers" | "account" | "complete"
+  readiness: { ready: boolean; capabilities: { google: boolean; sms: boolean }; requirements: Array<{ id: string; label: string; description: string; configured: boolean; variables: string[]; error?: string }> }
+}
 
 export default function SetupPage() {
   const router = useRouter()
@@ -37,6 +47,19 @@ export default function SetupPage() {
   const [usernameStatus, setUsernameStatus] = React.useState<Availability>("idle")
   const [usernameMessage, setUsernameMessage] = React.useState("")
   const [submitting, setSubmitting] = React.useState(false)
+  const [systemStatus, setSystemStatus] = React.useState<SetupStatus | null>(null)
+  const [statusError, setStatusError] = React.useState("")
+  const [workersCompleted, setWorkersCompleted] = React.useState(false)
+
+  const loadSystemStatus = React.useCallback(async () => {
+    try {
+      const response = await fetch("/api/setup/status", { cache: "no-store" })
+      const value = await response.json()
+      if (!response.ok) throw new Error(value.error || "Unable to inspect setup status")
+      setSystemStatus(value as SetupStatus); setStatusError("")
+    } catch (error) { setStatusError(error instanceof Error ? error.message : "Unable to inspect setup status") }
+  }, [])
+  React.useEffect(() => { void loadSystemStatus() }, [loadSystemStatus])
 
   function isEmail(value: string) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
@@ -230,6 +253,32 @@ export default function SetupPage() {
     window.location.href = url.toString()
   }
 
+  if (!systemStatus) return <main className="auth-flow-bg page-under-header flex items-center justify-center p-4"><Card className="w-full max-w-lg"><CardHeader><CardTitle>Inspecting this installation</CardTitle><CardDescription>Checking environment, database, and Worker readiness.</CardDescription></CardHeader><CardContent><Progress value={34} /></CardContent>{statusError ? <CardFooter><p className="text-sm text-destructive">{statusError}</p></CardFooter> : null}</Card></main>
+
+  const stage = systemStatus.setupStep
+  const stageIndex = stage === "requirements" ? 1 : stage === "workers" ? 2 : 3
+  if (stage === "requirements" || stage === "workers" || stage === "complete") {
+    const configuredCount = systemStatus.readiness.requirements.filter((item) => item.configured).length
+    return <main className="auth-flow-bg page-under-header min-h-screen p-4 sm:p-6 lg:p-10">
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
+        <header className="flex flex-col gap-4 rounded-3xl border bg-card/80 p-5 shadow-sm backdrop-blur sm:p-8">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex items-start gap-3"><div className="flex size-11 items-center justify-center rounded-2xl border bg-background"><ShieldCheck /></div><div><Badge variant="outline">Drive control plane</Badge><h1 className="mt-2 text-2xl font-bold tracking-tight sm:text-3xl">Workspace setup</h1><p className="mt-1 max-w-2xl text-sm text-muted-foreground">A verified path from infrastructure to Workers to the first administrator.</p></div></div>
+            <Button variant="outline" onClick={() => void loadSystemStatus()}><RefreshCw data-icon="inline-start" />Recheck</Button>
+          </div>
+          <Progress value={(stageIndex / 3) * 100} />
+          <div className="grid gap-3 sm:grid-cols-3">{[["1", "Environment"], ["2", "Workers"], ["3", "Account"]].map(([number, label], index) => <div key={number} className="flex items-center gap-3 rounded-xl border bg-background/60 p-3"><Badge variant={stageIndex >= index + 1 ? "default" : "secondary"}>{number}</Badge><span className="text-sm font-medium">{label}</span></div>)}</div>
+        </header>
+
+        {stage === "requirements" ? <Card><CardHeader><CardTitle className="flex items-center gap-2"><Database />Required environment</CardTitle><CardDescription>{configuredCount} of {systemStatus.readiness.requirements.length} requirements are ready. Add missing variables in Vercel, redeploy, then recheck.</CardDescription></CardHeader><CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{systemStatus.readiness.requirements.map((item) => <Card key={item.id}><CardHeader className="pb-3"><div className="flex items-start justify-between gap-3"><CardTitle className="text-base">{item.label}</CardTitle>{item.configured ? <CheckCircle2 className="text-primary" /> : <TriangleAlert className="text-destructive" />}</div><CardDescription>{item.description}</CardDescription></CardHeader><CardContent className="flex flex-col gap-2"><Badge variant={item.configured ? "default" : "destructive"}>{item.configured ? "Configured" : "Required"}</Badge>{item.variables.map((variable) => <code key={variable} className="rounded-md bg-muted px-2 py-1 text-xs">{variable}</code>)}{item.error ? <p className="text-xs text-destructive">{item.error}</p> : null}</CardContent></Card>)}</CardContent><CardFooter className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground"><span>Optional:</span><Badge variant="outline">Google {systemStatus.readiness.capabilities.google ? "available" : "not configured"}</Badge><Badge variant="outline">SMS {systemStatus.readiness.capabilities.sms ? "available" : "not configured"}</Badge></div><Button onClick={() => void loadSystemStatus()} disabled={!systemStatus.readiness.ready}>Continue to Workers</Button></CardFooter></Card> : null}
+
+        {stage === "workers" ? <><Card><CardHeader><CardTitle className="flex items-center gap-2"><ServerCog />Worker foundation</CardTitle><CardDescription>Existing Workers are verified and reused. Missing or unhealthy Workers are repaired without duplicating healthy scripts.</CardDescription></CardHeader><CardContent><div className="grid gap-3 sm:grid-cols-3"><p className="flex items-center gap-2 text-sm"><CheckCircle2 className="text-primary" />Backend first</p><p className="flex items-center gap-2 text-sm"><CircleDashed />File Scanner second</p><p className="flex items-center gap-2 text-sm"><CircleDashed />Migration third</p></div></CardContent></Card><CloudflareWorkerHosting onboarding onReady={() => setWorkersCompleted(true)} />{workersCompleted ? <Card><CardHeader><CardTitle>Worker foundation is ready</CardTitle><CardDescription>All three deployments exist and passed authenticated verification.</CardDescription></CardHeader><CardFooter className="justify-end"><Button onClick={() => void loadSystemStatus()}>Continue to account</Button></CardFooter></Card> : null}</> : null}
+
+        {stage === "complete" ? <Card><CardHeader><CardTitle>Setup is healthy</CardTitle><CardDescription>Required services and all three Workers passed reconciliation.</CardDescription></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2"><p className="flex items-center gap-2 text-sm"><Mail />Email gateway ready</p><p className="flex items-center gap-2 text-sm"><ServerCog />Workers verified</p></CardContent><CardFooter><Button asChild><Link href="/">Return to Drive</Link></Button></CardFooter></Card> : null}
+      </div>
+    </main>
+  }
+
   const title =
     step === "email"
       ? "Initialize Drive"
@@ -254,6 +303,7 @@ export default function SetupPage() {
               </div>
               <span className="sr-only">Drive</span>
             </Link>
+            <Badge variant="outline">Step 3 of 3 · Account</Badge>
             <h1 className="text-balance text-xl font-bold">{title}</h1>
             <FieldDescription className="text-pretty">{description}</FieldDescription>
           </div>
@@ -277,12 +327,11 @@ export default function SetupPage() {
                     Continue
                   </Button>
                 </Field>
-                <FieldSeparator>Or</FieldSeparator>
-                <Field>
+                {systemStatus.readiness.capabilities.google ? <><FieldSeparator>Or</FieldSeparator><Field>
                   <Button type="button" variant="outline" onClick={handleGoogleSetup}>
                     Google
                   </Button>
-                </Field>
+                </Field></> : null}
               </FieldGroup>
             </form>
           ) : null}

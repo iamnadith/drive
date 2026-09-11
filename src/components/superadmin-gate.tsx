@@ -12,6 +12,7 @@ export function SuperAdminGate({ children }: Props) {
   const pathname = usePathname()
   const [checked, setChecked] = React.useState(false)
   const [hasSuperAdmin, setHasSuperAdmin] = React.useState<boolean | null>(null)
+  const [setupRequired, setSetupRequired] = React.useState(false)
 
   React.useEffect(() => {
     let cancelled = false
@@ -21,6 +22,7 @@ export function SuperAdminGate({ children }: Props) {
         const data = await res.json()
         if (!cancelled && res.ok) {
           setHasSuperAdmin(!!data.hasSuperAdmin)
+          setSetupRequired(data.setupRequired === true)
           setChecked(true)
         }
       } catch {
@@ -30,9 +32,15 @@ export function SuperAdminGate({ children }: Props) {
         }
       }
     })()
+    const timer = window.setInterval(() => {
+      void fetch("/api/setup/status", { cache: "no-store" }).then((res) => res.json()).then((data) => {
+        if (!cancelled) { setHasSuperAdmin(!!data.hasSuperAdmin); setSetupRequired(data.setupRequired === true); setChecked(true) }
+      }).catch(() => undefined)
+    }, 60_000)
 
     return () => {
       cancelled = true
+      window.clearInterval(timer)
     }
   }, [])
 
@@ -40,16 +48,16 @@ export function SuperAdminGate({ children }: Props) {
     if (!checked || hasSuperAdmin === null) return
 
     // If no super admin exists, everything redirects to /setup
-    if (!hasSuperAdmin && pathname !== "/setup") {
+    if ((!hasSuperAdmin || setupRequired) && pathname !== "/setup") {
       router.replace("/setup")
       return
     }
 
     // If super admin exists, /setup should not be accessible
-    if (hasSuperAdmin && pathname === "/setup") {
+    if (hasSuperAdmin && !setupRequired && pathname === "/setup") {
       router.replace("/")
     }
-  }, [checked, hasSuperAdmin, pathname, router])
+  }, [checked, hasSuperAdmin, setupRequired, pathname, router])
 
   // While checking, or while redirecting away from /setup when no superadmin,
   // render nothing to avoid flashing other pages.
@@ -57,11 +65,11 @@ export function SuperAdminGate({ children }: Props) {
     return null
   }
 
-  if (!hasSuperAdmin && pathname !== "/setup") {
+  if ((!hasSuperAdmin || setupRequired) && pathname !== "/setup") {
     return null
   }
 
-  if (hasSuperAdmin && pathname === "/setup") {
+  if (hasSuperAdmin && !setupRequired && pathname === "/setup") {
     return null
   }
 
