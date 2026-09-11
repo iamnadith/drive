@@ -61,8 +61,10 @@ function formatBytes(value: number) {
 
 function statusBadge(status?: string) {
   const value = String(status || "").toLowerCase()
-  if (value === "completed") return <Badge className="bg-green-600">Completed</Badge>
-  if (value === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
+  if (value === "completed" || value === "copied") return <Badge className="bg-green-600">Completed</Badge>
+  if (value === "running" || value === "copying") return <Badge className="bg-primary text-primary-foreground">Transferring</Badge>
+  if (value === "scanning") return <Badge className="bg-sky-600">Scanning</Badge>
+  if (value === "verifying") return <Badge className="bg-purple-600">Verifying</Badge>
   if (value === "claimed") return <Badge className="bg-sky-600">Claimed</Badge>
   if (value === "pending") return <Badge variant="secondary">Pending</Badge>
   if (value === "failed") return <Badge variant="destructive">Failed</Badge>
@@ -151,6 +153,11 @@ export default function MigrationWorkerPoolDetailsPage() {
 
   if (loading) return <div className="p-6 text-sm text-muted-foreground">Loading migration worker pool...</div>
   const percent = telemetry.totalFiles > 0 ? Math.min(100, (telemetry.processedFiles / telemetry.totalFiles) * 100) : 0
+  const activeTransfers = runs.filter((run) => ["pending", "claimed", "running"].includes(run.status) && isRecord(run.currentFile)).length
+  const latestHeartbeat = runs
+    .filter((run) => ["pending", "claimed", "running"].includes(run.status))
+    .map((run) => run.lastHeartbeatAt || run.updatedAt)
+    .sort((a, b) => String(b).localeCompare(String(a)))[0]
 
   return (
     <div className="space-y-6">
@@ -169,7 +176,7 @@ export default function MigrationWorkerPoolDetailsPage() {
       <div className="grid gap-4 xl:grid-cols-4">
         <Card className="xl:col-span-2"><CardHeader><CardTitle className="text-base">Overall progress</CardTitle><CardDescription>Combined progress across the complete migration worker pool.</CardDescription></CardHeader><CardContent className="space-y-4"><div className="flex justify-between text-sm"><span>{totals.active} active / {runs.length} workers</span><span className="font-mono">{percent.toFixed(1)}%</span></div><Progress value={percent} className="h-2" /><div className="grid gap-3 sm:grid-cols-3"><div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Processed files</div><div className="mt-1 text-lg font-semibold">{telemetry.processedFiles || totals.completedFiles} / {telemetry.totalFiles || "-"}</div></div><div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Transferred</div><div className="mt-1 text-lg font-semibold">{telemetry.transferred || totals.completedFiles}</div></div><div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Failed</div><div className="mt-1 text-lg font-semibold">{totals.failedFiles}</div></div></div></CardContent></Card>
         <Card><CardHeader><CardTitle className="text-base">Transfer totals</CardTitle></CardHeader><CardContent className="space-y-2 text-sm"><div className="flex justify-between"><span className="text-muted-foreground">Transferred bytes</span><span>{formatBytes(totals.completedBytes)}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Skipped</span><span>{telemetry.skipped}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Missing</span><span>{telemetry.missing}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Mismatched</span><span>{telemetry.mismatched}</span></div></CardContent></Card>
-        <Card><CardHeader><CardTitle className="text-base">Pool status</CardTitle></CardHeader><CardContent className="space-y-2 text-sm"><div className="flex justify-between"><span className="text-muted-foreground">Total workers</span><span>{runs.length}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Active</span><span>{totals.active}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Jobs reporting</span><span>{jobs.length}</span></div></CardContent></Card>
+        <Card><CardHeader><CardTitle className="text-base">Live capacity</CardTitle><CardDescription>Only workers online for the current pool run.</CardDescription></CardHeader><CardContent className="space-y-2 text-sm"><div className="flex justify-between"><span className="text-muted-foreground">Online workers</span><span>{totals.active}</span></div><div className="flex justify-between"><span className="text-muted-foreground">Active transfers</span><span>{activeTransfers}</span></div><div className="flex justify-between gap-4"><span className="text-muted-foreground">Latest update</span><span className="text-right">{formatDate(latestHeartbeat)}</span></div></CardContent></Card>
       </div>
 
       <Card>
