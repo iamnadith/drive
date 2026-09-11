@@ -42,7 +42,11 @@ export function SiteHeader() {
     }
   }, [accountMenuOpen]);
 
-  if (pathname?.startsWith("/dashboard")) {
+  const headerlessRoute = ["/dashboard", "/setup", "/login", "/signup", "/auth"].some(
+    (route) => pathname === route || pathname?.startsWith(`${route}/`),
+  );
+
+  if (headerlessRoute) {
     return null;
   }
 

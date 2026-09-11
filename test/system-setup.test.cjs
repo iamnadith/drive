@@ -17,9 +17,10 @@ const hosting = read("src/components/dashboard/cloudflare-worker-hosting.tsx")
 const cron = read("src/app/api/cron/cloudflare-workers/route.ts")
 const backendReconcile = read("src/app/api/internal/backend-orchestrator/reconcile/route.ts")
 const vercel = read("vercel.json")
+const siteHeader = read("src/components/site-header.tsx")
 
 test("setup gates account creation behind required environment and Workers", () => {
-  for (const marker of ["POSTGRES_URL", "SUPABASE_SERVICE_ROLE_KEY", "RESEND_API_KEY", "NEXT_PUBLIC_APP_URL", "CRON_SECRET"]) assert.match(readiness, new RegExp(marker))
+  for (const marker of ["POSTGRES_URL", "POSTGRES_SSL", "SUPABASE_SERVICE_ROLE_KEY", "RESEND_API_KEY", "NEXT_PUBLIC_APP_URL", "CRON_SECRET"]) assert.match(readiness, new RegExp(marker))
   assert.match(readiness, /queryDb\("select 1 as ready"\)/)
   assert.match(setupStatus, /!readiness\.ready \? "requirements" : !workersReady \? "workers" : !hasSuperAdmin \? "account"/)
   assert.match(setupAdmin, /Complete the required environment configuration first/)
@@ -53,4 +54,11 @@ test("optional Google and SMS controls are capability-aware", () => {
   assert.match(login, /capabilities\.google/)
   assert.match(profile, /capabilities\.sms/)
   assert.match(profile, /capabilities\.google/)
+})
+
+test("setup and authentication flows do not render the global header", () => {
+  for (const route of ["/setup", "/login", "/signup", "/auth"]) {
+    assert.match(siteHeader, new RegExp(route.replace("/", "\\/")))
+  }
+  assert.match(siteHeader, /if \(headerlessRoute\)/)
 })

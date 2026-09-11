@@ -42,6 +42,7 @@ export async function getSystemReadiness() {
 
   const requirements: RequirementStatus[] = [
     { id: "database", label: "PostgreSQL database", description: "Primary durable state shared by the panel and Workers.", configured: databaseConfigured && databaseConnected, variables: ["POSTGRES_URL_NON_POOLING or POSTGRES_URL"], error: databaseError },
+    { id: "database-ssl", label: "PostgreSQL transport security", description: "Explicitly controls encrypted PostgreSQL connections for the panel and every Worker.", configured: present("POSTGRES_SSL", "DISABLE_POSTGRES_SSL"), variables: ["POSTGRES_SSL=true"] },
     { id: "supabase-url", label: "Supabase project URL", description: "Required by account, verification, and storage metadata services.", configured: present("NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL"), variables: ["NEXT_PUBLIC_SUPABASE_URL"] },
     { id: "supabase-public", label: "Supabase public key", description: "Browser-safe project access key.", configured: present("NEXT_PUBLIC_SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY", "SUPABASE_ANON_KEY", "SUPABASE_PUBLISHABLE_KEY"), variables: ["NEXT_PUBLIC_SUPABASE_ANON_KEY"] },
     { id: "supabase-server", label: "Supabase server access", description: "Server-only key and verified API access for protected account and verification writes.", configured: supabaseServerConfigured && supabaseConnected, variables: ["SUPABASE_SERVICE_ROLE_KEY"], error: supabaseError },

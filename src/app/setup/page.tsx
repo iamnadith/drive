@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import Link from "next/link"
-import { CheckCircle2, CircleDashed, Database, GalleryVerticalEnd, Mail, RefreshCw, ServerCog, ShieldCheck, TriangleAlert } from "lucide-react"
+import { ArrowRight, Check, CheckCircle2, Cloud, Database, GalleryVerticalEnd, KeyRound, LockKeyhole, Mail, RefreshCw, ServerCog, ShieldCheck, Smartphone, TriangleAlert } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 
@@ -12,6 +12,9 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Item, ItemActions, ItemContent, ItemGroup, ItemMedia, ItemTitle } from "@/components/ui/item"
+import { Separator } from "@/components/ui/separator"
 import { CloudflareWorkerHosting } from "@/components/dashboard/cloudflare-worker-hosting"
 import {
   Field,
@@ -253,28 +256,45 @@ export default function SetupPage() {
     window.location.href = url.toString()
   }
 
-  if (!systemStatus) return <main className="auth-flow-bg page-under-header flex items-center justify-center p-4"><Card className="w-full max-w-lg"><CardHeader><CardTitle>Inspecting this installation</CardTitle><CardDescription>Checking environment, database, and Worker readiness.</CardDescription></CardHeader><CardContent><Progress value={34} /></CardContent>{statusError ? <CardFooter><p className="text-sm text-destructive">{statusError}</p></CardFooter> : null}</Card></main>
+  if (!systemStatus) return <main className="auth-flow-bg flex min-h-svh items-center justify-center p-4"><Card className="w-full max-w-lg"><CardHeader><CardTitle>Inspecting this installation</CardTitle><CardDescription>Checking environment, database, and Worker readiness.</CardDescription></CardHeader><CardContent className="flex flex-col gap-4"><Progress value={34} />{statusError ? <Alert variant="destructive"><TriangleAlert /><AlertTitle>Readiness check failed</AlertTitle><AlertDescription>{statusError}</AlertDescription></Alert> : null}</CardContent></Card></main>
 
   const stage = systemStatus.setupStep
   const stageIndex = stage === "requirements" ? 1 : stage === "workers" ? 2 : 3
   if (stage === "requirements" || stage === "workers" || stage === "complete") {
     const configuredCount = systemStatus.readiness.requirements.filter((item) => item.configured).length
-    return <main className="auth-flow-bg page-under-header min-h-screen p-4 sm:p-6 lg:p-10">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
-        <header className="flex flex-col gap-4 rounded-3xl border bg-card/80 p-5 shadow-sm backdrop-blur sm:p-8">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div className="flex items-start gap-3"><div className="flex size-11 items-center justify-center rounded-2xl border bg-background"><ShieldCheck /></div><div><Badge variant="outline">Drive control plane</Badge><h1 className="mt-2 text-2xl font-bold tracking-tight sm:text-3xl">Workspace setup</h1><p className="mt-1 max-w-2xl text-sm text-muted-foreground">A verified path from infrastructure to Workers to the first administrator.</p></div></div>
-            <Button variant="outline" onClick={() => void loadSystemStatus()}><RefreshCw data-icon="inline-start" />Recheck</Button>
+    return <main className="auth-flow-bg min-h-svh px-4 py-6 sm:px-6 sm:py-10 lg:px-10">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-8">
+        <header className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+          <div className="flex max-w-3xl flex-col gap-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground"><ShieldCheck />Drive control plane</div>
+            <h1 className="text-balance text-3xl font-semibold tracking-tight sm:text-4xl">Prepare your workspace</h1>
+            <p className="text-pretty text-base text-muted-foreground sm:text-lg">Connect the services Drive needs, deploy its Worker layer, then create the first administrator.</p>
           </div>
-          <Progress value={(stageIndex / 3) * 100} />
-          <div className="grid gap-3 sm:grid-cols-3">{[["1", "Environment"], ["2", "Workers"], ["3", "Account"]].map(([number, label], index) => <div key={number} className="flex items-center gap-3 rounded-xl border bg-background/60 p-3"><Badge variant={stageIndex >= index + 1 ? "default" : "secondary"}>{number}</Badge><span className="text-sm font-medium">{label}</span></div>)}</div>
+          <Button variant="outline" onClick={() => void loadSystemStatus()}><RefreshCw data-icon="inline-start" />Refresh status</Button>
         </header>
 
-        {stage === "requirements" ? <Card><CardHeader><CardTitle className="flex items-center gap-2"><Database />Required environment</CardTitle><CardDescription>{configuredCount} of {systemStatus.readiness.requirements.length} requirements are ready. Add missing variables in Vercel, redeploy, then recheck.</CardDescription></CardHeader><CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{systemStatus.readiness.requirements.map((item) => <Card key={item.id}><CardHeader className="pb-3"><div className="flex items-start justify-between gap-3"><CardTitle className="text-base">{item.label}</CardTitle>{item.configured ? <CheckCircle2 className="text-primary" /> : <TriangleAlert className="text-destructive" />}</div><CardDescription>{item.description}</CardDescription></CardHeader><CardContent className="flex flex-col gap-2"><Badge variant={item.configured ? "default" : "destructive"}>{item.configured ? "Configured" : "Required"}</Badge>{item.variables.map((variable) => <code key={variable} className="rounded-md bg-muted px-2 py-1 text-xs">{variable}</code>)}{item.error ? <p className="text-xs text-destructive">{item.error}</p> : null}</CardContent></Card>)}</CardContent><CardFooter className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground"><span>Optional:</span><Badge variant="outline">Google {systemStatus.readiness.capabilities.google ? "available" : "not configured"}</Badge><Badge variant="outline">SMS {systemStatus.readiness.capabilities.sms ? "available" : "not configured"}</Badge></div><Button onClick={() => void loadSystemStatus()} disabled={!systemStatus.readiness.ready}>Continue to Workers</Button></CardFooter></Card> : null}
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center justify-between text-sm"><span className="font-medium">Step {stageIndex} of 3</span><span className="text-muted-foreground">{stageIndex === 1 ? "Environment" : stageIndex === 2 ? "Cloudflare Workers" : "Complete"}</span></div>
+          <Progress value={(stageIndex / 3) * 100} />
+          <div className="grid grid-cols-3 gap-2">{[["1", "Environment"], ["2", "Workers"], ["3", "Account"]].map(([number, label], index) => <div key={number} className={cn("flex items-center gap-2 rounded-2xl px-3 py-2 text-sm", stageIndex === index + 1 ? "bg-foreground text-background" : "text-muted-foreground")}><span className="flex size-6 shrink-0 items-center justify-center rounded-full border text-xs">{stageIndex > index + 1 ? <Check /> : number}</span><span className="hidden font-medium sm:inline">{label}</span></div>)}</div>
+        </div>
 
-        {stage === "workers" ? <><Card><CardHeader><CardTitle className="flex items-center gap-2"><ServerCog />Worker foundation</CardTitle><CardDescription>Existing Workers are verified and reused. Missing or unhealthy Workers are repaired without duplicating healthy scripts.</CardDescription></CardHeader><CardContent><div className="grid gap-3 sm:grid-cols-3"><p className="flex items-center gap-2 text-sm"><CheckCircle2 className="text-primary" />Backend first</p><p className="flex items-center gap-2 text-sm"><CircleDashed />File Scanner second</p><p className="flex items-center gap-2 text-sm"><CircleDashed />Migration third</p></div></CardContent></Card><CloudflareWorkerHosting onboarding onReady={() => setWorkersCompleted(true)} />{workersCompleted ? <Card><CardHeader><CardTitle>Worker foundation is ready</CardTitle><CardDescription>All three deployments exist and passed authenticated verification.</CardDescription></CardHeader><CardFooter className="justify-end"><Button onClick={() => void loadSystemStatus()}>Continue to account</Button></CardFooter></Card> : null}</> : null}
+        {stage === "requirements" ? <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+          <Card className="overflow-hidden py-0">
+            <CardHeader className="border-b px-5 py-5 sm:px-7 sm:py-6"><div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"><div className="flex gap-3"><div className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-secondary"><Database /></div><div><CardTitle>Required services</CardTitle><CardDescription className="mt-1">Every item below must be ready before Worker deployment.</CardDescription></div></div><Badge variant={systemStatus.readiness.ready ? "default" : "secondary"}>{configuredCount} / {systemStatus.readiness.requirements.length} ready</Badge></div></CardHeader>
+            <CardContent className="p-0"><ItemGroup>{systemStatus.readiness.requirements.map((item, index) => <React.Fragment key={item.id}>{index > 0 ? <Separator /> : null}<Item className="rounded-none border-0 px-5 py-4 sm:px-7"><ItemMedia variant="icon">{item.configured ? <CheckCircle2 /> : <TriangleAlert />}</ItemMedia><ItemContent><ItemTitle>{item.label}</ItemTitle><p className="text-sm text-muted-foreground">{item.description}</p><div className="mt-1 flex flex-wrap gap-1.5">{item.variables.map((variable) => <Badge key={variable} variant="outline" className="font-mono font-normal">{variable}</Badge>)}</div>{item.error ? <p className="mt-1 text-sm text-destructive">{item.error}</p> : null}</ItemContent><ItemActions><Badge variant={item.configured ? "default" : "destructive"}>{item.configured ? "Ready" : "Missing"}</Badge></ItemActions></Item></React.Fragment>)}</ItemGroup></CardContent>
+            <CardFooter className="flex flex-col items-stretch gap-3 border-t px-5 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-7"><p className="text-sm text-muted-foreground">Update Vercel variables, redeploy, then refresh this check.</p><Button onClick={() => void loadSystemStatus()} disabled={!systemStatus.readiness.ready}>Continue to Workers<ArrowRight data-icon="inline-end" /></Button></CardFooter>
+          </Card>
 
-        {stage === "complete" ? <Card><CardHeader><CardTitle>Setup is healthy</CardTitle><CardDescription>Required services and all three Workers passed reconciliation.</CardDescription></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2"><p className="flex items-center gap-2 text-sm"><Mail />Email gateway ready</p><p className="flex items-center gap-2 text-sm"><ServerCog />Workers verified</p></CardContent><CardFooter><Button asChild><Link href="/">Return to Drive</Link></Button></CardFooter></Card> : null}
+          <div className="flex flex-col gap-6">
+            <Card className="py-0"><CardHeader className="px-5 pt-5"><CardTitle className="text-base">Optional integrations</CardTitle><CardDescription>Detected automatically. They never block setup.</CardDescription></CardHeader><CardContent className="px-3 pb-3"><ItemGroup><Item><ItemMedia variant="icon"><KeyRound /></ItemMedia><ItemContent><ItemTitle>Google sign-in</ItemTitle><p className="text-xs text-muted-foreground">GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET</p></ItemContent><ItemActions><Badge variant={systemStatus.readiness.capabilities.google ? "default" : "outline"}>{systemStatus.readiness.capabilities.google ? "Configured" : "Optional"}</Badge></ItemActions></Item><Separator /><Item><ItemMedia variant="icon"><Smartphone /></ItemMedia><ItemContent><ItemTitle>SMS gateway</ItemTitle><p className="text-xs text-muted-foreground">TEXTLK_API_TOKEN</p></ItemContent><ItemActions><Badge variant={systemStatus.readiness.capabilities.sms ? "default" : "outline"}>{systemStatus.readiness.capabilities.sms ? "Configured" : "Optional"}</Badge></ItemActions></Item></ItemGroup></CardContent></Card>
+            <Alert><LockKeyhole /><AlertTitle>Secrets stay server-side</AlertTitle><AlertDescription>Values are checked for availability and connectivity. Their contents are never returned to this page.</AlertDescription></Alert>
+          </div>
+        </div> : null}
+
+        {stage === "workers" ? <div className="flex flex-col gap-6"><Card className="py-0"><CardHeader className="border-b px-5 py-5 sm:px-7 sm:py-6"><div className="flex gap-3"><div className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-secondary"><Cloud /></div><div><CardTitle>Cloudflare Worker layer</CardTitle><CardDescription className="mt-1">Healthy deployments are reused. Only missing or unhealthy infrastructure is repaired.</CardDescription></div></div></CardHeader><CardContent className="grid gap-0 p-0 sm:grid-cols-3">{[["01", "Backend Orchestrator", "Coordinates scheduled work"], ["02", "File Scanner", "Discovers and verifies files"], ["03", "Migration Orchestrator", "Dispatches migration jobs"]].map(([number, label, copy], index) => <div key={number} className={cn("flex gap-3 px-5 py-4 sm:px-6", index > 0 && "border-t sm:border-t-0 sm:border-l")}><Badge variant="outline" className="h-fit">{number}</Badge><div><p className="text-sm font-medium">{label}</p><p className="mt-1 text-xs text-muted-foreground">{copy}</p></div></div>)}</CardContent></Card><CloudflareWorkerHosting onboarding onReady={() => setWorkersCompleted(true)} />{workersCompleted ? <Alert><CheckCircle2 /><AlertTitle>Worker foundation is ready</AlertTitle><AlertDescription className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><span>All three deployments passed authenticated verification.</span><Button onClick={() => void loadSystemStatus()}>Continue to account<ArrowRight data-icon="inline-end" /></Button></AlertDescription></Alert> : null}</div> : null}
+
+        {stage === "complete" ? <Card className="mx-auto w-full max-w-2xl text-center"><CardHeader className="items-center"><div className="flex size-12 items-center justify-center rounded-2xl bg-primary text-primary-foreground"><Check /></div><CardTitle className="mt-2 text-2xl">Workspace ready</CardTitle><CardDescription>Required services and all three Workers passed reconciliation.</CardDescription></CardHeader><CardContent className="flex flex-wrap justify-center gap-2"><Badge variant="outline"><Mail />Email ready</Badge><Badge variant="outline"><ServerCog />Workers verified</Badge></CardContent><CardFooter className="justify-center"><Button asChild><Link href="/">Open Drive<ArrowRight data-icon="inline-end" /></Link></Button></CardFooter></Card> : null}
       </div>
     </main>
   }
@@ -293,18 +313,33 @@ export default function SetupPage() {
         : "Set up the first account that controls this workspace."
 
   return (
-    <main className="auth-flow-bg page-under-header flex flex-col items-center justify-center p-4 sm:p-6 md:p-10">
-      <div className="auth-flow-panel w-full max-w-sm rounded-3xl p-5 backdrop-blur sm:p-6">
-        <div className="flex flex-col gap-6">
+    <main className="auth-flow-bg flex min-h-svh items-center px-4 py-6 sm:px-6 sm:py-10 lg:px-10">
+      <div className="mx-auto grid w-full max-w-5xl items-stretch gap-6 lg:grid-cols-[minmax(0,1fr)_26rem]">
+        <Card className="justify-between overflow-hidden py-0">
+          <CardHeader className="px-6 pt-7 sm:px-8 sm:pt-9">
+            <div className="flex size-11 items-center justify-center rounded-2xl bg-primary text-primary-foreground"><GalleryVerticalEnd /></div>
+            <Badge variant="outline" className="mt-6 w-fit">Final step</Badge>
+            <CardTitle className="mt-2 text-3xl">Your infrastructure is ready.</CardTitle>
+            <CardDescription className="mt-2 max-w-md text-base">Create the first Super Admin to start managing Drive. This account owns workspace access and configuration.</CardDescription>
+          </CardHeader>
+          <CardContent className="px-3 pb-3 sm:px-5 sm:pb-5">
+            <ItemGroup>
+              <Item><ItemMedia variant="icon"><Database /></ItemMedia><ItemContent><ItemTitle>Environment connected</ItemTitle><p className="text-xs text-muted-foreground">Database, SSL, email, and application origin verified</p></ItemContent><ItemActions><CheckCircle2 /></ItemActions></Item>
+              <Separator />
+              <Item><ItemMedia variant="icon"><ServerCog /></ItemMedia><ItemContent><ItemTitle>Workers online</ItemTitle><p className="text-xs text-muted-foreground">Backend, scanner, and migration services verified</p></ItemContent><ItemActions><CheckCircle2 /></ItemActions></Item>
+              <Separator />
+              <Item><ItemMedia variant="icon"><KeyRound /></ItemMedia><ItemContent><ItemTitle>Google sign-in</ItemTitle><p className="text-xs text-muted-foreground">Optional identity provider</p></ItemContent><ItemActions><Badge variant={systemStatus.readiness.capabilities.google ? "default" : "outline"}>{systemStatus.readiness.capabilities.google ? "Configured" : "Not enabled"}</Badge></ItemActions></Item>
+              <Separator />
+              <Item><ItemMedia variant="icon"><Smartphone /></ItemMedia><ItemContent><ItemTitle>SMS verification</ItemTitle><p className="text-xs text-muted-foreground">Optional mobile gateway</p></ItemContent><ItemActions><Badge variant={systemStatus.readiness.capabilities.sms ? "default" : "outline"}>{systemStatus.readiness.capabilities.sms ? "Configured" : "Not enabled"}</Badge></ItemActions></Item>
+            </ItemGroup>
+          </CardContent>
+        </Card>
+
+        <Card className="py-0">
+          <div className="flex flex-col gap-6 p-5 sm:p-7">
           <div className="flex flex-col items-center gap-2 text-center">
-            <Link href="/setup" className="flex flex-col items-center gap-2 font-medium">
-              <div className="flex size-8 items-center justify-center rounded-2xl">
-                <GalleryVerticalEnd className="size-6" />
-              </div>
-              <span className="sr-only">Drive</span>
-            </Link>
-            <Badge variant="outline">Step 3 of 3 · Account</Badge>
-            <h1 className="text-balance text-xl font-bold">{title}</h1>
+            <Badge variant="secondary">Step 3 of 3 · Account</Badge>
+            <h1 className="text-balance text-2xl font-semibold">{title}</h1>
             <FieldDescription className="text-pretty">{description}</FieldDescription>
           </div>
 
@@ -475,10 +510,11 @@ export default function SetupPage() {
             </form>
           ) : null}
 
-          <FieldDescription className="px-6 text-center">
+          <FieldDescription className="text-center">
             This creates the first Super Admin for this Drive workspace.
           </FieldDescription>
-        </div>
+          </div>
+        </Card>
       </div>
     </main>
   )
