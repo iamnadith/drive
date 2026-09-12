@@ -416,7 +416,9 @@ export async function reconcileCloudflareWorkers(force = false) {
 
 export async function reconcileAndRepairCloudflareWorkers(force = false) {
   const installation = await reconcileCloudflareWorkers(force)
-  if (!installation || installation.status !== "failed" || !installation.tokensSaved) return installation
+  if (!installation || !installation.tokensSaved) return installation
+  const abandonedRunning = installation.status === "running" && Date.now() - new Date(installation.updatedAt).getTime() >= 60_000
+  if (installation.status !== "failed" && !abandonedRunning) return installation
   return installCloudflareWorkers({ mode: installation.mode, tokens: {} })
 }
 
@@ -471,6 +473,8 @@ export async function replaceCloudflareTokens(input: { mode: InstallMode; tokens
 export async function installCloudflareWorkers(input: { mode: InstallMode; tokens: Partial<TokenMap>; restart?: boolean }) {
   return withDbAdvisoryLock("cloudflare-worker-install", "singleton", async () => {
     const previous = await loadState()
+    const hasSuppliedToken = ORDER.some((worker) => Boolean(String(input.tokens[worker] || "").trim()))
+    if (previous?.status === "ready" && !input.restart && !hasSuppliedToken) return getCloudflareInstallation()
     const supplied = input.mode === "single"
       ? { backend: String(input.tokens.backend || "").trim(), scanner: String(input.tokens.backend || "").trim(), migration: String(input.tokens.backend || "").trim() }
       : { backend: String(input.tokens.backend || "").trim(), scanner: String(input.tokens.scanner || "").trim(), migration: String(input.tokens.migration || "").trim() }

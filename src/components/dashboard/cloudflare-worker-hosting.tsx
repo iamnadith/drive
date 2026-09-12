@@ -80,7 +80,7 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
   React.useEffect(() => {
     const ready = installation?.status === "ready" && installation.tokensSaved === true && (Object.values(installation.workers) as Installation["workers"][WorkerKey][]).every((worker) => worker.deployed && worker.verified && worker.url && worker.deployedAt && worker.verifiedAt && worker.lastCheckedAt)
     if (ready) { repairAttempted.current = false; onReady?.(); return }
-    if (installation?.status !== "failed" || !installation.tokensSaved || repairAttempted.current || busy) return
+    if ((installation?.status !== "failed" && installation?.status !== "running") || !installation.tokensSaved || repairAttempted.current || busy) return
     repairAttempted.current = true
     void deploy(false)
   // deploy is intentionally event-like; installation transitions prevent repeats.
