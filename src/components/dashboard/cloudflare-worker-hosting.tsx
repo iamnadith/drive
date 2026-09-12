@@ -1,13 +1,16 @@
 "use client"
 
 import * as React from "react"
-import { Cloud, Eye, EyeOff, RefreshCw } from "lucide-react"
+import { Activity, CheckCircle2, CircleDashed, Cloud, Eye, EyeOff, KeyRound, RefreshCw, ServerCog, TriangleAlert } from "lucide-react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Item, ItemActions, ItemContent, ItemGroup, ItemMedia, ItemTitle } from "@/components/ui/item"
+import { Separator } from "@/components/ui/separator"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 
 type Mode = "single" | "separate"
@@ -33,6 +36,7 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
   const [scannerToken, setScannerToken] = React.useState("")
   const [migrationToken, setMigrationToken] = React.useState("")
   const [tokensVisible, setTokensVisible] = React.useState(false)
+  const [canRevealTokens, setCanRevealTokens] = React.useState(false)
   const [installation, setInstallation] = React.useState<Installation | null>(null)
   const [busy, setBusy] = React.useState(false)
   const repairAttempted = React.useRef(false)
@@ -59,9 +63,10 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
 
   const refresh = React.useCallback(async () => {
     const response = await fetch("/api/workers/cloudflare-install?reconcile=1", { cache: "no-store" })
-    const payload = await response.json().catch(() => ({})) as { installation?: Installation; hosting?: { mode?: SetupMode }; error?: string }
+    const payload = await response.json().catch(() => ({})) as { installation?: Installation; hosting?: { mode?: SetupMode }; canRevealTokens?: boolean; error?: string }
     if (!response.ok) throw new Error(payload.error || "Unable to load Cloudflare hosting status")
     setInstallation(payload.installation || null)
+    setCanRevealTokens(payload.canRevealTokens === true)
     if (payload.installation?.mode) setMode(payload.installation.mode)
     if (onboarding) setSetupMode("automatic")
     else if (payload.hosting?.mode) setSetupMode(payload.hosting.mode)
@@ -73,13 +78,14 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
     return () => window.clearInterval(timer)
   }, [busy, installation?.status, refresh])
   React.useEffect(() => {
-    if (installation?.status === "ready") { repairAttempted.current = false; onReady?.(); return }
+    const ready = installation?.status === "ready" && installation.tokensSaved === true && (Object.values(installation.workers) as Installation["workers"][WorkerKey][]).every((worker) => worker.deployed && worker.verified && worker.url && worker.deployedAt && worker.verifiedAt && worker.lastCheckedAt)
+    if (ready) { repairAttempted.current = false; onReady?.(); return }
     if (installation?.status !== "failed" || !installation.tokensSaved || repairAttempted.current || busy) return
     repairAttempted.current = true
     void deploy(false)
   // deploy is intentionally event-like; installation transitions prevent repeats.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [installation?.status, installation?.tokensSaved, busy, onReady])
+  }, [installation, busy, onReady])
 
   const revealTokens = async () => {
     if (tokensVisible) { setToken(""); setScannerToken(""); setMigrationToken(""); setTokensVisible(false); return }
@@ -180,73 +186,70 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
     finally { setBusy(false) }
   }
 
+  const workers = (["backend", "scanner", "migration"] as WorkerKey[])
+  const installationReady = installation?.status === "ready" && installation.tokensSaved === true && workers.every((worker) => {
+    const current = installation.workers[worker]
+    return Boolean(current.deployed && current.verified && current.url && current.deployedAt && current.verifiedAt && current.lastCheckedAt)
+  })
+  const tokenInputReady = Boolean(token && (mode === "single" || (scannerToken && migrationToken)))
+
   return (
-    <section className="flex flex-col gap-4">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2"><Cloud className="size-5" />Cloudflare Worker hosting</CardTitle>
-          <CardDescription>Choose automatic token deployment or manually connect Workers that are already deployed.</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          {!onboarding ? <ToggleGroup type="single" value={setupMode} onValueChange={(value) => { if (value) void changeSetupMode(value as SetupMode) }} disabled={busy}>
-            <ToggleGroupItem value="automatic">Automatic</ToggleGroupItem>
-            <ToggleGroupItem value="manual">Manual</ToggleGroupItem>
-          </ToggleGroup> : null}
-          {setupMode === "automatic" ? <>
-          <p className="text-sm text-muted-foreground">Deploy all three Workers automatically. Choose whether they share one Cloudflare account or use separate accounts.</p>
-          <ToggleGroup type="single" value={mode} onValueChange={(value) => { if (value) setMode(value as Mode) }} disabled={busy}>
-            <ToggleGroupItem value="single">One Cloudflare account</ToggleGroupItem>
-            <ToggleGroupItem value="separate">Separate accounts</ToggleGroupItem>
-          </ToggleGroup>
-          <div className="grid gap-4 lg:grid-cols-3">
-            <div className="flex flex-col gap-2 lg:col-span-3">
-              <Label htmlFor="cf-backend-token">{mode === "single" ? "Cloudflare API token" : "Backend Orchestrator token"}</Label>
-              <Input id="cf-backend-token" type={tokensVisible ? "text" : "password"} autoComplete="off" value={token} placeholder={installation?.tokensSaved ? "Saved securely - leave blank to reuse" : "Enter token"} onChange={(event) => setToken(event.target.value)} disabled={busy} />
+    <section>
+      <Card className="overflow-hidden py-0">
+        <CardHeader className="border-b px-5 py-5 sm:px-7 sm:py-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex gap-3">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-secondary"><Cloud /></div>
+              <div><CardTitle>Cloudflare Worker hosting</CardTitle><CardDescription className="mt-1">Deploy and verify Drive&apos;s three service Workers from one place.</CardDescription></div>
             </div>
-            {mode === "separate" ? <>
-              <div className="flex flex-col gap-2"><Label htmlFor="cf-scanner-token">File Scanner token</Label><Input id="cf-scanner-token" type={tokensVisible ? "text" : "password"} autoComplete="off" value={scannerToken} placeholder={installation?.tokensSaved ? "Saved securely - leave blank to reuse" : "Enter token"} onChange={(event) => setScannerToken(event.target.value)} disabled={busy} /></div>
-              <div className="flex flex-col gap-2"><Label htmlFor="cf-migration-token">Migration Orchestrator token</Label><Input id="cf-migration-token" type={tokensVisible ? "text" : "password"} autoComplete="off" value={migrationToken} placeholder={installation?.tokensSaved ? "Saved securely - leave blank to reuse" : "Enter token"} onChange={(event) => setMigrationToken(event.target.value)} disabled={busy} /></div>
-            </> : null}
+            {!onboarding ? <ToggleGroup type="single" variant="outline" value={setupMode} onValueChange={(value) => { if (value) void changeSetupMode(value as SetupMode) }} disabled={busy} aria-label="Worker hosting mode"><ToggleGroupItem value="automatic">Automatic</ToggleGroupItem><ToggleGroupItem value="manual">Manual</ToggleGroupItem></ToggleGroup> : <Badge variant="secondary">Automatic setup</Badge>}
           </div>
-          <div className="flex flex-wrap gap-2">
-            {installation?.status !== "ready" ? <Button onClick={() => void deploy(false)} disabled={busy || (!installation?.tokensSaved && (!token || (mode === "separate" && (!scannerToken || !migrationToken))))}>{busy ? "Deploying…" : installation?.status === "failed" || installation?.status === "running" ? "Continue deployment" : "Deploy all Workers"}</Button> : null}
-            {installation?.status === "failed" ? <Button variant="outline" onClick={() => void deploy(true)} disabled={busy || (!installation.tokensSaved && (!token || (mode === "separate" && (!scannerToken || !migrationToken))))}>Start fresh</Button> : null}
-            <Button variant="outline" onClick={() => void refresh()} disabled={busy}><RefreshCw data-icon="inline-start" />Refresh status</Button>
-            {installation?.tokensSaved && !onboarding ? <Button variant="outline" onClick={() => void revealTokens()} disabled={busy}>{tokensVisible ? <EyeOff data-icon="inline-start" /> : <Eye data-icon="inline-start" />}{tokensVisible ? "Hide saved token" : "View saved token"}</Button> : null}
-            {installation?.status === "ready" && !onboarding && token && (mode === "single" || (scannerToken && migrationToken)) ? <Button onClick={() => void saveReplacementTokens()} disabled={busy}>Save replacement token</Button> : null}
-          </div>
-          {installation ? <p className="text-sm">Status: <Badge variant={installation.status === "ready" ? "default" : installation.status === "failed" ? "destructive" : "secondary"}>{installation.status}</Badge> · Step: {installation.step}{installation.releaseVersion ? ` · Release: ${installation.releaseVersion}` : ""}{installation.tokensSaved ? " · Token saved encrypted" : ""}</p> : <p className="text-sm text-muted-foreground">Ready to deploy. No deployment has been recorded yet.</p>}
-          {installation?.error ? <p className="text-sm text-destructive">{installation.error}</p> : null}
-          <div className="grid gap-4 xl:grid-cols-3">
-            {(["backend", "scanner", "migration"] as WorkerKey[]).map((worker) => {
-              const current = installation?.workers[worker]
-              const phase = current?.phase || (current?.verified ? "verified" : current?.deployed ? "deployed" : "queued")
-              return <Card key={worker}><CardHeader className="pb-3"><CardTitle className="text-base">{labels[worker]}</CardTitle><CardDescription>{current?.scriptName || "Waiting for deployment"}</CardDescription></CardHeader><CardContent className="flex flex-col gap-2 text-sm">
-                <p className="flex items-center justify-between"><span>Phase</span><Badge variant={phase === "verified" ? "default" : phase === "failed" ? "destructive" : "secondary"}>{phase}</Badge></p>
-                <p>Account: {current?.accountName || "—"}</p><p className="truncate" title={current?.url}>URL: {current?.url || "—"}</p>
-                <p>Build: {current?.build ?? "—"} · Response: {current?.latencyMs != null ? `${current.latencyMs} ms` : "—"}</p>
-                <p>Deployed: {current?.deployedAt ? new Date(current.deployedAt).toLocaleString() : "—"}</p><p>Verified: {current?.verifiedAt ? new Date(current.verifiedAt).toLocaleString() : "—"}</p>
-                <p>Checked: {current?.lastCheckedAt ? new Date(current.lastCheckedAt).toLocaleString() : "—"}</p>
-                {current?.error ? <p className="text-destructive">{current.error}</p> : null}
-              </CardContent></Card>
-            })}
-          </div>
-          </> : <p className="text-sm text-muted-foreground">Enter the URL and secret for each existing Worker below.</p>}
-        </CardContent>
+        </CardHeader>
+
+        {setupMode === "automatic" ? <>
+          <CardContent className="flex flex-col gap-6 px-5 py-5 sm:px-7 sm:py-6">
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
+              <div className="flex flex-col gap-4">
+                <div><p className="text-sm font-medium">Cloudflare accounts</p><p className="mt-1 text-sm text-muted-foreground">Use one token for every Worker, or isolate each Worker in a separate account.</p></div>
+                <ToggleGroup type="single" variant="outline" value={mode} onValueChange={(value) => { if (value) { setMode(value as Mode); setTokensVisible(false); setToken(""); setScannerToken(""); setMigrationToken("") } }} disabled={busy || tokensVisible} aria-label="Cloudflare account layout"><ToggleGroupItem value="single">One account</ToggleGroupItem><ToggleGroupItem value="separate">Separate accounts</ToggleGroupItem></ToggleGroup>
+              </div>
+              <Item variant="outline"><ItemMedia variant="icon"><KeyRound /></ItemMedia><ItemContent><ItemTitle>API credentials</ItemTitle><p className="text-xs text-muted-foreground">{installation?.tokensSaved ? "Encrypted and saved" : "No token saved"}</p></ItemContent><ItemActions><Badge variant={installation?.tokensSaved ? "default" : "destructive"}>{installation?.tokensSaved ? "Saved" : "Required"}</Badge></ItemActions></Item>
+            </div>
+
+            <FieldGroup className={mode === "separate" ? "grid gap-4 lg:grid-cols-3" : undefined}>
+              <Field className={mode === "single" ? "max-w-2xl" : undefined}><FieldLabel htmlFor="cf-backend-token">{mode === "single" ? "Cloudflare API token" : "Backend Orchestrator token"}</FieldLabel><Input id="cf-backend-token" type={tokensVisible ? "text" : "password"} autoComplete="off" value={token} placeholder={installation?.tokensSaved ? "Saved securely — leave blank to reuse" : "Paste API token"} onChange={(event) => setToken(event.target.value)} disabled={busy || tokensVisible} /><FieldDescription>{installation?.tokensSaved ? "A saved token is available for future repairs." : "The token is encrypted before it is stored."}</FieldDescription></Field>
+              {mode === "separate" ? <><Field><FieldLabel htmlFor="cf-scanner-token">File Scanner token</FieldLabel><Input id="cf-scanner-token" type={tokensVisible ? "text" : "password"} autoComplete="off" value={scannerToken} placeholder={installation?.tokensSaved ? "Saved securely — leave blank to reuse" : "Paste API token"} onChange={(event) => setScannerToken(event.target.value)} disabled={busy || tokensVisible} /></Field><Field><FieldLabel htmlFor="cf-migration-token">Migration Orchestrator token</FieldLabel><Input id="cf-migration-token" type={tokensVisible ? "text" : "password"} autoComplete="off" value={migrationToken} placeholder={installation?.tokensSaved ? "Saved securely — leave blank to reuse" : "Paste API token"} onChange={(event) => setMigrationToken(event.target.value)} disabled={busy || tokensVisible} /></Field></> : null}
+            </FieldGroup>
+
+            <div className="flex flex-wrap gap-2">
+              {!installationReady ? <Button onClick={() => void deploy(false)} disabled={busy || (!installation?.tokensSaved && !tokenInputReady)}>{busy ? "Working…" : installation?.status === "failed" || installation?.status === "running" ? "Repair and continue" : "Deploy Workers"}</Button> : null}
+              {installation?.status === "failed" ? <Button variant="outline" onClick={() => void deploy(true)} disabled={busy || (!installation.tokensSaved && !tokenInputReady)}>Start fresh</Button> : null}
+              <Button variant="outline" onClick={() => void refresh()} disabled={busy}><RefreshCw data-icon="inline-start" />Check now</Button>
+              {installation?.tokensSaved && canRevealTokens ? <Button variant="outline" onClick={() => void revealTokens()} disabled={busy}>{tokensVisible ? <EyeOff data-icon="inline-start" /> : <Eye data-icon="inline-start" />}{tokensVisible ? "Hide token" : "View saved token"}</Button> : null}
+              {installation?.tokensSaved && !canRevealTokens ? <Badge variant="outline">Create the administrator before revealing saved tokens</Badge> : null}
+              {installation?.tokensSaved && canRevealTokens && tokensVisible && tokenInputReady ? <Button onClick={() => void saveReplacementTokens()} disabled={busy}>Save replacement token</Button> : null}
+            </div>
+
+            {installation?.error ? <Alert variant="destructive"><TriangleAlert /><AlertTitle>Worker verification failed</AlertTitle><AlertDescription>{installation.error}</AlertDescription></Alert> : installationReady ? <Alert><CheckCircle2 /><AlertTitle>All Workers are live</AlertTitle><AlertDescription>Each script exists in Cloudflare and passed a current authenticated health check.</AlertDescription></Alert> : <Alert><CircleDashed /><AlertTitle>{installation ? "Deployment is not verified" : "Ready for first deployment"}</AlertTitle><AlertDescription>{installation ? `Current step: ${installation.step}${installation.releaseVersion ? ` · Release ${installation.releaseVersion}` : ""}.` : "Enter the required token, then Drive will deploy Workers in dependency order."}</AlertDescription></Alert>}
+          </CardContent>
+
+          <Separator />
+          <CardContent className="p-0">
+            <ItemGroup>{workers.map((worker, index) => {
+              const current = installation?.tokensSaved ? installation.workers[worker] : undefined
+              const live = Boolean(current?.deployed && current.verified && current.url && current.deployedAt && current.verifiedAt && current.lastCheckedAt)
+              const phase = live ? "verified" : current?.phase === "failed" ? "failed" : current?.phase || "not deployed"
+              return <React.Fragment key={worker}>{index > 0 ? <Separator /> : null}<Item className="rounded-none border-0 px-5 py-5 sm:px-7"><ItemMedia variant="icon">{live ? <CheckCircle2 /> : phase === "failed" ? <TriangleAlert /> : <ServerCog />}</ItemMedia><ItemContent><div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><div><ItemTitle>{labels[worker]}</ItemTitle><p className="mt-1 text-xs text-muted-foreground">{current?.scriptName || "Waiting for a verified deployment"}</p></div><Badge variant={live ? "default" : phase === "failed" ? "destructive" : "secondary"}>{live ? "Live" : phase}</Badge></div>{current ? <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2 xl:grid-cols-4"><p className="truncate" title={current.url}>URL <span className="block text-foreground">{current.url || "Not available"}</span></p><p>Cloudflare account <span className="block text-foreground">{current.accountName || "Not available"}</span></p><p>Last response <span className="block text-foreground">{current.latencyMs != null ? `${current.latencyMs} ms` : "No response recorded"}</span></p><p>Live check <span className="block text-foreground">{current.lastCheckedAt ? new Date(current.lastCheckedAt).toLocaleString() : "Never checked"}</span></p></div> : <p className="mt-2 text-sm text-muted-foreground">No automatic deployment evidence is available.</p>}{current?.error ? <p className="mt-2 text-sm text-destructive">{current.error}</p> : null}</ItemContent></Item></React.Fragment>
+            })}</ItemGroup>
+          </CardContent>
+        </> : <CardContent className="flex flex-col gap-6 px-5 py-5 sm:px-7 sm:py-6">
+          <Alert><Activity /><AlertTitle>Manual connections</AlertTitle><AlertDescription>Manual mode uses only the URL and shared secret you provide. Cloudflare account names and automatic deployment records do not apply here.</AlertDescription></Alert>
+          <div className="grid gap-5 xl:grid-cols-3">{workers.map((worker) => {
+            const connection = connections[worker]
+            return <Card key={worker} className="shadow-none"><CardHeader><div className="flex items-start justify-between gap-3"><div><CardTitle className="text-base">{labels[worker]}</CardTitle><CardDescription>{connection.url ? "Manual endpoint configured" : "No manual endpoint"}</CardDescription></div><Badge variant={connection.enabled ? "default" : "secondary"}>{connection.enabled ? "Enabled" : "Disabled"}</Badge></div></CardHeader><CardContent><FieldGroup><Field><FieldLabel htmlFor={`${worker}-url`}>Worker URL</FieldLabel><Input id={`${worker}-url`} value={connection.url} placeholder="https://your-worker.workers.dev" onChange={(event) => updateConnection(worker, { url: event.target.value })} disabled={busy} /></Field><Field><FieldLabel htmlFor={`${worker}-secret`}>Shared secret</FieldLabel><Input id={`${worker}-secret`} type="password" autoComplete="off" value={connection.secret} placeholder={connection.secretConfigured ? "Saved securely — leave blank to keep" : "Enter Worker secret"} onChange={(event) => updateConnection(worker, { secret: event.target.value })} disabled={busy} /></Field><Field className="flex-row flex-wrap"><Button size="sm" onClick={() => void saveConnection(worker)} disabled={busy || !connection.url || (!connection.secret && !connection.secretConfigured)}>Save</Button><Button size="sm" variant="outline" onClick={() => void workerAction(worker, "test")} disabled={busy || !connection.url || !connection.secretConfigured}>Test</Button><Button size="sm" variant="outline" onClick={() => void workerAction(worker, "toggle")} disabled={busy || !connection.url || !connection.secretConfigured}>{connection.enabled ? "Disable" : "Enable"}</Button><Button size="sm" variant="outline" onClick={() => void workerAction(worker, "run")} disabled={busy || !connection.enabled}>Run now</Button></Field></FieldGroup></CardContent></Card>
+          })}</div>
+        </CardContent>}
       </Card>
-      {setupMode === "manual" ? <div className="grid gap-4 xl:grid-cols-3">
-        {(["backend", "scanner", "migration"] as WorkerKey[]).map((worker) => {
-          const current = installation?.workers[worker]
-          const connection = connections[worker]
-          return <Card key={worker}><CardHeader><CardTitle className="text-base">{labels[worker]}</CardTitle><CardDescription>{current?.scriptName || "Manual or not installed"}</CardDescription></CardHeader><CardContent className="flex flex-col gap-3 text-sm">
-            <p>Account: {current?.accountName || "—"} · <Badge variant={connection.enabled ? "default" : "secondary"}>{connection.enabled ? "Enabled" : "Disabled"}</Badge></p>
-            <div className="flex flex-col gap-1"><Label htmlFor={`${worker}-url`}>Worker URL</Label><Input id={`${worker}-url`} value={connection.url} onChange={(event) => updateConnection(worker, { url: event.target.value })} disabled={busy} /></div>
-            <div className="flex flex-col gap-1"><Label htmlFor={`${worker}-secret`}>Worker secret</Label><Input id={`${worker}-secret`} type="password" autoComplete="off" value={connection.secret} onChange={(event) => updateConnection(worker, { secret: event.target.value })} disabled={busy} /></div>
-            <p>Deployment: {current?.verified ? "Verified" : current?.deployed ? "Awaiting verification" : connection.url ? "Configured manually" : "Not deployed"}</p>
-            <div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => void saveConnection(worker)} disabled={busy || !connection.url || (!connection.secret && !connection.secretConfigured)}>Save</Button><Button size="sm" variant="outline" onClick={() => void workerAction(worker, "test")} disabled={busy || !connection.url || !connection.secretConfigured}>Test</Button><Button size="sm" variant="outline" onClick={() => void workerAction(worker, "toggle")} disabled={busy || !connection.url || !connection.secretConfigured}>{connection.enabled ? "Disable" : "Enable"}</Button><Button size="sm" variant="outline" onClick={() => void workerAction(worker, "run")} disabled={busy || !connection.enabled}>Run now</Button></div>
-          </CardContent></Card>
-        })}
-      </div> : null}
     </section>
   )
 }

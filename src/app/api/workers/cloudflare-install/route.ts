@@ -21,7 +21,7 @@ async function authorizeBootstrap() {
 export async function GET(request: NextRequest) {
   const auth = await authorizeBootstrap(); if (!auth.ok) return auth.response
   const reconcile = request.nextUrl.searchParams.get("reconcile") === "1"
-  return NextResponse.json({ installation: reconcile ? await reconcileCloudflareWorkers(true) : await getCloudflareInstallation(), hosting: await getCloudflareHostingPreference() })
+  return NextResponse.json({ installation: reconcile ? await reconcileCloudflareWorkers(true) : await getCloudflareInstallation(), hosting: await getCloudflareHostingPreference(), canRevealTokens: !auth.bootstrap })
 }
 
 export async function PATCH(request: NextRequest) {

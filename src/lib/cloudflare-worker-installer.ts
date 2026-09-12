@@ -157,8 +157,9 @@ async function adoptExistingWorkers(state: InstallState, tokens: TokenMap, accou
     try {
       if (!(await scriptExists(tokens[worker], accounts[worker].id, current.scriptName))) return
       const inspected = await inspectWorker(candidate.url, candidate.secret)
+      const checkedAt = new Date().toISOString()
       state.secrets[worker] = candidate.secret; current.url = candidate.url; current.deployed = true; current.verified = true; current.phase = "verified"
-      current.lastCheckedAt = new Date().toISOString(); current.latencyMs = inspected.latencyMs; current.build = inspected.build
+      current.deployedAt = checkedAt; current.verifiedAt = checkedAt; current.lastCheckedAt = checkedAt; current.latencyMs = inspected.latencyMs; current.build = inspected.build
     } catch { /* Existing configuration is not authoritative; the installer will repair it. */ }
   }))
 }
@@ -366,7 +367,7 @@ async function inspectWorker(url: string, secret: string) {
 export async function reconcileCloudflareWorkers(force = false) {
   return withDbAdvisoryLock("cloudflare-worker-reconcile", "singleton", async () => {
     const state = await loadState()
-    if (!state || state.status !== "ready" || !state.encryptedTokens) return getCloudflareInstallation()
+    if (!state || !state.encryptedTokens) return getCloudflareInstallation()
     const encryptedTokens = state.encryptedTokens
     if (!force && state.lastReconciledAt && Date.now() - new Date(state.lastReconciledAt).getTime() < 60_000) return getCloudflareInstallation()
     await Promise.all(ORDER.map(async (worker) => {
@@ -406,7 +407,21 @@ export async function getCloudflareInstallation() {
   const state = await loadState()
   if (!state) return null
   const { encryptedTokens, ...safe } = state
-  return { ...safe, secrets: { backend: "", scanner: "", migration: "" }, tokensSaved: ORDER.every((worker) => Boolean(encryptedTokens?.[worker])) }
+  const tokensSaved = ORDER.every((worker) => Boolean(encryptedTokens?.[worker]))
+  const workers = Object.fromEntries(ORDER.map((worker) => {
+    const current = safe.workers[worker]
+    return [worker, tokensSaved ? current : { scriptName: current.scriptName, phase: "queued" as const }]
+  })) as Record<HostedWorker, WorkerState>
+  return { ...safe, workers, secrets: { backend: "", scanner: "", migration: "" }, tokensSaved }
+}
+
+export function cloudflareInstallationReady(installation: Awaited<ReturnType<typeof getCloudflareInstallation>>) {
+  if (!installation || installation.status !== "ready" || installation.tokensSaved !== true) return false
+  return ORDER.every((worker) => {
+    const current = installation.workers[worker]
+    const checkedAt = current.lastCheckedAt ? new Date(current.lastCheckedAt).getTime() : 0
+    return current.deployed === true && current.verified === true && Boolean(current.url && current.deployedAt && current.verifiedAt) && Number.isFinite(checkedAt) && checkedAt > 0
+  })
 }
 
 export async function revealCloudflareTokens() {
@@ -492,7 +507,10 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       state.step = "configuration_saved"; await saveState(state)
       for (const worker of ORDER) {
         state.workers[worker].phase = "verifying"; state.step = `${worker}_verifying`; await saveState(state)
-        await verify(state.workers[worker].url!, state.secrets[worker]); state.workers[worker].verified = true; state.workers[worker].phase = "verified"; state.workers[worker].verifiedAt = new Date().toISOString(); state.workers[worker].lastCheckedAt = new Date().toISOString(); await saveState(state)
+        await verify(state.workers[worker].url!, state.secrets[worker])
+        const inspected = await inspectWorker(state.workers[worker].url!, state.secrets[worker])
+        const checkedAt = new Date().toISOString()
+        state.workers[worker].verified = true; state.workers[worker].phase = "verified"; state.workers[worker].verifiedAt = checkedAt; state.workers[worker].lastCheckedAt = checkedAt; state.workers[worker].latencyMs = inspected.latencyMs; state.workers[worker].build = inspected.build; await saveState(state)
       }
       for (const worker of ORDER) await setSchedule(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
       state.step = "schedules_ready"; await saveState(state)

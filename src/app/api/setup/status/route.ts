@@ -5,7 +5,7 @@ import {
   hasSuperAdminUser,
 } from "@/lib/users-store"
 import { getSessionUser } from "@/lib/server-auth"
-import { getCloudflareInstallation, reconcileCloudflareWorkers } from "@/lib/cloudflare-worker-installer"
+import { cloudflareInstallationReady, getCloudflareInstallation, reconcileCloudflareWorkers } from "@/lib/cloudflare-worker-installer"
 import { getSystemReadiness } from "@/lib/system-readiness"
 import { queryDb } from "@/lib/db"
 import { cookies } from "next/headers"
@@ -22,7 +22,7 @@ export async function GET() {
     const mayManageSetup = !hasSuperAdmin || session?.role === "superadmin"
     const mayInspectWorkers = readiness.ready && mayManageSetup
     const installation = mayInspectWorkers ? await reconcileCloudflareWorkers(false).catch(() => getCloudflareInstallation()) : null
-    const workersReady = installation?.status === "ready" && installation.tokensSaved === true && Object.values(installation.workers || {}).every((worker) => worker.deployed && worker.verified)
+    const workersReady = cloudflareInstallationReady(installation)
     const setupStep = !mayManageSetup ? "complete" : !readiness.ready ? "requirements" : !workersReady ? "workers" : !hasSuperAdmin ? "account" : "complete"
     return NextResponse.json({ hasUsers, hasAdmin, hasSuperAdmin, readiness, workersReady, setupStep, setupRequired: setupStep !== "complete" })
   } catch (error: unknown) {
@@ -44,7 +44,7 @@ export async function GET() {
       const session = sessionUserId ? await queryDb<{ role: string }>(`select role from drive_users where id=$1 and status='active' limit 1`, [sessionUserId]) : null
       const mayManageSetup = !fallback?.has_superadmin || session?.rows[0]?.role === "superadmin"
       const installation = readiness.ready && mayManageSetup ? await getCloudflareInstallation().catch(() => null) : null
-      const workersReady = installation?.status === "ready" && installation.tokensSaved === true && Object.values(installation.workers || {}).every((worker) => worker.deployed && worker.verified)
+      const workersReady = cloudflareInstallationReady(installation)
       const setupStep = !mayManageSetup ? "complete" : !readiness.ready ? "requirements" : !workersReady ? "workers" : !fallback?.has_superadmin ? "account" : "complete"
       return NextResponse.json({ hasUsers: fallback?.has_users === true, hasAdmin: fallback?.has_admin === true, hasSuperAdmin: fallback?.has_superadmin === true, readiness, workersReady, setupStep, setupRequired: setupStep !== "complete", warning: message })
     } catch { /* Database readiness card will carry the actionable failure. */ }
