@@ -17,6 +17,14 @@ import {
 import { Label } from "@/components/ui/label"
 
 export default function VerifyEmailPage() {
+  return (
+    <React.Suspense fallback={<main className="auth-flow-bg min-h-svh" />}>
+      <VerifyEmailContent />
+    </React.Suspense>
+  )
+}
+
+function VerifyEmailContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { setUserDirect } = useAuth()

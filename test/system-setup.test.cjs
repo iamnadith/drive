@@ -14,13 +14,14 @@ const gate = read("src/components/superadmin-gate.tsx")
 const login = read("src/components/login-form.tsx")
 const profile = read("src/app/profile/page.tsx")
 const hosting = read("src/components/dashboard/cloudflare-worker-hosting.tsx")
-const cron = read("src/app/api/cron/cloudflare-workers/route.ts")
 const backendReconcile = read("src/app/api/internal/backend-orchestrator/reconcile/route.ts")
-const vercel = read("vercel.json")
 const siteHeader = read("src/components/site-header.tsx")
+const middleware = read("middleware.ts")
+const workerFailure = read("src/lib/worker-failure-response.ts")
 
 test("setup gates account creation behind required environment and Workers", () => {
-  for (const marker of ["POSTGRES_URL", "POSTGRES_SSL", "SUPABASE_SERVICE_ROLE_KEY", "RESEND_API_KEY", "NEXT_PUBLIC_APP_URL", "CRON_SECRET"]) assert.match(readiness, new RegExp(marker))
+  for (const marker of ["POSTGRES_URL", "POSTGRES_SSL", "SUPABASE_SERVICE_ROLE_KEY", "RESEND_API_KEY", "NEXT_PUBLIC_APP_URL"]) assert.match(readiness, new RegExp(marker))
+  assert.doesNotMatch(readiness, /CRON_SECRET/)
   assert.match(readiness, /queryDb\("select 1 as ready"\)/)
   assert.match(setupStatus, /!readiness\.ready \? "requirements" : !workersReady \? "workers" : !hasSuperAdmin \? "account"/)
   assert.match(setupAdmin, /Complete the required environment configuration first/)
@@ -40,12 +41,15 @@ test("setup presents responsive ordered stages and Worker telemetry", () => {
 
 test("runtime guard returns superadmins to setup when reconciliation fails", () => {
   assert.match(gate, /setupRequired/)
-  assert.match(gate, /60_000/)
+  assert.doesNotMatch(gate, /setInterval/)
+  assert.doesNotMatch(gate, /return null/)
+  assert.match(gate, /X-Drive-Worker-Failure/)
+  assert.match(setupStatus, /drive_setup_required/)
+  assert.match(setupStatus, /forceWorkers/)
+  assert.match(middleware, /drive_setup_required/)
+  assert.match(workerFailure, /reconcileAndRepairCloudflareWorkers\(true\)/)
   assert.match(setupStatus, /reconcileCloudflareWorkers/)
-  assert.match(cron, /reconcileAndRepairCloudflareWorkers\(true\)/)
-  assert.match(cron, /Bearer \$\{secret\}/)
   assert.match(backendReconcile, /after\(async \(\) =>/)
-  assert.match(vercel, /api\/cron\/cloudflare-workers/)
 })
 
 test("optional Google and SMS controls are capability-aware", () => {

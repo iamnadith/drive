@@ -5,6 +5,7 @@ import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-s
 import { listMigrationItems } from "@/lib/migrations-store"
 import { listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { scheduleWorkerRepair } from "@/lib/worker-failure-response"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -100,6 +101,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     if (!response.ok) throw new Error(live.error || `Migration Orchestrator returned HTTP ${response.status}`)
     return NextResponse.json({ ...cached, snapshot: live.snapshot ?? cached.snapshot, jobs: Array.isArray(live.jobs) ? live.jobs : cached.jobs, source: "orchestrator" }, { headers: { "Cache-Control": "no-store, max-age=0" } })
   } catch (error) {
-    return NextResponse.json({ ...cached, source: "database", liveWarning: error instanceof Error ? error.message : String(error) }, { headers: { "Cache-Control": "no-store, max-age=0" } })
+    scheduleWorkerRepair()
+    return NextResponse.json({ ...cached, source: "database", liveWarning: error instanceof Error ? error.message : String(error) }, { headers: { "Cache-Control": "no-store, max-age=0", "X-Drive-Worker-Failure": "1" } })
   }
 }

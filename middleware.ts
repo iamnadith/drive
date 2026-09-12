@@ -40,7 +40,15 @@ function isProtectedInternalApi(pathname: string) {
 }
 
 export function middleware(request: NextRequest) {
-  if (!isProtectedInternalApi(request.nextUrl.pathname)) {
+  const pathname = request.nextUrl.pathname
+  if (!pathname.startsWith("/api/")) {
+    const setupRequired = request.cookies.get("drive_setup_required")?.value
+    if (setupRequired === "1" && pathname !== "/setup") return NextResponse.redirect(new URL("/setup", request.url))
+    if (setupRequired === "0" && pathname === "/setup") return NextResponse.redirect(new URL("/", request.url))
+    return NextResponse.next()
+  }
+
+  if (!isProtectedInternalApi(pathname)) {
     return NextResponse.next()
   }
 
@@ -52,5 +60,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: "/api/:path*",
+  matcher: ["/api/:path*", "/((?!_next/static|_next/image|favicon.ico).*)"],
 }

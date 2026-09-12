@@ -34,6 +34,10 @@ function normalizeMethods(value: unknown): VerificationMethod[] {
 }
 
 export default function GoogleCompletePage() {
+  return <React.Suspense fallback={<div className="auth-flow-bg flex min-h-svh items-center justify-center p-4"><FieldDescription>Finishing Google sign-in…</FieldDescription></div>}><GoogleCompleteContent /></React.Suspense>
+}
+
+function GoogleCompleteContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { setUserDirect } = useAuth()

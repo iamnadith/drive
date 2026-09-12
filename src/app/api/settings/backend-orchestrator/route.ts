@@ -6,6 +6,7 @@ import {
   saveBackendOrchestratorSettings,
 } from "@/lib/backend-orchestrator-settings-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { scheduleWorkerRepair, workerFailureResponse } from "@/lib/worker-failure-response"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -38,12 +39,15 @@ export async function GET() {
   const auth = await requireAdmin()
   if (!auth.ok) return auth.response
   const settings = await getBackendOrchestratorSettings()
-  const worker = settings.orchestratorUrl && settings.sharedSecret
-    ? await callOrchestrator(settings, { path: "/status", method: "GET" }).catch(() => null)
-    : null
+  let worker: unknown = null
+  let workerFailed = false
+  if (settings.orchestratorUrl && settings.sharedSecret) {
+    try { worker = await callOrchestrator(settings, { path: "/status", method: "GET" }) }
+    catch { workerFailed = true; scheduleWorkerRepair() }
+  }
   return NextResponse.json(
     { settings: publicBackendOrchestratorSettings(settings), state: await state(), worker },
-    { headers: { "Cache-Control": "no-store, max-age=0" } }
+    { headers: { "Cache-Control": "no-store, max-age=0", ...(workerFailed ? { "X-Drive-Worker-Failure": "1" } : {}) } }
   )
 }
 
@@ -79,7 +83,7 @@ export async function PATCH(request: Request) {
     const saved = await saveBackendOrchestratorSettings({ enabled: body.enabled })
     return NextResponse.json({ settings: publicBackendOrchestratorSettings(saved), state: await state() })
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 })
+    return workerFailureResponse(error)
   }
 }
 
@@ -97,6 +101,6 @@ export async function POST(request: Request) {
     })
     return NextResponse.json({ ok: true, action, result: payload, state: await state() })
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 })
+    return workerFailureResponse(error)
   }
 }

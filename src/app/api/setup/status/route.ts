@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server"
+import { NextRequest, NextResponse } from "next/server"
 import {
   hasAnyUsers,
   hasAdminUser,
@@ -12,7 +12,17 @@ import { cookies } from "next/headers"
 
 export const runtime = "nodejs"
 
-export async function GET() {
+function setupResponse(payload: Record<string, unknown>) {
+  const response = NextResponse.json(payload, { headers: { "Cache-Control": "no-store" } })
+  if (typeof payload.setupRequired === "boolean") {
+    response.cookies.set("drive_setup_required", payload.setupRequired ? "1" : "0", {
+      sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge: 60 * 60 * 24 * 30,
+    })
+  }
+  return response
+}
+
+export async function GET(request: NextRequest) {
   const readiness = await getSystemReadiness()
   try {
     const hasUsers = await hasAnyUsers()
@@ -21,10 +31,11 @@ export async function GET() {
     const session = await getSessionUser().catch(() => null)
     const mayManageSetup = !hasSuperAdmin || session?.role === "superadmin"
     const mayInspectWorkers = readiness.ready && mayManageSetup
-    const installation = mayInspectWorkers ? await reconcileCloudflareWorkers(false).catch(() => getCloudflareInstallation()) : null
+    const forceWorkers = request.nextUrl.searchParams.get("forceWorkers") === "1"
+    const installation = mayInspectWorkers ? await reconcileCloudflareWorkers(forceWorkers).catch(() => getCloudflareInstallation()) : null
     const workersReady = cloudflareInstallationReady(installation)
     const setupStep = !mayManageSetup ? "complete" : !readiness.ready ? "requirements" : !workersReady ? "workers" : !hasSuperAdmin ? "account" : "complete"
-    return NextResponse.json({ hasUsers, hasAdmin, hasSuperAdmin, readiness, workersReady, setupStep, setupRequired: setupStep !== "complete" })
+    return setupResponse({ hasUsers, hasAdmin, hasSuperAdmin, readiness, workersReady, setupStep, setupRequired: setupStep !== "complete" })
   } catch (error: unknown) {
     const message =
       typeof error === "object" && error !== null && "message" in error
@@ -46,11 +57,8 @@ export async function GET() {
       const installation = readiness.ready && mayManageSetup ? await getCloudflareInstallation().catch(() => null) : null
       const workersReady = cloudflareInstallationReady(installation)
       const setupStep = !mayManageSetup ? "complete" : !readiness.ready ? "requirements" : !workersReady ? "workers" : !fallback?.has_superadmin ? "account" : "complete"
-      return NextResponse.json({ hasUsers: fallback?.has_users === true, hasAdmin: fallback?.has_admin === true, hasSuperAdmin: fallback?.has_superadmin === true, readiness, workersReady, setupStep, setupRequired: setupStep !== "complete", warning: message })
+      return setupResponse({ hasUsers: fallback?.has_users === true, hasAdmin: fallback?.has_admin === true, hasSuperAdmin: fallback?.has_superadmin === true, readiness, workersReady, setupStep, setupRequired: setupStep !== "complete", warning: message })
     } catch { /* Database readiness card will carry the actionable failure. */ }
-    return NextResponse.json(
-      { hasUsers: false, hasAdmin: false, hasSuperAdmin: false, readiness, workersReady: false, setupStep: readiness.ready ? "account" : "requirements", setupRequired: true, error: message },
-      { status: 200 }
-    )
+    return setupResponse({ hasUsers: false, hasAdmin: false, hasSuperAdmin: false, readiness, workersReady: false, setupStep: readiness.ready ? "account" : "requirements", setupRequired: true, error: message })
   }
 }

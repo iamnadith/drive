@@ -5,6 +5,7 @@ import {
   publicMigrationOrchestratorSettings,
   saveMigrationOrchestratorSettings,
 } from "@/lib/migration-orchestrator-settings-store"
+import { workerFailureResponse } from "@/lib/worker-failure-response"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -66,7 +67,7 @@ export async function PATCH(request: Request) {
     const settings = await saveMigrationOrchestratorSettings(worker === "migration" ? { migrationEnabled: body.enabled } : { fileScannerEnabled: body.enabled })
     return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings) })
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 })
+    return workerFailureResponse(error)
   }
 }
 
@@ -87,6 +88,6 @@ export async function POST(request: Request) {
       : await callWorker(settings, action === "run_file" ? "file" : "migration", "/run", "POST")
     return NextResponse.json({ ok: true, action, result })
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 })
+    return workerFailureResponse(error)
   }
 }
