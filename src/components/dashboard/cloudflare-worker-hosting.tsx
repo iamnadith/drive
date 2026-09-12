@@ -73,11 +73,6 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
   }, [onboarding])
   React.useEffect(() => { void (onboarding ? refresh() : Promise.all([refresh(), loadConnections()])).catch(() => undefined) }, [refresh, loadConnections, onboarding])
   React.useEffect(() => {
-    if (!busy && installation?.status !== "running") return
-    const timer = window.setInterval(() => { void refresh().catch(() => undefined) }, 1500)
-    return () => window.clearInterval(timer)
-  }, [busy, installation?.status, refresh])
-  React.useEffect(() => {
     const ready = installation?.status === "ready" && installation.tokensSaved === true && (Object.values(installation.workers) as Installation["workers"][WorkerKey][]).every((worker) => worker.deployed && worker.verified && worker.url && worker.deployedAt && worker.verifiedAt && worker.lastCheckedAt)
     if (ready) { repairAttempted.current = false; onReady?.(); return }
     if ((installation?.status !== "failed" && installation?.status !== "running") || !installation.tokensSaved || repairAttempted.current || busy) return

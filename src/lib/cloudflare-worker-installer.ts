@@ -11,7 +11,7 @@ type TokenMap = Record<HostedWorker, string>
 type Account = { id: string; name: string }
 type Artifact = { url: string; sha256: string; compatibilityDate: string; compatibilityFlags?: string[] }
 type Manifest = { version: string; workers: Record<HostedWorker, Artifact> }
-type WorkerState = { accountId?: string; accountName?: string; scriptName: string; url?: string; deployed?: boolean; verified?: boolean; phase?: "queued" | "uploading" | "configuring" | "deployed" | "verifying" | "verified" | "failed"; deployedAt?: string; verifiedAt?: string; lastCheckedAt?: string; latencyMs?: number; build?: string | number; error?: string }
+type WorkerState = { accountId?: string; accountName?: string; scriptName: string; url?: string; deployed?: boolean; verified?: boolean; phase?: "queued" | "uploading" | "configuring" | "deployed" | "verifying" | "verified" | "failed"; deployedAt?: string; verifiedAt?: string; lastCheckedAt?: string; latencyMs?: number; build?: string | number; releaseVersion?: string; artifactSha256?: string; error?: string }
 type InstallState = {
   id: string
   mode: InstallMode
@@ -262,7 +262,11 @@ async function ensureQueue(token: string, accountId: string, name: string) {
 async function uploadWorker(input: { worker: HostedWorker; token: string; accountId: string; entry: Artifact; code: Uint8Array; state: InstallState }) {
   const { worker, token, accountId, entry, code, state } = input
   const publicPanelUrl = panelUrl()
-  const postgresUrl = String(process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL || "")
+  // Cloudflare Workers should use the pooler URL. Supabase direct/non-pooling
+  // hosts are commonly IPv6-only and can time out from a Worker even while the
+  // same URL works during a Vercel build. Keep the direct URL as a last-resort
+  // fallback for installations that only expose one connection string.
+  const postgresUrl = String(process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL || process.env.POSTGRES_URL_NON_POOLING || "")
   if (!/^https:\/\//i.test(publicPanelUrl) || !postgresUrl) throw new Error("Panel URL or PostgreSQL URL is not configured")
   const postgresSsl = String(process.env.POSTGRES_SSL || "").trim().toLowerCase()
   const disablePostgresSsl = postgresSsl === "0" || postgresSsl === "false" || ["1", "true"].includes(String(process.env.DISABLE_POSTGRES_SSL || "").trim().toLowerCase())
@@ -513,12 +517,18 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       await ensureQueue(tokens.migration, accounts.migration.id, names.migrationDlq)
       state.step = "queues_ready"; await saveState(state)
       for (const worker of ORDER) {
-        if (!state.workers[worker].deployed) {
+        const current = state.workers[worker]
+        const artifactEntry = manifest.workers[worker]
+        const artifactMatches = current.releaseVersion === manifest.version && current.artifactSha256 === artifactEntry.sha256.toLowerCase()
+        if (!current.deployed || !artifactMatches) {
+          current.deployed = false; current.verified = false; current.verifiedAt = undefined; current.latencyMs = undefined; current.build = undefined
           state.workers[worker].phase = "uploading"; state.workers[worker].error = undefined; state.step = `${worker}_uploading`; await saveState(state)
-          await uploadWorker({ worker, token: tokens[worker], accountId: accounts[worker].id, entry: manifest.workers[worker], code: await artifact(manifest.workers[worker]), state })
+          await uploadWorker({ worker, token: tokens[worker], accountId: accounts[worker].id, entry: artifactEntry, code: await artifact(artifactEntry), state })
           state.workers[worker].phase = "configuring"; state.step = `${worker}_configuring`; await saveState(state)
           state.workers[worker].url = await workersDevUrl(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
-          state.workers[worker].deployed = true; state.workers[worker].phase = "deployed"; state.workers[worker].deployedAt = new Date().toISOString(); state.step = `${worker}_deployed`; await saveState(state)
+          state.workers[worker].deployed = true; state.workers[worker].phase = "deployed"; state.workers[worker].deployedAt = new Date().toISOString()
+          state.workers[worker].releaseVersion = manifest.version; state.workers[worker].artifactSha256 = artifactEntry.sha256.toLowerCase()
+          state.step = `${worker}_deployed`; await saveState(state)
         }
       }
       await configureConsumer(tokens.scanner, accounts.scanner.id, names.scannerQueue, names.scannerDlq, state.workers.scanner.scriptName, 15)
