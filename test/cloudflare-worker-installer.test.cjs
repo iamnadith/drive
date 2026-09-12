@@ -48,6 +48,10 @@ test("installer is resumable, locked and keeps secrets on release redeploy", () 
   assert.match(installer, /cloudflareInstallationReady/)
   assert.match(installer, /current\.deployedAt = checkedAt; current\.verifiedAt = checkedAt/)
   assert.match(hosting, /current\.deployedAt && current\.verifiedAt && current\.lastCheckedAt/)
+  assert.match(installer, /never-finished installation must be resumed by the installer/)
+  assert.match(hosting, /Account details will appear only after deployment/)
+  assert.match(installer, /Array\.isArray\(result\?\.schedules\)/)
+  assert.match(installer, /consumers\.find\(\(consumer\) => consumer\.script_name === scriptName\) \|\| consumers\[0\]/)
 })
 
 test("release artifacts are immutable checksummed bundles", () => {

@@ -289,16 +289,27 @@ async function setSchedule(token: string, accountId: string, scriptName: string)
 }
 
 async function ensureSchedule(token: string, accountId: string, scriptName: string) {
-  const schedules = await cf<Array<{ cron?: string }>>(token, `/accounts/${accountId}/workers/scripts/${scriptName}/schedules`)
+  const result = await cf<{ schedules?: Array<{ cron?: string }> } | Array<{ cron?: string }>>(token, `/accounts/${accountId}/workers/scripts/${scriptName}/schedules`)
+  const schedules = Array.isArray(result) ? result : Array.isArray(result?.schedules) ? result.schedules : []
   if (!schedules.some((schedule) => schedule.cron === "* * * * *")) await setSchedule(token, accountId, scriptName)
+}
+
+type QueueConsumer = { consumer_id?: string; script_name?: string }
+
+function queueConsumers(result: QueueConsumer[] | { consumers?: QueueConsumer[] }) {
+  if (Array.isArray(result)) return result
+  return Array.isArray(result?.consumers) ? result.consumers : []
 }
 
 async function configureConsumer(token: string, accountId: string, queueName: string, dlqName: string, scriptName: string, retryDelay: number) {
   const queue = await ensureQueue(token, accountId, queueName)
   await ensureQueue(token, accountId, dlqName)
-  const consumers = await cf<Array<{ consumer_id: string; script_name?: string }>>(token, `/accounts/${accountId}/queues/${queue.queue_id}/consumers`)
+  const consumers = queueConsumers(await cf<QueueConsumer[] | { consumers?: QueueConsumer[] }>(token, `/accounts/${accountId}/queues/${queue.queue_id}/consumers`))
   const body = JSON.stringify({ type: "worker", script_name: scriptName, dead_letter_queue: dlqName, settings: { batch_size: 1, max_wait_time_ms: 1000, max_retries: 20, retry_delay: retryDelay } })
-  const existing = consumers.find((consumer) => consumer.script_name === scriptName)
+  // Cloudflare permits one push consumer for this Queue. Repoint an existing
+  // consumer to the expected script instead of attempting a duplicate POST.
+  const existing = consumers.find((consumer) => consumer.script_name === scriptName) || consumers[0]
+  if (existing && !existing.consumer_id) throw new Error(`Existing consumer for ${queueName} has no identifier`)
   await cf(token, existing
     ? `/accounts/${accountId}/queues/${queue.queue_id}/consumers/${existing.consumer_id}`
     : `/accounts/${accountId}/queues/${queue.queue_id}/consumers`, { method: existing ? "PUT" : "POST", body })
@@ -307,7 +318,7 @@ async function configureConsumer(token: string, accountId: string, queueName: st
 async function ensureConsumer(token: string, accountId: string, queueName: string, dlqName: string, scriptName: string, retryDelay: number) {
   const queue = await ensureQueue(token, accountId, queueName)
   await ensureQueue(token, accountId, dlqName)
-  const consumers = await cf<Array<{ script_name?: string }>>(token, `/accounts/${accountId}/queues/${queue.queue_id}/consumers`)
+  const consumers = queueConsumers(await cf<QueueConsumer[] | { consumers?: QueueConsumer[] }>(token, `/accounts/${accountId}/queues/${queue.queue_id}/consumers`))
   if (!consumers.some((consumer) => consumer.script_name === scriptName)) await configureConsumer(token, accountId, queueName, dlqName, scriptName, retryDelay)
 }
 
@@ -368,6 +379,12 @@ export async function reconcileCloudflareWorkers(force = false) {
   return withDbAdvisoryLock("cloudflare-worker-reconcile", "singleton", async () => {
     const state = await loadState()
     if (!state || !state.encryptedTokens) return getCloudflareInstallation()
+    // A running or never-finished installation must be resumed by the installer.
+    // Reconciling it cannot work without URLs and used to erase the actionable
+    // deployment error with a generic "metadata is incomplete" message.
+    if (state.status === "running" || (state.status === "failed" && !ORDER.some((worker) => Boolean(state.workers[worker].url)))) {
+      return getCloudflareInstallation()
+    }
     const encryptedTokens = state.encryptedTokens
     if (!force && state.lastReconciledAt && Date.now() - new Date(state.lastReconciledAt).getTime() < 60_000) return getCloudflareInstallation()
     await Promise.all(ORDER.map(async (worker) => {
@@ -385,7 +402,7 @@ export async function reconcileCloudflareWorkers(force = false) {
         current.lastCheckedAt = new Date().toISOString(); current.latencyMs = inspected.latencyMs; current.build = inspected.build
       } catch (error) {
         current.deployed = false; current.verified = false; current.phase = "failed"
-        current.error = error instanceof Error ? error.message : "Worker reconciliation failed"; current.lastCheckedAt = new Date().toISOString()
+        current.error = error instanceof Error ? error.message : "Worker reconciliation failed"; current.lastCheckedAt = new Date().toISOString(); current.latencyMs = undefined; current.build = undefined
       }
     }))
     state.lastReconciledAt = new Date().toISOString()
