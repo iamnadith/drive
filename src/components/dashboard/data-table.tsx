@@ -44,6 +44,7 @@ type DashboardDataTableProps<TData> = {
   tableClassName?: string
   rowClassName?: string
   resetKey?: string | number
+  withCard?: boolean
 }
 
 const paginationButtonClass =
@@ -62,6 +63,7 @@ export function DashboardDataTable<TData>({
   tableClassName,
   rowClassName,
   resetKey,
+  withCard = true,
 }: DashboardDataTableProps<TData>) {
   const safePageSize = Number.isFinite(pageSize) ? Math.max(1, Math.floor(pageSize)) : 10
   const [pagination, setPagination] = React.useState({ pageIndex: 0, pageSize: safePageSize })
@@ -94,7 +96,7 @@ export function DashboardDataTable<TData>({
 
   return (
     <>
-      <Card className={cn("dashboard-motion-item overflow-hidden gap-0 sm:gap-0 md:gap-0", className)}>
+      <TableSurface withCard={withCard} className={className}>
         <Table
           className={cn("w-full", tableClassName)}
           style={{ minWidth }}
@@ -215,11 +217,27 @@ export function DashboardDataTable<TData>({
             </button>
           </div>
         </div>
-      </Card>
-      <div className="-mt-2 text-center text-xs text-muted-foreground" aria-live="polite">
-        Page {totalRows ? pageIndex + 1 : 0} of {totalRows ? pageCount : 0}
-      </div>
+        <div className="px-3 pb-2 text-center text-xs text-muted-foreground" aria-live="polite">
+          Page {totalRows ? pageIndex + 1 : 0} of {totalRows ? pageCount : 0}
+        </div>
+      </TableSurface>
     </>
+  )
+}
+
+function TableSurface({
+  withCard,
+  className,
+  children,
+}: {
+  withCard: boolean
+  className?: string
+  children: React.ReactNode
+}) {
+  return withCard ? (
+    <Card className={cn("dashboard-motion-item overflow-hidden gap-0 sm:gap-0 md:gap-0", className)}>{children}</Card>
+  ) : (
+    <div className={cn("min-w-0 overflow-hidden", className)}>{children}</div>
   )
 }
 

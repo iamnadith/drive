@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import type { ColumnDef } from "@tanstack/react-table"
 import { useParams, useRouter } from "next/navigation"
 import {
   AlertCircle,
@@ -37,6 +38,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
+import { DashboardDataTable } from "@/components/dashboard/data-table"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import {
   getBucketDisplayStatusRank,
@@ -1753,6 +1755,151 @@ export default function MigrationDetailsPage() {
   const sourceLabel = accountLabelById.get(migration.sourceAccountId) ?? migration.sourceAccountId
   const targetLabel = accountLabelById.get(migration.targetAccountId) ?? migration.targetAccountId
 
+  const bucketColumns: ColumnDef<MigrationItem, unknown>[] = [
+    {
+      id: "bucket",
+      header: "Bucket",
+      meta: { width: "min-w-[260px]", align: "left" },
+      cell: ({ row }) => (
+        <div className="leading-tight">
+          <div className="truncate font-medium">{row.original.sourceBucket}</div>
+          <div className="truncate text-xs text-muted-foreground"><span className="font-mono">{row.original.id}</span></div>
+        </div>
+      ),
+    },
+    {
+      id: "status",
+      header: "Status",
+      meta: { width: "min-w-[130px]", align: "center" },
+      cell: ({ row }) => {
+        const item = row.original
+        const progress = isRecord(item.progress) ? item.progress : {}
+        const settingsSync = isRecord(progress.settingsSync) ? progress.settingsSync : null
+        const snapshot = getBucketSnapshot(item)
+        const displayStatus = settingsSync?.status === "syncing"
+          ? "settings_syncing"
+          : settingsSync?.status === "failed"
+            ? "settings_failed"
+            : snapshot.displayStatus
+        return (
+          <div className="space-y-1">
+            <div>{statusBadge(displayStatus, { hadProgress: snapshot.transferred > 0 || snapshot.skipped > 0 || snapshot.failed > 0 })}</div>
+            {settingsSync?.status === "completed" ? <div className="text-[11px] text-muted-foreground">Settings synced</div> : null}
+          </div>
+        )
+      },
+    },
+    {
+      id: "transferred",
+      header: "Transferred",
+      meta: { width: "min-w-[120px]", align: "center" },
+      cell: ({ row }) => <span className="font-mono text-xs">{formatNumber(getBucketSnapshot(row.original).transferred)}</span>,
+    },
+    {
+      id: "total",
+      header: "Total",
+      meta: { width: "min-w-[100px]", align: "center" },
+      cell: ({ row }) => {
+        const item = row.original
+        const progress = isRecord(item.progress) ? item.progress : {}
+        const scanComplete = progress.sourceScanStatus === "completed"
+        const snapshot = getBucketSnapshot(item)
+        const repairState = readRepairWorkerState(progress)
+        const repairItem = latestRepairItemsById.get(item.id)
+        const settingsSync = isRecord(progress.settingsSync) ? progress.settingsSync : null
+        const displayStatus = settingsSync?.status === "syncing"
+          ? "settings_syncing"
+          : settingsSync?.status === "failed"
+            ? "settings_failed"
+            : snapshot.displayStatus
+        const hasKnownEmpty = typeof item.sourceObjects === "number" && item.sourceObjects === 0 &&
+          getEffectiveSourceBytes(item, repairItem, repairState) === 0
+        const total = displayStatus === "no_files" || hasKnownEmpty
+          ? 0
+          : snapshot.total > 0 || scanComplete
+            ? snapshot.total
+            : undefined
+        return (
+          <span
+            className="font-mono text-xs"
+            title={scanComplete ? "Total from Supabase bucket scan (authoritative)" : displayStatus === "scanning" ? "Scanning source bucket… totals will appear when scan completes" : "Total"}
+          >
+            {typeof total === "number" ? formatNumber(total) : "—"}
+          </span>
+        )
+      },
+    },
+    {
+      id: "size",
+      header: "Size",
+      meta: { width: "min-w-[120px]", align: "center" },
+      cell: ({ row }) => {
+        const item = row.original
+        const progress = isRecord(item.progress) ? item.progress : {}
+        const scanComplete = progress.sourceScanStatus === "completed"
+        const repairState = readRepairWorkerState(progress)
+        const sourceBytes = getEffectiveSourceBytes(item, latestRepairItemsById.get(item.id), repairState)
+        const snapshot = getBucketSnapshot(item)
+        const settingsSync = isRecord(progress.settingsSync) ? progress.settingsSync : null
+        const displayStatus = settingsSync?.status === "syncing"
+          ? "settings_syncing"
+          : settingsSync?.status === "failed"
+            ? "settings_failed"
+            : snapshot.displayStatus
+        return <span className="font-mono text-xs">{displayStatus === "no_files" ? "0 B" : scanComplete || sourceBytes > 0 ? formatBytes(sourceBytes) : "—"}</span>
+      },
+    },
+    {
+      id: "actions",
+      header: "Actions",
+      meta: { width: "min-w-[190px]", align: "center", divider: false },
+      cell: ({ row }) => {
+        const item = row.original
+        const progress = isRecord(item.progress) ? item.progress : {}
+        const settingsSync = isRecord(progress.settingsSync) ? progress.settingsSync : null
+        const snapshot = getBucketSnapshot(item)
+        const status = String(getItemStatus(item) ?? "").toLowerCase()
+        const displayStatus = settingsSync?.status === "syncing"
+          ? "settings_syncing"
+          : settingsSync?.status === "failed"
+            ? "settings_failed"
+            : snapshot.displayStatus
+        const normalizedDisplayStatus = normalizeStatus(displayStatus)
+        const itemBusy = busyItemAction[item.id]
+        const workerPoolMigration = migration.options.executionMode === "migration_workers"
+        const canPause = !workerPoolMigration && Boolean(item.slurperJobId) && status === "running"
+        const canResume = !workerPoolMigration && Boolean(item.slurperJobId) && status === "paused"
+        const verifyState = readVerifyState(item.progress)
+        const verifyStatus = verifyState?.status ?? null
+        const canRetry = !workerPoolMigration && (verifyStatus === "error" || normalizedDisplayStatus === "queued" || normalizedDisplayStatus === "job_id_pending" || normalizedDisplayStatus.endsWith("_failed") || normalizedDisplayStatus.includes("failed") || normalizedDisplayStatus.includes("error"))
+        const canAbort = !workerPoolMigration && (Boolean(item.slurperJobId) || canRetry) && !["completed", "aborted", "failed", "verification_failed", "no_files"].includes(normalizedDisplayStatus)
+        const canVerify = !workerPoolMigration && isCompletedStatus(displayStatus) && verifyStatus !== "pending" && verifyStatus !== "running"
+        const canInspectFailures = snapshot.failed > 0 || snapshot.verifyIssues > 0 || normalizedDisplayStatus.includes("failed") || normalizedDisplayStatus.includes("error")
+        const lifecycleAction: "pause" | "resume" | "retry" | null = canPause ? "pause" : canRetry ? "retry" : canResume ? "resume" : null
+        const lifecycleBusy = itemBusy === "pause" || itemBusy === "resume" || itemBusy === "retry"
+        return (
+          <div className="flex justify-center gap-1">
+            <Button size="icon-sm" variant="outline" loading={itemBusy === "verify"} title={verifyStatus === null ? "Run verification" : "Re-run verification"} aria-label="Verify" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canVerify} onClick={() => { void runItemAction(item.id, "verify").then(() => void syncNow()) }}>
+              {itemBusy !== "verify" ? <ShieldCheck className="h-4 w-4" /> : null}
+            </Button>
+            <Button size="icon-sm" variant="outline" loading={itemBusy === "logs"} title="View logs" disabled={Boolean(itemBusy)} onClick={() => { setLogsItemId(item.id); setLogsOpen(true); if (bucketCounts.scanning > 0 || bucketCounts.running > 0 || bucketCounts.verifying > 0) void runItemAction(item.id, "logs") }}>
+              {itemBusy !== "logs" ? <ScrollText className="h-4 w-4" /> : null}
+            </Button>
+            <Button size="icon-sm" variant="outline" loading={lifecycleBusy} title="Failed Diagnostics" aria-label="Failed Diagnostics" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canInspectFailures} onClick={() => { void openFailedDiagnosticsForSingle(item.id) }}>
+              <AlertCircle className="h-4 w-4" />
+            </Button>
+            <Button size="icon-sm" variant="outline" title={lifecycleAction === "pause" ? "Stop" : lifecycleAction === "retry" ? "Start (retry)" : lifecycleAction === "resume" ? "Start" : "Start/Stop"} aria-label={lifecycleAction === "pause" ? "Stop" : lifecycleAction === "retry" ? "Start (retry)" : lifecycleAction === "resume" ? "Start" : "Start/Stop"} disabled={historyReadOnly.readOnly || Boolean(itemBusy) || lifecycleAction === null} onClick={() => { if (lifecycleAction) void runItemAction(item.id, lifecycleAction).then(() => lifecycleAction === "retry" ? void syncNow() : undefined) }}>
+              {!lifecycleBusy && lifecycleAction === "pause" ? <Square className="h-4 w-4" /> : !lifecycleBusy ? <Play className="h-4 w-4" /> : null}
+            </Button>
+            <Button size="icon-sm" variant="destructive" loading={itemBusy === "abort"} title="Abort" aria-label="Abort" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canAbort} onClick={() => { void runItemAction(item.id, "abort") }}>
+              {itemBusy !== "abort" ? <CircleX className="h-4 w-4" /> : null}
+            </Button>
+          </div>
+        )
+      },
+    },
+  ]
+
   return (
     <div className="space-y-6 max-w-full">
       <div className="flex items-center justify-between gap-3">
@@ -2050,19 +2197,11 @@ export default function MigrationDetailsPage() {
         </CardContent>
       </Card>
       {migration.options.executionMode === "migration_workers" ? (
-        <Card className="gap-2">
-          <CardHeader className="pb-1">
-            <div className="space-y-1">
-              <CardTitle>Migration Workers</CardTitle>
-              <CardDescription>Worker instances executing this migration.</CardDescription>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-3 pt-0">
-            {workerRuns.length === 0 ? (
-              <div className="rounded-2xl border border-dashed p-5 text-sm text-muted-foreground">
-                Waiting for a migration worker to start.
-              </div>
-            ) : (() => {
+        workerRuns.length === 0 ? (
+          <div className="rounded-2xl border border-dashed p-5 text-sm text-muted-foreground">
+            Waiting for a migration worker to start.
+          </div>
+        ) : (() => {
               const activeRuns = workerRuns.filter((run) => run.online)
               const latestRun = [...workerRuns].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]
               const isActive = activeRuns.length > 0
@@ -2123,9 +2262,7 @@ export default function MigrationDetailsPage() {
                   </div>
                 </div>
               )
-            })()}
-          </CardContent>
-        </Card>
+        })()
       ) : null}
 
       {latestRepairJob ? (
@@ -2213,16 +2350,17 @@ export default function MigrationDetailsPage() {
         </Card>
       ) : null}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Buckets</CardTitle>
-          <CardDescription>Object transfer, verification, and settings sync status for each bucket.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="max-w-full">
-            <div className="rounded-md border">
-              <ScrollArea className="max-h-[min(520px,60vh)]" hideScrollbar>
-                <Table className="table-fixed w-full">
+      {false ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Buckets</CardTitle>
+            <CardDescription>Object transfer, verification, and settings sync status for each bucket.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="max-w-full">
+              <div className="rounded-md border">
+                <ScrollArea className="max-h-[min(520px,60vh)]" hideScrollbar>
+                  <Table className="table-fixed w-full">
                   <TableHeader>
                     <TableRow>
                       <TableHead className="sticky top-0 z-10 bg-background w-[260px]">Bucket</TableHead>
@@ -2237,8 +2375,8 @@ export default function MigrationDetailsPage() {
                 {items.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={6} className="h-20 text-center text-sm text-muted-foreground">
-                      {migration.detailsCompactedAt
-                        ? `Detailed records were compacted. Summary retained: ${migration.summaryObjects.toLocaleString()} objects, ${formatBytes(migration.summaryBytes)}, ${migration.workerSummary?.workerRuns?.length ?? 0} worker runs, and ${migration.workerSummary?.repairJobs?.length ?? 0} repair jobs.`
+                      {migration!.detailsCompactedAt
+                        ? `Detailed records were compacted. Summary retained: ${migration!.summaryObjects.toLocaleString()} objects, ${formatBytes(migration!.summaryBytes)}, ${migration!.workerSummary?.workerRuns?.length ?? 0} worker runs, and ${migration!.workerSummary?.repairJobs?.length ?? 0} repair jobs.`
                         : "No bucket data stored for this migration."}
                     </TableCell>
                   </TableRow>
@@ -2275,7 +2413,7 @@ export default function MigrationDetailsPage() {
                   const failed = typeof slurper?.failedObjects === "number" ? slurper.failedObjects : 0
                   const hadProgress = snapshot.transferred > 0 || snapshot.skipped > 0 || snapshot.failed > 0
                   const itemBusy = busyItemAction[item.id]
-                  const workerPoolMigration = migration.options.executionMode === "migration_workers"
+                  const workerPoolMigration = migration!.options.executionMode === "migration_workers"
                   const canPause = !workerPoolMigration && Boolean(item.slurperJobId) && status === "running"
                   const canResume = !workerPoolMigration && Boolean(item.slurperJobId) && status === "paused"
                   const verifyState = readVerifyState(item.progress)
@@ -2458,19 +2596,33 @@ export default function MigrationDetailsPage() {
                   )
                 })}
                   </TableBody>
-                </Table>
-              </ScrollArea>
+                  </Table>
+                </ScrollArea>
+              </div>
             </div>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      ) : (
+        <DashboardDataTable
+          data={items}
+          columns={bucketColumns}
+          pageSize={10}
+          minWidth="980px"
+          withCard={false}
+          emptyState={
+            migration.detailsCompactedAt
+              ? `Detailed records were compacted. Summary retained: ${migration.summaryObjects.toLocaleString()} objects, ${formatBytes(migration.summaryBytes)}, ${migration.workerSummary?.workerRuns?.length ?? 0} worker runs, and ${migration.workerSummary?.repairJobs?.length ?? 0} repair jobs.`
+              : "No bucket data stored for this migration."
+          }
+          resetKey={migration.id}
+        />
+      )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Migration Logs</CardTitle>
-          <CardDescription>Aggregated logs and errors for this migration.</CardDescription>
-        </CardHeader>
-        <CardContent>
+      <section className="space-y-2">
+        <div className="space-y-1">
+          <h2 className="text-lg font-semibold">Migration Logs</h2>
+          <p className="text-sm text-muted-foreground">Aggregated logs and errors for this migration.</p>
+        </div>
           <div className="rounded-md border bg-muted/20">
             <ScrollArea ref={migrationLogsRef} className="max-h-[420px]" hideScrollbar>
                 <div className="min-w-[900px] p-2 text-xs font-mono">
@@ -2584,11 +2736,10 @@ export default function MigrationDetailsPage() {
                 </div>
             </ScrollArea>
           </div>
-        </CardContent>
             {logLines.length === 0 ? (
               <div className="p-4 text-sm text-muted-foreground">Waiting for scanner and orchestrator lifecycle events.</div>
             ) : null}
-        </Card>
+      </section>
 
       <Dialog open={failedOpen} onOpenChange={setFailedOpen}>
         <DialogContent className="w-[96vw] max-w-[96vw] sm:max-w-[min(96vw,72rem)] h-[88vh] sm:h-[min(88vh,56rem)] overflow-hidden p-0 flex flex-col gap-0">

@@ -35,7 +35,6 @@ import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
-import { Slider } from "@/components/ui/slider"
 import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -404,7 +403,6 @@ export default function MigrationsPage() {
   const [createOpen, setCreateOpen] = React.useState(false)
   const [targetAccountId, setTargetAccountId] = React.useState<string>("")
   const [overwrite, setOverwrite] = React.useState(true)
-  const [concurrency, setConcurrency] = React.useState("3")
   const [executionMode, setExecutionMode] = React.useState<"super_slurper" | "migration_workers">("super_slurper")
   const [pathPrefix, setPathPrefix] = React.useState("")
   const [bucketQuery, setBucketQuery] = React.useState("")
@@ -654,12 +652,6 @@ export default function MigrationsPage() {
     return buckets.filter((b) => b.name.toLowerCase().includes(query))
   }, [bucketQuery, buckets])
 
-  const concurrencyNumber = React.useMemo(() => {
-    const n = Number(concurrency)
-    if (!Number.isFinite(n)) return 3
-    return Math.max(1, Math.min(3, Math.floor(n)))
-  }, [concurrency])
-
   const selectedSummary = React.useMemo(() => {
     const names = Object.entries(selectedBuckets)
       .filter(([, on]) => on)
@@ -678,7 +670,6 @@ export default function MigrationsPage() {
 
   const createNewMigration = async () => {
     try {
-      const parsedConcurrency = Number(concurrency)
       const chosen = Object.entries(selectedBuckets)
         .filter(([, on]) => on)
         .map(([name]) => name)
@@ -702,7 +693,6 @@ export default function MigrationsPage() {
           body: JSON.stringify({
             targetAccountId,
             overwrite,
-            concurrency: Number.isFinite(parsedConcurrency) ? concurrencyNumber : 3,
             executionMode,
             pathPrefix: pathPrefix.trim() ? pathPrefix.trim() : undefined,
             includeBuckets: chosen,
@@ -987,35 +977,6 @@ export default function MigrationsPage() {
               <Separator />
 
               <div className="space-y-2">
-                <div className="flex items-center justify-between gap-3">
-                  <Label>Concurrency</Label>
-                  <span className="text-xs text-muted-foreground font-mono">{concurrencyNumber}/3</span>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Slider
-                    min={1}
-                    max={3}
-                    step={1}
-                    value={[concurrencyNumber]}
-                    onValueChange={(v) => setConcurrency(String(v[0] ?? 3))}
-                  />
-                  <Input
-                    className="w-16 h-10 text-center font-mono"
-                    value={String(concurrencyNumber)}
-                    onChange={(e) => setConcurrency(e.target.value)}
-                    inputMode="numeric"
-                  />
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {executionMode === "migration_workers"
-                    ? "This controls how many destination buckets are prepared at once; worker concurrency comes from dispatched workers."
-                    : "Cloudflare allows up to 3 concurrent Super Slurper jobs."}
-                </p>
-              </div>
-
-              <Separator />
-
-              <div className="space-y-2">
                 <Label>Path prefix (optional)</Label>
                 <Input className="h-11" value={pathPrefix} onChange={(e) => setPathPrefix(e.target.value)} placeholder="e.g. backups/" />
                 <p className="text-xs text-muted-foreground">Only migrate objects under this prefix.</p>
@@ -1142,6 +1103,37 @@ export default function MigrationsPage() {
         </DialogContent>
       </Dialog>
 
+      <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-4">
+        <Card className="gap-0 py-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+            <CardDescription className="text-[13px] leading-4">Total Migrations</CardDescription>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{migrations.length}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Stored migration runs</p></CardContent>
+        </Card>
+        <Card className="gap-0 py-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+            <CardDescription className="text-[13px] leading-4">In Progress</CardDescription>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{activeCount}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Running or verifying</p></CardContent>
+        </Card>
+        <Card className="gap-0 py-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+            <CardDescription className="text-[13px] leading-4">Completed</CardDescription>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{completedCount}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Successfully completed</p></CardContent>
+        </Card>
+        <Card className="gap-0 py-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+            <CardDescription className="text-[13px] leading-4">Needs Attention</CardDescription>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{attentionCount}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Failed or verification issues</p></CardContent>
+        </Card>
+      </div>
+
       <div className="dashboard-motion-item dashboard-motion-delay-1">
         {hasActiveCard ? (
           <Card>
@@ -1214,37 +1206,6 @@ export default function MigrationsPage() {
             </CardContent>
           </Card>
         ) : null}
-      </div>
-
-      <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-4">
-        <Card className="gap-0 py-0">
-          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
-            <CardDescription className="text-[13px] leading-4">Total Migrations</CardDescription>
-            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{migrations.length}</CardTitle>
-          </CardHeader>
-          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Stored migration runs</p></CardContent>
-        </Card>
-        <Card className="gap-0 py-0">
-          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
-            <CardDescription className="text-[13px] leading-4">In Progress</CardDescription>
-            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{activeCount}</CardTitle>
-          </CardHeader>
-          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Running or verifying</p></CardContent>
-        </Card>
-        <Card className="gap-0 py-0">
-          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
-            <CardDescription className="text-[13px] leading-4">Completed</CardDescription>
-            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{completedCount}</CardTitle>
-          </CardHeader>
-          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Successfully completed</p></CardContent>
-        </Card>
-        <Card className="gap-0 py-0">
-          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
-            <CardDescription className="text-[13px] leading-4">Needs Attention</CardDescription>
-            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{attentionCount}</CardTitle>
-          </CardHeader>
-          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Failed or verification issues</p></CardContent>
-        </Card>
       </div>
 
       <DashboardDataTable
