@@ -20,7 +20,9 @@ const middleware = read("middleware.ts")
 const workerFailure = read("src/lib/worker-failure-response.ts")
 
 test("setup gates account creation behind required environment and Workers", () => {
-  for (const marker of ["POSTGRES_URL", "POSTGRES_SSL", "CLOUDFLARE_TOKEN_ENCRYPTION_KEY", "RESEND_API_KEY", "NEXT_PUBLIC_APP_URL"]) assert.match(readiness, new RegExp(marker))
+  for (const marker of ["POSTGRES_URL", "RESEND_API_KEY", "NEXT_PUBLIC_APP_URL"]) assert.match(readiness, new RegExp(marker))
+  assert.doesNotMatch(readiness, /id: "database-ssl"|id: "encryption"/)
+  assert.match(readiness, /Primary durable state shared by the panel and Workers/)
   assert.doesNotMatch(readiness, /SUPABASE_URL|SUPABASE_SERVICE_ROLE_KEY|SUPABASE_PUBLISHABLE_KEY/)
   assert.doesNotMatch(readiness, /CRON_SECRET/)
   assert.match(readiness, /queryDb\("select 1 as ready"\)/)

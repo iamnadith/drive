@@ -47,9 +47,9 @@ export async function PATCH(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const auth = await authorizeBootstrap(); if (!auth.ok) return auth.response
   try {
-    const body = await request.json() as { mode?: unknown; token?: unknown; backendToken?: unknown; scannerToken?: unknown; migrationToken?: unknown; restart?: unknown; checkForUpdates?: unknown }
+    const body = await request.json() as { mode?: unknown; token?: unknown; backendToken?: unknown; scannerToken?: unknown; migrationToken?: unknown; restart?: unknown; checkForUpdates?: unknown; forceRedeploy?: unknown }
     const mode = body.mode === "separate" ? "separate" : "single"
-    const installation = await installCloudflareWorkers({ mode, restart: body.restart === true, checkForUpdates: body.checkForUpdates === true, tokens: {
+    const installation = await installCloudflareWorkers({ mode, restart: body.restart === true, checkForUpdates: body.checkForUpdates === true, forceRedeploy: body.forceRedeploy === true, tokens: {
       backend: String(mode === "single" ? body.token || "" : body.backendToken || ""),
       scanner: String(body.scannerToken || ""), migration: String(body.migrationToken || ""),
     } })

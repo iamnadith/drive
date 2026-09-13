@@ -34,19 +34,34 @@ type HostingPreference = { mode: "automatic" | "manual"; manual?: RuntimeSnapsho
 const API = "https://api.cloudflare.com/client/v4"
 const ORDER: HostedWorker[] = ["backend", "scanner", "migration"]
 
-function primaryEncryptionKey() {
-  const material = [process.env.CLOUDFLARE_TOKEN_ENCRYPTION_KEY, process.env.AUTH_SECRET, process.env.NEXTAUTH_SECRET]
+function postgresEncryptionMaterial() {
+  const connectionString = [process.env.POSTGRES_URL, process.env.POSTGRES_PRISMA_URL, process.env.POSTGRES_URL_NON_POOLING]
     .map((value) => String(value || "").trim())
-    .find((value) => value.length >= 24)
-  if (!material) throw new Error("Configure CLOUDFLARE_TOKEN_ENCRYPTION_KEY or AUTH_SECRET to securely save Cloudflare tokens")
+    .find(Boolean)
+  if (connectionString) return connectionString
+
+  const fields = [process.env.POSTGRES_HOST, process.env.POSTGRES_PORT, process.env.POSTGRES_USER, process.env.POSTGRES_PASSWORD, process.env.POSTGRES_DATABASE]
+    .map((value) => String(value || "").trim())
+  return fields.every(Boolean) ? JSON.stringify(fields) : ""
+}
+
+function encryptionMaterials() {
+  const configured = [process.env.CLOUDFLARE_TOKEN_ENCRYPTION_KEY, process.env.AUTH_SECRET, process.env.NEXTAUTH_SECRET]
+  const database = postgresEncryptionMaterial()
+  const legacy = [process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.SUPABASE_SECRET_KEY, process.env.SUPABASE_SERVICE_KEY]
+  return [...configured, database, ...legacy]
+    .map((value) => String(value || "").trim())
+    .filter((value, index, values) => value.length >= 24 && values.indexOf(value) === index)
+}
+
+function primaryEncryptionKey() {
+  const material = encryptionMaterials()[0]
+  if (!material) throw new Error("Configure PostgreSQL before securely saving Cloudflare tokens")
   return createHash("sha256").update(`drive-cloudflare-token:${material}`).digest()
 }
 
 function encryptionKeys() {
-  const stable = [process.env.CLOUDFLARE_TOKEN_ENCRYPTION_KEY, process.env.AUTH_SECRET, process.env.NEXTAUTH_SECRET]
-  const legacy = [process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.SUPABASE_SECRET_KEY, process.env.SUPABASE_SERVICE_KEY]
-  const materials = [...stable, ...legacy].map((value) => String(value || "").trim())
-    .filter((value, index, values) => value.length >= 24 && values.indexOf(value) === index)
+  const materials = encryptionMaterials()
   if (!materials.length) throw new Error("No Cloudflare token decryption key is configured")
   return materials.map((material) => createHash("sha256").update(`drive-cloudflare-token:${material}`).digest())
 }
@@ -513,11 +528,11 @@ export async function replaceCloudflareTokens(input: { mode: InstallMode; tokens
   })
 }
 
-export async function installCloudflareWorkers(input: { mode: InstallMode; tokens: Partial<TokenMap>; restart?: boolean; checkForUpdates?: boolean }) {
+export async function installCloudflareWorkers(input: { mode: InstallMode; tokens: Partial<TokenMap>; restart?: boolean; checkForUpdates?: boolean; forceRedeploy?: boolean }) {
   return withDbAdvisoryLock("cloudflare-worker-install", "singleton", async () => {
     const previous = await loadState()
     const hasSuppliedToken = ORDER.some((worker) => Boolean(String(input.tokens[worker] || "").trim()))
-    if (previous?.status === "ready" && !input.restart && !input.checkForUpdates && !hasSuppliedToken) return getCloudflareInstallation()
+    if (previous?.status === "ready" && !input.restart && !input.checkForUpdates && !input.forceRedeploy && !hasSuppliedToken) return getCloudflareInstallation()
     const supplied = input.mode === "single"
       ? { backend: String(input.tokens.backend || "").trim(), scanner: String(input.tokens.backend || "").trim(), migration: String(input.tokens.backend || "").trim() }
       : { backend: String(input.tokens.backend || "").trim(), scanner: String(input.tokens.scanner || "").trim(), migration: String(input.tokens.migration || "").trim() }
@@ -559,7 +574,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
         const current = state.workers[worker]
         const artifactEntry = manifest.workers[worker]
         const artifactMatches = current.releaseVersion === manifest.version && current.artifactSha256 === artifactEntry.sha256.toLowerCase()
-        if (!current.deployed || !artifactMatches) {
+        if (input.forceRedeploy || !current.deployed || !artifactMatches) {
           current.deployed = false; current.verified = false; current.verifiedAt = undefined; current.latencyMs = undefined; current.build = undefined
           state.workers[worker].phase = "uploading"; state.workers[worker].error = undefined; state.step = `${worker}_uploading`; await saveState(state)
           await uploadWorker({ worker, token: tokens[worker], accountId: accounts[worker].id, entry: artifactEntry, code: await artifact(artifactEntry), state })

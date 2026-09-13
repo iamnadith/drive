@@ -107,19 +107,19 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
     finally { setBusy(false) }
   }
 
-  const deploy = async (restart = false, checkForUpdates = false) => {
+  const deploy = async (restart = false, checkForUpdates = false, forceRedeploy = false) => {
     setBusy(true)
     try {
       const body = mode === "single"
-        ? { mode, token, restart, checkForUpdates }
-        : { mode, backendToken: token, scannerToken, migrationToken, restart, checkForUpdates }
+        ? { mode, token, restart, checkForUpdates, forceRedeploy }
+        : { mode, backendToken: token, scannerToken, migrationToken, restart, checkForUpdates, forceRedeploy }
       const response = await fetch("/api/workers/cloudflare-install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       const payload = await response.json().catch(() => ({})) as { installation?: Installation; error?: string }
       if (payload.installation) setInstallation(payload.installation)
       if (!response.ok) throw new Error(payload.error || "Cloudflare Worker installation failed")
       setToken(""); setScannerToken(""); setMigrationToken("")
       if (!onboarding) await loadConnections()
-      toast.success(checkForUpdates ? "Latest Worker release checked; all Workers are verified" : "All Cloudflare Workers were deployed, verified and enabled")
+      toast.success(checkForUpdates ? "Latest Worker release checked; all Workers are verified" : forceRedeploy ? "All Cloudflare Workers were redeployed and verified" : "All Cloudflare Workers were deployed, verified and enabled")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Cloudflare Worker installation failed")
       await refresh().catch(() => undefined)
@@ -218,7 +218,10 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
 
             <div className="flex flex-wrap gap-2">
               {!installationReady ? <Button onClick={() => void deploy(false)} disabled={busy || (!installation?.tokensSaved && !tokenInputReady)}>{busy ? "Working…" : installation?.status === "failed" || installation?.status === "running" ? "Repair and continue" : "Deploy Workers"}</Button> : null}
-              {installationReady ? <Button variant="outline" onClick={() => void deploy(false, true)} disabled={busy}><RefreshCw data-icon="inline-start" />{busy ? "Checking release…" : "Check for updates"}</Button> : null}
+              {installationReady ? <>
+                <Button variant="outline" onClick={() => void deploy(false, true)} disabled={busy}><RefreshCw data-icon="inline-start" />{busy ? "Checking release…" : "Check for updates"}</Button>
+                <Button variant="default" onClick={() => void deploy(false, false, true)} disabled={busy}><RefreshCw data-icon="inline-start" />{busy ? "Redeploying Workers…" : "Redeploy all Workers"}</Button>
+              </> : null}
               {installation?.status === "failed" ? <Button variant="outline" onClick={() => void deploy(true)} disabled={busy || (!installation.tokensSaved && !tokenInputReady)}>Start fresh</Button> : null}
               <Button variant="outline" onClick={() => void refresh()} disabled={busy}><RefreshCw data-icon="inline-start" />Refresh status</Button>
               {installation?.tokensSaved && canRevealTokens ? <Button variant="outline" onClick={() => void revealTokens()} disabled={busy}>{tokensVisible ? <EyeOff data-icon="inline-start" /> : <Eye data-icon="inline-start" />}{tokensVisible ? "Hide token" : "View saved token"}</Button> : null}
@@ -235,7 +238,7 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
               const current = installation?.tokensSaved ? installation.workers[worker] : undefined
               const live = Boolean(current?.deployed && current.verified && current.url && current.deployedAt && current.verifiedAt && current.lastCheckedAt)
               const phase = live ? "verified" : current?.phase === "failed" ? "failed" : current?.phase || "not deployed"
-              return <React.Fragment key={worker}>{index > 0 ? <Separator /> : null}<Item className="rounded-none border-0 px-5 py-5 sm:px-7"><ItemMedia variant="icon">{live ? <CheckCircle2 /> : phase === "failed" ? <TriangleAlert /> : <ServerCog />}</ItemMedia><ItemContent><div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><div><ItemTitle>{labels[worker]}</ItemTitle><p className="mt-1 text-xs text-muted-foreground">{current?.scriptName || "Waiting for a verified deployment"}</p></div><Badge variant={live ? "default" : phase === "failed" ? "destructive" : "secondary"}>{live ? "Live" : phase}</Badge></div>{current?.url ? <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2 xl:grid-cols-4"><p className="truncate" title={current.url}>URL <span className="block text-foreground">{current.url}</span></p><p>Cloudflare account <span className="block text-foreground">{current.accountName || "Validated account"}</span></p><p>Last response <span className="block text-foreground">{current.latencyMs != null ? `${current.latencyMs} ms` : "No response recorded"}</span></p><p>Live check <span className="block text-foreground">{current.lastCheckedAt ? new Date(current.lastCheckedAt).toLocaleString() : "Never checked"}</span></p></div> : <p className="mt-2 text-sm text-muted-foreground">No deployed Worker URL exists yet. Account details will appear only after deployment.</p>}{current?.error && current.url ? <p className="mt-2 text-sm text-destructive">{current.error}</p> : null}</ItemContent></Item></React.Fragment>
+              return <React.Fragment key={worker}>{index > 0 ? <Separator /> : null}<Item className="rounded-none border-0 px-5 py-5 sm:px-7"><ItemMedia variant="icon">{live ? <CheckCircle2 /> : phase === "failed" ? <TriangleAlert /> : <ServerCog />}</ItemMedia><ItemContent><div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"><div><ItemTitle>{labels[worker]}</ItemTitle><p className="mt-1 text-xs text-muted-foreground">{current?.scriptName || "Waiting for a verified deployment"}</p></div><Badge variant={live ? "default" : phase === "failed" ? "destructive" : "secondary"}>{live ? "Live" : phase}</Badge></div>{current?.url ? <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2 xl:grid-cols-5"><p className="truncate" title={current.url}>URL <span className="block text-foreground">{current.url}</span></p><p>Cloudflare account <span className="block text-foreground">{current.accountName || "Validated account"}</span></p><p>Last deployed <span className="block text-foreground">{current.deployedAt ? new Date(current.deployedAt).toLocaleString() : "Unknown"}</span></p><p>Last response <span className="block text-foreground">{current.latencyMs != null ? `${current.latencyMs} ms` : "No response recorded"}</span></p><p>Live check <span className="block text-foreground">{current.lastCheckedAt ? new Date(current.lastCheckedAt).toLocaleString() : "Never checked"}</span></p></div> : <p className="mt-2 text-sm text-muted-foreground">No deployed Worker URL exists yet. Account details will appear only after deployment.</p>}{current?.error && current.url ? <p className="mt-2 text-sm text-destructive">{current.error}</p> : null}</ItemContent></Item></React.Fragment>
             })}</ItemGroup>
           </CardContent>
         </> : <CardContent className="flex flex-col gap-6 px-5 py-5 sm:px-7 sm:py-6">
