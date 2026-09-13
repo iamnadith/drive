@@ -321,10 +321,11 @@ async function listBuckets(account: AccountRow) {
   const response = await fetchWithTimeout(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account.cloudflare_account_id)}/r2/buckets`, {
     headers: { Authorization: `Bearer ${account.api_token}` },
   })
-  const payload = await response.json().catch(() => ({})) as { result?: unknown; errors?: Array<{ message?: string }> }
-  if (!response.ok) throw new Error(payload.errors?.[0]?.message || `R2 bucket listing failed (${response.status})`)
+  const payload = await response.json().catch(() => ({})) as { success?: unknown; result?: unknown; errors?: Array<{ message?: string }> }
+  if (!response.ok || payload.success !== true) throw new Error(payload.errors?.[0]?.message || `R2 bucket listing failed (${response.status})`)
   const result = payload.result
-  const values = Array.isArray(result) ? result : result && typeof result === "object" && Array.isArray((result as { buckets?: unknown }).buckets) ? (result as { buckets: unknown[] }).buckets : []
+  const values = Array.isArray(result) ? result : result && typeof result === "object" && Array.isArray((result as { buckets?: unknown }).buckets) ? (result as { buckets: unknown[] }).buckets : null
+  if (!values) throw new Error("R2 bucket listing returned an invalid Cloudflare API result")
   return values
     .map((value): BucketInfo => ({
       name: String((value as { name?: unknown })?.name ?? ""),
@@ -894,17 +895,6 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
     const buckets = progress ? progress.buckets : await listBuckets(account)
     const bucketNames = buckets.map((bucket) => bucket.name)
     const bucketOffset = progress?.accountId === account.id ? Math.min(progress.bucketOffset, buckets.length) : 0
-    const existingBucketCount = await db.query<{ count: string }>(
-      `select count(*)::text count from drive_bucket_stats where account_id=$1`,
-      [account.id]
-    )
-    if (buckets.length === 0 && Number(existingBucketCount.rows[0]?.count ?? 0) > 0) {
-      await db.query(
-        `update drive_accounts set sync_status='syncing',sync_message='R2 bucket listing unavailable; retaining last known totals',updated_at=now() where id=$1`,
-        [account.id]
-      )
-      return { account: account.label, status: "incomplete", message: "R2 bucket listing unavailable" }
-    }
     if (!progress || progress.accountId !== account.id) {
       // Persist the account and bucket list before doing reconciliation. If the
       // invocation is killed at the CPU limit, the next cron run can resume

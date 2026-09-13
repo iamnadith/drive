@@ -72,6 +72,18 @@ test("backend orchestrator uses account analytics without per-object scans and p
   assert.ok(orchestrator.indexOf("const panel = await reconcilePanel(env)") < orchestrator.indexOf("const sync = await syncNextAccount"))
 })
 
+test("a confirmed empty Cloudflare bucket list clears stale account and bucket statistics", () => {
+  const orchestrator = read("workers/backend-orchestrator/src/index.ts")
+  const listBuckets = orchestrator.slice(orchestrator.indexOf("async function listBuckets"), orchestrator.indexOf("async function cloudflareBucketSubresource"))
+  const syncAccount = orchestrator.slice(orchestrator.indexOf("async function syncNextAccount"), orchestrator.indexOf("async function deleteRetentionBatch"))
+
+  assert.match(listBuckets, /payload\.success !== true/)
+  assert.match(listBuckets, /invalid Cloudflare API result/)
+  assert.match(syncAccount, /reconcileBuckets\(db, account, buckets\)/)
+  assert.match(syncAccount, /if \(buckets\.length === 0\)[\s\S]*total_buckets=0,total_objects=0,total_bytes=0/)
+  assert.doesNotMatch(syncAccount, /existingBucketCount|bucket listing unavailable; retaining last known totals/)
+})
+
 test("worker sync is aggregate-only and resumable across CPU-limited invocations", () => {
   const orchestrator = read("workers/backend-orchestrator/src/index.ts")
   const analyticsRoute = read("src/app/api/dashboard/analytics/route.ts")
