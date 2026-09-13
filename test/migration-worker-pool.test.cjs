@@ -39,7 +39,7 @@ test('the GitHub workflow exposes no manual dispatch fields and receives system 
   assert.doesNotMatch(workflow, /DRIVE_REPAIR_JOB_ID:.*vars\.DRIVE_REPAIR_JOB_ID/)
 })
 
-test('worker-pool details hydrate from PostgreSQL and refresh the orchestrator live endpoint', () => {
+test('worker-pool details hydrate and refresh from PostgreSQL only', () => {
   const route = read('src/app/api/migrations/[id]/worker-pool/route.ts')
   const page = read('src/app/dashboard/migrations/[id]/worker-pool/page.tsx')
   assert.equal((route.match(/payload->>'migrationId'=\(\$1::uuid\)::text/g) || []).length, 2)
@@ -47,8 +47,35 @@ test('worker-pool details hydrate from PostgreSQL and refresh the orchestrator l
   assert.match(route, /ensureDriveSchema\(\)/)
   assert.match(route, /listRepairJobsByMigration\(id, 500\)/)
   assert.match(route, /drive_migration_worker_live_state/)
+  assert.doesNotMatch(route, /getMigrationOrchestratorSettings|fetch\(/)
+  assert.match(route, /source: "database"/)
   assert.match(route, /catch \(error\)[\s\S]*?status: 500/)
-  assert.match(page, /load\(active, false, true\),\s*active \? 5000 : 20000/)
+  assert.match(page, /load\(false, true\),\s*active \? 5000 : 20000/)
+  assert.doesNotMatch(page, /\?live=1/)
+})
+
+test('canceled migration and bucket states cannot be masked by stale verifying snapshots', () => {
+  const bucketState = read('src/lib/migration-bucket-state.ts')
+  const details = read('src/app/dashboard/migrations/[id]/page.tsx')
+  const cancelRoute = read('src/app/api/migrations/[id]/action/route.ts')
+  const itemRoute = read('src/app/api/migrations/[id]/items/[itemId]/action/route.ts')
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(bucketState, /isAbortedStatus\(durableItemStatus\)[\s\S]*?stableLive\.status/)
+  assert.match(bucketState, /if \(isAbortedStatus\(item\.slurperStatus\)\) return item\.slurperStatus/)
+  assert.match(details, /\["completed", "failed", "canceled"\]\.includes\(migration\.status\)/)
+  assert.match(details, /migration\.status === "completed" \? formatDate\(migration\.completedAt\) : "-"/)
+  assert.match(cancelRoute, /status: "canceled",\s*completedAt: null,\s*syncStatus: "syncing",\s*syncMessage: "Cancellation requested"/)
+  assert.match(cancelRoute, /abortedProgress\(item, "aborted_all"/)
+  assert.match(itemRoute, /migration\.status === "canceled"[\s\S]*?status: 409/)
+  assert.match(orchestrator, /select id from drive_migrations where id=\$1 and status in\('running','verifying'\) for update/)
+  assert.match(orchestrator, /where id=\$1 and status in\('running','verifying'\)/)
+})
+
+test('migration dashboards do not run worker sync on a timer', () => {
+  const listPage = read('src/app/dashboard/migrations/page.tsx')
+  const detailPage = read('src/app/dashboard/migrations/[id]/page.tsx')
+  assert.doesNotMatch(listPage, /setInterval\(\(\) => void tick\(\),\s*5_000\)/)
+  assert.doesNotMatch(detailPage, /ACTIVE_SYNC_INTERVAL_MS|MIN_SYNC_GAP_MS/)
 })
 
 test('reusable data-table column headers use the compact centered height', () => {

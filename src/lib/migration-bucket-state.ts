@@ -250,6 +250,7 @@ export function getEffectiveRepairStatus(input: {
 
 export function getItemStatus(item: BucketLikeItem): string | undefined {
   const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
+  if (isAbortedStatus(item.slurperStatus)) return item.slurperStatus
   const stage = typeof progress.stage === "string" ? progress.stage : ""
   const sourceScanStatus = typeof progress.sourceScanStatus === "string" ? progress.sourceScanStatus : ""
   if (
@@ -350,6 +351,8 @@ export function getMergedBucketSnapshot(
       displayStatus:
         canceledRepairWithoutResult
           ? "aborted"
+          : isAbortedStatus(durableItemStatus)
+            ? durableItemStatus
           : durableItemStatus === "verification_failed"
             ? "verification_failed"
           : stableLive.status ?? getItemDisplayStatus(item, repairResultItem, stableLive.workerStatus ?? undefined),

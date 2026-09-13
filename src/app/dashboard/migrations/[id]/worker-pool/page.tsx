@@ -9,7 +9,6 @@ import {
   Clock3,
   Files,
   RefreshCw,
-  Server,
   Workflow,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -19,7 +18,6 @@ import {
   DashboardPageHeader,
 } from "@/components/dashboard/page-shell";
 import { formatLastSyncedAt } from "@/lib/dashboard-format";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -178,21 +176,17 @@ export default function MigrationWorkerPoolDetailsPage() {
   const migrationId = typeof params?.id === "string" ? params.id : "";
   const [jobs, setJobs] = React.useState<WorkerJob[]>([]);
   const [snapshot, setSnapshot] = React.useState<PoolSnapshot>({});
-  const [source, setSource] = React.useState<"database" | "orchestrator">(
-    "database",
-  );
-  const [liveWarning, setLiveWarning] = React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
 
   const load = React.useCallback(
-    async (live = false, showRefreshing = false, background = false) => {
+    async (showRefreshing = false, background = false) => {
       if (!migrationId) return;
       try {
         if (showRefreshing) setRefreshing(true);
-        else if (!live && !background) setLoading(true);
+        else if (!background) setLoading(true);
         const response = await fetch(
-          `/api/migrations/${encodeURIComponent(migrationId)}/worker-pool${live ? "?live=1" : ""}`,
+          `/api/migrations/${encodeURIComponent(migrationId)}/worker-pool`,
           { cache: "no-store" },
         );
         const data = await response.json().catch(() => ({}));
@@ -202,18 +196,8 @@ export default function MigrationWorkerPoolDetailsPage() {
         setSnapshot(
           isRecord(data.snapshot) ? (data.snapshot as PoolSnapshot) : {},
         );
-        setSource(data.source === "orchestrator" ? "orchestrator" : "database");
-        setLiveWarning(
-          typeof data.liveWarning === "string" ? data.liveWarning : "",
-        );
       } catch (error) {
-        if (live)
-          setLiveWarning(
-            error instanceof Error
-              ? error.message
-              : "Unable to refresh live migration worker data",
-          );
-        if (!live)
+        if (!background)
           toast.error(
             error instanceof Error
               ? error.message
@@ -237,7 +221,7 @@ export default function MigrationWorkerPoolDetailsPage() {
       num(snapshot.runningJobs) > 0 ||
       num(snapshot.queuedJobs) > 0;
     const timer = window.setTimeout(
-      () => void load(active, false, true),
+      () => void load(false, true),
       active ? 5000 : 20000,
     );
     return () => window.clearTimeout(timer);
@@ -313,7 +297,7 @@ export default function MigrationWorkerPoolDetailsPage() {
                 variant="outline"
                 size="sm"
                 className="flex-1 rounded-xl sm:flex-none"
-                onClick={() => void load(true, true)}
+                onClick={() => void load(true)}
                 disabled={refreshing}
               >
                 <RefreshCw
@@ -326,17 +310,6 @@ export default function MigrationWorkerPoolDetailsPage() {
           }
         />
       </div>
-
-      {liveWarning ? (
-        <Alert className="dashboard-motion-item">
-          <Server />
-          <AlertTitle>Showing the last synced state</AlertTitle>
-          <AlertDescription>
-            {liveWarning} Saved database progress remains visible; live refresh
-            will retry automatically.
-          </AlertDescription>
-        </Alert>
-      ) : null}
 
       <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-4">
         <MetricCard
@@ -376,11 +349,7 @@ export default function MigrationWorkerPoolDetailsPage() {
                 </CardDescription>
               </div>
               <div className="flex items-center gap-2">
-                <Badge
-                  variant={source === "orchestrator" ? "default" : "outline"}
-                >
-                  {source === "orchestrator" ? "Live" : "Saved"}
-                </Badge>
+                <Badge variant="outline">Database</Badge>
                 <span className="font-mono text-sm font-semibold tabular-nums">
                   {overallPercent.toFixed(1)}%
                 </span>

@@ -760,8 +760,6 @@ function PinnedScrollableTable({
 const DIAGNOSTICS_TABLE_GRID_TEMPLATE = "340px 280px 180px 180px 220px 180px minmax(320px, 1fr)"
 
 export default function MigrationDetailsPage() {
-  const ACTIVE_SYNC_INTERVAL_MS = 8_000
-  const MIN_SYNC_GAP_MS = 6_000
   const router = useRouter()
   const params = useParams<{ id: string }>()
   const id = typeof params?.id === "string" ? params.id : ""
@@ -793,8 +791,6 @@ export default function MigrationDetailsPage() {
   const [dispatchingWorkerId, setDispatchingWorkerId] = React.useState<string | null>(null)
   const [abortingRepairJobId, setAbortingRepairJobId] = React.useState<string | null>(null)
 
-  const syncInFlight = React.useRef(false)
-  const lastSyncAtRef = React.useRef(0)
   const migrationLogsRef = React.useRef<HTMLDivElement | null>(null)
   const bucketLogsRef = React.useRef<HTMLDivElement | null>(null)
 
@@ -1144,7 +1140,7 @@ export default function MigrationDetailsPage() {
   )
 
   const overviewBadgeStatus = React.useMemo(() => {
-    if (migration?.status === "completed" && migration.options?.manualCompleted === true) return "completed"
+    if (migration && ["completed", "failed", "canceled"].includes(migration.status)) return migration.status
     if (migration?.status === "verifying" && migration.syncMessage?.toLowerCase().includes("settings")) return "verifying"
     if (bucketCounts.scanning > 0) return "scanning"
     if (bucketCounts.running > 0) return "running"
@@ -1154,7 +1150,7 @@ export default function MigrationDetailsPage() {
       return "aborted"
     if (bucketCounts.completed === bucketCounts.total && bucketCounts.total > 0) return "completed"
     return migration?.status ?? "draft"
-  }, [bucketCounts, migration?.options?.manualCompleted, migration?.status, migration?.syncMessage])
+  }, [bucketCounts, migration])
 
   const effectiveMigrationStatus = React.useMemo(() => {
     if (overviewBadgeStatus === "aborted") return "canceled"
@@ -1301,42 +1297,6 @@ export default function MigrationDetailsPage() {
     }
   }, [id])
 
-  React.useEffect(() => {
-    if (!id) return
-    if (!migration) return
-    // Worker-pool progress is projected durably by Migration Orchestrator and
-    // consumed through SSE. Do not run the legacy panel orchestrator here.
-    if (migration.options.executionMode === "migration_workers") return
-    if (bucketCounts.scanning === 0 && bucketCounts.running === 0 && bucketCounts.verifying === 0) return
-
-    let stopped = false
-
-    const tick = async () => {
-      if (stopped) return
-      if (syncInFlight.current) return
-      if (Date.now() - lastSyncAtRef.current < MIN_SYNC_GAP_MS) return
-      syncInFlight.current = true
-      try {
-        await postJsonWithTimeout({
-          url: `/api/migrations/${encodeURIComponent(id)}/sync`,
-          body: { finalizeSettings: true },
-          timeoutMs: 10_000,
-        }).catch(() => {})
-        lastSyncAtRef.current = Date.now()
-      } finally {
-        syncInFlight.current = false
-      }
-    }
-
-    const timeout = setTimeout(() => void tick(), 1_500)
-    const interval = setInterval(() => void tick(), ACTIVE_SYNC_INTERVAL_MS)
-    return () => {
-      stopped = true
-      clearTimeout(timeout)
-      clearInterval(interval)
-    }
-  }, [ACTIVE_SYNC_INTERVAL_MS, MIN_SYNC_GAP_MS, bucketCounts.running, bucketCounts.scanning, bucketCounts.verifying, id, migration])
-
   const syncNow = async () => {
     if (!id) return
     setBusyAction("sync")
@@ -1347,7 +1307,6 @@ export default function MigrationDetailsPage() {
         body: {},
         timeoutMs: 12_000,
       })
-      lastSyncAtRef.current = Date.now()
       const json: unknown = await res.json().catch(() => ({}))
       const errorMessage = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to sync migration"
       if (!res.ok) throw new Error(errorMessage)
@@ -1867,7 +1826,7 @@ export default function MigrationDetailsPage() {
         const verifyState = readVerifyState(item.progress)
         const verifyStatus = verifyState?.status ?? null
         const canRetry = !workerPoolMigration && (verifyStatus === "error" || normalizedDisplayStatus === "queued" || normalizedDisplayStatus === "job_id_pending" || normalizedDisplayStatus.endsWith("_failed") || normalizedDisplayStatus.includes("failed") || normalizedDisplayStatus.includes("error"))
-        const canAbort = !workerPoolMigration && (Boolean(item.slurperJobId) || canRetry) && !["completed", "aborted", "failed", "verification_failed", "no_files"].includes(normalizedDisplayStatus)
+        const canAbort = !["canceled", "completed"].includes(migration?.status ?? "") && !workerPoolMigration && (Boolean(item.slurperJobId) || canRetry) && !["completed", "aborted", "failed", "verification_failed", "no_files"].includes(normalizedDisplayStatus)
         const canVerify = !workerPoolMigration && isCompletedStatus(displayStatus) && verifyStatus !== "pending" && verifyStatus !== "running"
         const canInspectFailures = snapshot.failed > 0 || snapshot.verifyIssues > 0 || normalizedDisplayStatus.includes("failed") || normalizedDisplayStatus.includes("error")
         const lifecycleAction: "pause" | "resume" | "retry" | null = canPause ? "pause" : canRetry ? "retry" : canResume ? "resume" : null
@@ -1932,7 +1891,7 @@ export default function MigrationDetailsPage() {
               <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
               <div className="min-w-0">
                 <dt className="text-xs font-medium text-muted-foreground">Completed</dt>
-                <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatDate(migration.completedAt)}</dd>
+                <dd className="mt-1 truncate text-sm font-medium tabular-nums">{migration.status === "completed" ? formatDate(migration.completedAt) : "-"}</dd>
               </div>
             </div>
             <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:pr-0">

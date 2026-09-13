@@ -23,6 +23,20 @@ function normalizeStatus(value: string | undefined): string {
   return String(value ?? "").trim().toLowerCase()
 }
 
+function isTerminalSlurperStatus(value: string | undefined): boolean {
+  return ["completed", "complete", "finished", "success", "succeeded", "failed", "aborted", "verification_failed", "copy_completed", "copy_failed", "copy_aborted", "no_files", "bucket_create_failed", "precheck_failed"].includes(normalizeStatus(value))
+}
+
+function abortedProgress(item: { progress: Record<string, unknown> }, stage: string, status: "requested" | "confirmed" | "unconfirmed", at: string, error?: string) {
+  const live = isRecord(item.progress.live) ? item.progress.live : {}
+  return {
+    ...item.progress,
+    stage,
+    live: { ...live, status: "aborted", updatedAt: at },
+    abortRequest: { status, at, ...(error ? { error } : {}) },
+  }
+}
+
 function isCompletedStatus(value: string | undefined): boolean {
   const s = normalizeStatus(value)
   return (
@@ -267,6 +281,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     const migration = await getMigration(id)
     if (!migration) return NextResponse.json({ error: "Migration not found" }, { status: 404 })
+    if (action === "cancel_migration" && migration.status === "completed") {
+      return NextResponse.json({ error: "A completed migration cannot be canceled" }, { status: 409 })
+    }
+    if (action === "cancel_migration" && migration.status === "canceled") {
+      return NextResponse.json({ ok: true, alreadyCanceled: true }, { status: 200 })
+    }
     const readOnly = getMigrationReadOnlyState(migration)
     const workerMaintenanceAction =
       migration.options.executionMode === "migration_workers" &&
@@ -327,42 +347,54 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     if (action === "cancel_migration") {
-      const cancelRepairResult = await abortRepairJobsForMigration(id)
-      const candidates = items.filter(
-        (i) => Boolean(i.slurperJobId) && !["completed", "aborted", "failed", "copy_completed", "copy_failed"].includes(normalizeStatus(i.slurperStatus))
-      )
-      for (const item of candidates) {
-        await slurperAbortJob({ ...jobArgsBase, jobId: item.slurperJobId! })
-        await updateMigrationItem(item.id, {
-          slurperStatus: "aborted",
-          progress: { ...item.progress, stage: "aborted_all" },
-          lastProgressAt: now,
-        })
-      }
-
-      const queuedOrPending = items.filter((i) => !i.slurperJobId && normalizeStatus(i.slurperStatus))
-      for (const item of queuedOrPending) {
-        await updateMigrationItem(item.id, {
-          slurperJobId: null,
-          slurperStatus: "aborted",
-          progress: { ...item.progress, stage: "aborted_without_job_all" },
-          lastProgressAt: now,
-        })
-      }
-
+      const abortTargets = items.filter((item) => !isTerminalSlurperStatus(item.slurperStatus))
+      // Fence the scheduled orchestrator before making remote abort calls. An
+      // already-running cycle must see a terminal parent row and stop writing.
       await updateMigration(id, {
         status: "canceled",
-        completedAt: now,
-        syncStatus: "ok",
-        syncMessage: `Migration canceled${cancelRepairResult.abortedJobs > 0 ? `; aborted ${cancelRepairResult.abortedJobs} worker job(s)` : ""}`,
+        completedAt: null,
+        syncStatus: "syncing",
+        syncMessage: "Cancellation requested",
         lastSyncedAt: now,
         options: { ...migration.options, manualCompleted: false, targetActivatedAt: undefined },
+      })
+
+      await Promise.all(abortTargets.map((item) => updateMigrationItem(item.id, {
+        slurperStatus: "aborted",
+        progress: abortedProgress(item, "aborted_all", "requested", now),
+        lastProgressAt: now,
+      })))
+
+      const cancelRepairResult = await abortRepairJobsForMigration(id)
+      const candidates = abortTargets.filter((item) => Boolean(item.slurperJobId))
+      const remoteCancellationWarnings: Array<{ itemId: string; reason: string }> = []
+      for (const item of candidates) {
+        try {
+          await slurperAbortJob({ ...jobArgsBase, jobId: item.slurperJobId! })
+          await updateMigrationItem(item.id, { progress: abortedProgress(item, "aborted_all", "confirmed", new Date().toISOString()), lastProgressAt: new Date().toISOString() })
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          remoteCancellationWarnings.push({ itemId: item.id, reason })
+          const failedAt = new Date().toISOString()
+          await updateMigrationItem(item.id, { progress: abortedProgress(item, "aborted_all", "unconfirmed", failedAt, reason), lastProgressAt: failedAt })
+        }
+      }
+
+      const warningCount = remoteCancellationWarnings.length + cancelRepairResult.blockedJobs.length
+      await updateMigration(id, {
+        status: "canceled",
+        completedAt: null,
+        syncStatus: warningCount ? "error" : "ok",
+        syncMessage: warningCount
+          ? `Migration canceled; remote stop was not confirmed for ${warningCount} job(s)`
+          : `Migration canceled${cancelRepairResult.abortedJobs > 0 ? `; aborted ${cancelRepairResult.abortedJobs} worker job(s)` : ""}`,
+        lastSyncedAt: new Date().toISOString(),
       })
       return NextResponse.json({
         ok: true,
         abortedRepairJobs: cancelRepairResult.abortedJobs,
         abortedSlurperJobs: candidates.length,
-        remoteCancellationWarnings: cancelRepairResult.blockedJobs,
+        remoteCancellationWarnings: [...cancelRepairResult.blockedJobs, ...remoteCancellationWarnings],
       }, { status: 200 })
     }
 

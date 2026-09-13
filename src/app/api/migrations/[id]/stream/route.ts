@@ -55,7 +55,8 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       const loop = async () => {
         let lastSnapshot = ""
         let lastSentAt = 0
-        // Basic heartbeat + DB state. Cloudflare syncing is driven by /sync.
+        // The stream only projects saved PostgreSQL state; worker schedules
+        // advance migrations independently of any connected dashboard.
         while (!closed && !request.signal.aborted) {
           let nextDelay = 10_000
           try {

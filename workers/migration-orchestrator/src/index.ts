@@ -65,6 +65,10 @@ async function ensureSchema(db: Client) {
   `)
 }
 function opts(row: Row): Row { return row.options && typeof row.options === "object" ? row.options : {} }
+async function migrationIsActive(db: Client, migrationId: string) {
+  const result = await db.query(`select 1 from drive_migrations where id=$1 and status in('running','verifying') limit 1`, [migrationId])
+  return result.rowCount === 1
+}
 function integer(value: unknown, fallback: number, min: number, max: number) {
   const parsed = Number(value); return Number.isFinite(parsed) ? Math.max(min, Math.min(max, Math.trunc(parsed))) : fallback
 }
@@ -146,7 +150,8 @@ async function refreshSuperSlurperProgress(db: Client, migration: Row) {
       const message = error instanceof Error ? error.message : String(error)
       await db.query(`update drive_migration_items set
         progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{slurperSync}',$2::jsonb),updated_at=now()
-        where id=$1`, [item.id, JSON.stringify({ status: "retrying", error: message, updatedAt: new Date().toISOString() })])
+        where id=$1 and coalesce(slurper_status,'') not in('completed','failed','aborted','verification_failed')
+          and exists(select 1 from drive_migrations m where m.id=$3 and m.status in('running','verifying'))`, [item.id, JSON.stringify({ status: "retrying", error: message, updatedAt: new Date().toISOString() }), migration.id])
       return
     }
     const values = slurperProgressValues(response)
@@ -192,8 +197,9 @@ async function refreshSuperSlurperProgress(db: Client, migration: Row) {
                 else '[]'::jsonb end,true),
           '{slurperEventStatus}',to_jsonb($2::text),true),
         last_progress_at=now(),updated_at=now()
-      where id=$1
-    `, [item.id, status, objects, JSON.stringify(normalized), JSON.stringify({ ...normalized, status: liveStatus }), JSON.stringify(live)])
+      where id=$1 and coalesce(slurper_status,'') not in('completed','failed','aborted','verification_failed')
+        and exists(select 1 from drive_migrations m where m.id=$7 and m.status in('running','verifying'))
+    `, [item.id, status, objects, JSON.stringify(normalized), JSON.stringify({ ...normalized, status: liveStatus }), JSON.stringify(live), migration.id])
     refreshed += 1
   })
   const verification = await db.query(`
@@ -204,6 +210,7 @@ async function refreshSuperSlurperProgress(db: Client, migration: Row) {
       case when nullif(i.progress->>'sourceScanId','') is null then 'source' else 'destination' end
     from drive_migration_items i
     where i.migration_id=$1 and i.slurper_status='completed'
+      and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying'))
       and coalesce(i.progress->>'stage','')<>'worker_bucket_create_failed'
     on conflict(migration_item_id) do nothing
   `, [migration.id])
@@ -213,6 +220,7 @@ async function refreshSuperSlurperProgress(db: Client, migration: Row) {
         coalesce(i.progress->'live','{}'::jsonb)||jsonb_build_object('status','verifying','updatedAt',now()))
     from drive_migration_verification_state v
     where v.migration_item_id=i.id and v.migration_id=$1 and v.generation=1 and v.status in('pending','running')
+      and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying'))
       and i.slurper_status='completed'
   `, [migration.id])
   const counts = await db.query(`select
@@ -237,7 +245,7 @@ async function ensureShards(db: Client, migration: Row) {
   const generation = integer(opts(migration).workerGeneration, 1, 1, 1000000)
   const items = await db.query(`select id,source_bucket,target_bucket,progress from drive_migration_items where migration_id=$1 and coalesce(slurper_status,'')<>'worker_bucket_create_failed' order by created_at`, [migration.id])
   if (!items.rowCount) {
-    await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message='No migration buckets are available for worker processing',last_synced_at=now(),updated_at=now() where id=$1`, [migration.id])
+    await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message='No migration buckets are available for worker processing',last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
     return { generation, shardCount: 0, created: 0, inventoryPending: 0, terminalFailure: true }
   }
   let inventoryPending = 0
@@ -512,6 +520,7 @@ async function finalizeVerifiedBuckets(db: Client, migration: Row, generation: n
     from drive_migration_verification_state v
     where v.migration_item_id=i.id and v.migration_id=$1 and v.generation=$2 and v.status='completed'
       and v.missing_objects=0 and v.mismatched_objects=0 and (v.extra_objects=0 or $3=false)
+      and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying'))
   `, [migration.id, generation, opts(migration).verifyStrictDestination === true])
   await db.query(`
     update drive_migration_items i set slurper_status='verification_failed',last_progress_at=now(),updated_at=now(),
@@ -522,6 +531,7 @@ async function finalizeVerifiedBuckets(db: Client, migration: Row, generation: n
     from drive_migration_verification_state v
     where v.migration_item_id=i.id and v.migration_id=$1 and v.generation=$2 and v.status='completed'
       and (v.missing_objects>0 or v.mismatched_objects>0 or (v.extra_objects>0 and $3=true))
+      and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying'))
   `, [migration.id, generation, opts(migration).verifyStrictDestination === true])
 }
 async function finalizeShards(db: Client, migration: Row, generation: number, shardCount: number) {
@@ -535,9 +545,13 @@ async function finalizeShards(db: Client, migration: Row, generation: number, sh
     }
     return { complete: false, jobs }
   }
-  await db.query(`update drive_migration_items set slurper_status='completed',last_progress_at=now(),updated_at=now(),progress=jsonb_set(jsonb_set(coalesce(progress,'{}'::jsonb),'{repairWorkerStatus}','"completed"'::jsonb),'{stage}','"awaiting_independent_verification"'::jsonb) where migration_id=$1 and coalesce(slurper_status,'')<>'worker_bucket_create_failed'`, [migration.id])
-  await db.query(`update drive_migrations set status='verifying',sync_status='running',sync_message='File Scanner verification pending',last_synced_at=now(),updated_at=now() where id=$1`, [migration.id])
-  await db.query(`
+  await db.query("begin")
+  try {
+    const active = await db.query(`select id from drive_migrations where id=$1 and status in('running','verifying') for update`, [migration.id])
+    if (!active.rowCount) { await db.query("commit"); return { complete: false, canceled: true, jobs } }
+    await db.query(`update drive_migration_items set slurper_status='completed',last_progress_at=now(),updated_at=now(),progress=jsonb_set(jsonb_set(coalesce(progress,'{}'::jsonb),'{repairWorkerStatus}','"completed"'::jsonb),'{stage}','"awaiting_independent_verification"'::jsonb) where migration_id=$1 and coalesce(slurper_status,'')<>'worker_bucket_create_failed'`, [migration.id])
+    await db.query(`update drive_migrations set status='verifying',sync_status='running',sync_message='File Scanner verification pending',last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
+    await db.query(`
     insert into drive_migration_verification_state(migration_item_id,migration_id,generation,status,phase)
     select id,migration_id,$2,'pending','source' from drive_migration_items where migration_id=$1
     on conflict(migration_item_id) do update set generation=excluded.generation,
@@ -560,7 +574,9 @@ async function finalizeShards(db: Client, migration: Row, generation: number, sh
       lease_expires_at=case when drive_migration_verification_state.generation=excluded.generation then drive_migration_verification_state.lease_expires_at else null end,
       completed_at=case when drive_migration_verification_state.generation=excluded.generation then drive_migration_verification_state.completed_at else null end,
       updated_at=now()
-  `, [migration.id, generation])
+    `, [migration.id, generation])
+    await db.query("commit")
+  } catch (error) { await db.query("rollback"); throw error }
   return { complete: true, jobs }
 }
 async function cloudflare(account: Row, path: string, method = "GET", body?: unknown, allow404 = false, timeoutMs = 20_000) {
@@ -606,6 +622,7 @@ async function ensureSuperSlurperInventory(db: Client, migration: Row) {
   let pending = 0
   let failed = 0
   for (const item of items.rows) {
+    if (!(await migrationIsActive(db, migration.id))) break
     if (item.slurper_job_id || ["completed", "failed", "aborted", "bucket_create_failed", "verification_failed"].includes(String(item.slurper_status || ""))) continue
     if (item.progress?.sourceScanStatus === "failed") { failed += 1; continue }
     let scanId = typeof item.progress?.sourceScanId === "string" ? item.progress.sourceScanId : ""
@@ -628,7 +645,7 @@ async function ensureSuperSlurperInventory(db: Client, migration: Row) {
     if (scanStatus === "failed") {
       failed += 1
       const message = String(scan.error || `File Scanner failed for ${item.source_bucket}`)
-      await db.query(`update drive_migration_items set slurper_status='precheck_failed',progress=$2::jsonb,last_progress_at=now(),updated_at=now() where id=$1`, [item.id, JSON.stringify({ ...progress, stage: "scan_failed", sourceScanId: scan.id, sourceScanStatus: "failed", error: message, lastError: message, events: appendMigrationEvent(progress, "source_scan", "failed", message) })])
+      await db.query(`update drive_migration_items i set slurper_status='precheck_failed',progress=$2::jsonb,last_progress_at=now(),updated_at=now() where i.id=$1 and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying'))`, [item.id, JSON.stringify({ ...progress, stage: "scan_failed", sourceScanId: scan.id, sourceScanStatus: "failed", error: message, lastError: message, events: appendMigrationEvent(progress, "source_scan", "failed", message) })])
       continue
     }
     if (scanStatus !== "completed") pending += 1
@@ -639,7 +656,7 @@ async function ensureSuperSlurperInventory(db: Client, migration: Row) {
         source_objects=$3,
         source_bytes=$4,
         progress=$5::jsonb,last_progress_at=now(),updated_at=now()
-      where id=$1
+      where id=$1 and exists(select 1 from drive_migrations m where m.id=drive_migration_items.migration_id and m.status in('running','verifying'))
     `, [item.id, completed, scan.objects || 0, scan.bytes || 0, JSON.stringify({
       ...progress,
       stage: completed ? "scan_completed" : "scanning_source",
@@ -676,6 +693,7 @@ async function createSuperSlurperJobs(db: Client, migration: Row) {
   let failed = 0
 
   for (const item of itemsResult.rows) {
+    if (!(await migrationIsActive(db, migration.id))) break
     const progress = { ...(item.progress || {}) }
     const scanId = String(progress.sourceScanId || "")
     if (!scanId || progress.sourceScanStatus !== "completed") continue
@@ -692,9 +710,11 @@ async function createSuperSlurperJobs(db: Client, migration: Row) {
       return sourceBucket === item.source_bucket && targetBucket === item.target_bucket && Number.isFinite(ageMs) && ageMs >= -60_000 && ageMs <= 10 * 60_000
     })
     if (recent?.id) {
-      await db.query(`update drive_migration_items set slurper_job_id=$2,slurper_status='running',progress=$3::jsonb,last_progress_at=now(),updated_at=now() where id=$1 and slurper_job_id is null`, [item.id, String(recent.id), JSON.stringify({ ...progress, stage: "job_attached", jobName: `drive-migration-${migration.id}-${item.id}`, events: appendMigrationEvent(progress, "super_slurper_job", "running", "Attached existing Cloudflare Super Slurper job") })])
-      attached += 1
-      if (typeof recent.status !== "string" || !terminal.has(recent.status.toLowerCase())) activeCount += 1
+      const linked = await db.query(`update drive_migration_items i set slurper_job_id=$2,slurper_status='running',progress=$3::jsonb,last_progress_at=now(),updated_at=now() where i.id=$1 and i.slurper_job_id is null and coalesce(i.slurper_status,'') not in('aborted','failed','completed','verification_failed') and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying')) returning i.id`, [item.id, String(recent.id), JSON.stringify({ ...progress, stage: "job_attached", jobName: `drive-migration-${migration.id}-${item.id}`, events: appendMigrationEvent(progress, "super_slurper_job", "running", "Attached existing Cloudflare Super Slurper job") })])
+      if (linked.rowCount) {
+        attached += 1
+        if (typeof recent.status !== "string" || !terminal.has(recent.status.toLowerCase())) activeCount += 1
+      }
       continue
     }
 
@@ -728,6 +748,8 @@ async function createSuperSlurperJobs(db: Client, migration: Row) {
         catch (r2Error) { throw new Error(`Source precheck failed (S3: ${s3Error instanceof Error ? s3Error.message : String(s3Error)}; R2: ${r2Error instanceof Error ? r2Error.message : String(r2Error)})`) }
       }
 
+      if (!(await migrationIsActive(db, migration.id))) break
+
       const response = await cloudflare(target, "/slurper/jobs", "POST", {
         overwrite,
         jobName,
@@ -748,10 +770,14 @@ async function createSuperSlurperJobs(db: Client, migration: Row) {
         jobId = typeof match?.id === "string" ? match.id : null
       }
       if (!jobId) {
-        await db.query(`update drive_migration_items set slurper_status='job_id_pending',progress=$2::jsonb,last_progress_at=now(),updated_at=now() where id=$1`, [item.id, JSON.stringify({ ...progress, stage: "job_id_missing", jobName, lastError: "Cloudflare accepted the job but no job ID was returned", events: appendMigrationEvent(progress, "super_slurper_job", "pending", "Waiting for Cloudflare to return the new job ID") })])
+        await db.query(`update drive_migration_items i set slurper_status='job_id_pending',progress=$2::jsonb,last_progress_at=now(),updated_at=now() where i.id=$1 and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying'))`, [item.id, JSON.stringify({ ...progress, stage: "job_id_missing", jobName, lastError: "Cloudflare accepted the job but no job ID was returned", events: appendMigrationEvent(progress, "super_slurper_job", "pending", "Waiting for Cloudflare to return the new job ID") })])
         continue
       }
-      await db.query(`update drive_migration_items set slurper_job_id=$2,slurper_status='running',progress=$3::jsonb,last_progress_at=now(),updated_at=now() where id=$1 and slurper_job_id is null`, [item.id, jobId, JSON.stringify({ ...progress, stage: "job_created", jobName, sourceModeUsed: sourceSpec.vendor, events: appendMigrationEvent(progress, "super_slurper_job", "running", "Cloudflare Super Slurper job started") })])
+      const attachedJob = await db.query(`update drive_migration_items i set slurper_job_id=$2,slurper_status='running',progress=$3::jsonb,last_progress_at=now(),updated_at=now() where i.id=$1 and i.slurper_job_id is null and coalesce(i.slurper_status,'') not in('aborted','failed','completed','verification_failed') and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying')) returning i.id`, [item.id, jobId, JSON.stringify({ ...progress, stage: "job_created", jobName, sourceModeUsed: sourceSpec.vendor, events: appendMigrationEvent(progress, "super_slurper_job", "running", "Cloudflare Super Slurper job started") })])
+      if (!attachedJob.rowCount) {
+        await cloudflare(target, `/slurper/jobs/${encodeURIComponent(jobId)}/abort`, "PUT").catch(() => undefined)
+        continue
+      }
       remoteJobs.push({ id: jobId, status: "queued", createdAt: new Date().toISOString(), source: { bucket: item.source_bucket }, target: { bucket: item.target_bucket } })
       activeCount += 1
       created += 1
@@ -760,7 +786,7 @@ async function createSuperSlurperJobs(db: Client, migration: Row) {
       const retryable = /HTTP (?:409|429)|rate.?limit|concurren|job limit/i.test(message)
       const status = retryable ? "queued" : message.toLowerCase().includes("bucket") && !bucketNames.has(item.target_bucket) ? "bucket_create_failed" : "precheck_failed"
       if (!retryable) failed += 1
-      await db.query(`update drive_migration_items set slurper_status=$2,progress=$3::jsonb,last_progress_at=now(),updated_at=now() where id=$1`, [item.id, status, JSON.stringify({ ...progress, stage: retryable ? "cloudflare_job_limit" : status === "bucket_create_failed" ? "create_target_bucket" : "create_job", error: message, lastError: message, events: appendMigrationEvent(progress, "super_slurper_job", retryable ? "queued" : "failed", message) })])
+      await db.query(`update drive_migration_items i set slurper_status=$2,progress=$3::jsonb,last_progress_at=now(),updated_at=now() where i.id=$1 and coalesce(i.slurper_status,'') not in('aborted','completed') and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying'))`, [item.id, status, JSON.stringify({ ...progress, stage: retryable ? "cloudflare_job_limit" : status === "bucket_create_failed" ? "create_target_bucket" : "create_job", error: message, lastError: message, events: appendMigrationEvent(progress, "super_slurper_job", retryable ? "queued" : "failed", message) })])
     }
   }
   return { created, attached, failed, active: activeCount, limit }
@@ -769,6 +795,7 @@ async function syncNextBucketSettings(db: Client, migration: Row) {
   const pending = await db.query(`select i.* from drive_migration_items i
     join drive_migration_verification_state v on v.migration_item_id=i.id and v.migration_id=i.migration_id
     where i.migration_id=$1 and i.slurper_status='completed' and v.status='completed'
+      and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying'))
       and v.missing_objects=0 and v.mismatched_objects=0
       and (v.extra_objects=0 or $2=false)
       and coalesce(i.progress->'orchestratorSettings'->>'status','')<>'synced'
@@ -780,7 +807,7 @@ async function syncNextBucketSettings(db: Client, migration: Row) {
   if (!source || !target) throw new Error("Source or target account is missing")
   const attempts = integer(item.progress?.orchestratorSettings?.attempts, 0, 0, 100)
   const sourcePath = `/r2/buckets/${encodeURIComponent(item.source_bucket)}`; const targetPath = `/r2/buckets/${encodeURIComponent(item.target_bucket)}`
-  await db.query(`update drive_migration_items set progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{orchestratorSettings}',$2::jsonb),updated_at=now() where id=$1`, [item.id, JSON.stringify({ status: "syncing", attempts: attempts + 1, startedAt: new Date().toISOString() })])
+  await db.query(`update drive_migration_items i set progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{orchestratorSettings}',$2::jsonb),updated_at=now() where i.id=$1 and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying'))`, [item.id, JSON.stringify({ status: "syncing", attempts: attempts + 1, startedAt: new Date().toISOString() })])
   try {
     const [cors, domain] = await Promise.all([
       cloudflare(source, `${sourcePath}/cors`, "GET", undefined, true),
@@ -789,12 +816,12 @@ async function syncNextBucketSettings(db: Client, migration: Row) {
     const rules = Array.isArray(cors?.rules) ? cors.rules : []
     await cloudflare(target, `${targetPath}/cors`, rules.length ? "PUT" : "DELETE", rules.length ? { rules } : undefined, true)
     await cloudflare(target, `${targetPath}/domains/managed`, "PUT", { enabled: domain?.enabled === true })
-    await db.query(`update drive_migration_items set progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{orchestratorSettings}',$2::jsonb),updated_at=now() where id=$1`, [item.id, JSON.stringify({ status: "synced", attempts: attempts + 1, syncedAt: new Date().toISOString() })])
+    await db.query(`update drive_migration_items i set progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{orchestratorSettings}',$2::jsonb),updated_at=now() where i.id=$1 and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying'))`, [item.id, JSON.stringify({ status: "synced", attempts: attempts + 1, syncedAt: new Date().toISOString() })])
     return { settings: "progress", itemId: item.id }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    await db.query(`update drive_migration_items set progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{orchestratorSettings}',$2::jsonb),updated_at=now() where id=$1`, [item.id, JSON.stringify({ status: attempts >= 2 ? "failed" : "pending", attempts: attempts + 1, error: message, updatedAt: new Date().toISOString() })])
-    if (attempts >= 2) await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message=$2,updated_at=now() where id=$1`, [migration.id, `Bucket settings sync failed for ${item.source_bucket}: ${message}`])
+    await db.query(`update drive_migration_items i set progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{orchestratorSettings}',$2::jsonb),updated_at=now() where i.id=$1 and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying'))`, [item.id, JSON.stringify({ status: attempts >= 2 ? "failed" : "pending", attempts: attempts + 1, error: message, updatedAt: new Date().toISOString() })])
+    if (attempts >= 2) await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message=$2,updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id, `Bucket settings sync failed for ${item.source_bucket}: ${message}`])
     return { settings: attempts >= 2 ? "failed" : "retry", itemId: item.id, error: message }
   }
 }
@@ -808,9 +835,11 @@ async function wakeBackendOrchestrator(db: Client) {
   } catch { return "deferred_to_cron" }
 }
 async function finishOrRepair(db: Client, migration: Row, generation: number) {
+  const active = await db.query(`select id from drive_migrations where id=$1 and status in('running','verifying')`, [migration.id])
+  if (!active.rowCount) return { verification: "canceled" }
   const states = await db.query(`select status,missing_objects,mismatched_objects,extra_objects from drive_migration_verification_state where migration_id=$1 and generation=$2`, [migration.id, generation])
   if (states.rows.some((row) => row.status === "failed")) {
-    await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message='File Scanner exhausted its scan retries',updated_at=now() where id=$1`, [migration.id])
+    await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message='File Scanner exhausted its scan retries',updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
     return { verification: "failed", reason: "file_scan_failed" }
   }
   if (!states.rows.length || states.rows.some((row) => row.status !== "completed")) return { verification: "pending" }
@@ -818,13 +847,15 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
   const mismatched = states.rows.reduce((n, row) => n + Number(row.mismatched_objects), 0)
   const extra = states.rows.reduce((n, row) => n + Number(row.extra_objects), 0)
   if (missing || mismatched || (opts(migration).verifyStrictDestination === true && extra)) {
-    await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1`, [migration.id, `File Scanner verification found ${missing} missing, ${mismatched} mismatched, ${extra} extra; repair is available`])
+    await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id, `File Scanner verification found ${missing} missing, ${mismatched} mismatched, ${extra} extra; repair is available`])
     return { verification: "failed", missing, mismatched, extra, repairAvailable: true }
   }
   const settings = await syncNextBucketSettings(db, migration)
   if (settings.settings !== "synced") return { verification: settings.settings === "failed" ? "failed" : "settings_sync", missing, mismatched, extra, ...settings }
   await db.query("begin")
   try {
+    const lockedMigration = await db.query(`select id from drive_migrations where id=$1 and status in('running','verifying') for update`, [migration.id])
+    if (!lockedMigration.rowCount) { await db.query("commit"); return { verification: "canceled" } }
     await db.query(`
       with previous as (
         select total_buckets,total_objects,total_bytes,last_synced_at
@@ -843,7 +874,7 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
         updated_at=now()
       where a.id=$1 or a.status='active'
     `, [migration.target_account_id])
-    await db.query(`update drive_migrations set status='completed',completed_at=now(),sync_status='synced',sync_message=NULL,last_synced_at=now(),updated_at=now(),summary_item_count=(select count(*) from drive_migration_items where migration_id=$1),summary_objects=(select coalesce(sum(source_objects),0) from drive_migration_items where migration_id=$1),summary_bytes=(select coalesce(sum(source_bytes),0) from drive_migration_items where migration_id=$1) where id=$1`, [migration.id])
+    await db.query(`update drive_migrations set status='completed',completed_at=now(),sync_status='synced',sync_message=NULL,last_synced_at=now(),updated_at=now(),summary_item_count=(select count(*) from drive_migration_items where migration_id=$1),summary_objects=(select coalesce(sum(source_objects),0) from drive_migration_items where migration_id=$1),summary_bytes=(select coalesce(sum(source_bytes),0) from drive_migration_items where migration_id=$1) where id=$1 and status in('running','verifying')`, [migration.id])
     await db.query("commit")
   } catch (error) { await db.query("rollback"); throw error }
   return { verification: "completed", missing, mismatched, extra, backendOrchestrator: await wakeBackendOrchestrator(db) }

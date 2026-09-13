@@ -68,6 +68,12 @@ export async function POST(
     if (!migration) {
       return NextResponse.json({ error: "Migration not found" }, { status: 404 })
     }
+    if (migration.status === "canceled" && !["logs", "progress"].includes(action)) {
+      return NextResponse.json({ error: "This migration is canceled. Use Retry migration to start a new run." }, { status: 409 })
+    }
+    if (migration.status === "completed" && action === "abort") {
+      return NextResponse.json({ error: "A completed migration bucket cannot be aborted" }, { status: 409 })
+    }
     const readOnly = getMigrationReadOnlyState(migration)
     if (readOnly.readOnly && action !== "logs" && action !== "progress") {
       return NextResponse.json({ error: `Migration history is read-only: ${readOnly.reason}` }, { status: 409 })
@@ -135,11 +141,13 @@ export async function POST(
         return NextResponse.json({ ok: true }, { status: 200 })
       }
       if (action === "abort") {
+        const abortedAt = new Date().toISOString()
+        const live = isRecord(item.progress.live) ? item.progress.live : {}
         await updateMigrationItem(item.id, {
           slurperJobId: null,
           slurperStatus: "aborted",
-          progress: { ...item.progress, stage: "aborted_without_job", lastAction: { action, at: new Date().toISOString() } },
-          lastProgressAt: new Date().toISOString(),
+          progress: { ...item.progress, stage: "aborted_without_job", live: { ...live, status: "aborted", updatedAt: abortedAt }, abortRequest: { status: "confirmed", at: abortedAt }, lastAction: { action, at: abortedAt } },
+          lastProgressAt: abortedAt,
         })
         return NextResponse.json({ ok: true }, { status: 200 })
       }
@@ -208,10 +216,12 @@ export async function POST(
 
     if (action === "abort") {
       const res = await slurperAbortJob(jobArgs)
+      const abortedAt = new Date().toISOString()
+      const live = isRecord(item.progress.live) ? item.progress.live : {}
       await updateMigrationItem(item.id, {
         slurperStatus: "aborted",
-        progress: { ...item.progress, stage: "aborted", lastAction: { action, at: new Date().toISOString() } },
-        lastProgressAt: new Date().toISOString(),
+        progress: { ...item.progress, stage: "aborted", live: { ...live, status: "aborted", updatedAt: abortedAt }, abortRequest: { status: "confirmed", at: abortedAt }, lastAction: { action, at: abortedAt } },
+        lastProgressAt: abortedAt,
       })
       return NextResponse.json({ ok: true, result: res }, { status: 200 })
     }

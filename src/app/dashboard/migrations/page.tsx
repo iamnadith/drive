@@ -574,37 +574,6 @@ export default function MigrationsPage() {
     }
   }, [activeMigration?.id])
 
-  const syncInFlight = React.useRef(false)
-  React.useEffect(() => {
-    if (!activeMigration?.id) return
-    if (activeMigration.status !== "running" && activeMigration.status !== "verifying" && activeMigration.syncStatus !== "syncing") return
-
-    let stopped = false
-    const tick = async () => {
-      if (stopped) return
-      if (syncInFlight.current) return
-      syncInFlight.current = true
-      try {
-        await postJsonWithTimeout({
-          url: `/api/migrations/${encodeURIComponent(activeMigration.id)}/sync`,
-          body: { finalizeSettings: true },
-          timeoutMs: 10_000,
-        }).catch(() => {})
-      } catch {
-        // ignore
-      } finally {
-        syncInFlight.current = false
-      }
-    }
-
-    void tick()
-    const interval = setInterval(() => void tick(), 5_000)
-    return () => {
-      stopped = true
-      clearInterval(interval)
-    }
-  }, [activeMigration?.id, activeMigration?.status, activeMigration?.syncStatus])
-
   const totals = React.useMemo(() => {
     if (activeItems.length === 0 && activeMigration?.detailsCompactedAt) {
       const totalObjects = activeMigration.summaryObjects ?? 0
