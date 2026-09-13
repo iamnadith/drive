@@ -38,7 +38,11 @@ type DashboardDataTableProps<TData> = {
   header?: React.ReactNode
   emptyState?: React.ReactNode
   footer?: React.ReactNode
-  paginationContent?: React.ReactNode
+  serverPagination?: {
+    pageIndex: number
+    pageCount: number
+    onPageChange: (pageIndex: number) => void
+  }
   loading?: boolean
   loadingRows?: number
   className?: string
@@ -52,7 +56,7 @@ type DashboardDataTableProps<TData> = {
 const paginationButtonClass =
   "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border/80 bg-background/85 p-0 text-foreground shadow-sm backdrop-blur-sm transition-colors hover:bg-muted/55 disabled:pointer-events-none disabled:opacity-50 sm:w-auto sm:gap-1 sm:px-2.5"
 const pageButtonClass =
-  "inline-flex size-8 min-w-8 max-w-8 shrink-0 items-center justify-center rounded-full border border-border/80 bg-background/85 p-0 text-xs font-medium text-foreground shadow-sm backdrop-blur-sm transition-colors hover:bg-muted/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+  "inline-flex h-8 w-8 min-w-8 max-w-8 flex-none aspect-square items-center justify-center rounded-full border border-border/80 bg-background/85 p-0 text-xs font-medium leading-none text-foreground shadow-sm backdrop-blur-sm transition-colors hover:bg-muted/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
 
 export function DashboardDataTable<TData>({
   data,
@@ -62,7 +66,7 @@ export function DashboardDataTable<TData>({
   header,
   emptyState = "No results.",
   footer,
-  paginationContent,
+  serverPagination,
   loading = false,
   loadingRows = 6,
   className,
@@ -90,8 +94,11 @@ export function DashboardDataTable<TData>({
     getPaginationRowModel: getPaginationRowModel(),
     autoResetPageIndex: true,
   })
-  const pageCount = table.getPageCount()
-  const pageIndex = table.getState().pagination.pageIndex
+  const pageCount = Math.max(1, serverPagination?.pageCount ?? table.getPageCount())
+  const pageIndex = serverPagination?.pageIndex ?? table.getState().pagination.pageIndex
+  const canPreviousPage = serverPagination ? pageIndex > 0 : table.getCanPreviousPage()
+  const canNextPage = serverPagination ? pageIndex < pageCount - 1 : table.getCanNextPage()
+  const goToPage = serverPagination?.onPageChange ?? table.setPageIndex
   const pageWindow = Math.min(pageCount, 3)
   const desktopPageWindow = Math.min(pageCount, 5)
   const mobileStart = Math.max(0, Math.min(pageIndex - Math.floor(pageWindow / 2), pageCount - pageWindow))
@@ -103,7 +110,11 @@ export function DashboardDataTable<TData>({
   return (
     <>
       <TableSurface withCard={withCard} className={className}>
-        {header ? <div className="border-b px-4 py-3">{header}</div> : null}
+        {header ? (
+          <div className="flex min-h-16 items-center justify-center border-b px-4 py-3 text-center [&>*]:w-full">
+            {header}
+          </div>
+        ) : null}
         <Table
           className={cn("w-full", tableClassName)}
           style={{ minWidth }}
@@ -193,19 +204,14 @@ export function DashboardDataTable<TData>({
             {footer}
           </div>
         ) : null}
-        {paginationContent ? (
-          <div className="border-t px-3 py-2 text-xs text-muted-foreground">
-            {paginationContent}
-          </div>
-        ) : (
-          <div className="border-t px-3 py-2 text-xs text-muted-foreground max-sm:-mb-2">
+        <div className="border-t px-3 py-2 text-xs text-muted-foreground max-sm:-mb-2">
             <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
               <button
                 type="button"
                 className={cn(paginationButtonClass, "justify-self-start")}
                 aria-label="Previous page"
-                disabled={!table.getCanPreviousPage()}
-                onClick={() => table.previousPage()}
+                disabled={!canPreviousPage}
+                onClick={() => goToPage(pageIndex - 1)}
               >
                 <ChevronLeft className="h-4 w-4 sm:mr-1" />
                 <span className="hidden sm:inline">Previous</span>
@@ -213,12 +219,12 @@ export function DashboardDataTable<TData>({
               <div className="flex min-w-0 max-w-full items-center justify-center gap-1 justify-self-center overflow-x-auto">
                 <div className="flex min-w-0 items-center gap-1 sm:hidden">
                   {mobilePages.map((page) => (
-                    <PageButton key={`m-${page}`} page={page} currentPage={pageIndex} onSelect={() => table.setPageIndex(page)} />
+                    <PageButton key={`m-${page}`} page={page} currentPage={pageIndex} onSelect={() => goToPage(page)} />
                   ))}
                 </div>
                 <div className="hidden min-w-0 items-center gap-1 sm:flex">
                   {desktopPages.map((page) => (
-                    <PageButton key={`d-${page}`} page={page} currentPage={pageIndex} onSelect={() => table.setPageIndex(page)} />
+                    <PageButton key={`d-${page}`} page={page} currentPage={pageIndex} onSelect={() => goToPage(page)} />
                   ))}
                 </div>
               </div>
@@ -226,15 +232,14 @@ export function DashboardDataTable<TData>({
                 type="button"
                 className={cn(paginationButtonClass, "justify-self-end")}
                 aria-label="Next page"
-                disabled={!table.getCanNextPage()}
-                onClick={() => table.nextPage()}
+                disabled={!canNextPage}
+                onClick={() => goToPage(pageIndex + 1)}
               >
                 <span className="hidden sm:inline">Next</span>
                 <ChevronRight className="h-4 w-4 sm:ml-1" />
               </button>
             </div>
-          </div>
-        )}
+        </div>
       </TableSurface>
     </>
   )

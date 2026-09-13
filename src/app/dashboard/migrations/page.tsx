@@ -217,6 +217,10 @@ function formatBytes(value: number | undefined): string {
   return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unitIndex]}`
 }
 
+function visibleSyncMessage(value?: string | null) {
+  return value?.trim().toLowerCase() === "migration independently verified" ? "" : value ?? ""
+}
+
 function statusBadge(status: string | undefined, syncStatus?: string, syncMessage?: string) {
   const s = String(status ?? "unknown")
   if (s === "verifying" && syncStatus === "error") return <Badge className="bg-red-600">{syncMessage?.toLowerCase().includes("settings sync") ? "Settings sync failed" : "Verification failed"}</Badge>
@@ -295,7 +299,7 @@ export default function MigrationsPage() {
             </span>
             <span className="truncate text-[10px] leading-4 text-muted-foreground">
               {migration.options.executionMode === "migration_workers" ? "Worker pool" : "Super Slurper"}
-              {migration.syncMessage ? ` · ${migration.syncMessage}` : ""}
+              {visibleSyncMessage(migration.syncMessage) ? ` · ${visibleSyncMessage(migration.syncMessage)}` : ""}
             </span>
           </div>
         )
@@ -850,7 +854,6 @@ export default function MigrationsPage() {
       <div className="dashboard-motion-item">
         <DashboardPageHeader
           title="Migrations"
-          description={activeMigration?.options.executionMode === "migration_workers" ? "Drive migration worker pool" : "Cloudflare Super Slurper (Cloudflare-run)"}
           actions={
             <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
               <div className="relative h-9 min-w-0 flex-1 sm:w-[220px] sm:flex-none">
@@ -1150,7 +1153,7 @@ export default function MigrationsPage() {
                 {activeMigration ? (
                   <span className="text-xs">
                     ID <span className="font-mono">{activeMigration.id}</span>{" "}
-                    {activeMigration.syncMessage ? `- ${activeMigration.syncMessage}` : ""}
+                    {visibleSyncMessage(activeMigration.syncMessage) ? `- ${visibleSyncMessage(activeMigration.syncMessage)}` : ""}
                   </span>
                 ) : null}
               </CardDescription>

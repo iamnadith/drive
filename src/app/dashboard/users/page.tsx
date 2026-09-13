@@ -8,7 +8,6 @@ import {
   MoreHorizontal,
   UserPlus,
   Shield,
-  Search,
   HardDrive,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -43,12 +42,11 @@ import { Switch } from "@/components/ui/switch"
 import { useAuth } from "@/components/auth-provider"
 import { DashboardDataTable } from "@/components/dashboard/data-table"
 import {
-  DashboardFilterGrid,
   DashboardPage,
   DashboardPageHeader,
   DashboardPageSkeleton,
 } from "@/components/dashboard/page-shell"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { DashboardSearchFilterToolbar, type SearchFilterOption } from "@/components/dashboard/search-filter-toolbar"
 
 type UserRow = {
   id: string
@@ -493,10 +491,24 @@ export default function UsersPage() {
   const activeUserCount = users.filter((user) => user.status === "active").length
   const disabledUserCount = users.length - activeUserCount
   const privilegedUserCount = users.filter((user) => user.role === "admin" || user.role === "superadmin").length
+  const userFilters: SearchFilterOption[] = [
+    { key: "role", label: "Role", type: "select", defaultValue: "all", options: [
+      { value: "all", label: "All roles" },
+      { value: "superadmin", label: "Super Admin" },
+      { value: "admin", label: "Admin" },
+      { value: "user", label: "User" },
+    ] },
+    { key: "status", label: "Status", type: "select", defaultValue: "all", options: [
+      { value: "all", label: "All statuses" },
+      { value: "active", label: "Active" },
+      { value: "disabled", label: "Disabled" },
+    ] },
+  ]
 
   const columns: ColumnDef<UserRow>[] = [
     {
       accessorKey: "name",
+      meta: { width: "min-w-[260px]" },
       header: "User",
       cell: ({ row }) => (
         <div className="flex items-center gap-3">
@@ -522,6 +534,7 @@ export default function UsersPage() {
     },
     {
       accessorKey: "role",
+      meta: { width: "min-w-[130px]", align: "center" },
       header: "Role",
       cell: ({ row }) => {
         const role = row.getValue("role") as string
@@ -543,6 +556,7 @@ export default function UsersPage() {
     },
     {
       accessorKey: "status",
+      meta: { width: "min-w-[120px]", align: "center" },
       header: "Status",
       cell: ({ row }) => {
         const status = (row.getValue("status") as string) || ""
@@ -561,6 +575,7 @@ export default function UsersPage() {
     },
     {
       accessorKey: "quotaLimitMb",
+      meta: { width: "min-w-[260px]", align: "center" },
       header: "Storage quota",
       cell: ({ row }) => {
         const used = row.original.quotaUsedMb
@@ -586,6 +601,7 @@ export default function UsersPage() {
     },
     {
       id: "actions",
+      meta: { width: "min-w-[180px]", align: "right", divider: false },
       cell: ({ row }) => {
         const rowUser = row.original
         const isDisabled = rowUser.status === "disabled"
@@ -908,15 +924,29 @@ export default function UsersPage() {
           title="Users"
           description="Manage user access, roles, and storage quotas."
           actions={
-            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
-              <div className="relative min-w-0 sm:w-[220px]">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input className="h-9 w-full pl-8" placeholder="Search users..." value={search} onChange={(event) => setSearch(event.target.value)} />
-              </div>
-              <Button className="w-full sm:w-auto" onClick={openAddDialog}>
+            <DashboardSearchFilterToolbar
+              searchValue={search}
+              onSearchChange={setSearch}
+              searchPlaceholder="Search users..."
+              searchWidthClassName="sm:w-[220px]"
+              countSearch
+              filters={userFilters}
+              filterValues={{ role: roleFilter || "all", status: statusFilter || "all" }}
+              onFilterChange={(key, value) => {
+                if (key === "role") setRoleFilter(value === "all" ? "" : value as typeof roleFilter)
+                else if (key === "status") setStatusFilter(value === "all" ? "" : value as typeof statusFilter)
+              }}
+              onClear={() => {
+                setSearch("")
+                setRoleFilter("")
+                setStatusFilter("")
+              }}
+              title="Filter users"
+              description="Filter by account role and status."
+              actions={<Button className="shrink-0" onClick={openAddDialog}>
                 <UserPlus className="mr-2 h-4 w-4" /> Add user
-              </Button>
-            </div>
+              </Button>}
+            />
           }
         />
       </div>
@@ -940,47 +970,14 @@ export default function UsersPage() {
         ))}
       </div>
 
-      <div className="dashboard-motion-item dashboard-motion-delay-2">
-        <DashboardFilterGrid className="sm:grid-cols-2 xl:grid-cols-[1fr_220px_220px]">
-          <div className="text-sm font-medium text-muted-foreground sm:col-span-2 xl:col-span-1">
-            Showing {filteredUsers.length} of {users.length} users
-          </div>
-          <Select value={roleFilter || "all"} onValueChange={(value) => setRoleFilter(value === "all" ? "" : value as typeof roleFilter)}>
-            <SelectTrigger aria-label="Filter users by role"><SelectValue placeholder="All roles" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All roles</SelectItem>
-              <SelectItem value="superadmin">Super Admin</SelectItem>
-              <SelectItem value="admin">Admin</SelectItem>
-              <SelectItem value="user">User</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select value={statusFilter || "all"} onValueChange={(value) => setStatusFilter(value === "all" ? "" : value as typeof statusFilter)}>
-            <SelectTrigger aria-label="Filter users by status"><SelectValue placeholder="All statuses" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All statuses</SelectItem>
-              <SelectItem value="active">Active</SelectItem>
-              <SelectItem value="disabled">Disabled</SelectItem>
-            </SelectContent>
-          </Select>
-        </DashboardFilterGrid>
-      </div>
-
       <div className="dashboard-motion-item dashboard-motion-delay-3">
       <DashboardDataTable
         data={filteredUsers}
         columns={columns}
         pageSize={PAGE_SIZE}
-        minWidth="920px"
+        minWidth="950px"
         resetKey={`${search}:${roleFilter}:${statusFilter}`}
         emptyState="No users found."
-        header={
-          <div>
-            <h2 className="text-sm font-semibold">Team Members</h2>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Users with access to this organization.
-            </p>
-          </div>
-        }
       />
       </div>
 

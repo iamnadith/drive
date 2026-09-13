@@ -494,7 +494,7 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
         updated_at=now()
       where a.id=$1 or a.status='active'
     `, [migration.target_account_id])
-    await db.query(`update drive_migrations set status='completed',completed_at=now(),sync_status='synced',sync_message='Migration independently verified',last_synced_at=now(),updated_at=now(),summary_item_count=(select count(*) from drive_migration_items where migration_id=$1),summary_objects=(select coalesce(sum(source_objects),0) from drive_migration_items where migration_id=$1),summary_bytes=(select coalesce(sum(source_bytes),0) from drive_migration_items where migration_id=$1) where id=$1`, [migration.id])
+    await db.query(`update drive_migrations set status='completed',completed_at=now(),sync_status='synced',sync_message=NULL,last_synced_at=now(),updated_at=now(),summary_item_count=(select count(*) from drive_migration_items where migration_id=$1),summary_objects=(select coalesce(sum(source_objects),0) from drive_migration_items where migration_id=$1),summary_bytes=(select coalesce(sum(source_bytes),0) from drive_migration_items where migration_id=$1) where id=$1`, [migration.id])
     await db.query("commit")
   } catch (error) { await db.query("rollback"); throw error }
   return { verification: "completed", missing, mismatched, extra, backendOrchestrator: await wakeBackendOrchestrator(db) }

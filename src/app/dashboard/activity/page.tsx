@@ -5,13 +5,10 @@ import * as DialogPrimitive from "@radix-ui/react-dialog"
 import { AnimatePresence, motion } from "framer-motion"
 import {
   AlertTriangle,
-  CalendarDays,
   ChevronLeft,
   ChevronRight,
   RefreshCw,
   RotateCcw,
-  Search,
-  SlidersHorizontal,
   X,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -23,21 +20,12 @@ import { Card, CardContent } from "@/components/ui/card"
 import {
   Dialog,
   DialogClose,
-  DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { DashboardActivitySkeleton } from "@/components/dashboard/loading-skeletons"
@@ -45,6 +33,7 @@ import {
   DashboardPage,
   DashboardPageHeader,
 } from "@/components/dashboard/page-shell"
+import { DashboardSearchFilterToolbar, type SearchFilterOption } from "@/components/dashboard/search-filter-toolbar"
 import { useDashboardResource } from "@/hooks/use-dashboard-resource"
 
 type ActivityEvent = {
@@ -188,7 +177,6 @@ export default function ActivityPage() {
   const [detailOpen, setDetailOpen] = React.useState(false)
   const [detailOpening, setDetailOpening] = React.useState(false)
   const [activeRowId, setActiveRowId] = React.useState<string | null>(null)
-  const [filtersOpen, setFiltersOpen] = React.useState(false)
   const [undoingId, setUndoingId] = React.useState<string | null>(null)
   const [cursorStack, setCursorStack] = React.useState<string[]>([])
   const [cursor, setCursor] = React.useState<string | null>(null)
@@ -333,6 +321,25 @@ export default function ActivityPage() {
   const events = data?.events ?? []
   const actions = Array.from(new Set(events.map((event) => event.action))).sort()
   const entityTypes = Array.from(new Set(events.map((event) => event.entityType))).sort()
+  const activityFilters: SearchFilterOption[] = [
+    { key: "action", label: "Action", type: "select", defaultValue: ALL, options: [{ value: ALL, label: "All actions" }, ...actions.map((action) => ({ value: action, label: formatAction(action) }))] },
+    { key: "entityType", label: "Entity", type: "select", defaultValue: ALL, options: [{ value: ALL, label: "All entities" }, ...entityTypes.map((entity) => ({ value: entity, label: formatAction(entity) }))] },
+    { key: "outcome", label: "Status", type: "select", defaultValue: ALL, options: [
+      { value: ALL, label: "All statuses" },
+      { value: "success", label: "Success" },
+      { value: "failed", label: "Failed" },
+      { value: "warning", label: "Warning" },
+      { value: "info", label: "Info" },
+    ] },
+    { key: "undoable", label: "Undo", type: "select", defaultValue: ALL, options: [
+      { value: ALL, label: "All undo states" },
+      { value: "true", label: "Undo available" },
+      { value: "false", label: "Locked" },
+    ] },
+    { key: "limit", label: "Results per page", type: "select", defaultValue: "25", options: pageSizeOptions.map((size) => ({ value: String(size), label: `${size} per page` })) },
+    { key: "from", label: "From date", type: "date", defaultValue: "" },
+    { key: "to", label: "To date", type: "date", defaultValue: "" },
+  ]
   const currentPage = cursorStack.length + 1
   const totalPages = Math.max(1, data?.totalPages ?? 1)
   const totalCount = Math.max(0, data?.totalCount ?? 0)
@@ -397,25 +404,34 @@ export default function ActivityPage() {
           </>
         }
         actions={
-          <div className="flex w-full items-center gap-2 sm:w-auto">
-            <div className="relative min-w-0 flex-1 sm:w-[320px] sm:flex-none">
-              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={filters.q}
-                onChange={(event) => updateFilter("q", event.target.value)}
-                placeholder="Search"
-                className="h-10 pl-9"
-              />
-            </div>
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={() => setFiltersOpen(true)}
-              aria-label="Open filters"
-              className="h-10 min-h-10 w-10 min-w-10 shrink-0 aspect-square rounded-full [border-radius:9999px] p-0 border border-border/70 bg-background/85 shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
-            >
-              <SlidersHorizontal className="h-4 w-4" />
-            </Button>
+          <DashboardSearchFilterToolbar
+            searchValue={filters.q}
+            onSearchChange={(value) => updateFilter("q", value)}
+            searchPlaceholder="Search"
+            countSearch
+            filters={activityFilters}
+            filterValues={{
+              action: filters.action,
+              entityType: filters.entityType,
+              outcome: filters.outcome,
+              undoable: filters.undoable,
+              limit: String(filters.limit),
+              from: filters.from,
+              to: filters.to,
+            }}
+            onFilterChange={(key, value) => {
+              if (key === "action") updateFilter("action", value)
+              else if (key === "entityType") updateFilter("entityType", value)
+              else if (key === "outcome") updateFilter("outcome", value)
+              else if (key === "undoable") updateFilter("undoable", value)
+              else if (key === "limit") updateFilter("limit", Number(value))
+              else if (key === "from") updateFilter("from", value)
+              else if (key === "to") updateFilter("to", value)
+            }}
+            onClear={resetFilters}
+            title="Activity filters"
+            description="Narrow activity by action, entity, status, undo state, date, and page size."
+            actions={
             <Button
               variant="outline"
               size="icon"
@@ -426,7 +442,8 @@ export default function ActivityPage() {
             >
               {refreshing ? <Spinner className="size-4" /> : <RefreshCw className="h-4 w-4" />}
             </Button>
-          </div>
+            }
+          />
         }
       />
 
@@ -677,105 +694,6 @@ export default function ActivityPage() {
           </div>
         </div>
       </Card>
-
-      <Dialog open={filtersOpen} onOpenChange={setFiltersOpen}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Filters</DialogTitle>
-            <DialogDescription>
-              Narrow the activity stream by action, entity, status, undo state, date, and page size.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            <Select value={filters.action} onValueChange={(value) => updateFilter("action", value)}>
-              <SelectTrigger className="h-10 w-full">
-                <SelectValue placeholder="Action" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>All actions</SelectItem>
-                {actions.map((action) => (
-                  <SelectItem key={action} value={action}>{formatAction(action)}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <Select value={filters.entityType} onValueChange={(value) => updateFilter("entityType", value)}>
-              <SelectTrigger className="h-10 w-full">
-                <SelectValue placeholder="Entity" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>All entities</SelectItem>
-                {entityTypes.map((entity) => (
-                  <SelectItem key={entity} value={entity}>{formatAction(entity)}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <Select value={filters.outcome} onValueChange={(value) => updateFilter("outcome", value)}>
-              <SelectTrigger className="h-10 w-full">
-                <SelectValue placeholder="Status" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>All statuses</SelectItem>
-                <SelectItem value="success">Success</SelectItem>
-                <SelectItem value="failed">Failed</SelectItem>
-                <SelectItem value="warning">Warning</SelectItem>
-                <SelectItem value="info">Info</SelectItem>
-              </SelectContent>
-            </Select>
-
-            <Select value={filters.undoable} onValueChange={(value) => updateFilter("undoable", value)}>
-              <SelectTrigger className="h-10 w-full">
-                <SelectValue placeholder="Undo" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>All undo states</SelectItem>
-                <SelectItem value="true">Undo available</SelectItem>
-                <SelectItem value="false">Locked</SelectItem>
-              </SelectContent>
-            </Select>
-
-            <Select value={String(filters.limit)} onValueChange={(value) => updateFilter("limit", Number(value))}>
-              <SelectTrigger className="h-10 w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {pageSizeOptions.map((size) => (
-                  <SelectItem key={size} value={String(size)}>{size} per page</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-
-            <div className="relative">
-              <CalendarDays className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input
-                aria-label="Activity from date"
-                type="date"
-                value={filters.from}
-                onChange={(event) => updateFilter("from", event.target.value)}
-                className="h-10 pl-9"
-              />
-            </div>
-
-            <Input
-              aria-label="Activity to date"
-              type="date"
-              value={filters.to}
-              onChange={(event) => updateFilter("to", event.target.value)}
-              className="h-10"
-            />
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" onClick={resetFilters}>
-              <X className="h-4 w-4" />
-              Clear
-            </Button>
-            <Button onClick={() => setFiltersOpen(false)}>Done</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       <Dialog
         open={detailOpen}

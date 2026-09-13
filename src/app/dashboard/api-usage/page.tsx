@@ -4,36 +4,27 @@ import * as React from "react"
 import {
   AlertTriangle,
   BarChart3,
-  ChevronLeft,
-  ChevronRight,
   Clock,
   KeyRound,
-  Search,
   Server,
   ShieldAlert,
 } from "lucide-react"
 import type { ColumnDef } from "@tanstack/react-table"
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts"
 import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart"
 import { DashboardDataTable } from "@/components/dashboard/data-table"
 import {
-  DashboardFilterGrid,
   DashboardPage,
   DashboardPageHeader,
   DashboardPageSkeleton,
 } from "@/components/dashboard/page-shell"
+import { DashboardSearchFilterToolbar, type SearchFilterOption } from "@/components/dashboard/search-filter-toolbar"
 
 const ALL = "__all__"
 
@@ -65,6 +56,53 @@ type UsageResponse = {
   events: UsageEvent[]
   nextCursor: string | null
   generatedAt: string
+}
+
+const rankingChartConfig = {
+  requests: { label: "Requests", color: "var(--chart-1)" },
+} satisfies ChartConfig
+
+function RankingChartCard({
+  title,
+  description,
+  emptyMessage,
+  rows,
+}: {
+  title: string
+  description: string
+  emptyMessage: string
+  rows: Array<{ name: string; requests: number }>
+}) {
+  return (
+    <Card className="gap-0 py-0">
+      <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+        <CardTitle className="text-sm font-semibold">{title}</CardTitle>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </CardHeader>
+      <CardContent className="px-3 pb-3 pt-2">
+        {rows.length === 0 ? (
+          <div className="flex h-[220px] items-center justify-center text-sm text-muted-foreground">{emptyMessage}</div>
+        ) : (
+          <ChartContainer config={rankingChartConfig} className="h-[240px] w-full">
+            <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 12, bottom: 4, left: 4 }}>
+              <CartesianGrid horizontal={false} />
+              <XAxis type="number" allowDecimals={false} tickLine={false} axisLine={false} />
+              <YAxis
+                type="category"
+                dataKey="name"
+                width={132}
+                tickLine={false}
+                axisLine={false}
+                tickFormatter={(value: string) => value.length > 18 ? `${value.slice(0, 17)}…` : value}
+              />
+              <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="dot" />} />
+              <Bar dataKey="requests" fill="var(--color-requests)" radius={[0, 4, 4, 0]} />
+            </BarChart>
+          </ChartContainer>
+        )}
+      </CardContent>
+    </Card>
+  )
 }
 
 function formatNumber(value: number) {
@@ -206,12 +244,54 @@ export default function ApiUsagePage() {
     setCursorStack([])
   }
 
+  const goToUsagePage = (pageIndex: number) => {
+    if (pageIndex < 0 || pageIndex > cursorStack.length + 1) return
+    if (pageIndex <= cursorStack.length) {
+      setCursorStack((stack) => stack.slice(0, pageIndex))
+      setCursor(pageIndex === 0 ? null : cursorStack[pageIndex - 1] ?? null)
+      return
+    }
+    if (!data?.nextCursor) return
+    setCursorStack((stack) => [...stack, data.nextCursor!])
+    setCursor(data.nextCursor)
+  }
+
   const updateFilter = <K extends keyof typeof filters>(key: K, value: (typeof filters)[K]) => {
     resetPagination()
     setFilters((current) => ({ ...current, [key]: value }))
   }
 
   const actions = data?.byAction.map((item) => item.action) ?? []
+  const usageFilters: SearchFilterOption[] = [
+    {
+      key: "action",
+      label: "Action",
+      type: "select",
+      defaultValue: ALL,
+      options: [{ value: ALL, label: "All actions" }, ...actions.map((action) => ({ value: action, label: formatAction(action) }))],
+    },
+    {
+      key: "outcome",
+      label: "Outcome",
+      type: "select",
+      defaultValue: ALL,
+      options: [
+        { value: ALL, label: "All outcomes" },
+        { value: "success", label: "Success" },
+        { value: "failed", label: "Failed" },
+        { value: "warning", label: "Warning" },
+      ],
+    },
+    {
+      key: "limit",
+      label: "Results per page",
+      type: "select",
+      defaultValue: "50",
+      options: [25, 50, 100, 200].map((size) => ({ value: String(size), label: String(size) })),
+    },
+    { key: "from", label: "From date", type: "date", defaultValue: "" },
+    { key: "to", label: "To date", type: "date", defaultValue: "" },
+  ]
   const summary = data?.summary
   const successRate =
     summary && summary.total > 0
@@ -275,14 +355,45 @@ export default function ApiUsagePage() {
           </>
         }
         actions={
-        <Button
-          variant="outline"
-          loading={refreshing}
-          onClick={() => void loadUsage(true)}
-          disabled={refreshing}
-        >
-          Refresh
-        </Button>
+          <DashboardSearchFilterToolbar
+            searchValue={filters.projectId}
+            searchPlaceholder="Search project ID..."
+            countSearch
+            searchWidthClassName="sm:w-[220px]"
+            onSearchChange={(value) => updateFilter("projectId", value)}
+            filters={usageFilters}
+            filterValues={{
+              action: filters.action,
+              outcome: filters.outcome,
+              limit: String(filters.limit),
+              from: filters.from,
+              to: filters.to,
+            }}
+            onFilterChange={(key, value) => {
+              if (key === "limit") updateFilter("limit", Number(value))
+              else if (key === "action") updateFilter("action", value)
+              else if (key === "outcome") updateFilter("outcome", value)
+              else if (key === "from") updateFilter("from", value)
+              else if (key === "to") updateFilter("to", value)
+            }}
+            onClear={() => {
+              resetPagination()
+              setFilters({ projectId: "", action: ALL, outcome: ALL, from: "", to: "", limit: 50 })
+            }}
+            title="Filter API usage"
+            description="Narrow API activity by project, action, result, or date range."
+            actions={
+              <Button
+                variant="outline"
+                className="h-10 shrink-0 rounded-full"
+                loading={refreshing}
+                onClick={() => void loadUsage(true)}
+                disabled={refreshing}
+              >
+                Refresh
+              </Button>
+            }
+          />
         }
       />
       </div>
@@ -322,113 +433,11 @@ export default function ApiUsagePage() {
         />
       </div>
 
-      <Card className="dashboard-motion-item dashboard-motion-delay-2 gap-0 py-0">
-        <CardHeader className="px-4 py-3 pb-2 lg:px-4 lg:py-3">
-          <CardTitle className="text-sm font-semibold">Filter API events</CardTitle>
-        </CardHeader>
-        <CardContent className="px-4 pb-4 pt-0">
-          <DashboardFilterGrid className="grid-cols-1 sm:grid-cols-2 xl:grid-cols-4">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input
-                value={filters.projectId}
-                onChange={(event) => updateFilter("projectId", event.target.value)}
-                placeholder="Project ID"
-                className="pl-9"
-              />
-            </div>
-            <Select value={filters.action} onValueChange={(value) => updateFilter("action", value)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>All actions</SelectItem>
-                {actions.map((action) => (
-                  <SelectItem key={action} value={action}>
-                    {formatAction(action)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={filters.outcome} onValueChange={(value) => updateFilter("outcome", value)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>All outcomes</SelectItem>
-                <SelectItem value="success">Success</SelectItem>
-                <SelectItem value="failed">Failed</SelectItem>
-                <SelectItem value="warning">Warning</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={String(filters.limit)} onValueChange={(value) => updateFilter("limit", Number(value))}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {[25, 50, 100, 200].map((size) => (
-                  <SelectItem key={size} value={String(size)}>
-                    {size}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Input type="date" aria-label="From date" value={filters.from} onChange={(event) => updateFilter("from", event.target.value)} />
-            <Input type="date" aria-label="To date" value={filters.to} onChange={(event) => updateFilter("to", event.target.value)} />
-            <Button className="w-full" variant="outline" onClick={() => {
-              resetPagination()
-              setFilters({ projectId: "", action: ALL, outcome: ALL, from: "", to: "", limit: 50 })
-            }}>Clear filters</Button>
-          </DashboardFilterGrid>
-        </CardContent>
-      </Card>
-
-      <div className="dashboard-motion-item dashboard-motion-delay-2 grid gap-4 xl:grid-cols-2">
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Top Actions</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {(data?.byAction ?? []).length === 0 ? (
-              <div className="text-sm text-muted-foreground">No API events yet.</div>
-            ) : (
-              data?.byAction.map((item) => (
-                <div key={item.action} className="flex items-center justify-between gap-3 border-b py-2 text-sm last:border-0">
-                  <span>{formatAction(item.action)}</span>
-                  <Badge variant="secondary">{formatNumber(item.count)}</Badge>
-                </div>
-              ))
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base">Top Projects</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {(data?.byProject ?? []).length === 0 ? (
-              <div className="text-sm text-muted-foreground">No project traffic yet.</div>
-            ) : (
-              data?.byProject.map((item) => (
-                <div key={item.projectId} className="flex items-center justify-between gap-3 border-b py-2 text-sm last:border-0">
-                  <div className="min-w-0">
-                    <div className="truncate font-medium">{item.name}</div>
-                    <div className="truncate font-mono text-xs text-muted-foreground">{item.projectId}</div>
-                  </div>
-                  <Badge variant="secondary">{formatNumber(item.count)}</Badge>
-                </div>
-              ))
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
       <div className="dashboard-motion-item dashboard-motion-delay-3">
         <DashboardDataTable
           data={data?.events ?? []}
           columns={eventColumns}
-          pageSize={Math.max(filters.limit, data?.events.length ?? 0)}
+          pageSize={filters.limit}
           minWidth="1080px"
           loading={loading && !data}
           emptyState="No API usage events found."
@@ -438,37 +447,26 @@ export default function ApiUsagePage() {
               <p className="mt-1 text-xs text-muted-foreground">Latest project API activity. Results are loaded {filters.limit} at a time.</p>
             </div>
           }
-          paginationContent={<div className="flex items-center justify-between gap-3">
-          <span>API event results</span>
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={cursorStack.length === 0 || loading}
-              onClick={() => {
-                const nextStack = cursorStack.slice(0, -1)
-                setCursor(nextStack[nextStack.length - 1] ?? null)
-                setCursorStack(nextStack)
-              }}
-            >
-              <ChevronLeft className="h-4 w-4" />
-              Previous
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!data?.nextCursor || loading}
-              onClick={() => {
-                if (!data?.nextCursor) return
-                setCursorStack((stack) => [...stack, data.nextCursor!])
-                setCursor(data.nextCursor)
-              }}
-            >
-              Next
-              <ChevronRight className="h-4 w-4" />
-            </Button>
-          </div>
-          </div>}
+          serverPagination={{
+            pageIndex: cursorStack.length,
+            pageCount: cursorStack.length + 1 + (data?.nextCursor ? 1 : 0),
+            onPageChange: goToUsagePage,
+          }}
+        />
+      </div>
+
+      <div className="dashboard-motion-item dashboard-motion-delay-4 grid gap-4 xl:grid-cols-2">
+        <RankingChartCard
+          title="Top Actions"
+          description="Request volume grouped by API action."
+          emptyMessage="No API events yet."
+          rows={(data?.byAction ?? []).slice(0, 8).map((item) => ({ name: formatAction(item.action), requests: item.count }))}
+        />
+        <RankingChartCard
+          title="Top Projects"
+          description="Projects generating the most API requests."
+          emptyMessage="No project traffic yet."
+          rows={(data?.byProject ?? []).slice(0, 8).map((item) => ({ name: item.name, requests: item.count }))}
         />
       </div>
     </DashboardPage>

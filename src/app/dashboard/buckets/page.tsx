@@ -278,19 +278,7 @@ export default function BucketsPage() {
           </span>
           <div className="min-w-0">
             <div className="truncate text-[13px] font-medium leading-4">{row.original.name}</div>
-            <div className="truncate font-mono text-[10px] leading-4 text-muted-foreground">{row.original.jurisdiction} / {row.original.storageClass}</div>
           </div>
-        </div>
-      ),
-    },
-    {
-      accessorKey: "accountLabel",
-      header: "Account",
-      meta: { width: "min-w-[160px]", align: "center" },
-      cell: ({ row }) => (
-        <div className="flex flex-col items-center gap-1 text-center">
-          <span className="max-w-[145px] truncate text-[11px] leading-4 text-muted-foreground">{row.original.accountLabel}</span>
-          <Badge variant={row.original.accountStatus === "active" ? "default" : row.original.accountStatus === "available" ? "outline" : "secondary"} className="capitalize">{row.original.accountStatus}</Badge>
         </div>
       ),
     },
@@ -367,7 +355,7 @@ export default function BucketsPage() {
         <DashboardPageHeader
           title="Buckets"
           description={data?.activeAccount
-            ? `${data.activeAccount.label} / ${formatSyncedAt(data.activeAccount.lastSyncedAt)}`
+            ? formatSyncedAt(data.activeAccount.lastSyncedAt)
             : "Usage and access settings for the active account"}
           actions={
             <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">

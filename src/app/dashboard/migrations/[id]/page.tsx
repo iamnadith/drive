@@ -1150,31 +1150,6 @@ export default function MigrationDetailsPage() {
     return overviewBadgeStatus
   }, [overviewBadgeStatus])
 
-  const overviewStatus = React.useMemo(() => {
-    const message =
-      migration?.status === "completed" && migration.options?.manualCompleted === true
-        ? "Migration marked completed manually"
-        : bucketCounts.scanning > 0
-        ? `${bucketCounts.scanning} bucket${bucketCounts.scanning === 1 ? "" : "s"} scanning`
-        : bucketCounts.running > 0
-          ? `${bucketCounts.running} bucket${bucketCounts.running === 1 ? "" : "s"} running`
-        : bucketCounts.verifying > 0
-          ? `${bucketCounts.verifying} bucket${bucketCounts.verifying === 1 ? "" : "s"} verifying`
-        : bucketCounts.failed > 0
-          ? `${bucketCounts.failed} bucket${bucketCounts.failed === 1 ? "" : "s"} failed`
-        : latestRepairJob && (latestRepairJob.status === "pending" || latestRepairJob.status === "claimed" || latestRepairJob.status === "running")
-          ? latestRepairJob.summary || "Worker reconciliation in progress"
-          : migration?.syncMessage ?? ""
-
-    return {
-      message,
-      completed: bucketCounts.completed,
-      failed: bucketCounts.failed,
-      aborted: bucketCounts.aborted,
-      pending: bucketCounts.running + bucketCounts.scanning + bucketCounts.verifying,
-    }
-  }, [bucketCounts, latestRepairJob, migration?.options?.manualCompleted, migration?.status, migration?.syncMessage])
-
   const loadInitial = React.useCallback(async () => {
     if (!id) return
     setError(null)
@@ -1902,12 +1877,8 @@ export default function MigrationDetailsPage() {
             {statusBadge(overviewBadgeStatus, { syncStatus: migration.syncStatus, syncMessage: migration.syncMessage })}
           </CardTitle>
           <CardDescription>
-            {migration.options.executionMode === "migration_workers" ? "Drive migration worker pool" : "Cloudflare Super Slurper"} -{" "}
-            {sourceLabel} - {targetLabel} - {migration.options.overwrite ? "Overwrite on destination" : "No overwrite"} -{" "}
-            {Math.max(1, Math.min(3, migration.options.concurrency ?? 3))} concurrent bucket preparations
-            {migration.options.executionMode === "migration_workers"
-              ? " - scanner-indexed per-file queue"
-              : ""}
+            {migration.options.executionMode === "migration_workers" ? "Worker pool" : "Cloudflare Super Slurper"}
+            {" · Source: "}{sourceLabel}{" · Destination: "}{targetLabel}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -2001,14 +1972,6 @@ export default function MigrationDetailsPage() {
               </div>
             </div>
           )}
-
-          {overviewStatus.message ? (
-            <div className="text-sm text-muted-foreground">
-              <span className="font-medium text-foreground">Status:</span> {overviewStatus.message} -{" "}
-              {overviewStatus.completed} buckets completed - {overviewStatus.failed} buckets failed - {overviewStatus.aborted} buckets aborted
-              {overviewStatus.pending > 0 ? ` - ${overviewStatus.pending} buckets pending` : ""}
-            </div>
-          ) : null}
 
           <div className="flex flex-wrap gap-2">
             {(() => {
@@ -2580,7 +2543,6 @@ export default function MigrationDetailsPage() {
           columns={bucketColumns}
           pageSize={10}
           minWidth="980px"
-          withCard={false}
           emptyState={
             migration.detailsCompactedAt
               ? `Detailed records were compacted. Summary retained: ${migration.summaryObjects.toLocaleString()} objects, ${formatBytes(migration.summaryBytes)}, ${migration.workerSummary?.workerRuns?.length ?? 0} worker runs, and ${migration.workerSummary?.repairJobs?.length ?? 0} repair jobs.`
@@ -2590,15 +2552,14 @@ export default function MigrationDetailsPage() {
         />
       )}
 
-      <section className="space-y-2">
-        <div className="space-y-1">
-          <h2 className="text-lg font-semibold">Migration Logs</h2>
-          <p className="text-sm text-muted-foreground">Aggregated logs and errors for this migration.</p>
-        </div>
-          <div className="rounded-md border bg-muted/20">
+      <section>
+          <div className="overflow-hidden rounded-xl border bg-card">
+            <div className="border-b px-3 py-2">
+              <h2 className="text-sm font-semibold">Migration Logs</h2>
+            </div>
             <ScrollArea ref={migrationLogsRef} className="max-h-[420px]" hideScrollbar>
-                <div className="min-w-[900px] p-2 text-xs font-mono">
-                  <div className="sticky top-0 z-10 border-b bg-background/80 px-2 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+                <div className="min-w-[900px] text-xs font-mono">
+                  <div className="sticky top-0 z-10 border-b bg-background/80 px-3 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/60">
                     <div
                       className="grid gap-3 text-[11px] text-muted-foreground select-none"
                       style={{
@@ -2686,7 +2647,7 @@ export default function MigrationDetailsPage() {
                       <div>Message</div>
                     </div>
                   </div>
-                  <div className="space-y-1 px-2 py-2">
+                  <div className="space-y-1 px-3 py-2">
                     {logLines.map((line, idx) => (
                       <div
                         key={`${line.atIso}-${line.bucket}-${idx}`}
@@ -2707,10 +2668,10 @@ export default function MigrationDetailsPage() {
                   </div>
                 </div>
             </ScrollArea>
-          </div>
             {logLines.length === 0 ? (
-              <div className="p-4 text-sm text-muted-foreground">Waiting for scanner and orchestrator lifecycle events.</div>
+              <div className="border-t px-4 py-8 text-center text-sm text-muted-foreground">Waiting for scanner and orchestrator lifecycle events.</div>
             ) : null}
+          </div>
       </section>
 
       <Dialog open={failedOpen} onOpenChange={setFailedOpen}>
