@@ -3,8 +3,6 @@
 import * as React from "react"
 import Link from "next/link"
 import {
-  ChevronLeft,
-  ChevronRight,
   FolderPlus,
   KeyRound,
   MoreHorizontal,
@@ -15,12 +13,10 @@ import {
   Trash2,
 } from "lucide-react"
 import { toast } from "sonner"
+import { type ColumnDef } from "@tanstack/react-table"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-} from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
@@ -47,20 +43,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Skeleton } from "@/components/ui/skeleton"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
+import { DashboardDataTable } from "@/components/dashboard/data-table"
 import {
   DashboardPage,
   DashboardPageHeader,
 } from "@/components/dashboard/page-shell"
-import { cn } from "@/lib/utils"
 
 type Project = {
   id: string
@@ -121,11 +108,9 @@ function readProjectOrigins(data: Record<string, unknown>) {
 }
 
 export default function ProjectsPage() {
-  const PAGE_SIZE = 8
   const [projects, setProjects] = React.useState<Project[]>([])
   const [loading, setLoading] = React.useState(false)
   const [search, setSearch] = React.useState("")
-  const [page, setPage] = React.useState(1)
 
   const [createOpen, setCreateOpen] = React.useState(false)
   const [projectName, setProjectName] = React.useState("")
@@ -177,21 +162,6 @@ export default function ProjectsPage() {
     })
   }, [projects, search])
 
-  const totalPages = Math.max(1, Math.ceil(filteredProjects.length / PAGE_SIZE))
-  const paginatedProjects = React.useMemo(() => {
-    const start = (page - 1) * PAGE_SIZE
-    return filteredProjects.slice(start, start + PAGE_SIZE)
-  }, [filteredProjects, page])
-
-  React.useEffect(() => {
-    setPage(1)
-  }, [search])
-
-  React.useEffect(() => {
-    if (page > totalPages) {
-      setPage(totalPages)
-    }
-  }, [page, totalPages])
 
   const openCreateDialog = () => {
     setProjectName("")
@@ -351,6 +321,79 @@ export default function ProjectsPage() {
     }
   }
 
+  const columns: ColumnDef<Project, unknown>[] = [
+    {
+      accessorKey: "name",
+      header: "Project",
+      meta: { width: "min-w-[240px]" },
+      cell: ({ row }) => (
+        <div className="max-w-[260px]">
+          <div className="truncate font-medium">{row.original.name}</div>
+          <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{row.original.projectId}</div>
+        </div>
+      ),
+    },
+    {
+      accessorKey: "createdAccountLabel",
+      header: "Account",
+      meta: { width: "min-w-[170px]" },
+      cell: ({ row }) => <span className="block max-w-[180px] truncate text-sm text-muted-foreground">{row.original.createdAccountLabel || "Active account"}</span>,
+    },
+    {
+      accessorKey: "bucketName",
+      header: "Primary bucket",
+      meta: { width: "min-w-[220px]" },
+      cell: ({ row }) => <span className="block max-w-[230px] truncate font-mono text-xs">{row.original.bucketName || "Not assigned"}</span>,
+    },
+    {
+      accessorKey: "bucketCount",
+      header: "Buckets",
+      meta: { width: "min-w-[90px]", align: "center" },
+      cell: ({ row }) => row.original.bucketCount ?? 0,
+    },
+    {
+      accessorKey: "keyCount",
+      header: "API keys",
+      meta: { width: "min-w-[90px]", align: "center" },
+      cell: ({ row }) => row.original.keyCount ?? 0,
+    },
+    {
+      accessorKey: "status",
+      header: "Status",
+      meta: { width: "min-w-[110px]" },
+      cell: ({ row }) => <Badge variant={row.original.status === "active" ? "default" : "secondary"}>{row.original.status}</Badge>,
+    },
+    {
+      id: "actions",
+      header: "Actions",
+      meta: { width: "min-w-[170px]", align: "right", divider: false },
+      cell: ({ row }) => {
+        const project = row.original
+        return (
+          <div className="flex items-center justify-end gap-1">
+            <Button variant="ghost" size="icon-sm" className="rounded-full" asChild>
+              <Link href={`/dashboard/projects/${encodeURIComponent(project.id)}/buckets`} aria-label={`Manage buckets for ${project.name}`}><FolderPlus /></Link>
+            </Button>
+            <Button variant="ghost" size="icon-sm" className="rounded-full" asChild>
+              <Link href={`/dashboard/projects/${encodeURIComponent(project.id)}/keys`} aria-label={`Manage API keys for ${project.name}`}><KeyRound /></Link>
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon-sm" className="rounded-full" aria-label={`More actions for ${project.name}`}><MoreHorizontal /></Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuGroup>
+                  <DropdownMenuItem onClick={() => void openSettingsDialog(project)}><Settings2 /> Settings</DropdownMenuItem>
+                  <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget(project)}><Trash2 /> Delete</DropdownMenuItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        )
+      },
+    },
+  ]
+
   return (
     <DashboardPage className="dashboard-motion-stage">
       <div className="dashboard-motion-item">
@@ -392,117 +435,16 @@ export default function ProjectsPage() {
         />
       </div>
 
-      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
-        <Table className="min-w-[930px] w-full" containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full">
-          <TableHeader>
-            <TableRow className="h-9 border-b">
-              {[
-                ["Project", "min-w-[240px]"],
-                ["Account", "min-w-[170px]"],
-                ["Primary bucket", "min-w-[220px]"],
-                ["Buckets", "min-w-[90px]"],
-                ["API keys", "min-w-[90px]"],
-                ["Status", "min-w-[110px]"],
-                ["Actions", "min-w-[170px]"],
-              ].map(([label, width], index, items) => (
-                <TableHead key={label} className={cn(width, "relative px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground", label === "Actions" && "text-right")}>
-                  {label}
-                  {index < items.length - 1 ? <span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /> : null}
-                </TableHead>
-              ))}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {loading && projects.length === 0 ? (
-              Array.from({ length: 6 }).map((_, index) => (
-                <TableRow key={index} className="h-[64px]">
-                  <TableCell colSpan={7}><Skeleton className="h-10 w-full rounded-xl" /></TableCell>
-                </TableRow>
-              ))
-            ) : paginatedProjects.length ? (
-              paginatedProjects.map((project) => (
-                <TableRow key={project.id} className="h-[64px] border-b last:border-b-0 hover:bg-muted/30">
-                  <TableCell className="relative px-2.5 py-2">
-                    <div className="max-w-[260px]">
-                      <div className="truncate font-medium">{project.name}</div>
-                      <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{project.projectId}</div>
-                    </div>
-                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
-                  </TableCell>
-                  <TableCell className="relative px-2.5 py-2 text-sm text-muted-foreground">
-                    <span className="block max-w-[180px] truncate">{project.createdAccountLabel || "Active account"}</span>
-                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
-                  </TableCell>
-                  <TableCell className="relative px-2.5 py-2 font-mono text-xs">
-                    <span className="block max-w-[230px] truncate">{project.bucketName || "Not assigned"}</span>
-                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
-                  </TableCell>
-                  <TableCell className="relative px-2.5 py-2 text-center font-medium">
-                    {project.bucketCount ?? 0}
-                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
-                  </TableCell>
-                  <TableCell className="relative px-2.5 py-2 text-center font-medium">
-                    {project.keyCount ?? 0}
-                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
-                  </TableCell>
-                  <TableCell className="relative px-2.5 py-2">
-                    <Badge variant={project.status === "active" ? "default" : "secondary"}>{project.status}</Badge>
-                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
-                  </TableCell>
-                  <TableCell className="px-2.5 py-2">
-                    <div className="flex items-center justify-end gap-1">
-                      <Button variant="ghost" size="icon-sm" className="rounded-full" asChild>
-                        <Link href={`/dashboard/projects/${encodeURIComponent(project.id)}/buckets`} aria-label={`Manage buckets for ${project.name}`}>
-                          <FolderPlus />
-                        </Link>
-                      </Button>
-                      <Button variant="ghost" size="icon-sm" className="rounded-full" asChild>
-                        <Link href={`/dashboard/projects/${encodeURIComponent(project.id)}/keys`} aria-label={`Manage API keys for ${project.name}`}>
-                          <KeyRound />
-                        </Link>
-                      </Button>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon-sm" className="rounded-full" aria-label={`More actions for ${project.name}`}>
-                            <MoreHorizontal />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuGroup>
-                            <DropdownMenuItem onClick={() => void openSettingsDialog(project)}>
-                              <Settings2 /> Settings
-                            </DropdownMenuItem>
-                            <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget(project)}>
-                              <Trash2 /> Delete
-                            </DropdownMenuItem>
-                          </DropdownMenuGroup>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))
-            ) : (
-              <TableRow>
-                <TableCell colSpan={7} className="h-28 text-center text-muted-foreground">
-                  {projects.length === 0 ? "No projects yet." : "No projects match your search."}
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-        <div className="border-t px-3 py-2 text-xs text-muted-foreground max-sm:-mb-2">
-          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-            <Button variant="outline" size="sm" className="justify-self-start rounded-full" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page === 1 || filteredProjects.length === 0}>
-              <ChevronLeft data-icon="inline-start" /> <span className="hidden sm:inline">Previous</span>
-            </Button>
-            <span className="justify-self-center">Page {filteredProjects.length ? page : 0} of {filteredProjects.length ? totalPages : 0}</span>
-            <Button variant="outline" size="sm" className="justify-self-end rounded-full" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={page === totalPages || filteredProjects.length === 0}>
-              <span className="hidden sm:inline">Next</span> <ChevronRight data-icon="inline-end" />
-            </Button>
-          </div>
-        </div>
-      </Card>
+      <DashboardDataTable
+        data={filteredProjects}
+        columns={columns}
+        pageSize={8}
+        minWidth="1090px"
+        loading={loading && projects.length === 0}
+        emptyState={projects.length === 0 ? "No projects yet." : "No projects match your search."}
+        resetKey={search}
+        className="dashboard-motion-delay-2"
+      />
 
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="rounded-2xl sm:max-w-md">

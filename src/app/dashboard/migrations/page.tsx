@@ -3,8 +3,6 @@
 import * as React from "react"
 import {
   CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
   ExternalLink,
   Plus,
   RefreshCw,
@@ -14,12 +12,7 @@ import {
   X,
 } from "lucide-react"
 import { useRouter } from "next/navigation"
-import {
-  ColumnDef,
-  flexRender,
-  getCoreRowModel,
-  useReactTable,
-} from "@tanstack/react-table"
+import type { ColumnDef } from "@tanstack/react-table"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -51,6 +44,7 @@ import {
   DashboardPageHeader,
   DashboardPageSkeleton,
 } from "@/components/dashboard/page-shell"
+import { DashboardDataTable } from "@/components/dashboard/data-table"
 
 type Account = {
   id: string
@@ -111,7 +105,6 @@ type SlurperProgressResult = {
   status?: string
 }
 
-const MIGRATIONS_PAGE_SIZE = 10
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
@@ -255,7 +248,6 @@ export default function MigrationsPage() {
   const [busyAction, setBusyAction] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [search, setSearch] = React.useState("")
-  const [pageIndex, setPageIndex] = React.useState(0)
   const [deleteId, setDeleteId] = React.useState<string | null>(null)
 
   React.useEffect(() => {
@@ -293,6 +285,7 @@ export default function MigrationsPage() {
   const columns: ColumnDef<Migration>[] = [
     {
       accessorKey: "id",
+      meta: { width: "min-w-[230px]" },
       header: () => <div className="text-center">Migration</div>,
       cell: ({ row }) => {
         const migration = row.original
@@ -311,6 +304,7 @@ export default function MigrationsPage() {
     },
     {
       accessorKey: "status",
+      meta: { width: "min-w-[125px]", align: "center" },
       header: () => <div className="text-center">Status</div>,
       cell: ({ row }) => (
         <div className="flex min-h-10 items-center justify-center">
@@ -320,6 +314,7 @@ export default function MigrationsPage() {
     },
     {
       id: "source",
+      meta: { width: "min-w-[130px]", align: "center" },
       header: () => <div className="text-center">Source</div>,
       cell: ({ row }) => {
         const source = accountLabelById.get(row.original.sourceAccountId) ?? row.original.sourceAccountId
@@ -328,6 +323,7 @@ export default function MigrationsPage() {
     },
     {
       id: "target",
+      meta: { width: "min-w-[130px]", align: "center" },
       header: () => <div className="text-center">Target</div>,
       cell: ({ row }) => {
         const target = accountLabelById.get(row.original.targetAccountId) ?? row.original.targetAccountId
@@ -336,6 +332,7 @@ export default function MigrationsPage() {
     },
     {
       accessorKey: "createdAt",
+      meta: { width: "min-w-[130px]", align: "center" },
       header: () => <div className="text-center">Created</div>,
       cell: ({ row }) => {
         const createdAt = row.original.createdAt
@@ -350,16 +347,19 @@ export default function MigrationsPage() {
     },
     {
       accessorKey: "summaryObjects",
+      meta: { width: "min-w-[110px]", align: "center" },
       header: () => <div className="text-center">Objects</div>,
       cell: ({ row }) => <div className="min-h-10 content-center text-center text-[12px] tabular-nums">{formatNumber(row.original.summaryObjects)}</div>,
     },
     {
       accessorKey: "summaryBytes",
+      meta: { width: "min-w-[110px]", align: "center" },
       header: () => <div className="text-center">Data</div>,
       cell: ({ row }) => <div className="min-h-10 content-center text-center text-[11px] tabular-nums text-muted-foreground">{formatBytes(row.original.summaryBytes)}</div>,
     },
     {
       id: "workers",
+      meta: { width: "min-w-[90px]", align: "center" },
       header: () => <div className="text-center">Workers</div>,
       cell: ({ row }) => {
         const workerRuns = row.original.workerSummary?.workerRuns
@@ -368,6 +368,7 @@ export default function MigrationsPage() {
     },
     {
       id: "actions",
+      meta: { width: "min-w-[100px]", align: "center", divider: false },
       enableHiding: false,
       header: () => <div className="text-center">Actions</div>,
       cell: ({ row }) => (
@@ -396,28 +397,9 @@ export default function MigrationsPage() {
     },
   ]
 
-  const table = useReactTable({
-    data: filteredMigrations,
-    columns,
-    getCoreRowModel: getCoreRowModel(),
-  })
-
-  const totalRows = filteredMigrations.length
-  const totalPages = Math.max(1, Math.ceil(totalRows / MIGRATIONS_PAGE_SIZE))
-  const currentPageIndex = Math.min(pageIndex, totalPages - 1)
-  const paginatedRows = table.getRowModel().rows.slice(
-    currentPageIndex * MIGRATIONS_PAGE_SIZE,
-    currentPageIndex * MIGRATIONS_PAGE_SIZE + MIGRATIONS_PAGE_SIZE,
-  )
   const activeCount = migrations.filter((migration) => migration.status === "running" || migration.status === "verifying").length
   const completedCount = migrations.filter((migration) => migration.status === "completed").length
   const attentionCount = migrations.filter((migration) => migration.status === "failed" || (migration.status === "verifying" && migration.syncStatus === "error")).length
-  const pageWindow = Math.min(totalPages, 3)
-  const desktopPageWindow = Math.min(totalPages, 5)
-  const mobileStart = Math.max(0, Math.min(currentPageIndex - Math.floor(pageWindow / 2), totalPages - pageWindow))
-  const desktopStart = Math.max(0, Math.min(currentPageIndex - Math.floor(desktopPageWindow / 2), totalPages - desktopPageWindow))
-  const mobilePages = Array.from({ length: pageWindow }, (_, index) => mobileStart + index)
-  const desktopPages = Array.from({ length: desktopPageWindow }, (_, index) => desktopStart + index)
 
   const [createOpen, setCreateOpen] = React.useState(false)
   const [targetAccountId, setTargetAccountId] = React.useState<string>("")
@@ -888,7 +870,6 @@ export default function MigrationsPage() {
                   value={search}
                   onChange={(event) => {
                     setSearch(event.target.value)
-                    setPageIndex(0)
                   }}
                   className="h-9 w-full pl-8"
                 />
@@ -1266,85 +1247,14 @@ export default function MigrationsPage() {
         </Card>
       </div>
 
-      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
-        <Table
-          className="min-w-[1180px] w-full"
-          containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full [-ms-overflow-style:none] [scrollbar-width:thin]"
-        >
-          <TableHeader>
-            {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id} className="h-9 border-b">
-                {headerGroup.headers.map((header) => {
-                  const widths: Record<string, string> = {
-                    id: "min-w-[230px]",
-                    status: "min-w-[125px]",
-                    source: "min-w-[130px]",
-                    target: "min-w-[130px]",
-                    createdAt: "min-w-[130px]",
-                    summaryObjects: "min-w-[110px]",
-                    summaryBytes: "min-w-[110px]",
-                    workers: "min-w-[90px]",
-                    actions: "min-w-[100px]",
-                  }
-                  return (
-                    <TableHead key={header.id} className={`${widths[header.column.id] ?? ""} relative px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground`}>
-                      {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
-                      {header.column.id !== "actions" ? <span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /> : null}
-                    </TableHead>
-                  )
-                })}
-              </TableRow>
-            ))}
-          </TableHeader>
-          <TableBody>
-            {paginatedRows.length ? paginatedRows.map((row) => (
-              <TableRow key={row.id} className="h-[64px] border-b last:border-b-0 hover:bg-muted/30">
-                {row.getVisibleCells().map((cell) => (
-                  <TableCell key={cell.id} className="relative px-2.5 py-2 align-middle">
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                    {cell.column.id !== "actions" ? <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" /> : null}
-                  </TableCell>
-                ))}
-              </TableRow>
-            )) : (
-              <TableRow>
-                <TableCell colSpan={columns.length} className="h-24 text-center text-sm text-muted-foreground">
-                  {search.trim() ? "No migrations match your search." : "No migrations yet."}
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-        <div className="border-t px-3 py-2 text-xs text-muted-foreground max-sm:-mb-2">
-          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-            <button type="button" className="justify-self-start inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/15 bg-background/85 p-0 text-foreground shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-white/25 hover:bg-muted/55 hover:shadow-md disabled:pointer-events-none disabled:opacity-50 sm:w-auto sm:gap-1 sm:px-2.5" disabled={currentPageIndex === 0} onClick={() => setPageIndex((prev) => Math.max(0, prev - 1))}>
-              <ChevronLeft className="h-4 w-4 sm:mr-1" /><span className="hidden sm:inline">Previous</span>
-            </button>
-            <div className="flex items-center justify-center gap-1 justify-self-center">
-              <div className="flex items-center gap-1 sm:hidden">
-                {mobilePages.map((page) => (
-                  <button key={`m-${page}`} type="button" className={`inline-flex h-[1.875rem] w-[1.875rem] shrink-0 items-center justify-center rounded-full border p-0 text-[11px] font-medium leading-none transition-[border-color,background-color,color,box-shadow] ${page === currentPageIndex ? "border-white/25 bg-white text-black shadow-sm" : "border-white/15 bg-background/85 text-foreground shadow-sm backdrop-blur-sm hover:border-white/25 hover:bg-muted/55 hover:shadow-md"}`} onClick={() => setPageIndex(page)} disabled={page === currentPageIndex}>
-                    {page + 1}
-                  </button>
-                ))}
-              </div>
-              <div className="hidden items-center gap-1 sm:flex">
-                {desktopPages.map((page) => (
-                  <button key={`d-${page}`} type="button" className={`inline-flex h-[1.875rem] w-[1.875rem] shrink-0 items-center justify-center rounded-full border p-0 text-[11px] font-medium leading-none transition-[border-color,background-color,color,box-shadow] ${page === currentPageIndex ? "border-white/25 bg-white text-black shadow-sm" : "border-white/15 bg-background/85 text-foreground shadow-sm backdrop-blur-sm hover:border-white/25 hover:bg-muted/55 hover:shadow-md"}`} onClick={() => setPageIndex(page)} disabled={page === currentPageIndex}>
-                    {page + 1}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <button type="button" className="justify-self-end inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/15 bg-background/85 p-0 text-foreground shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-white/25 hover:bg-muted/55 hover:shadow-md disabled:pointer-events-none disabled:opacity-50 sm:w-auto sm:gap-1 sm:px-2.5" disabled={currentPageIndex >= totalPages - 1 || totalRows === 0} onClick={() => setPageIndex((prev) => Math.min(totalPages - 1, prev + 1))}>
-              <ChevronRight className="h-4 w-4 sm:mr-1" /><span className="hidden sm:inline">Next</span>
-            </button>
-          </div>
-        </div>
-      </Card>
-      <div className="-mt-2 text-center text-xs text-muted-foreground">
-        Page {totalRows ? currentPageIndex + 1 : 0} of {totalRows ? totalPages : 0}
-      </div>
+      <DashboardDataTable
+        data={filteredMigrations}
+        columns={columns}
+        minWidth="1180px"
+        emptyState={search.trim() ? "No migrations match your search." : "No migrations yet."}
+        resetKey={search}
+        className="dashboard-motion-delay-2"
+      />
 
       <AlertDialog open={Boolean(deleteId)} onOpenChange={(open) => (!open && busyAction !== "delete" ? setDeleteId(null) : null)}>
         <AlertDialogContent>

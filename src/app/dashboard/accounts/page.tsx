@@ -1,12 +1,7 @@
 ﻿"use client";
 
 import * as React from "react";
-import {
-  ColumnDef,
-  flexRender,
-  getCoreRowModel,
-  useReactTable,
-} from "@tanstack/react-table";
+import type { ColumnDef } from "@tanstack/react-table";
 import {
   Plus,
   Ban,
@@ -19,8 +14,6 @@ import {
   ClipboardPaste,
   BookOpen,
   X,
-  ChevronLeft,
-  ChevronRight,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -59,6 +52,7 @@ import {
 } from "@/components/ui/hover-card";
 import { Switch } from "@/components/ui/switch";
 import { AccountsPageSkeleton } from "@/components/dashboard/loading-skeletons";
+import { DashboardDataTable } from "@/components/dashboard/data-table";
 import {
   DashboardPage,
   DashboardPageHeader,
@@ -293,8 +287,6 @@ export default function AccountsPage() {
   const [keysStatus, setKeysStatus] = React.useState<
     "idle" | "valid" | "invalid"
   >("idle");
-  const pageSize = 10;
-  const [pageIndex, setPageIndex] = React.useState(0);
   const [confirmAction, setConfirmAction] = React.useState<{
     type: "delete" | "disable";
     account: Account | null;
@@ -917,6 +909,7 @@ export default function AccountsPage() {
   const columns: ColumnDef<Account>[] = [
     {
       accessorKey: "name",
+      meta: { width: "min-w-[240px]" },
       header: () => <div className="text-center">Account</div>,
       cell: ({ row }) => (
         <div className="flex min-h-[40px] items-center">
@@ -938,6 +931,7 @@ export default function AccountsPage() {
     },
     {
       accessorKey: "email",
+      meta: { width: "min-w-[220px]" },
       header: () => <div className="text-center">Email</div>,
       cell: ({ row }) => (
         <span className="flex min-h-[40px] w-full items-center justify-center text-center text-[11px] leading-4 text-muted-foreground break-all">
@@ -947,6 +941,7 @@ export default function AccountsPage() {
     },
     {
       accessorKey: "status",
+      meta: { width: "min-w-[120px]", align: "center" },
       header: () => <div className="text-center">Status</div>,
       cell: ({ row }) => {
         const status = row.getValue("status") as string;
@@ -981,6 +976,7 @@ export default function AccountsPage() {
     },
     {
       accessorKey: "createdAt",
+      meta: { width: "min-w-[140px]", align: "center" },
       header: () => <div className="text-center">Added</div>,
       cell: ({ row }) => (
         <div className="flex min-h-[40px] w-full flex-col items-center justify-center space-y-0.5 text-center text-[11px] text-muted-foreground">
@@ -1002,6 +998,7 @@ export default function AccountsPage() {
     },
     {
       accessorKey: "totalBuckets",
+      meta: { width: "min-w-[130px]", align: "center" },
       header: () => <div className="text-center">Usage</div>,
       cell: ({ row }) => (
         <div className="flex min-h-[40px] w-full flex-col items-center justify-center space-y-0.5 text-center">
@@ -1016,6 +1013,7 @@ export default function AccountsPage() {
     },
     {
       id: "actions",
+      meta: { width: "min-w-[170px]", align: "center", divider: false },
       enableHiding: false,
       header: () => <div className="text-center">Actions</div>,
       cell: ({ row }) => {
@@ -1066,46 +1064,9 @@ export default function AccountsPage() {
     },
   ];
 
-  const table = useReactTable({
-    data: filteredAccounts,
-    columns,
-    getCoreRowModel: getCoreRowModel(),
-  });
-
-  const totalRows = filteredAccounts.length;
-  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
-  const currentPageIndex = Math.min(pageIndex, totalPages - 1);
   const accountsHeaderDescription = activeAccount?.lastSyncedAt
     ? `Last Synced At ${new Date(activeAccount.lastSyncedAt).toLocaleString()}`
     : "Last Synced At Never";
-  const paginatedRows = table
-    .getRowModel()
-    .rows.slice(
-      currentPageIndex * pageSize,
-      currentPageIndex * pageSize + pageSize,
-    );
-  const pageWindow = totalPages <= 3 ? totalPages : 3;
-  const desktopPageWindow = totalPages <= 5 ? totalPages : 5;
-  const mobileStart = Math.max(
-    0,
-    Math.min(
-      currentPageIndex - Math.floor(pageWindow / 2),
-      Math.max(0, totalPages - pageWindow),
-    ),
-  );
-  const desktopStart = Math.max(
-    0,
-    Math.min(
-      currentPageIndex - Math.floor(desktopPageWindow / 2),
-      Math.max(0, totalPages - desktopPageWindow),
-    ),
-  );
-  const mobilePages = Array.from({ length: pageWindow }, (_, index) => mobileStart + index);
-  const desktopPages = Array.from(
-    { length: desktopPageWindow },
-    (_, index) => desktopStart + index,
-  );
-
   if (accountsLoading && accounts.length === 0) {
     return <AccountsPageSkeleton />;
   }
@@ -2982,152 +2943,13 @@ export default function AccountsPage() {
           </DialogContent>
         </Dialog>
       )}
-      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
-        <Table
-          className="min-w-[900px] w-full"
-          containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full [-ms-overflow-style:none] [scrollbar-width:thin]"
-        >
-            <TableHeader>
-              {table.getHeaderGroups().map((headerGroup) => (
-                  <TableRow key={headerGroup.id} className="h-9 border-b">
-                    {headerGroup.headers.map((header) => {
-                      const columnId = header.column.id;
-                      const colWidth =
-                        columnId === "name"
-                          ? "min-w-[240px]"
-                          : columnId === "email"
-                            ? "min-w-[220px]"
-                            : columnId === "status"
-                              ? "min-w-[120px]"
-                              : columnId === "createdAt"
-                                ? "min-w-[140px]"
-                                : columnId === "totalBuckets"
-                                  ? "min-w-[130px]"
-                                  : columnId === "actions"
-                                      ? "min-w-[170px]"
-                                      : "";
-
-                      return (
-                        <TableHead
-                          key={header.id}
-                          className={`${colWidth} relative px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground`}
-                        >
-                          {header.isPlaceholder
-                            ? null
-                            : flexRender(
-                                header.column.columnDef.header,
-                                header.getContext(),
-                              )}
-                          {header.column.id !== "actions" ? (
-                            <span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" />
-                          ) : null}
-                        </TableHead>
-                      );
-                    })}
-                  </TableRow>
-                ))}
-              </TableHeader>
-              <TableBody>
-                {paginatedRows.length ? (
-                  paginatedRows.map((row) => (
-                    <TableRow
-                      key={row.id}
-                      data-state={row.getIsSelected() && "selected"}
-                      className="h-[64px] border-b last:border-b-0 hover:bg-muted/30"
-                    >
-                      {row.getVisibleCells().map((cell) => (
-                        <TableCell
-                          key={cell.id}
-                          className="relative px-2.5 py-2 align-middle"
-                        >
-                          {flexRender(
-                            cell.column.columnDef.cell,
-                            cell.getContext(),
-                          )}
-                          {cell.column.id !== "actions" ? (
-                            <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
-                          ) : null}
-                        </TableCell>
-                      ))}
-                    </TableRow>
-                  ))
-                ) : (
-                  <TableRow>
-                    <TableCell
-                      colSpan={columns.length}
-                      className="h-24 text-center"
-                    >
-                      No results.
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-              </Table>
-        <div className="border-t px-3 py-2 text-xs text-muted-foreground max-sm:-mb-2">
-          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-            <button
-              type="button"
-              className="justify-self-start inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/15 bg-background/85 p-0 text-foreground shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-white/25 hover:bg-muted/55 hover:shadow-md disabled:pointer-events-none disabled:opacity-50 sm:w-auto sm:gap-1 sm:px-2.5"
-              disabled={currentPageIndex === 0}
-              onClick={() => setPageIndex((prev) => Math.max(0, prev - 1))}
-            >
-              <ChevronLeft className="h-4 w-4 sm:mr-1" />
-              <span className="hidden sm:inline">Previous</span>
-            </button>
-            <div className="flex items-center justify-center gap-1 justify-self-center">
-              <div className="flex items-center gap-1 sm:hidden">
-                {mobilePages.map((page) => (
-                  <button
-                    key={`m-${page}`}
-                    type="button"
-                    className={`inline-flex h-[1.875rem] w-[1.875rem] shrink-0 items-center justify-center rounded-full border p-0 text-[11px] font-medium leading-none transition-[border-color,background-color,color,box-shadow] ${
-                      page === currentPageIndex
-                        ? "border-white/25 bg-white text-black shadow-sm"
-                        : "border-white/15 bg-background/85 text-foreground shadow-sm backdrop-blur-sm hover:border-white/25 hover:bg-muted/55 hover:shadow-md"
-                    }`}
-                    onClick={() => setPageIndex(page)}
-                    disabled={page === currentPageIndex}
-                  >
-                    {page + 1}
-                  </button>
-                ))}
-              </div>
-              <div className="hidden items-center gap-1 sm:flex">
-                {desktopPages.map((page) => (
-                  <button
-                    key={`d-${page}`}
-                    type="button"
-                    className={`inline-flex h-[1.875rem] w-[1.875rem] shrink-0 items-center justify-center rounded-full border p-0 text-[11px] font-medium leading-none transition-[border-color,background-color,color,box-shadow] ${
-                      page === currentPageIndex
-                        ? "border-white/25 bg-white text-black shadow-sm"
-                        : "border-white/15 bg-background/85 text-foreground shadow-sm backdrop-blur-sm hover:border-white/25 hover:bg-muted/55 hover:shadow-md"
-                    }`}
-                    onClick={() => setPageIndex(page)}
-                    disabled={page === currentPageIndex}
-                  >
-                    {page + 1}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <button
-              type="button"
-              className="justify-self-end inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/15 bg-background/85 p-0 text-foreground shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-white/25 hover:bg-muted/55 hover:shadow-md disabled:pointer-events-none disabled:opacity-50 sm:w-auto sm:gap-1 sm:px-2.5"
-              disabled={currentPageIndex >= totalPages - 1 || totalRows === 0}
-              onClick={() =>
-                setPageIndex((prev) => Math.min(totalPages - 1, prev + 1))
-              }
-            >
-              <ChevronRight className="h-4 w-4 sm:mr-1" />
-              <span className="hidden sm:inline">Next</span>
-            </button>
-          </div>
-        </div>
-      </Card>
-      <div className="-mt-2 text-center text-xs text-muted-foreground">
-        Page {totalRows ? currentPageIndex + 1 : 0} of{" "}
-        {totalRows ? totalPages : 0}
-      </div>
+      <DashboardDataTable
+        data={filteredAccounts}
+        columns={columns}
+        minWidth="1020px"
+        resetKey={search}
+        className="dashboard-motion-delay-2"
+      />
     </DashboardPage>
   );
 }
