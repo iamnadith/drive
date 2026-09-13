@@ -1005,6 +1005,19 @@ export default function MigrationDetailsPage() {
     [latestRepairItemIds, latestRepairItemsById, latestRepairJob]
   )
 
+  const readBucketSettingsStatus = (item: MigrationItem): "syncing" | "synced" | "failed" | null => {
+    const progress = isRecord(item.progress) ? item.progress : {}
+    const orchestratorSettings = isRecord(progress.orchestratorSettings) ? progress.orchestratorSettings : null
+    const settingsSync = isRecord(progress.settingsSync) ? progress.settingsSync : null
+    const status = orchestratorSettings?.status ?? settingsSync?.status
+    if (status === "syncing") return "syncing"
+    if (status === "synced" || status === "completed") return "synced"
+    if (status === "failed") return "failed"
+    if (status === "pending") return "syncing"
+    return null
+  }
+  const showSettingsColumn = items.some((item) => isCompletedStatus(getItemStatus(item)) && readBucketSettingsStatus(item) !== null)
+
   const bucketCounts = React.useMemo(() => {
     let completed = 0
     let failed = 0
@@ -1818,6 +1831,19 @@ export default function MigrationDetailsPage() {
         return <span className="font-mono text-xs" title={scanInProgress ? "Live partial size from File Scanner; updates as pages are scanned" : undefined}>{displayStatus === "no_files" ? "0 B" : scanComplete || scanInProgress || sourceBytes > 0 ? formatBytes(sourceBytes) : "—"}</span>
       },
     },
+    ...(showSettingsColumn ? [{
+      id: "settings",
+      header: "Settings",
+      meta: { width: "min-w-[130px]", align: "center" },
+      cell: ({ row }: { row: { original: MigrationItem } }) => {
+        const item = row.original
+        const settingsStatus = readBucketSettingsStatus(item) ?? (isCompletedStatus(getItemStatus(item)) ? "syncing" : null)
+        if (!settingsStatus) return <span className="text-xs text-muted-foreground">—</span>
+        if (settingsStatus === "synced") return <Badge className="bg-green-600">Synced</Badge>
+        if (settingsStatus === "failed") return <Badge className="bg-red-600">Failed</Badge>
+        return <Badge className="bg-purple-600">Syncing</Badge>
+      },
+    } satisfies ColumnDef<MigrationItem, unknown>] : []),
     {
       id: "actions",
       header: "Actions",

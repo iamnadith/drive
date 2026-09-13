@@ -780,6 +780,7 @@ async function syncNextBucketSettings(db: Client, migration: Row) {
   if (!source || !target) throw new Error("Source or target account is missing")
   const attempts = integer(item.progress?.orchestratorSettings?.attempts, 0, 0, 100)
   const sourcePath = `/r2/buckets/${encodeURIComponent(item.source_bucket)}`; const targetPath = `/r2/buckets/${encodeURIComponent(item.target_bucket)}`
+  await db.query(`update drive_migration_items set progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{orchestratorSettings}',$2::jsonb),updated_at=now() where id=$1`, [item.id, JSON.stringify({ status: "syncing", attempts: attempts + 1, startedAt: new Date().toISOString() })])
   try {
     const [cors, domain] = await Promise.all([
       cloudflare(source, `${sourcePath}/cors`, "GET", undefined, true),
