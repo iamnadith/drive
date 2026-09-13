@@ -42,7 +42,7 @@ export async function GET(_: Request, { params }: RouteParams) {
     return NextResponse.json({ user: publicUser })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to fetch user")
-    return NextResponse.json({ error: message }, { status: 400 })
+    return NextResponse.json({ error: message }, { status: 500 })
   }
 }
 

@@ -82,8 +82,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const res = await fetch(`/api/users/${user.id}`)
       const data = await res.json()
       if (!res.ok) {
-        // Don't log out on transient server errors (dev reloads, DB hiccups, etc).
-        if (res.status >= 500 || res.status === 429) {
+        // Only an explicit missing/invalid session or deleted account should clear
+        // the cached user. Other failures (including permission and validation
+        // errors) do not prove that the session is invalid.
+        if (res.status !== 401 && res.status !== 404) {
           return
         }
         if (typeof window !== "undefined") {
@@ -98,14 +100,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (lower.includes("not found")) {
           toast.error("Your account was deleted by an administrator.")
         } else {
-          toast.error(message)
+          toast.error("Your session has expired. Please sign in again.")
         }
         return
       }
 
       const serverUser = data.user as AuthUser
 
-      if (serverUser.status !== "active") {
+      if (serverUser.status === "disabled") {
         if (typeof window !== "undefined") {
           window.localStorage.removeItem("authUser")
         }
@@ -113,6 +115,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         toast.error("Your account has been disabled by an administrator.")
         return
       }
+      if (serverUser.status !== "active") return
 
       // Detect changes between local user and serverUser.
       const changes: string[] = []
