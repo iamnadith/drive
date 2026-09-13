@@ -612,7 +612,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
       severity: "warning",
       title: `Verification ${diff.kind.replaceAll("_", " ")}`,
       detail: diff.key,
-      href: "/dashboard/migrations/history",
+      href: "/dashboard/migrations",
       at: diff.created_at,
     })),
   ]

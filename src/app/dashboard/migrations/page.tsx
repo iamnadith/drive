@@ -1,13 +1,40 @@
 "use client"
 
 import * as React from "react"
-import { CheckCircle2, ExternalLink, Plus, RefreshCw, Play, X } from "lucide-react"
+import {
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  Plus,
+  RefreshCw,
+  Play,
+  Search,
+  Trash2,
+  X,
+} from "lucide-react"
 import { useRouter } from "next/navigation"
+import {
+  ColumnDef,
+  flexRender,
+  getCoreRowModel,
+  useReactTable,
+} from "@tanstack/react-table"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -16,9 +43,14 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Slider } from "@/components/ui/slider"
-import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
+import { Spinner } from "@/components/ui/spinner"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import {
+  DashboardPage,
+  DashboardPageHeader,
+  DashboardPageSkeleton,
+} from "@/components/dashboard/page-shell"
 
 type Account = {
   id: string
@@ -78,6 +110,8 @@ type SlurperProgressResult = {
   failedObjects?: number
   status?: string
 }
+
+const MIGRATIONS_PAGE_SIZE = 10
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
@@ -220,6 +254,9 @@ export default function MigrationsPage() {
   const [initialLoading, setInitialLoading] = React.useState(true)
   const [busyAction, setBusyAction] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  const [search, setSearch] = React.useState("")
+  const [pageIndex, setPageIndex] = React.useState(0)
+  const [deleteId, setDeleteId] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     if (!error) return
@@ -229,6 +266,158 @@ export default function MigrationsPage() {
 
   const activeAccount = accounts.find((a) => a.status === "active") ?? null
   const availableTargets = accounts.filter((a) => a.status === "available")
+  const accountLabelById = React.useMemo(() => {
+    const labels = new Map<string, string>()
+    for (const account of accounts) labels.set(account.id, account.label)
+    return labels
+  }, [accounts])
+
+  const filteredMigrations = React.useMemo(() => {
+    const term = search.trim().toLowerCase()
+    const matching = term
+      ? migrations.filter((migration) => {
+          const source = accountLabelById.get(migration.sourceAccountId) ?? migration.sourceAccountId
+          const target = accountLabelById.get(migration.targetAccountId) ?? migration.targetAccountId
+          const engine = migration.options.executionMode === "migration_workers" ? "worker pool" : "super slurper"
+          return [migration.id, migration.status, source, target, migration.createdAt, engine, migration.syncMessage]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase()
+            .includes(term)
+        })
+      : migrations.slice()
+
+    return matching.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))
+  }, [accountLabelById, migrations, search])
+
+  const columns: ColumnDef<Migration>[] = [
+    {
+      accessorKey: "id",
+      header: () => <div className="text-center">Migration</div>,
+      cell: ({ row }) => {
+        const migration = row.original
+        return (
+          <div className="flex min-h-10 min-w-0 flex-col justify-center gap-0.5">
+            <span className="truncate font-mono text-[11px] font-medium" title={migration.id}>
+              {migration.id}
+            </span>
+            <span className="truncate text-[10px] leading-4 text-muted-foreground">
+              {migration.options.executionMode === "migration_workers" ? "Worker pool" : "Super Slurper"}
+              {migration.syncMessage ? ` · ${migration.syncMessage}` : ""}
+            </span>
+          </div>
+        )
+      },
+    },
+    {
+      accessorKey: "status",
+      header: () => <div className="text-center">Status</div>,
+      cell: ({ row }) => (
+        <div className="flex min-h-10 items-center justify-center">
+          {statusBadge(row.original.status, row.original.syncStatus, row.original.syncMessage)}
+        </div>
+      ),
+    },
+    {
+      id: "source",
+      header: () => <div className="text-center">Source</div>,
+      cell: ({ row }) => {
+        const source = accountLabelById.get(row.original.sourceAccountId) ?? row.original.sourceAccountId
+        return <span className="block truncate text-center text-[11px] text-muted-foreground" title={source}>{source}</span>
+      },
+    },
+    {
+      id: "target",
+      header: () => <div className="text-center">Target</div>,
+      cell: ({ row }) => {
+        const target = accountLabelById.get(row.original.targetAccountId) ?? row.original.targetAccountId
+        return <span className="block truncate text-center text-[11px] text-muted-foreground" title={target}>{target}</span>
+      },
+    },
+    {
+      accessorKey: "createdAt",
+      header: () => <div className="text-center">Created</div>,
+      cell: ({ row }) => {
+        const createdAt = row.original.createdAt
+        const date = createdAt ? new Date(createdAt) : null
+        return (
+          <div className="flex min-h-10 flex-col items-center justify-center gap-0.5 text-center text-[11px] text-muted-foreground">
+            <span>{date && !Number.isNaN(date.getTime()) ? date.toLocaleDateString() : "-"}</span>
+            <span>{date && !Number.isNaN(date.getTime()) ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}</span>
+          </div>
+        )
+      },
+    },
+    {
+      accessorKey: "summaryObjects",
+      header: () => <div className="text-center">Objects</div>,
+      cell: ({ row }) => <div className="min-h-10 content-center text-center text-[12px] tabular-nums">{formatNumber(row.original.summaryObjects)}</div>,
+    },
+    {
+      accessorKey: "summaryBytes",
+      header: () => <div className="text-center">Data</div>,
+      cell: ({ row }) => <div className="min-h-10 content-center text-center text-[11px] tabular-nums text-muted-foreground">{formatBytes(row.original.summaryBytes)}</div>,
+    },
+    {
+      id: "workers",
+      header: () => <div className="text-center">Workers</div>,
+      cell: ({ row }) => {
+        const workerRuns = row.original.workerSummary?.workerRuns
+        return <div className="min-h-10 content-center text-center text-[12px] tabular-nums">{Array.isArray(workerRuns) ? workerRuns.length : 0}</div>
+      },
+    },
+    {
+      id: "actions",
+      enableHiding: false,
+      header: () => <div className="text-center">Actions</div>,
+      cell: ({ row }) => (
+        <div className="flex min-h-10 items-center justify-center gap-1.5">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md"
+            onClick={() => router.push(`/dashboard/migrations/${encodeURIComponent(row.original.id)}`)}
+            aria-label="View migration details"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 text-destructive shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md"
+            onClick={() => setDeleteId(row.original.id)}
+            aria-label="Delete migration"
+            disabled={Boolean(busyAction)}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      ),
+    },
+  ]
+
+  const table = useReactTable({
+    data: filteredMigrations,
+    columns,
+    getCoreRowModel: getCoreRowModel(),
+  })
+
+  const totalRows = filteredMigrations.length
+  const totalPages = Math.max(1, Math.ceil(totalRows / MIGRATIONS_PAGE_SIZE))
+  const currentPageIndex = Math.min(pageIndex, totalPages - 1)
+  const paginatedRows = table.getRowModel().rows.slice(
+    currentPageIndex * MIGRATIONS_PAGE_SIZE,
+    currentPageIndex * MIGRATIONS_PAGE_SIZE + MIGRATIONS_PAGE_SIZE,
+  )
+  const activeCount = migrations.filter((migration) => migration.status === "running" || migration.status === "verifying").length
+  const completedCount = migrations.filter((migration) => migration.status === "completed").length
+  const attentionCount = migrations.filter((migration) => migration.status === "failed" || (migration.status === "verifying" && migration.syncStatus === "error")).length
+  const pageWindow = Math.min(totalPages, 3)
+  const desktopPageWindow = Math.min(totalPages, 5)
+  const mobileStart = Math.max(0, Math.min(currentPageIndex - Math.floor(pageWindow / 2), totalPages - pageWindow))
+  const desktopStart = Math.max(0, Math.min(currentPageIndex - Math.floor(desktopPageWindow / 2), totalPages - desktopPageWindow))
+  const mobilePages = Array.from({ length: pageWindow }, (_, index) => mobileStart + index)
+  const desktopPages = Array.from({ length: desktopPageWindow }, (_, index) => desktopStart + index)
 
   const [createOpen, setCreateOpen] = React.useState(false)
   const [targetAccountId, setTargetAccountId] = React.useState<string>("")
@@ -309,6 +498,32 @@ export default function MigrationsPage() {
       setInitialLoading(false)
     }
   }, [])
+
+  const confirmDelete = async () => {
+    const migrationId = deleteId
+    if (!migrationId) return
+
+    setBusyAction("delete")
+    setError(null)
+    try {
+      const res = await fetch(`/api/migrations/${encodeURIComponent(migrationId)}`, { method: "DELETE" })
+      const json: unknown = await res.json().catch(() => ({}))
+      const message = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to delete migration"
+      if (!res.ok) throw new Error(message)
+
+      setMigrations((current) => current.filter((migration) => migration.id !== migrationId))
+      setDeleteId(null)
+      await loadAll()
+    } catch (e: unknown) {
+      const message =
+        typeof e === "object" && e !== null && "message" in e
+          ? String((e as { message?: unknown }).message ?? "Unable to delete migration")
+          : "Unable to delete migration"
+      setError(message)
+    } finally {
+      setBusyAction(null)
+    }
+  }
 
   React.useEffect(() => {
     void loadAll()
@@ -655,36 +870,41 @@ export default function MigrationsPage() {
   const hasActiveCard = Boolean(activeMigration)
 
   if (initialLoading) {
-    return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between gap-3">
-          <div className="space-y-2">
-            <Skeleton className="h-8 w-44" />
-            <Skeleton className="h-4 w-72" />
-          </div>
-          <Skeleton className="h-10 w-36" />
-        </div>
-        <Skeleton className="h-[220px] w-full" />
-        <Skeleton className="h-[260px] w-full" />
-      </div>
-    )
+    return <DashboardPageSkeleton cards={4} rows={8} />
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between gap-3">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold">Migrations</h1>
-          <p className="text-sm text-muted-foreground">
-            {activeMigration?.options.executionMode === "migration_workers"
-              ? "Drive migration worker pool"
-              : "Cloudflare Super Slurper (Cloudflare-run)"}
-          </p>
-        </div>
-        <Button onClick={() => setCreateOpen(true)} disabled={Boolean(busyAction) || !activeAccount || availableTargets.length === 0}>
-          <Plus className="h-4 w-4 mr-0" />
-          New migration
-        </Button>
+    <DashboardPage className="dashboard-motion-stage">
+      <div className="dashboard-motion-item">
+        <DashboardPageHeader
+          title="Migrations"
+          description={activeMigration?.options.executionMode === "migration_workers" ? "Drive migration worker pool" : "Cloudflare Super Slurper (Cloudflare-run)"}
+          actions={
+            <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
+              <div className="relative h-9 min-w-0 flex-1 sm:w-[220px] sm:flex-none">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  placeholder="Search migrations..."
+                  value={search}
+                  onChange={(event) => {
+                    setSearch(event.target.value)
+                    setPageIndex(0)
+                  }}
+                  className="h-9 w-full pl-8"
+                />
+              </div>
+              <Button
+                size="icon"
+                className="size-9 min-w-9 shrink-0 rounded-full border border-border/70 bg-background/85 p-0 text-foreground shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md sm:h-9 sm:w-auto sm:min-w-0 sm:px-3 sm:py-2"
+                onClick={() => setCreateOpen(true)}
+                disabled={Boolean(busyAction) || !activeAccount || availableTargets.length === 0}
+              >
+                <Plus className="h-4 w-4 sm:mr-2" />
+                <span className="sr-only sm:not-sr-only">New Migration</span>
+              </Button>
+            </div>
+          }
+        />
       </div>
 
       {error ? (
@@ -941,7 +1161,7 @@ export default function MigrationsPage() {
         </DialogContent>
       </Dialog>
 
-      <div className="space-y-6">
+      <div className="dashboard-motion-item dashboard-motion-delay-1">
         {hasActiveCard ? (
           <Card>
             <CardHeader className="pb-2">
@@ -1013,80 +1233,144 @@ export default function MigrationsPage() {
             </CardContent>
           </Card>
         ) : null}
+      </div>
 
-        <Card className="overflow-hidden">
-          <CardHeader className="flex flex-row items-center justify-between gap-4 border-b px-5 py-4">
-            <div className="min-w-0 space-y-1">
-              <CardTitle className="text-base">Recent migrations</CardTitle>
-              <CardDescription>Latest 3 migration runs and their results.</CardDescription>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="shrink-0"
-              onClick={() => router.push("/dashboard/migrations/history")}
-              disabled={Boolean(busyAction) || migrations.length === 0}
-            >
-              View history
-            </Button>
+      <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-4">
+        <Card className="gap-0 py-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+            <CardDescription className="text-[13px] leading-4">Total Migrations</CardDescription>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{migrations.length}</CardTitle>
           </CardHeader>
-          <CardContent className="p-0">
-            {migrations.length === 0 ? (
-              <div className="flex flex-col items-center gap-1 px-6 py-12 text-center">
-                <p className="text-sm font-medium">No migrations yet</p>
-                <p className="text-sm text-muted-foreground">Created migrations will appear here.</p>
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <Table className="min-w-[760px]">
-                  <TableHeader>
-                    <TableRow className="bg-muted/30 hover:bg-muted/30">
-                      <TableHead className="w-[34%] px-5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Migration</TableHead>
-                      <TableHead className="w-[18%] text-xs font-medium uppercase tracking-wide text-muted-foreground">Status</TableHead>
-                      <TableHead className="w-[12%] text-right text-xs font-medium uppercase tracking-wide text-muted-foreground">Buckets</TableHead>
-                      <TableHead className="w-[14%] text-right text-xs font-medium uppercase tracking-wide text-muted-foreground">Objects</TableHead>
-                      <TableHead className="w-[14%] text-right text-xs font-medium uppercase tracking-wide text-muted-foreground">Data</TableHead>
-                      <TableHead className="w-[8%] pr-5" />
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {migrations.slice(0, 3).map((m) => (
-                      <TableRow key={m.id} className="group">
-                        <TableCell className="px-5 py-3.5">
-                          <div className="min-w-0 space-y-1">
-                            <div className="max-w-[280px] truncate font-mono text-xs font-medium" title={m.id}>
-                              {m.id}
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              {new Date(m.createdAt).toLocaleString()} <span aria-hidden="true">·</span>{" "}
-                              {m.options.executionMode === "migration_workers" ? "Worker pool" : "Super Slurper"}
-                            </div>
-                          </div>
-                        </TableCell>
-                        <TableCell>{statusBadge(m.status, m.syncStatus, m.syncMessage)}</TableCell>
-                        <TableCell className="text-right tabular-nums">{formatNumber(m.summaryItemCount)}</TableCell>
-                        <TableCell className="text-right tabular-nums">{formatNumber(m.summaryObjects)}</TableCell>
-                        <TableCell className="text-right tabular-nums">{formatBytes(m.summaryBytes)}</TableCell>
-                        <TableCell className="pr-5 text-right">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-8"
-                            onClick={() => router.push(`/dashboard/migrations/${encodeURIComponent(m.id)}`)}
-                          >
-                            Details
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            )}
-          </CardContent>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Stored migration runs</p></CardContent>
+        </Card>
+        <Card className="gap-0 py-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+            <CardDescription className="text-[13px] leading-4">In Progress</CardDescription>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{activeCount}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Running or verifying</p></CardContent>
+        </Card>
+        <Card className="gap-0 py-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+            <CardDescription className="text-[13px] leading-4">Completed</CardDescription>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{completedCount}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Successfully completed</p></CardContent>
+        </Card>
+        <Card className="gap-0 py-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+            <CardDescription className="text-[13px] leading-4">Needs Attention</CardDescription>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{attentionCount}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Failed or verification issues</p></CardContent>
         </Card>
       </div>
-    </div>
+
+      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
+        <Table
+          className="min-w-[1180px] w-full"
+          containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full [-ms-overflow-style:none] [scrollbar-width:thin]"
+        >
+          <TableHeader>
+            {table.getHeaderGroups().map((headerGroup) => (
+              <TableRow key={headerGroup.id} className="h-9 border-b">
+                {headerGroup.headers.map((header) => {
+                  const widths: Record<string, string> = {
+                    id: "min-w-[230px]",
+                    status: "min-w-[125px]",
+                    source: "min-w-[130px]",
+                    target: "min-w-[130px]",
+                    createdAt: "min-w-[130px]",
+                    summaryObjects: "min-w-[110px]",
+                    summaryBytes: "min-w-[110px]",
+                    workers: "min-w-[90px]",
+                    actions: "min-w-[100px]",
+                  }
+                  return (
+                    <TableHead key={header.id} className={`${widths[header.column.id] ?? ""} relative px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground`}>
+                      {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
+                      {header.column.id !== "actions" ? <span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /> : null}
+                    </TableHead>
+                  )
+                })}
+              </TableRow>
+            ))}
+          </TableHeader>
+          <TableBody>
+            {paginatedRows.length ? paginatedRows.map((row) => (
+              <TableRow key={row.id} className="h-[64px] border-b last:border-b-0 hover:bg-muted/30">
+                {row.getVisibleCells().map((cell) => (
+                  <TableCell key={cell.id} className="relative px-2.5 py-2 align-middle">
+                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    {cell.column.id !== "actions" ? <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" /> : null}
+                  </TableCell>
+                ))}
+              </TableRow>
+            )) : (
+              <TableRow>
+                <TableCell colSpan={columns.length} className="h-24 text-center text-sm text-muted-foreground">
+                  {search.trim() ? "No migrations match your search." : "No migrations yet."}
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+        <div className="border-t px-3 py-2 text-xs text-muted-foreground max-sm:-mb-2">
+          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+            <button type="button" className="justify-self-start inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/15 bg-background/85 p-0 text-foreground shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-white/25 hover:bg-muted/55 hover:shadow-md disabled:pointer-events-none disabled:opacity-50 sm:w-auto sm:gap-1 sm:px-2.5" disabled={currentPageIndex === 0} onClick={() => setPageIndex((prev) => Math.max(0, prev - 1))}>
+              <ChevronLeft className="h-4 w-4 sm:mr-1" /><span className="hidden sm:inline">Previous</span>
+            </button>
+            <div className="flex items-center justify-center gap-1 justify-self-center">
+              <div className="flex items-center gap-1 sm:hidden">
+                {mobilePages.map((page) => (
+                  <button key={`m-${page}`} type="button" className={`inline-flex h-[1.875rem] w-[1.875rem] shrink-0 items-center justify-center rounded-full border p-0 text-[11px] font-medium leading-none transition-[border-color,background-color,color,box-shadow] ${page === currentPageIndex ? "border-white/25 bg-white text-black shadow-sm" : "border-white/15 bg-background/85 text-foreground shadow-sm backdrop-blur-sm hover:border-white/25 hover:bg-muted/55 hover:shadow-md"}`} onClick={() => setPageIndex(page)} disabled={page === currentPageIndex}>
+                    {page + 1}
+                  </button>
+                ))}
+              </div>
+              <div className="hidden items-center gap-1 sm:flex">
+                {desktopPages.map((page) => (
+                  <button key={`d-${page}`} type="button" className={`inline-flex h-[1.875rem] w-[1.875rem] shrink-0 items-center justify-center rounded-full border p-0 text-[11px] font-medium leading-none transition-[border-color,background-color,color,box-shadow] ${page === currentPageIndex ? "border-white/25 bg-white text-black shadow-sm" : "border-white/15 bg-background/85 text-foreground shadow-sm backdrop-blur-sm hover:border-white/25 hover:bg-muted/55 hover:shadow-md"}`} onClick={() => setPageIndex(page)} disabled={page === currentPageIndex}>
+                    {page + 1}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button type="button" className="justify-self-end inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/15 bg-background/85 p-0 text-foreground shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-white/25 hover:bg-muted/55 hover:shadow-md disabled:pointer-events-none disabled:opacity-50 sm:w-auto sm:gap-1 sm:px-2.5" disabled={currentPageIndex >= totalPages - 1 || totalRows === 0} onClick={() => setPageIndex((prev) => Math.min(totalPages - 1, prev + 1))}>
+              <ChevronRight className="h-4 w-4 sm:mr-1" /><span className="hidden sm:inline">Next</span>
+            </button>
+          </div>
+        </div>
+      </Card>
+      <div className="-mt-2 text-center text-xs text-muted-foreground">
+        Page {totalRows ? currentPageIndex + 1 : 0} of {totalRows ? totalPages : 0}
+      </div>
+
+      <AlertDialog open={Boolean(deleteId)} onOpenChange={(open) => (!open && busyAction !== "delete" ? setDeleteId(null) : null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete migration?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes the migration and its stored items from the database. It does not cancel Cloudflare jobs that may already be running.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busyAction === "delete"}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(event) => {
+                event.preventDefault()
+                void confirmDelete()
+              }}
+              disabled={busyAction === "delete"}
+            >
+              {busyAction === "delete" ? <Spinner className="mr-2" /> : null}
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </DashboardPage>
   )
 }
 

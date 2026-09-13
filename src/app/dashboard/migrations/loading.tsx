@@ -1,5 +1,5 @@
-import { DashboardTableSkeleton } from "@/components/dashboard/loading-skeletons"
+import { DashboardPageSkeleton } from "@/components/dashboard/page-shell"
 
 export default function Loading() {
-  return <DashboardTableSkeleton actions={2} cards={0} columns={5} rows={8} titleWidth="w-44" />
+  return <DashboardPageSkeleton cards={4} rows={8} />
 }
