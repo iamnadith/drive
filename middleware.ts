@@ -43,6 +43,12 @@ export function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname
   if (!pathname.startsWith("/api/")) {
     const setupRequired = request.cookies.get("drive_setup_required")?.value
+    const hasSession = Boolean(request.cookies.get("sessionUserId")?.value)
+    if (setupRequired === "1" && hasSession) {
+      const response = NextResponse.next()
+      response.cookies.delete("drive_setup_required")
+      return response
+    }
     if (setupRequired === "1" && pathname !== "/setup") return NextResponse.redirect(new URL("/setup", request.url))
     if (setupRequired === "0" && pathname === "/setup") return NextResponse.redirect(new URL("/", request.url))
     return NextResponse.next()

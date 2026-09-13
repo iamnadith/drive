@@ -26,14 +26,14 @@ async function readPool(id: string) {
         (select count(*)::bigint
            from drive_agent_runs r
            join drive_agents a on a.id=r.agent_id
-          where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1
+          where r.run_type='github_dispatch' and r.payload->>'migrationId'=($1::uuid)::text
             and r.status='running' and a.status='online'
             and a.last_heartbeat_at > now() - interval '90 seconds') online_workers,
         (select count(*)::bigint
            from drive_agent_runs r
            join drive_agents a on a.id=r.agent_id
            left join drive_repair_jobs j on j.id::text=r.job_reference
-          where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1
+          where r.run_type='github_dispatch' and r.payload->>'migrationId'=($1::uuid)::text
             and r.status='running' and j.progress ? 'currentFile'
             and a.status='online' and a.last_heartbeat_at > now() - interval '90 seconds') active_transfers
     `, [id]),

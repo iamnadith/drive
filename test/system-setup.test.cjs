@@ -55,6 +55,15 @@ test("runtime guard returns superadmins to setup when reconciliation fails", () 
   assert.match(backendReconcile, /after\(async \(\) =>/)
 })
 
+test("transient PostgreSQL failures cannot mark an existing installation as first-run setup", () => {
+  assert.match(setupStatus, /databaseRequirement\?\.error/)
+  assert.match(setupStatus, /status: 503/)
+  assert.match(setupStatus, /X-Drive-Existing-Session/)
+  assert.match(setupStatus, /Do not turn an unavailable database into a first-run setup state/)
+  assert.match(gate, /response\.headers\.get\("X-Drive-Existing-Session"\)/)
+  assert.match(middleware, /setupRequired === "1" && hasSession/)
+})
+
 test("optional Google and SMS controls are capability-aware", () => {
   assert.match(readiness, /google: present\("GOOGLE_CLIENT_ID"\) && present\("GOOGLE_CLIENT_SECRET"\)/)
   assert.match(readiness, /sms: present\("TEXTLK_API_TOKEN", "TEXT_LK_API_TOKEN"\)/)

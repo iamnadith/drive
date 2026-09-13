@@ -51,6 +51,8 @@ test("runtime PostgreSQL uses only POSTGRES_URL and keeps the process pool bound
   assert.match(source, /const connectionString = getEnv\("POSTGRES_URL"\)/)
   assert.match(source, /connectionString,\s*ssl: buildSslConfig\(\)/)
   assert.match(source, /return Boolean\(getEnv\("POSTGRES_URL"\)\)/)
+  assert.match(source, /var __drivePgAdvisoryLockPool: Pool \| undefined/)
+  assert.match(source, /const client = await global\.__drivePgAdvisoryLockPool\.connect\(\)/)
   assert.match(source, /process\.env\.NODE_ENV === "production" \? 2 : 1/)
   assert.match(source, /getEnv\("POSTGRES_SSL"\).*\?\? true/)
   assert.match(source, /getEnv\("DISABLE_POSTGRES_SSL"\).*\?\? false/)

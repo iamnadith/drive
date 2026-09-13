@@ -21,8 +21,12 @@ export function SuperAdminGate({ children }: Props) {
       checking = true
       try {
         const response = await fetch(`/api/setup/status${forceWorkers ? "?forceWorkers=1" : ""}`, { cache: "no-store" })
+        if (!response.ok) {
+          if (pathname === "/setup" && response.headers.get("X-Drive-Existing-Session") === "1") router.replace("/")
+          return
+        }
         const status = await response.json() as SetupSignal
-        if (cancelled || !response.ok) return
+        if (cancelled) return
         if (status.setupRequired === true && pathname !== "/setup") router.replace("/setup")
         else if (status.hasSuperAdmin === true && status.setupRequired === false && pathname === "/setup") router.replace("/")
       } catch {

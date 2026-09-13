@@ -42,6 +42,8 @@ test('the GitHub workflow exposes no manual dispatch fields and receives system 
 test('worker-pool details hydrate from PostgreSQL and refresh the orchestrator live endpoint', () => {
   const route = read('src/app/api/migrations/[id]/worker-pool/route.ts')
   const page = read('src/app/dashboard/migrations/[id]/worker-pool/page.tsx')
+  assert.equal((route.match(/payload->>'migrationId'=\(\$1::uuid\)::text/g) || []).length, 2)
+  assert.doesNotMatch(route, /payload->>'migrationId'=\$1\b/)
   assert.match(route, /ensureDriveSchema\(\)/)
   assert.match(route, /listRepairJobsByMigration\(id, 500\)/)
   assert.match(route, /drive_migration_worker_live_state/)

@@ -8,7 +8,6 @@ import { getSessionUser } from "@/lib/server-auth"
 import { cloudflareInstallationReady, getCloudflareInstallation, reconcileCloudflareWorkers } from "@/lib/cloudflare-worker-installer"
 import { getSystemReadiness } from "@/lib/system-readiness"
 import { queryDb } from "@/lib/db"
-import { cookies } from "next/headers"
 
 export const runtime = "nodejs"
 
@@ -22,8 +21,27 @@ function setupResponse(payload: Record<string, unknown>) {
   return response
 }
 
+function setupUnavailableResponse(request: NextRequest, readiness: Awaited<ReturnType<typeof getSystemReadiness>>, message: string) {
+  const response = NextResponse.json(
+    { error: "Setup status is temporarily unavailable; the saved installation state was not changed.", readiness, temporary: true, detail: message },
+    { status: 503, headers: { "Cache-Control": "no-store", "X-Drive-Setup-Status": "unknown" } }
+  )
+  const hasSession = Boolean(request.cookies.get("sessionUserId")?.value)
+  if (hasSession) {
+    response.headers.set("X-Drive-Existing-Session", "1")
+    if (request.cookies.get("drive_setup_required")?.value === "1") {
+      response.cookies.delete("drive_setup_required")
+    }
+  }
+  return response
+}
+
 export async function GET(request: NextRequest) {
   const readiness = await getSystemReadiness()
+  const databaseRequirement = readiness.requirements.find((requirement) => requirement.id === "database")
+  if (databaseRequirement?.error) {
+    return setupUnavailableResponse(request, readiness, databaseRequirement.error)
+  }
   try {
     const hasUsers = await hasAnyUsers()
     const hasAdmin = await hasAdminUser()
@@ -42,23 +60,22 @@ export async function GET(request: NextRequest) {
         ? String((error as { message?: unknown }).message ?? "Setup status check failed")
         : "Setup status check failed"
 
-    // Supabase REST may be temporarily unavailable even though PostgreSQL is
-    // healthy. Fall back to the same durable user table so an existing site is
-    // never mistaken for a brand-new installation.
+    // If the primary user adapter fails, retry the durable PostgreSQL
+    // projection once before deciding whether setup is required.
     try {
       const result = await queryDb<{ has_users: boolean; has_admin: boolean; has_superadmin: boolean }>(`select
         exists(select 1 from drive_users) has_users,
         exists(select 1 from drive_users where role='admin' and status='active') has_admin,
         exists(select 1 from drive_users where role='superadmin' and status='active') has_superadmin`)
       const fallback = result.rows[0]
-      const sessionUserId = (await cookies()).get("sessionUserId")?.value
-      const session = sessionUserId ? await queryDb<{ role: string }>(`select role from drive_users where id=$1 and status='active' limit 1`, [sessionUserId]) : null
+      const sessionUserId = request.cookies.get("sessionUserId")?.value
+      const session = sessionUserId ? await queryDb<{ role: string }>(`select role from drive_users where id=$1::uuid and status='active' limit 1`, [sessionUserId]) : null
       const mayManageSetup = !fallback?.has_superadmin || session?.rows[0]?.role === "superadmin"
       const installation = readiness.ready && mayManageSetup ? await getCloudflareInstallation().catch(() => null) : null
       const workersReady = cloudflareInstallationReady(installation)
       const setupStep = !mayManageSetup ? "complete" : !readiness.ready ? "requirements" : !workersReady ? "workers" : !fallback?.has_superadmin ? "account" : "complete"
       return setupResponse({ hasUsers: fallback?.has_users === true, hasAdmin: fallback?.has_admin === true, hasSuperAdmin: fallback?.has_superadmin === true, readiness, workersReady, setupStep, setupRequired: setupStep !== "complete", warning: message })
-    } catch { /* Database readiness card will carry the actionable failure. */ }
-    return setupResponse({ hasUsers: false, hasAdmin: false, hasSuperAdmin: false, readiness, workersReady: false, setupStep: readiness.ready ? "account" : "requirements", setupRequired: true, error: message })
+    } catch { /* Do not turn an unavailable database into a first-run setup state. */ }
+    return setupUnavailableResponse(request, readiness, message)
   }
 }

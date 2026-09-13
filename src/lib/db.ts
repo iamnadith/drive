@@ -5,6 +5,7 @@ const DRIVE_SCHEMA_VERSION = 2026091403
 
 declare global {
   var __drivePgPool: Pool | undefined
+  var __drivePgAdvisoryLockPool: Pool | undefined
   var __driveEnsureSchema: Promise<void> | undefined
 }
 
@@ -114,7 +115,29 @@ export async function queryDb<T extends QueryResultRow = QueryResultRow>(
 }
 
 export async function withDbAdvisoryLock<T>(namespace: string, resource: string, operation: () => Promise<T>) {
-  const client = await getDbPool().connect()
+  if (!global.__drivePgAdvisoryLockPool) {
+    const connectionString = getEnv("POSTGRES_URL")
+    if (!connectionString) throw new Error("POSTGRES_URL is not configured")
+    const pool = new Pool({
+      connectionString,
+      ssl: buildSslConfig(),
+      keepAlive: true,
+      connectionTimeoutMillis: 10_000,
+      idleTimeoutMillis: 30_000,
+      max: 1,
+    })
+    global.__drivePgAdvisoryLockPool = pool
+    pool.on("error", (error) => {
+      console.error("Postgres advisory-lock pool error:", error)
+      if (global.__drivePgAdvisoryLockPool === pool) {
+        global.__drivePgAdvisoryLockPool = undefined
+      }
+      pool.end().catch(() => {})
+    })
+  }
+  // Advisory locks may span slow Cloudflare calls. Reserve their connection
+  // separately so those waits cannot consume the dashboard query pool.
+  const client = await global.__drivePgAdvisoryLockPool.connect()
   let locked = false
   try {
     await client.query(`select pg_advisory_lock(hashtext($1), hashtext($2))`, [namespace, resource])
