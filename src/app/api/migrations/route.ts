@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server"
-import { getAllAccounts, getActiveAccount } from "@/lib/accounts-store"
+import { getAllAccounts, getActiveAccount, listDashboardAccountSummaries } from "@/lib/accounts-store"
 import { r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
-import { createMigration, listMigrations } from "@/lib/migrations-store"
-import { getBucketStatsMap } from "@/lib/bucket-stats-store"
+import { createMigration, listMigrationItems, listMigrations } from "@/lib/migrations-store"
+import { getBucketStatsMap, listActiveBucketStats } from "@/lib/bucket-stats-store"
 import { requireAdmin } from "@/lib/server-auth"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -22,9 +22,47 @@ export async function GET() {
     const auth = await requireAdmin()
     if (!auth.ok) return auth.response
 
-    // Return the durable projection written by the orchestrator. A dashboard
-    // read must not fan out into per-migration synchronization work.
-    return jsonOk({ migrations: await listMigrations() })
+    // Return only the account fields this page needs; never serialize account
+    // credentials into its bootstrap payload. Bucket and migration data are
+    // read from the worker/orchestrator-owned PostgreSQL projections.
+    const [migrations, accounts, bucketStats] = await Promise.all([
+      listMigrations(),
+      listDashboardAccountSummaries().catch(() => []),
+      listActiveBucketStats().then((rows) => ({ rows, error: null as string | null })).catch((error: unknown) => ({
+        rows: [],
+        error: error instanceof Error ? error.message : "Unable to load bucket statistics",
+      })),
+    ])
+    const current =
+      migrations.find((migration) => migration.status === "running") ??
+      migrations.find((migration) => migration.status === "verifying") ??
+      migrations.find((migration) => migration.status === "draft") ??
+      migrations[0] ??
+      null
+    const activeItems = current ? await listMigrationItems(current.id).catch(() => []) : []
+    const activeAccount = accounts.find((account) => account.status === "active")
+    const bucketError = bucketStats.error ?? (
+      !activeAccount
+        ? "No active Cloudflare account"
+        : !activeAccount.cloudflareAccountId
+          ? "Active Cloudflare account is not synced. Sync the account first to list buckets."
+          : null
+    )
+    return jsonOk({
+      migrations,
+      accounts: accounts.map(({ id, label, email, status }) => ({ id, label, email, status })),
+      buckets: activeAccount?.cloudflareAccountId ? bucketStats.rows.map((row) => ({
+        id: row.bucketName,
+        name: row.bucketName,
+        objects: row.objects,
+        bytes: row.bytes,
+        statsStatus: row.status,
+        statsError: row.error,
+        updatedAt: row.updatedAt,
+      })) : [],
+      bucketError,
+      activeItems,
+    })
   } catch (error: unknown) {
     const message =
       typeof error === "object" && error !== null && "message" in error

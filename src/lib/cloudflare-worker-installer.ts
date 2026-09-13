@@ -35,14 +35,7 @@ const API = "https://api.cloudflare.com/client/v4"
 const ORDER: HostedWorker[] = ["backend", "scanner", "migration"]
 
 function postgresEncryptionMaterial() {
-  const connectionString = [process.env.POSTGRES_URL, process.env.POSTGRES_PRISMA_URL, process.env.POSTGRES_URL_NON_POOLING]
-    .map((value) => String(value || "").trim())
-    .find(Boolean)
-  if (connectionString) return connectionString
-
-  const fields = [process.env.POSTGRES_HOST, process.env.POSTGRES_PORT, process.env.POSTGRES_USER, process.env.POSTGRES_PASSWORD, process.env.POSTGRES_DATABASE]
-    .map((value) => String(value || "").trim())
-  return fields.every(Boolean) ? JSON.stringify(fields) : ""
+  return String(process.env.POSTGRES_URL || "").trim()
 }
 
 function encryptionMaterials() {
@@ -315,11 +308,7 @@ async function ensureQueue(token: string, accountId: string, name: string) {
 async function uploadWorker(input: { worker: HostedWorker; token: string; accountId: string; entry: Artifact; code: Uint8Array; state: InstallState }) {
   const { worker, token, accountId, entry, code, state } = input
   const publicPanelUrl = panelUrl()
-  // Cloudflare Workers should use the pooler URL. Supabase direct/non-pooling
-  // hosts are commonly IPv6-only and can time out from a Worker even while the
-  // same URL works during a Vercel build. Keep the direct URL as a last-resort
-  // fallback for installations that only expose one connection string.
-  const postgresUrl = String(process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL || process.env.POSTGRES_URL_NON_POOLING || "")
+  const postgresUrl = String(process.env.POSTGRES_URL || "").trim()
   if (!/^https:\/\//i.test(publicPanelUrl) || !postgresUrl) throw new Error("Panel URL or PostgreSQL URL is not configured")
   const postgresSsl = String(process.env.POSTGRES_SSL || "").trim().toLowerCase()
   const disablePostgresSsl = postgresSsl === "0" || postgresSsl === "false" || ["1", "true"].includes(String(process.env.DISABLE_POSTGRES_SSL || "").trim().toLowerCase())

@@ -4,6 +4,7 @@ import { listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
 import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
 import { listMigrationWorkerRuns } from "@/lib/migration-worker-runs"
+import { listDashboardAccountSummaries } from "@/lib/accounts-store"
 
 export async function GET(
   _request: Request,
@@ -22,12 +23,14 @@ export async function GET(
     // orchestrator and must not delay every page/detail read.
     const readOnly = getMigrationReadOnlyState(migration)
     const usesLegacyProjection = migration.options.executionMode !== "migration_workers"
-    const [items, repairJobs, workerRuns] = await Promise.all([
+    const [items, repairJobs, workerRuns, accountSummaries] = await Promise.all([
       listMigrationItems(id),
       usesLegacyProjection ? listRepairJobsByMigration(id, 20).catch(() => []) : Promise.resolve([]),
       usesLegacyProjection ? Promise.resolve([]) : listMigrationWorkerRuns(id).catch(() => []),
+      listDashboardAccountSummaries().catch(() => []),
     ])
-    return NextResponse.json({ migration, items, repairJobs: repairJobs.filter((job) => job.mode !== "migration"), workerRuns, historyReadOnly: readOnly }, { status: 200 })
+    const accounts = accountSummaries.map(({ id: accountId, label, email, status }) => ({ id: accountId, label, email, status }))
+    return NextResponse.json({ migration, items, repairJobs: repairJobs.filter((job) => job.mode !== "migration"), workerRuns, accounts, historyReadOnly: readOnly }, { status: 200 })
   } catch (error: unknown) {
     const message =
       typeof error === "object" && error !== null && "message" in error

@@ -58,7 +58,7 @@ const DEFAULT_EXIT_AFTER_JOB = POOL_MODE ? "false" : process.env.GITHUB_ACTIONS 
 const EXIT_AFTER_JOB = ["1", "true", "yes"].includes(
   String(getArg("exit-after-job", DEFAULT_EXIT_AFTER_JOB)).toLowerCase()
 )
-const POSTGRES_URL = String(getArg("postgres-url", ""))
+const POSTGRES_URL = String(process.env.POSTGRES_URL || "").trim()
 const POSTGRES_SSL = String(getArg("postgres-ssl", "true")).trim().toLowerCase()
 const migrationItemProgressCache = new Map()
 const jobAbortControllers = new Map()

@@ -419,21 +419,20 @@ export default function MigrationsPage() {
     setRefreshing(true)
     setError(null)
     try {
-      const [accountsRes, migrationsRes, bucketsRes] = await Promise.all([
-        fetch("/api/accounts"),
-        fetch("/api/migrations"),
-        fetch("/api/storage/buckets"),
-      ])
-
-      const accountsJson: unknown = accountsRes.ok ? await accountsRes.json() : { accounts: [] }
-      const migrationsJson: unknown = migrationsRes.ok ? await migrationsRes.json() : { migrations: [] }
-      const bucketsJson: unknown = bucketsRes.ok ? await bucketsRes.json() : { buckets: [] }
+      const response = await fetch("/api/migrations", { cache: "no-store" })
+      const dashboardJson: unknown = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        const message = isRecord(dashboardJson) && typeof dashboardJson.error === "string"
+          ? dashboardJson.error
+          : "Unable to load migrations"
+        throw new Error(message)
+      }
 
       const nextAccounts =
-        isRecord(accountsJson) && Array.isArray(accountsJson.accounts) ? (accountsJson.accounts as Account[]) : []
+        isRecord(dashboardJson) && Array.isArray(dashboardJson.accounts) ? (dashboardJson.accounts as Account[]) : []
       const nextMigrations =
-        isRecord(migrationsJson) && Array.isArray(migrationsJson.migrations)
-          ? (migrationsJson.migrations as Migration[])
+        isRecord(dashboardJson) && Array.isArray(dashboardJson.migrations)
+          ? (dashboardJson.migrations as Migration[])
           : []
 
       setAccounts(nextAccounts)
@@ -441,14 +440,14 @@ export default function MigrationsPage() {
       setLastSyncedAt(new Date().toISOString())
 
       const bucketsError =
-        isRecord(bucketsJson) && typeof bucketsJson.error === "string" && bucketsJson.error.trim()
-          ? bucketsJson.error.trim()
+        isRecord(dashboardJson) && typeof dashboardJson.bucketError === "string" && dashboardJson.bucketError.trim()
+          ? dashboardJson.bucketError.trim()
           : null
       if (bucketsError) setError(bucketsError)
 
       const nextBuckets =
-        isRecord(bucketsJson) && Array.isArray(bucketsJson.buckets)
-          ? (bucketsJson.buckets as unknown[]).map((b) => {
+        isRecord(dashboardJson) && Array.isArray(dashboardJson.buckets)
+          ? (dashboardJson.buckets as unknown[]).map((b) => {
               const maybe = isRecord(b) ? b : {}
               return {
                 id: String(maybe.id ?? maybe.name ?? ""),
@@ -470,13 +469,10 @@ export default function MigrationsPage() {
         null
 
       setActiveMigration(current)
-      if (current?.id) {
-        const detailsRes = await fetch(`/api/migrations/${encodeURIComponent(current.id)}`)
-        const detailsJson: unknown = detailsRes.ok ? await detailsRes.json() : null
-        setActiveItems(isRecord(detailsJson) && Array.isArray(detailsJson.items) ? (detailsJson.items as MigrationItem[]) : [])
-      } else {
-        setActiveItems([])
-      }
+      const activeItems = isRecord(dashboardJson) && Array.isArray(dashboardJson.activeItems)
+        ? dashboardJson.activeItems as MigrationItem[]
+        : []
+      setActiveItems(activeItems)
     } catch (e: unknown) {
       const message =
         typeof e === "object" && e !== null && "message" in e

@@ -60,6 +60,7 @@ test('migration worker requires PostgreSQL and honors the configured SSL switch'
   const runtime = read('workers/migration-worker/migration-worker.mjs')
   const workerPackage = read('workers/migration-worker/package.json')
   assert.match(runtime, /if \(!POSTGRES_URL \|\| !SERVER_URL \|\| AGENT_TOKEN\.length < 24\)/)
+  assert.match(runtime, /const POSTGRES_URL = String\(process\.env\.POSTGRES_URL \|\| ""\)\.trim\(\)/)
   assert.match(runtime, /POSTGRES_SSL === "false"/)
   assert.match(runtime, /if \(currentMigrationId && Array\.isArray\(body\.items\)\)[\s\S]*?updateMigrationItemLocal\(currentMigrationId, jobId, itemUpdate\)/)
   assert.match(runtime, /update drive_migration_items set progress=\$3::jsonb/)

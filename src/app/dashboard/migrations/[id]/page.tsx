@@ -1152,13 +1152,8 @@ export default function MigrationDetailsPage() {
     if (!id) return
     setError(null)
     try {
-      const [accountsRes, detailsRes] = await Promise.all([fetch("/api/accounts"), fetch(`/api/migrations/${encodeURIComponent(id)}`)])
-      const accountsJson: unknown = accountsRes.ok ? await accountsRes.json() : { accounts: [] }
-      const detailsJson: unknown = detailsRes.ok ? await detailsRes.json() : null
-
-      const nextAccounts =
-        isRecord(accountsJson) && Array.isArray(accountsJson.accounts) ? (accountsJson.accounts as Account[]) : []
-      setAccounts(nextAccounts)
+      const detailsRes = await fetch(`/api/migrations/${encodeURIComponent(id)}`, { cache: "no-store" })
+      const detailsJson: unknown = await detailsRes.json().catch(() => null)
 
       if (!detailsRes.ok) {
         const message =
@@ -1167,6 +1162,10 @@ export default function MigrationDetailsPage() {
             : "Unable to load migration"
         throw new Error(message)
       }
+
+      const nextAccounts =
+        isRecord(detailsJson) && Array.isArray(detailsJson.accounts) ? (detailsJson.accounts as Account[]) : []
+      setAccounts(nextAccounts)
 
       const nextMigration =
         isRecord(detailsJson) && isRecord(detailsJson.migration) ? (detailsJson.migration as Migration) : null

@@ -46,24 +46,29 @@ test("repair worker claims are atomic and dashboard reads do not reconcile again
   assert.match(source, /export async function getRepairJob\(id: string\): Promise<DriveRepairJob \| null> \{\s+return getRepairJobRaw\(id\)/)
 })
 
-test("runtime PostgreSQL uses the pooled URL first and keeps the process pool bounded", () => {
+test("runtime PostgreSQL uses only POSTGRES_URL and keeps the process pool bounded", () => {
   const source = read("src/lib/db.ts")
-  assert.match(source, /getEnv\("POSTGRES_URL"\)\s*\?\?\s*getEnv\("POSTGRES_PRISMA_URL"\)\s*\?\?\s*getEnv\("POSTGRES_URL_NON_POOLING"\)/)
+  assert.match(source, /const connectionString = getEnv\("POSTGRES_URL"\)/)
+  assert.match(source, /connectionString,\s*ssl: buildSslConfig\(\)/)
+  assert.match(source, /return Boolean\(getEnv\("POSTGRES_URL"\)\)/)
   assert.match(source, /process\.env\.NODE_ENV === "production" \? 2 : 1/)
   assert.match(source, /getEnv\("POSTGRES_SSL"\).*\?\? true/)
+  assert.match(source, /getEnv\("DISABLE_POSTGRES_SSL"\).*\?\? false/)
   for (const route of [
     "src/app/api/internal/backend-orchestrator/config/route.ts",
     "src/app/api/internal/file-scanner/config/route.ts",
     "src/app/api/internal/migration-orchestrator/config/route.ts",
   ]) {
-    assert.match(read(route), /POSTGRES_URL(?:\s*\|\|\s*process\.env\.POSTGRES_PRISMA_URL)?\s*\|\|\s*process\.env\.POSTGRES_URL_NON_POOLING/)
+    assert.match(read(route), /process\.env\.POSTGRES_URL/)
   }
   const backendWorker = read("workers/backend-orchestrator/src/index.ts")
   assert.match(backendWorker, /ssl:\s*disablePostgresSsl\s*\?\s*false\s*:\s*\{\s*rejectUnauthorized:\s*false\s*\}/)
   assert.doesNotMatch(backendWorker, /isSupabase|supabase\.com/)
   const schemaInstaller = read("scripts/prepare-schema.mjs")
   assert.doesNotMatch(schemaInstaller, /supabase\.co|prefersDirectSupabase/i)
-  assert.match(schemaInstaller, /POSTGRES_USE_HOST_CONFIG/)
+  assert.match(schemaInstaller, /const url = value\("POSTGRES_URL"\)/)
+  assert.match(schemaInstaller, /Set POSTGRES_URL in the build environment/)
+  assert.match(schemaInstaller, /booleanValue\("DISABLE_POSTGRES_SSL", false\)/)
 })
 
 test("users page is server-paginated with safe columns and analytics reads only user aggregates", () => {
@@ -89,6 +94,73 @@ test("users page is server-paginated with safe columns and analytics reads only 
   assert.match(analytics, /itemMetricsByDay/)
   assert.doesNotMatch(analytics, /itemRowsAsItems\.filter\(|migrations\.filter\(\(m\) => dateKey/)
   assert.doesNotMatch(analytics, /Math\.min\(\.\.\.times\)/)
+})
+
+test("analytics aggregates bucket and verification summaries in one database round trip", () => {
+  const analytics = read("src/app/api/dashboard/analytics/route.ts")
+  const summaryStart = analytics.indexOf("async function getAnalyticsSqlSummary()")
+  const summaryEnd = analytics.indexOf("async function listActiveAccountSnapshots()", summaryStart)
+  assert.ok(summaryStart >= 0 && summaryEnd > summaryStart, "expected the consolidated analytics query")
+  const summary = analytics.slice(summaryStart, summaryEnd)
+  assert.equal((summary.match(/queryDb</g) ?? []).length, 1)
+  assert.match(summary, /bucket_status_counts as/i)
+  assert.match(summary, /join active_account/i)
+  assert.match(summary, /order by created_at desc\s+limit 25/i)
+  assert.match(summary, /order by updated_at desc nulls first[\s\S]*?limit 10/i)
+  assert.match(summary, /drive_migration_item_failure_records/i)
+  assert.match(summary, /count\(\*\)::text from public\.drive_bucket_verify_diffs/i)
+  assert.match(analytics, /ANALYTICS_ITEM_PROGRESS_SQL/)
+  assert.match(analytics, /\$\{ANALYTICS_ITEM_PROGRESS_SQL\} as progress/)
+  assert.doesNotMatch(analytics, /selectRows<BucketStatsRow>/)
+  assert.doesNotMatch(analytics, /countRows\(/)
+})
+
+test("migrations page bootstrap uses one safe, database-snapshot endpoint", () => {
+  const route = read("src/app/api/migrations/route.ts")
+  const getStart = route.indexOf("export async function GET()")
+  const getEnd = route.indexOf("export async function POST(", getStart)
+  assert.ok(getStart >= 0 && getEnd > getStart, "expected migrations bootstrap GET")
+  const getHandler = route.slice(getStart, getEnd)
+  assert.match(getHandler, /listDashboardAccountSummaries/)
+  assert.match(getHandler, /listActiveBucketStats/)
+  assert.match(getHandler, /listMigrationItems\(current\.id\)/)
+  assert.match(getHandler, /accounts: accounts\.map\(\(\{ id, label, email, status \}\)/)
+  assert.doesNotMatch(getHandler, /apiToken|r2SecretAccessKey|password/)
+
+  const page = read("src/app/dashboard/migrations/page.tsx")
+  const loadStart = page.indexOf("const loadAll = React.useCallback")
+  const loadEnd = page.indexOf("const confirmDelete =", loadStart)
+  assert.ok(loadStart >= 0 && loadEnd > loadStart, "expected migrations dashboard bootstrap")
+  const load = page.slice(loadStart, loadEnd)
+  assert.equal((load.match(/fetch\(/g) ?? []).length, 1)
+  assert.match(load, /fetch\("\/api\/migrations"/)
+  assert.doesNotMatch(load, /\/api\/accounts|\/api\/storage\/buckets|\/api\/migrations\/\$\{encodeURIComponent\(current\.id\)\}/)
+
+  const bucketStore = read("src/lib/bucket-stats-store.ts")
+  const activeReaderStart = bucketStore.indexOf("export async function listActiveBucketStats()")
+  const activeReaderEnd = bucketStore.indexOf("export async function getBucketStatsMap(", activeReaderStart)
+  assert.ok(activeReaderStart >= 0 && activeReaderEnd > activeReaderStart)
+  assert.match(bucketStore.slice(activeReaderStart, activeReaderEnd), /account\.status='active'/)
+})
+
+test("migration detail bootstrap loads safe account options with its initial payload", () => {
+  const route = read("src/app/api/migrations/[id]/route.ts")
+  const getStart = route.indexOf("export async function GET(")
+  const deleteStart = route.indexOf("export async function DELETE(", getStart)
+  assert.ok(getStart >= 0 && deleteStart > getStart)
+  const getHandler = route.slice(getStart, deleteStart)
+  assert.match(getHandler, /listDashboardAccountSummaries\(\)/)
+  assert.match(getHandler, /const accounts = accountSummaries\.map\(\(\{ id: accountId, label, email, status \}\)/)
+  assert.doesNotMatch(getHandler, /apiToken|r2SecretAccessKey|password/)
+
+  const page = read("src/app/dashboard/migrations/[id]/page.tsx")
+  const loadStart = page.indexOf("const loadInitial = React.useCallback")
+  const loadEnd = page.indexOf("const runMigrationAction =", loadStart)
+  assert.ok(loadStart >= 0 && loadEnd > loadStart)
+  const load = page.slice(loadStart, loadEnd)
+  assert.equal((load.match(/fetch\(/g) ?? []).length, 1)
+  assert.match(load, /detailsJson\.accounts/)
+  assert.doesNotMatch(load, /\/api\/accounts/)
 })
 
 test("API usage aggregates are page-stable and use one bounded database request", () => {

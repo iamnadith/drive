@@ -856,6 +856,7 @@ create table if not exists drive_bucket_verify_diffs (
 
 create index if not exists drive_bucket_verify_diffs_item_idx on drive_bucket_verify_diffs (migration_item_id);
 create index if not exists drive_bucket_verify_diffs_kind_idx on drive_bucket_verify_diffs (kind);
+create index if not exists drive_bucket_verify_diffs_created_idx on drive_bucket_verify_diffs (created_at desc);
 
 create table if not exists drive_agents (
   id uuid primary key,

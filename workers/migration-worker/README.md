@@ -22,7 +22,7 @@ It loads the shared worker secret and optional panel origin from PostgreSQL. It 
 
 ```bash
 npm install
-npm start -- --postgres-url POSTGRES_URL --agent-id YOUR_AGENT_ID
+npm start -- --agent-id YOUR_AGENT_ID
 ```
 
 The same values can be supplied as environment variables instead of command-line arguments:

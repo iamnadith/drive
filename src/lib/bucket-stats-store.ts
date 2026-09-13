@@ -161,6 +161,17 @@ export async function listBucketStats(accountId: string): Promise<DriveBucketSta
   return rows.map(mapRow)
 }
 
+export async function listActiveBucketStats(): Promise<DriveBucketStats[]> {
+  const { rows } = await queryDb<DriveBucketStatsRow>(`
+    select stats.*
+    from public.${TABLE} stats
+    join public.drive_accounts account on account.id=stats.account_id
+    where account.status='active'
+    order by stats.bucket_name asc
+  `)
+  return rows.map(mapRow)
+}
+
 export async function getBucketStatsMap(accountId: string): Promise<Map<string, DriveBucketStats>> {
   const rows = await listBucketStats(accountId)
   const map = new Map<string, DriveBucketStats>()

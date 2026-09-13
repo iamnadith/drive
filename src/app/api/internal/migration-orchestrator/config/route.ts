@@ -6,7 +6,7 @@ export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 function postgresUrl() {
-  return (process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL || process.env.POSTGRES_URL_NON_POOLING || "").trim()
+  return String(process.env.POSTGRES_URL || "").trim()
 }
 function disablePostgresSsl() {
   const ssl = String(process.env.POSTGRES_SSL || "").trim().toLowerCase()

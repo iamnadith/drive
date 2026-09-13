@@ -33,7 +33,7 @@ test("backend orchestrator uses the authenticated panel configuration handshake"
   assert.match(deploy, /"wrangler", "deploy", "--secrets-file"/)
   assert.doesNotMatch(deploy, /process\.env\.POSTGRES/)
   assert.match(configRoute, /authenticateBackendOrchestrator/)
-  assert.match(configRoute, /POSTGRES_URL_NON_POOLING/)
+  assert.match(configRoute, /process\.env\.POSTGRES_URL/)
   assert.match(configRoute, /DISABLE_POSTGRES_SSL/)
   assert.match(configRoute, /disabled === "1" \|\| disabled === "true"/)
   assert.match(deploy, /DISABLE_POSTGRES_SSL: config\.disablePostgresSsl === true \? "1" : "0"/)

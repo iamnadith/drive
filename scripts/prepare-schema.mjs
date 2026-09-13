@@ -32,7 +32,10 @@ function booleanValue(name, fallback) {
 }
 
 function sslConfig() {
-  if (!booleanValue("POSTGRES_SSL", true)) return false
+  if (
+    !booleanValue("POSTGRES_SSL", true) ||
+    booleanValue("DISABLE_POSTGRES_SSL", false)
+  ) return false
   const rejectUnauthorized = booleanValue(
     "POSTGRES_SSL_REJECT_UNAUTHORIZED",
     false
@@ -52,30 +55,11 @@ function sslConfig() {
 }
 
 function connectionConfig() {
-  const url =
-    value("POSTGRES_URL_NON_POOLING") ??
-    value("POSTGRES_URL") ??
-    value("POSTGRES_PRISMA_URL")
-  const host = value("POSTGRES_HOST")
-  const user = value("POSTGRES_USER")
-  const password = value("POSTGRES_PASSWORD")
-  const database = value("POSTGRES_DATABASE")
-  const port = Number(value("POSTGRES_PORT") ?? 5432)
-
-  if (url) {
-    const hasHostConfig = Boolean(host && user && password && database)
-    const preferHostConfig =
-      booleanValue("POSTGRES_USE_HOST_CONFIG", undefined) ?? !hasHostConfig
-
-    if (!preferHostConfig) return { connectionString: url }
-  }
-
-  if (host && user && password && database) {
-    return { host, user, password, database, port }
-  }
+  const url = value("POSTGRES_URL")
+  if (url) return { connectionString: url }
 
   throw new Error(
-    "Postgres is not configured. Set POSTGRES_URL (or POSTGRES_URL_NON_POOLING) in the build environment."
+    "Postgres is not configured. Set POSTGRES_URL in the build environment."
   )
 }
 
@@ -88,7 +72,7 @@ function databaseLabel(config) {
       return "configured database"
     }
   }
-  return `${config.host}:${config.port}/${config.database}`
+  return "configured database"
 }
 
 async function main() {

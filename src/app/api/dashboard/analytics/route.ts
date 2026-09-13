@@ -83,6 +83,77 @@ type ActiveAccountSnapshotRow = {
   captured_at: string
 }
 
+const ANALYTICS_ITEM_PROGRESS_SQL = `jsonb_strip_nulls(jsonb_build_object(
+  'stage',progress->'stage',
+  'sourceScanStatus',progress->'sourceScanStatus',
+  'slurperStatus',progress->'slurperStatus',
+  'slurperCumulative',progress->'slurperCumulative',
+  'slurperNormalized',progress->'slurperNormalized',
+  'slurper',case when jsonb_typeof(progress->'slurper')='object' then jsonb_build_object('result',jsonb_strip_nulls(jsonb_build_object(
+    'status',progress->'slurper'->'result'->'status',
+    'objects',progress->'slurper'->'result'->'objects',
+    'transferredObjects',progress->'slurper'->'result'->'transferredObjects',
+    'skippedObjects',progress->'slurper'->'result'->'skippedObjects',
+    'failedObjects',progress->'slurper'->'result'->'failedObjects'
+  ))) end,
+  'repairWorker',case when jsonb_typeof(progress->'repairWorker')='object' then jsonb_strip_nulls(jsonb_build_object(
+    'stage',progress->'repairWorker'->'stage',
+    'jobId',progress->'repairWorker'->'jobId',
+    'status',progress->'repairWorker'->'status',
+    'transferred',progress->'repairWorker'->'transferred',
+    'failed',progress->'repairWorker'->'failed',
+    'skipped',progress->'repairWorker'->'skipped',
+    'cumulativeTransferred',progress->'repairWorker'->'cumulativeTransferred',
+    'cumulativeSkipped',progress->'repairWorker'->'cumulativeSkipped',
+    'details',case when jsonb_typeof(progress->'repairWorker'->'details')='object' then jsonb_strip_nulls(jsonb_build_object(
+      'sourceObjectCount',progress->'repairWorker'->'details'->'sourceObjectCount',
+      'initialMissing',progress->'repairWorker'->'details'->'initialMissing',
+      'initialMismatched',progress->'repairWorker'->'details'->'initialMismatched',
+      'finalMissing',progress->'repairWorker'->'details'->'finalMissing',
+      'finalMismatched',progress->'repairWorker'->'details'->'finalMismatched'
+    )) end
+  )) end,
+  'verify',case when jsonb_typeof(progress->'verify')='object' then jsonb_strip_nulls(jsonb_build_object(
+    'status',progress->'verify'->'status',
+    'missingInDest',progress->'verify'->'missingInDest',
+    'sizeMismatched',progress->'verify'->'sizeMismatched',
+    'extraInDest',progress->'verify'->'extraInDest',
+    'note',progress->'verify'->'note'
+  )) end,
+  'live',case when jsonb_typeof(progress->'live')='object' then jsonb_strip_nulls(jsonb_build_object(
+    'updatedAt',progress->'live'->'updatedAt',
+    'status',progress->'live'->'status',
+    'transferredObjects',progress->'live'->'transferredObjects',
+    'transferredBytes',progress->'live'->'transferredBytes',
+    'skippedObjects',progress->'live'->'skippedObjects',
+    'failedObjects',progress->'live'->'failedObjects',
+    'unaccountedObjects',progress->'live'->'unaccountedObjects',
+    'verifyIssues',progress->'live'->'verifyIssues',
+    'totalObjects',progress->'live'->'totalObjects',
+    'workerStage',progress->'live'->'workerStage',
+    'workerStatus',progress->'live'->'workerStatus',
+    'slurperJobId',progress->'live'->'slurperJobId',
+    'repairJobId',progress->'live'->'repairJobId'
+  )) end
+))`
+
+type AnalyticsSqlSummaryRow = {
+  bucket_status_breakdown: Record<string, string | number>
+  active_bucket_stats: BucketStatsRow[]
+  active_bucket_summary: {
+    bucket_count: string | number
+    objects: string | number
+    bytes: string | number
+    newest_updated_at: string | null
+    incomplete: boolean
+  }
+  failed_bucket_count: string | number
+  attention_bucket_stats: BucketStatsRow[]
+  recent_diffs: VerifyDiffRow[]
+  failure_record_count: string | number
+  verification_diff_count: string | number
+}
+
 function asRange(value: string | null): RangeKey {
   if (value === "7d" || value === "30d" || value === "90d") return value
   return "all"
@@ -190,9 +261,57 @@ async function selectRows<T extends QueryResultRow>(table: string, columns = "*"
   return rows
 }
 
-async function countRows(table: string): Promise<number> {
-  const { rows } = await queryDb<{ count: string }>(`select count(*)::text as count from public.${table}`)
-  return Number(rows[0]?.count ?? 0)
+async function getAnalyticsSqlSummary(): Promise<AnalyticsSqlSummaryRow> {
+  const { rows } = await queryDb<AnalyticsSqlSummaryRow>(`
+    with active_account as materialized (
+      select id from public.drive_accounts where status='active' order by updated_at desc limit 1
+    ), active_buckets as materialized (
+      select s.id,s.account_id,s.bucket_name,s.objects,s.bytes,s.status,s.error,s.updated_at
+      from public.drive_bucket_stats s
+      join active_account a on a.id=s.account_id
+    ), bucket_status_counts as (
+      select coalesce(nullif(status,''),'unknown') status,count(*) count
+      from public.drive_bucket_stats
+      group by 1
+    ), active_bucket_totals as (
+      select count(distinct bucket_name)::text bucket_count,
+        coalesce(sum(objects),0)::text objects,
+        coalesce(sum(bytes),0)::text bytes,
+        max(updated_at)::text newest_updated_at,
+        coalesce(bool_or(lower(coalesce(status,'')) in ('pending','running','error')),false) incomplete
+      from active_buckets
+    ), recent_bucket_errors as (
+      select id,account_id,bucket_name,objects,bytes,status,error,updated_at
+      from public.drive_bucket_stats
+      where status='error'
+      order by updated_at desc nulls first,id
+      limit 10
+    ), recent_diffs as (
+      select id,migration_item_id,kind,key,created_at
+      from public.drive_bucket_verify_diffs
+      order by created_at desc
+      limit 25
+    )
+    select
+      coalesce((select jsonb_object_agg(status,count) from bucket_status_counts),'{}'::jsonb) bucket_status_breakdown,
+      coalesce((select jsonb_agg(jsonb_build_object(
+        'id',id,'account_id',account_id,'bucket_name',bucket_name,
+        'objects',objects::text,'bytes',bytes::text,'status',status,'error',error,'updated_at',updated_at::text
+      ) order by bytes desc,objects desc) from active_buckets),'[]'::jsonb) active_bucket_stats,
+      (select to_jsonb(totals) from active_bucket_totals totals) active_bucket_summary,
+      (select coalesce(sum(count) filter (where status='error'),0)::text from bucket_status_counts) failed_bucket_count,
+      coalesce((select jsonb_agg(jsonb_build_object(
+        'id',id,'account_id',account_id,'bucket_name',bucket_name,
+        'objects',objects::text,'bytes',bytes::text,'status',status,'error',error,'updated_at',updated_at::text
+      ) order by updated_at desc nulls first,id) from recent_bucket_errors),'[]'::jsonb) attention_bucket_stats,
+      coalesce((select jsonb_agg(jsonb_build_object(
+        'id',id,'migration_item_id',migration_item_id,'kind',kind,'key',key,'created_at',created_at::text
+      ) order by created_at desc) from recent_diffs),'[]'::jsonb) recent_diffs,
+      (select count(*)::text from public.drive_migration_item_failure_records) failure_record_count,
+      (select count(*)::text from public.drive_bucket_verify_diffs) verification_diff_count
+  `)
+  if (!rows[0]) throw new Error("Analytics database summary query returned no row")
+  return rows[0]
 }
 
 async function listActiveAccountSnapshots(): Promise<ActiveAccountSnapshotRow[]> {
@@ -267,11 +386,8 @@ async function buildAnalyticsPayload(range: RangeKey) {
     users,
     agents,
     repairJobs,
-    bucketStats,
+    sqlSummary,
     migrationItemRows,
-    recentDiffs,
-    failureRecordCount,
-    verifyDiffCount,
   ] =
     await Promise.all([
       capture("migrations", warnings, () => listMigrations(100), [] as DriveMigration[]),
@@ -295,35 +411,23 @@ async function buildAnalyticsPayload(range: RangeKey) {
         },
         [] as DriveRepairJob[]
       ),
-      selectRows<BucketStatsRow>(
-        "drive_bucket_stats",
-        "id,account_id,bucket_name,objects,bytes,status,error,updated_at"
-      ),
+      getAnalyticsSqlSummary(),
       capture(
         "migration items",
         warnings,
         () =>
           selectRows<MigrationItemRow>(
             "drive_migration_items",
-            "id,migration_id,source_bucket,target_bucket,source_objects,source_bytes,slurper_job_id,slurper_status,progress,last_progress_at,created_at,updated_at"
+            `id,migration_id,source_bucket,target_bucket,source_objects,source_bytes,slurper_job_id,slurper_status,${ANALYTICS_ITEM_PROGRESS_SQL} as progress,last_progress_at,created_at,updated_at`
           ),
         [] as MigrationItemRow[]
       ),
-      capture(
-        "verification diffs",
-        warnings,
-        () =>
-          selectRows<VerifyDiffRow>(
-            "drive_bucket_verify_diffs",
-            "id,migration_item_id,kind,key,created_at",
-            { column: "created_at", ascending: false },
-            25
-        ),
-        [] as VerifyDiffRow[]
-      ),
-      capture("failure record count", warnings, () => countRows("drive_migration_item_failure_records"), 0),
-      capture("verification diff count", warnings, () => countRows("drive_bucket_verify_diffs"), 0),
     ])
+
+  const bucketStats = sqlSummary.active_bucket_stats
+  const recentDiffs = sqlSummary.recent_diffs
+  const failureRecordCount = toNumber(sqlSummary.failure_record_count)
+  const verifyDiffCount = toNumber(sqlSummary.verification_diff_count)
 
   const itemRowsAsItems: DriveMigrationItem[] = migrationItemRows.map((row) => ({
     id: row.id,
@@ -354,29 +458,9 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const repairBreakdown: Record<string, number> = {}
   for (const job of repairJobs) increment(repairBreakdown, job.status)
 
-  const bucketSyncBreakdown: Record<string, number> = {}
-  for (const row of bucketStats) increment(bucketSyncBreakdown, row.status)
-
-  const totalsByMigration = new Map<string, ReturnType<typeof itemMetrics>>()
-  for (const item of itemRowsAsItems) {
-    const metrics = itemMetrics(item)
-    const current = totalsByMigration.get(item.migrationId) ?? {
-      totalObjects: 0,
-      totalBytes: 0,
-      transferred: 0,
-      skipped: 0,
-      failed: 0,
-      verifyIssues: 0,
-    }
-    totalsByMigration.set(item.migrationId, {
-      totalObjects: current.totalObjects + metrics.totalObjects,
-      totalBytes: current.totalBytes + metrics.totalBytes,
-      transferred: current.transferred + metrics.transferred,
-      skipped: current.skipped + metrics.skipped,
-      failed: current.failed + metrics.failed,
-      verifyIssues: current.verifyIssues + metrics.verifyIssues,
-    })
-  }
+  const bucketSyncBreakdown = Object.fromEntries(
+    Object.entries(sqlSummary.bucket_status_breakdown).map(([status, count]) => [status, toNumber(count)])
+  )
 
   const activeAccount = accounts.find((account) => account.status === "active") ?? null
   const activeBucketStats = activeAccount
@@ -543,9 +627,9 @@ async function buildAnalyticsPayload(range: RangeKey) {
   // using them during a refresh; pending bucket rows are work-in-progress and
   // must never replace a committed snapshot with placeholder zeroes.
   const activeAggregateReady = Boolean(activeAccount?.lastSyncedAt)
-  const activeBucketCount = new Set(activeBucketStats.map((row) => row.bucket_name)).size
-  const activeBucketObjects = activeBucketStats.reduce((sum, row) => sum + toNumber(row.objects), 0)
-  const activeBucketBytes = activeBucketStats.reduce((sum, row) => sum + toNumber(row.bytes), 0)
+  const activeBucketCount = toNumber(sqlSummary.active_bucket_summary.bucket_count)
+  const activeBucketObjects = toNumber(sqlSummary.active_bucket_summary.objects)
+  const activeBucketBytes = toNumber(sqlSummary.active_bucket_summary.bytes)
   const totalStorageBytes = activeAccount
     ? Math.max(0, activeAggregateReady ? toNumber(activeAccount.totalBytes) : activeBucketBytes)
     : 0
@@ -563,7 +647,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const activeMigrationCount = migrations.filter((m) => m.status === "running" || m.status === "verifying").length
   const failedRepairCount = repairJobs.filter((job) => job.status === "failed").length
   const activeRepairCount = repairJobs.filter((job) => ["pending", "claimed", "running"].includes(job.status)).length
-  const failedBucketStats = bucketStats.filter((row) => row.status === "error").length
+  const failedBucketStats = toNumber(sqlSummary.failed_bucket_count)
   const onlineWorkers = agents.filter((agent) => getEffectiveAgentStatus(agent) === "online").length
   const topBuckets = activeAnalyticsBucketStats
     .map((row) => ({
@@ -600,8 +684,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
         href: `/dashboard/migrations/${job.migrationId}/jobs/${job.id}`,
         at: job.updatedAt || job.completedAt || job.createdAt,
       })),
-    ...bucketStats
-      .filter((row) => row.status === "error")
+    ...sqlSummary.attention_bucket_stats
       .map((row) => ({
         id: `bucket-${row.id}`,
         severity: "warning",
@@ -632,17 +715,12 @@ async function buildAnalyticsPayload(range: RangeKey) {
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
     .slice(0, 10)
 
-  const newestBucketStat = activeBucketStats
-    .map((row) => (row.updated_at ? Date.parse(row.updated_at) : Number.NaN))
-    .filter(Number.isFinite)
-    .sort((a, b) => b - a)[0]
+  const newestBucketStat = sqlSummary.active_bucket_summary.newest_updated_at
+    ? Date.parse(sqlSummary.active_bucket_summary.newest_updated_at)
+    : Number.NaN
   const activeBucketStatsIncomplete =
     Boolean(activeAccount) &&
-    (activeBucketStats.length === 0 ||
-      activeBucketStats.some((row) => {
-        const status = String(row.status ?? "").toLowerCase()
-        return status === "pending" || status === "running" || status === "error"
-      }))
+    (activeBucketStats.length === 0 || sqlSummary.active_bucket_summary.incomplete)
   const staleBucketStats =
     (activeBucketStatsIncomplete && !activeAggregateReady) ||
     (Boolean(activeAccount) && activeBucketStats.length > 0 && !Number.isFinite(newestBucketStat))

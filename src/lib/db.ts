@@ -1,7 +1,7 @@
 import { Pool } from "pg"
 import type { PoolClient, QueryResultRow } from "pg"
 
-const DRIVE_SCHEMA_VERSION = 2026091402
+const DRIVE_SCHEMA_VERSION = 2026091403
 
 declare global {
   var __drivePgPool: Pool | undefined
@@ -29,7 +29,8 @@ function buildSslConfig(): false | {
   servername?: string
 } {
   const enabled = parseBooleanEnv(getEnv("POSTGRES_SSL")) ?? true
-  if (!enabled) return false
+  const explicitlyDisabled = parseBooleanEnv(getEnv("DISABLE_POSTGRES_SSL")) ?? false
+  if (!enabled || explicitlyDisabled) return false
 
   const rejectUnauthorized =
     parseBooleanEnv(getEnv("POSTGRES_SSL_REJECT_UNAUTHORIZED")) ?? false
@@ -143,93 +144,23 @@ export async function withDbTransaction<T>(operation: (client: PoolClient) => Pr
 }
 
 export function isPostgresConfigured(): boolean {
-  return Boolean(
-    getEnv("POSTGRES_URL_NON_POOLING") ||
-      getEnv("POSTGRES_URL") ||
-      getEnv("POSTGRES_PRISMA_URL") ||
-      (getEnv("POSTGRES_HOST") &&
-        getEnv("POSTGRES_USER") &&
-        getEnv("POSTGRES_PASSWORD") &&
-        getEnv("POSTGRES_DATABASE"))
-  )
+  return Boolean(getEnv("POSTGRES_URL"))
 }
 
 export function getDbPool(): Pool {
   if (!global.__drivePgPool) {
-    const host = getEnv("POSTGRES_HOST")
-    const user = getEnv("POSTGRES_USER")
-    const password = getEnv("POSTGRES_PASSWORD")
-    const database = getEnv("POSTGRES_DATABASE")
+    const connectionString = getEnv("POSTGRES_URL")
+    if (!connectionString) throw new Error("POSTGRES_URL is not configured")
 
-    const ssl = buildSslConfig()
-
-    const port = Number(getEnv("POSTGRES_PORT") ?? 5432)
-
-    const urlString =
-      getEnv("POSTGRES_URL") ??
-      getEnv("POSTGRES_PRISMA_URL") ??
-      getEnv("POSTGRES_URL_NON_POOLING")
-
-    const preferHostConfig =
-      parseBooleanEnv(getEnv("POSTGRES_USE_HOST_CONFIG")) ??
-      (parseBooleanEnv(getEnv("POSTGRES_PREFER_URL")) === false && Boolean(host && user && password && database))
-
-    if (preferHostConfig && host && user && password && database) {
-      global.__drivePgPool = new Pool({
-        host,
-        port,
-        user,
-        password,
-        database,
-        ssl,
-        keepAlive: true,
-        connectionTimeoutMillis: 10_000,
-        idleTimeoutMillis: 30_000,
-        max: getPoolMax(),
-      })
-      attachPoolErrorHandler(global.__drivePgPool)
-      return global.__drivePgPool
-    }
-
-    if (urlString) {
-      const url = new URL(urlString)
-
-      global.__drivePgPool = new Pool({
-        host: url.hostname,
-        port: Number(url.port || 5432),
-        user: decodeURIComponent(url.username),
-        password: decodeURIComponent(url.password),
-        database: url.pathname.startsWith("/")
-          ? url.pathname.slice(1)
-          : url.pathname,
-        ssl,
-        keepAlive: true,
-        connectionTimeoutMillis: 10_000,
-        idleTimeoutMillis: 30_000,
-        max: getPoolMax(),
-      })
-      attachPoolErrorHandler(global.__drivePgPool)
-      return global.__drivePgPool
-    }
-
-    if (host && user && password && database) {
-      global.__drivePgPool = new Pool({
-        host,
-        port,
-        user,
-        password,
-        database,
-        ssl,
-        keepAlive: true,
-        connectionTimeoutMillis: 10_000,
-        idleTimeoutMillis: 30_000,
-        max: getPoolMax(),
-      })
-      attachPoolErrorHandler(global.__drivePgPool)
-      return global.__drivePgPool
-    }
-
-    throw new Error("Postgres is not configured (missing POSTGRES_* variables)")
+    global.__drivePgPool = new Pool({
+      connectionString,
+      ssl: buildSslConfig(),
+      keepAlive: true,
+      connectionTimeoutMillis: 10_000,
+      idleTimeoutMillis: 30_000,
+      max: getPoolMax(),
+    })
+    attachPoolErrorHandler(global.__drivePgPool)
   }
 
   return global.__drivePgPool
@@ -1169,6 +1100,7 @@ export async function ensureDriveSchema(): Promise<void> {
       `)
       await queryDb(`create index if not exists drive_bucket_verify_diffs_item_idx on drive_bucket_verify_diffs (migration_item_id);`)
       await queryDb(`create index if not exists drive_bucket_verify_diffs_kind_idx on drive_bucket_verify_diffs (kind);`)
+      await queryDb(`create index concurrently if not exists drive_bucket_verify_diffs_created_idx on drive_bucket_verify_diffs (created_at desc);`)
       await queryDb(`
         create table if not exists drive_migration_orchestrator_state (
           id boolean primary key default true check (id),
