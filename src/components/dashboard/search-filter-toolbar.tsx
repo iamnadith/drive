@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { Search, SlidersHorizontal, X } from "lucide-react"
+import { RefreshCw, Search, SlidersHorizontal, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -23,29 +23,41 @@ type DashboardSearchFilterToolbarProps = {
   onSearchChange: (value: string) => void
   searchPlaceholder?: string
   countSearch?: boolean
-  filters: SearchFilterOption[]
-  filterValues: Record<string, string>
-  onFilterChange: (key: string, value: string) => void
-  onClear: () => void
+  filters?: SearchFilterOption[]
+  filterValues?: Record<string, string>
+  onFilterChange?: (key: string, value: string) => void
+  onClear?: () => void
   title?: string
   description?: string
+  onRefresh?: () => void
+  refreshing?: boolean
+  refreshLabel?: string
   actions?: React.ReactNode
   searchWidthClassName?: string
 }
+
+export const DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS =
+  "size-9 min-w-9 shrink-0 rounded-full border border-border/70 bg-background/85 p-0 text-foreground shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md sm:h-9 sm:w-auto sm:min-w-0 sm:px-3 sm:py-2"
+
+const dashboardToolbarIconButtonClass =
+  "size-9 min-w-9 shrink-0 rounded-full border border-border/70 bg-background/85 p-0 text-foreground shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
 
 export function DashboardSearchFilterToolbar({
   searchValue,
   onSearchChange,
   searchPlaceholder = "Search",
   countSearch = false,
-  filters,
-  filterValues,
+  filters = [],
+  filterValues = {},
   onFilterChange,
   onClear,
   title = "Filters",
   description = "Refine the results shown in this table.",
+  onRefresh,
+  refreshing = false,
+  refreshLabel = "Refresh",
   actions,
-  searchWidthClassName = "sm:w-[320px]",
+  searchWidthClassName = "sm:w-[220px]",
 }: DashboardSearchFilterToolbarProps) {
   const [open, setOpen] = React.useState(false)
   const id = React.useId()
@@ -56,13 +68,13 @@ export function DashboardSearchFilterToolbar({
   return (
     <>
       <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
-        <div className={`relative min-w-0 flex-1 ${searchWidthClassName}`}>
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <div className={`relative h-9 min-w-0 flex-1 ${searchWidthClassName}`}>
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={searchValue}
             onChange={(event) => onSearchChange(event.target.value)}
             placeholder={searchPlaceholder}
-            className="h-10 pl-9"
+            className="h-9 w-full pl-8"
           />
         </div>
         {filters.length > 0 ? (
@@ -72,7 +84,7 @@ export function DashboardSearchFilterToolbar({
             size="icon"
             onClick={() => setOpen(true)}
             aria-label="Open filters"
-            className="relative h-10 min-h-10 w-10 min-w-10 shrink-0 aspect-square rounded-full border border-border/70 bg-background/85 p-0 shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
+            className={dashboardToolbarIconButtonClass}
           >
             <SlidersHorizontal className="h-4 w-4" />
             {activeCount > 0 ? (
@@ -80,6 +92,20 @@ export function DashboardSearchFilterToolbar({
                 {activeCount}
               </span>
             ) : null}
+          </Button>
+        ) : null}
+        {onRefresh ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            onClick={onRefresh}
+            disabled={refreshing}
+            aria-label={refreshLabel}
+            aria-busy={refreshing || undefined}
+            className={dashboardToolbarIconButtonClass}
+          >
+            <RefreshCw className={refreshing ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
           </Button>
         ) : null}
         {actions}
@@ -100,13 +126,13 @@ export function DashboardSearchFilterToolbar({
                   <div key={filter.key} className="space-y-1.5">
                     <Label htmlFor={fieldId}>{filter.label}</Label>
                     {filter.type === "select" ? (
-                      <Select value={value} onValueChange={(next) => onFilterChange(filter.key, next)}>
-                        <SelectTrigger id={fieldId} className="h-10 w-full">
+                      <Select value={value} onValueChange={(next) => onFilterChange?.(filter.key, next)}>
+                        <SelectTrigger id={fieldId} className="h-9 w-full">
                           <SelectValue placeholder={filter.placeholder ?? filter.label} />
                         </SelectTrigger>
                         <SelectContent>
                           {(filter.options ?? []).map((option) => (
-                            <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                          <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
@@ -116,8 +142,8 @@ export function DashboardSearchFilterToolbar({
                         type={filter.type}
                         value={value}
                         placeholder={filter.placeholder}
-                        onChange={(event) => onFilterChange(filter.key, event.target.value)}
-                        className="h-10"
+                        onChange={(event) => onFilterChange?.(filter.key, event.target.value)}
+                        className="h-9"
                       />
                     )}
                   </div>
@@ -125,7 +151,7 @@ export function DashboardSearchFilterToolbar({
               })}
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={onClear}>
+              <Button variant="outline" onClick={() => onClear?.()}>
                 <X className="h-4 w-4" />
                 Clear
               </Button>

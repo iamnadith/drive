@@ -9,7 +9,6 @@ import {
   Globe2,
   Plus,
   RefreshCw,
-  Search,
   Settings2,
   TriangleAlert,
   Trash2,
@@ -19,6 +18,7 @@ import { toast } from "sonner"
 import { BucketsPageSkeleton } from "@/components/dashboard/loading-skeletons"
 import { DashboardDataTable } from "@/components/dashboard/data-table"
 import { DashboardPage, DashboardPageHeader } from "@/components/dashboard/page-shell"
+import { DashboardSearchFilterToolbar, DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS } from "@/components/dashboard/search-filter-toolbar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -35,7 +35,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { cn } from "@/lib/utils"
+import { formatLastSyncedAt } from "@/lib/dashboard-format"
 
 type CorsRule = {
   id?: string
@@ -113,16 +113,6 @@ function formatBytes(value: number) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat().format(value)
-}
-
-function formatSyncedAt(value: string | null | undefined) {
-  if (!value) return "Waiting for first sync"
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return "Waiting for first sync"
-  return `Last Synced At ${new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date)}`
 }
 
 function splitList(value: string) {
@@ -218,6 +208,9 @@ export default function BucketsPage() {
   const [refreshing, setRefreshing] = React.useState(false)
   const [search, setSearch] = React.useState("")
   const [selected, setSelected] = React.useState<BucketRecord | null>(null)
+  const [createOpen, setCreateOpen] = React.useState(false)
+  const [newBucketName, setNewBucketName] = React.useState("")
+  const [creatingBucket, setCreatingBucket] = React.useState(false)
   const didHydrateCacheRef = React.useRef(false)
 
   const load = React.useCallback(async (quiet = false, silent = false) => {
@@ -265,6 +258,31 @@ export default function BucketsPage() {
       return !query || bucket.name.toLowerCase().includes(query) || bucket.accountLabel.toLowerCase().includes(query)
     })
   }, [data?.buckets, search])
+
+  const createBucket = async () => {
+    const name = newBucketName.trim()
+    const accountId = data?.activeAccount?.id
+    if (!name || !accountId) return
+    setCreatingBucket(true)
+    try {
+      const response = await fetch(`/api/storage/buckets?${new URLSearchParams({ accountId })}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      })
+      const payload = await response.json() as { name?: string; error?: string; details?: string; warning?: string }
+      if (!response.ok) throw new Error(payload.details || payload.error || "Unable to create bucket")
+      setNewBucketName("")
+      setCreateOpen(false)
+      toast.success(`Bucket ${payload.name ?? name} created`)
+      if (payload.warning) toast.message(payload.warning)
+      await load(true)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to create bucket")
+    } finally {
+      setCreatingBucket(false)
+    }
+  }
 
   const bucketColumns: ColumnDef<BucketRecord, unknown>[] = [
     {
@@ -355,32 +373,23 @@ export default function BucketsPage() {
         <DashboardPageHeader
           title="Buckets"
           description={data?.activeAccount
-            ? formatSyncedAt(data.activeAccount.lastSyncedAt)
-            : "Usage and access settings for the active account"}
+            ? formatLastSyncedAt(data.activeAccount.lastSyncedAt)
+            : formatLastSyncedAt(null)}
           actions={
-            <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
-              <div className="relative h-9 min-w-0 flex-1 sm:w-[220px] sm:flex-none">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={search}
-                  onChange={(event) => {
-                    setSearch(event.target.value)
-                  }}
-                  placeholder="Search buckets..."
-                  className="h-9 w-full pl-8"
-                />
-              </div>
-              <Button
-                variant="outline"
-                size="icon"
-                className="size-9 shrink-0 rounded-full sm:w-auto sm:px-3"
-                onClick={() => void load(true)}
-                disabled={refreshing}
-              >
-                <RefreshCw data-icon="inline-start" className={cn(refreshing && "animate-spin")} />
-                <span className="sr-only sm:not-sr-only">Refresh</span>
-              </Button>
-            </div>
+            <DashboardSearchFilterToolbar
+              searchValue={search}
+              onSearchChange={setSearch}
+              searchPlaceholder="Search buckets..."
+              onRefresh={() => void load(true)}
+              refreshing={refreshing}
+              refreshLabel="Sync buckets"
+              actions={
+                <Button size="icon" className={DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS} onClick={() => setCreateOpen(true)} disabled={!data?.activeAccount?.id}>
+                  <Plus className="h-4 w-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">New Bucket</span>
+                </Button>
+              }
+            />
           }
         />
       </div>
@@ -401,6 +410,24 @@ export default function BucketsPage() {
         resetKey={search}
         className="dashboard-motion-delay-2"
       />
+
+      <Dialog open={createOpen} onOpenChange={(open) => { if (!creatingBucket) setCreateOpen(open) }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create bucket</DialogTitle>
+            <DialogDescription>Create an R2 bucket in the active Cloudflare account.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="new-bucket-name">Bucket name</Label>
+            <Input id="new-bucket-name" value={newBucketName} onChange={(event) => setNewBucketName(event.target.value)} placeholder="my-new-bucket" autoFocus />
+            <p className="text-xs text-muted-foreground">Use 3–63 lowercase letters, numbers, or hyphens.</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creatingBucket}>Cancel</Button>
+            <Button onClick={() => void createBucket()} loading={creatingBucket} disabled={!newBucketName.trim() || !data?.activeAccount?.id}>Create bucket</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <BucketSettingsDialog bucket={selected} onOpenChange={(open) => !open && setSelected(null)} onUpdated={(bucket) => {
         setData((current) => current ? { ...current, buckets: current.buckets.map((item) => item.id === bucket.id ? bucket : item), summary: {

@@ -18,6 +18,7 @@ import {
   DashboardPage,
   DashboardPageHeader,
 } from "@/components/dashboard/page-shell";
+import { formatLastSyncedAt } from "@/lib/dashboard-format";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -283,7 +284,7 @@ export default function MigrationWorkerPoolDetailsPage() {
       <div className="dashboard-motion-item">
         <DashboardPageHeader
           title="Migration worker job"
-          description={`Last synced ${formatDate(snapshot.updatedAt)}`}
+          description={formatLastSyncedAt(snapshot.updatedAt)}
           actions={
             <div className="flex w-full gap-2 sm:w-auto">
               <Button

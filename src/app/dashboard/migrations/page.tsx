@@ -7,7 +7,6 @@ import {
   Plus,
   RefreshCw,
   Play,
-  Search,
   Trash2,
   X,
 } from "lucide-react"
@@ -44,6 +43,8 @@ import {
   DashboardPageSkeleton,
 } from "@/components/dashboard/page-shell"
 import { DashboardDataTable } from "@/components/dashboard/data-table"
+import { DashboardSearchFilterToolbar, DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS } from "@/components/dashboard/search-filter-toolbar"
+import { formatLastSyncedAt } from "@/lib/dashboard-format"
 
 type Account = {
   id: string
@@ -248,6 +249,8 @@ export default function MigrationsPage() {
   const [activeItems, setActiveItems] = React.useState<MigrationItem[]>([])
   const [buckets, setBuckets] = React.useState<BucketSummary[]>([])
   const [initialLoading, setInitialLoading] = React.useState(true)
+  const [refreshing, setRefreshing] = React.useState(false)
+  const [lastSyncedAt, setLastSyncedAt] = React.useState<string | null>(null)
   const [busyAction, setBusyAction] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [search, setSearch] = React.useState("")
@@ -413,6 +416,7 @@ export default function MigrationsPage() {
   const [selectedBuckets, setSelectedBuckets] = React.useState<Record<string, boolean>>({})
 
   const loadAll = React.useCallback(async () => {
+    setRefreshing(true)
     setError(null)
     try {
       const [accountsRes, migrationsRes, bucketsRes] = await Promise.all([
@@ -434,6 +438,7 @@ export default function MigrationsPage() {
 
       setAccounts(nextAccounts)
       setMigrations(nextMigrations)
+      setLastSyncedAt(new Date().toISOString())
 
       const bucketsError =
         isRecord(bucketsJson) && typeof bucketsJson.error === "string" && bucketsJson.error.trim()
@@ -480,6 +485,7 @@ export default function MigrationsPage() {
       setError(message)
     } finally {
       setInitialLoading(false)
+      setRefreshing(false)
     }
   }, [])
 
@@ -854,29 +860,25 @@ export default function MigrationsPage() {
       <div className="dashboard-motion-item">
         <DashboardPageHeader
           title="Migrations"
+          description={formatLastSyncedAt(lastSyncedAt)}
           actions={
-            <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
-              <div className="relative h-9 min-w-0 flex-1 sm:w-[220px] sm:flex-none">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  placeholder="Search migrations..."
-                  value={search}
-                  onChange={(event) => {
-                    setSearch(event.target.value)
-                  }}
-                  className="h-9 w-full pl-8"
-                />
-              </div>
-              <Button
+            <DashboardSearchFilterToolbar
+              searchValue={search}
+              onSearchChange={setSearch}
+              searchPlaceholder="Search migrations..."
+              onRefresh={() => void loadAll()}
+              refreshing={refreshing}
+              refreshLabel="Refresh migrations"
+              actions={<Button
                 size="icon"
-                className="size-9 min-w-9 shrink-0 rounded-full border border-border/70 bg-background/85 p-0 text-foreground shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md sm:h-9 sm:w-auto sm:min-w-0 sm:px-3 sm:py-2"
+                className={DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS}
                 onClick={() => setCreateOpen(true)}
                 disabled={Boolean(busyAction) || !activeAccount || availableTargets.length === 0}
               >
                 <Plus className="h-4 w-4 sm:mr-2" />
                 <span className="sr-only sm:not-sr-only">New Migration</span>
-              </Button>
-            </div>
+              </Button>}
+            />
           }
         />
       </div>

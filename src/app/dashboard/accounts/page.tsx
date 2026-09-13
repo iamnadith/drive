@@ -9,7 +9,6 @@ import {
   Trash2,
   Eye,
   Settings,
-  Search,
   Copy,
   ClipboardPaste,
   BookOpen,
@@ -57,6 +56,7 @@ import {
   DashboardPage,
   DashboardPageHeader,
 } from "@/components/dashboard/page-shell";
+import { DashboardSearchFilterToolbar, DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS } from "@/components/dashboard/search-filter-toolbar";
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const ACCOUNTS_CACHE_KEY = "dashboard:accounts:v1";
@@ -1078,21 +1078,19 @@ export default function AccountsPage() {
           title="Accounts"
           description={accountsHeaderDescription}
           actions={
-            <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
-              <div className="relative h-9 min-w-0 flex-1 sm:w-[220px] sm:flex-none">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  placeholder="Search accounts..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className="h-9 w-full pl-8"
-                />
-              </div>
+            <DashboardSearchFilterToolbar
+              searchValue={search}
+              onSearchChange={setSearch}
+              searchPlaceholder="Search accounts..."
+              onRefresh={() => void loadAccounts({ silent: true })}
+              refreshing={accountsRefreshing}
+              refreshLabel="Sync accounts"
+              actions={
               <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
                 <DialogTrigger asChild>
                   <Button
                     size="icon"
-                    className="size-9 min-w-9 shrink-0 rounded-full border border-border/70 bg-background/85 p-0 text-foreground shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md sm:h-9 sm:w-auto sm:min-w-0 sm:px-3 sm:py-2"
+                    className={DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS}
                   >
                     <Plus className="h-4 w-4 sm:mr-2" />
                     <span className="sr-only sm:not-sr-only">Add Account</span>
@@ -1601,7 +1599,8 @@ export default function AccountsPage() {
                 </DialogFooter>
                 </DialogContent>
               </Dialog>
-            </div>
+              }
+            />
           }
         />
       </div>

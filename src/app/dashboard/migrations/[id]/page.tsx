@@ -2298,11 +2298,11 @@ export default function MigrationDetailsPage() {
 
 
       <section>
-          <div className="glass-surface overflow-hidden rounded-xl border bg-muted/20">
-            <div className="border-b bg-background/35 px-3 py-2 backdrop-blur-md">
-              <h2 className="text-sm font-semibold">Migration Logs</h2>
+          <Card className="gap-0 overflow-hidden rounded-3xl border border-border/70 p-0">
+            <div className="border-b px-4 py-3">
+              <CardTitle className="text-sm">Migration Logs</CardTitle>
             </div>
-            <ScrollArea ref={migrationLogsRef} className="max-h-[420px]" hideScrollbar>
+            <ScrollArea ref={migrationLogsRef} className="max-h-[420px] rounded-b-3xl" hideScrollbar>
                 <div className="min-w-[900px] text-xs font-mono">
                   <div className="sticky top-0 z-10 border-b bg-background/80 px-3 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/60">
                     <div
@@ -2416,7 +2416,7 @@ export default function MigrationDetailsPage() {
             {logLines.length === 0 ? (
               <div className="border-t px-4 py-8 text-center text-sm text-muted-foreground">Waiting for scanner and orchestrator lifecycle events.</div>
             ) : null}
-          </div>
+          </Card>
       </section>
 
       <Dialog open={failedOpen} onOpenChange={setFailedOpen}>

@@ -6,7 +6,7 @@ import {
 } from "@tanstack/react-table"
 import {
   MoreHorizontal,
-  UserPlus,
+  Plus,
   Shield,
   HardDrive,
 } from "lucide-react"
@@ -46,7 +46,8 @@ import {
   DashboardPageHeader,
   DashboardPageSkeleton,
 } from "@/components/dashboard/page-shell"
-import { DashboardSearchFilterToolbar, type SearchFilterOption } from "@/components/dashboard/search-filter-toolbar"
+import { DashboardSearchFilterToolbar, DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS, type SearchFilterOption } from "@/components/dashboard/search-filter-toolbar"
+import { formatLastSyncedAt } from "@/lib/dashboard-format"
 
 type UserRow = {
   id: string
@@ -66,6 +67,7 @@ const PAGE_SIZE = 10
 export default function UsersPage() {
   const [mounted, setMounted] = React.useState(false)
   const [usersLoading, setUsersLoading] = React.useState(true)
+  const [lastSyncedAt, setLastSyncedAt] = React.useState<string | null>(null)
   const [users, setUsers] = React.useState<UserRow[]>([])
   const [search, setSearch] = React.useState("")
   const [roleFilter, setRoleFilter] = React.useState<
@@ -92,7 +94,9 @@ export default function UsersPage() {
       const res = await fetch("/api/users")
       if (!res.ok) return
       const data = await res.json()
-      setUsers(data.users as UserRow[])
+      const nextUsers = Array.isArray(data.users) ? [...data.users as UserRow[]] : []
+      setUsers(nextUsers)
+      setLastSyncedAt(new Date().toISOString())
     } catch {
       // ignore for now
     } finally {
@@ -485,8 +489,8 @@ export default function UsersPage() {
       result = result.filter((u) => u.status === statusFilter)
     }
 
-    return result
-  }, [users, search, roleFilter, statusFilter])
+    return [...result].sort((a, b) => Number(b.id === currentUser?.id) - Number(a.id === currentUser?.id))
+  }, [users, search, roleFilter, statusFilter, currentUser?.id])
 
   const activeUserCount = users.filter((user) => user.status === "active").length
   const disabledUserCount = users.length - activeUserCount
@@ -922,13 +926,16 @@ export default function UsersPage() {
       <div className="dashboard-motion-item">
         <DashboardPageHeader
           title="Users"
-          description="Manage user access, roles, and storage quotas."
+          description={formatLastSyncedAt(lastSyncedAt)}
           actions={
             <DashboardSearchFilterToolbar
               searchValue={search}
               onSearchChange={setSearch}
               searchPlaceholder="Search users..."
               searchWidthClassName="sm:w-[220px]"
+              onRefresh={() => void reloadUsers()}
+              refreshing={usersLoading}
+              refreshLabel="Sync users"
               countSearch
               filters={userFilters}
               filterValues={{ role: roleFilter || "all", status: statusFilter || "all" }}
@@ -943,8 +950,8 @@ export default function UsersPage() {
               }}
               title="Filter users"
               description="Filter by account role and status."
-              actions={<Button className="shrink-0" onClick={openAddDialog}>
-                <UserPlus className="mr-2 h-4 w-4" /> Add user
+              actions={<Button size="icon" className={DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS} onClick={openAddDialog}>
+                <Plus className="h-4 w-4 sm:mr-2" /><span className="sr-only sm:not-sr-only">Add user</span>
               </Button>}
             />
           }

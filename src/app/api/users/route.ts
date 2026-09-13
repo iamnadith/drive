@@ -30,6 +30,23 @@ export async function GET(request: Request) {
         : undefined
     const users = await searchUsers(q, role)
     const publicUsers: PublicUser[] = users.map(toPublicUser)
+
+    // Keep the signed-in admin in an unfiltered listing even if the database
+    // result was truncated or temporarily omitted that account.
+    const currentUserMatchesQuery = !q?.trim() || [
+      auth.user.name,
+      auth.user.email,
+      auth.user.role,
+      auth.user.status,
+    ].some((value) => value.toLowerCase().includes(q.trim().toLowerCase()))
+    if (
+      (!role || auth.user.role === role) &&
+      currentUserMatchesQuery &&
+      !publicUsers.some((user) => user.id === auth.user.id)
+    ) {
+      publicUsers.unshift(toPublicUser(auth.user))
+    }
+
     return NextResponse.json({ users: publicUsers })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to load users")

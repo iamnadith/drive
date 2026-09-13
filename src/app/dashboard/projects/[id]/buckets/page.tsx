@@ -35,6 +35,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { DashboardPage, DashboardPageHeader } from "@/components/dashboard/page-shell"
+import { formatLastSyncedAt } from "@/lib/dashboard-format"
 import { DashboardDataTable } from "@/components/dashboard/data-table"
 import { validateProjectBucketCandidate } from "@/lib/project-bucket-name"
 
@@ -79,6 +80,7 @@ export default function ProjectBucketsPage() {
   const [availableBuckets, setAvailableBuckets] = React.useState<Bucket[]>([])
   const [projectBuckets, setProjectBuckets] = React.useState<ProjectBucket[]>([])
   const [loading, setLoading] = React.useState(true)
+  const [lastSyncedAt, setLastSyncedAt] = React.useState<string | null>(null)
   const [bucketMode, setBucketMode] = React.useState<BucketMode>("create")
   const [bucketDraftName, setBucketDraftName] = React.useState("")
   const [submitting, setSubmitting] = React.useState(false)
@@ -106,6 +108,7 @@ export default function ProjectBucketsPage() {
       if (!availableBucketsRes.ok) throw new Error(String(availableBucketsData.error ?? "Unable to load buckets"))
 
       setProject((projectData.project as Project) ?? null)
+      setLastSyncedAt(new Date().toISOString())
       const nextProjectBuckets = Array.isArray(projectBucketsData.buckets)
         ? (projectBucketsData.buckets as ProjectBucket[])
         : []
@@ -267,7 +270,7 @@ export default function ProjectBucketsPage() {
       <div className="dashboard-motion-item">
         <DashboardPageHeader
           title={project ? `${project.name} / Buckets` : "Project buckets"}
-          description={project ? `${projectBuckets.length} assigned / ${project.projectId}` : "Manage the storage assigned to this project."}
+          description={formatLastSyncedAt(lastSyncedAt)}
           actions={
             <div className="flex w-full items-center gap-2 sm:w-auto sm:justify-end">
               <Button variant="outline" size="icon" className="size-9 rounded-full" asChild>

@@ -8,7 +8,6 @@ import {
   MoreHorizontal,
   Plus,
   RefreshCw,
-  Search,
   Settings2,
   Trash2,
 } from "lucide-react"
@@ -49,6 +48,8 @@ import {
   DashboardPage,
   DashboardPageHeader,
 } from "@/components/dashboard/page-shell"
+import { DashboardSearchFilterToolbar, DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS } from "@/components/dashboard/search-filter-toolbar"
+import { formatLastSyncedAt } from "@/lib/dashboard-format"
 
 type Project = {
   id: string
@@ -111,6 +112,7 @@ function readProjectOrigins(data: Record<string, unknown>) {
 export default function ProjectsPage() {
   const [projects, setProjects] = React.useState<Project[]>([])
   const [loading, setLoading] = React.useState(false)
+  const [lastSyncedAt, setLastSyncedAt] = React.useState<string | null>(null)
   const [search, setSearch] = React.useState("")
 
   const [createOpen, setCreateOpen] = React.useState(false)
@@ -139,6 +141,7 @@ export default function ProjectsPage() {
       const data = await readJson(res)
       if (!res.ok) throw new Error(String(data.error ?? "Unable to load projects"))
       setProjects(Array.isArray(data.projects) ? (data.projects as Project[]) : [])
+      setLastSyncedAt(new Date().toISOString())
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to load projects")
     } finally {
@@ -404,38 +407,20 @@ export default function ProjectsPage() {
       <div className="dashboard-motion-item">
         <DashboardPageHeader
           title="Projects"
-          description={`${projects.length} project${projects.length === 1 ? "" : "s"} connected to the active account.`}
+          description={formatLastSyncedAt(lastSyncedAt)}
           actions={
-            <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
-              <div className="relative h-9 min-w-0 flex-1 sm:w-[220px] sm:flex-none">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search projects..."
-                  aria-label="Search projects"
-                  className="h-9 w-full pl-8"
-                />
-              </div>
-              <Button
-                variant="outline"
-                size="icon"
-                className="size-9 shrink-0 rounded-full"
-                loading={loading}
-                onClick={() => void loadProjects()}
-                aria-label="Refresh projects"
-              >
-                <RefreshCw />
-              </Button>
-              <Button
-                size="icon"
-                className="size-9 min-w-9 shrink-0 rounded-full sm:h-9 sm:w-auto sm:min-w-0 sm:px-3"
-                onClick={openCreateDialog}
-              >
-                <Plus data-icon="inline-start" />
+            <DashboardSearchFilterToolbar
+              searchValue={search}
+              onSearchChange={setSearch}
+              searchPlaceholder="Search projects..."
+              onRefresh={() => void loadProjects()}
+              refreshing={loading}
+              refreshLabel="Sync projects"
+              actions={<Button size="icon" className={DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS} onClick={openCreateDialog}>
+                <Plus className="h-4 w-4 sm:mr-2" />
                 <span className="sr-only sm:not-sr-only">New project</span>
-              </Button>
-            </div>
+              </Button>}
+            />
           }
         />
       </div>

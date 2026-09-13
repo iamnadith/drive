@@ -25,6 +25,7 @@ import {
   DashboardPageSkeleton,
 } from "@/components/dashboard/page-shell"
 import { DashboardSearchFilterToolbar, type SearchFilterOption } from "@/components/dashboard/search-filter-toolbar"
+import { formatLastSyncedAt } from "@/lib/dashboard-format"
 
 const ALL = "__all__"
 
@@ -348,18 +349,16 @@ export default function ApiUsagePage() {
       <div className="dashboard-motion-item">
       <DashboardPageHeader
         title="API Usage"
-        description={
-          <>
-            Track public project API calls, keys, projects, errors, and rate
-            limits. Last refreshed {formatRelative(data?.generatedAt)}.
-          </>
-        }
+        description={formatLastSyncedAt(data?.generatedAt)}
         actions={
           <DashboardSearchFilterToolbar
             searchValue={filters.projectId}
             searchPlaceholder="Search project ID..."
             countSearch
             searchWidthClassName="sm:w-[220px]"
+            onRefresh={() => void loadUsage(true)}
+            refreshing={refreshing}
+            refreshLabel="Sync API usage"
             onSearchChange={(value) => updateFilter("projectId", value)}
             filters={usageFilters}
             filterValues={{
@@ -382,17 +381,6 @@ export default function ApiUsagePage() {
             }}
             title="Filter API usage"
             description="Narrow API activity by project, action, result, or date range."
-            actions={
-              <Button
-                variant="outline"
-                className="h-10 shrink-0 rounded-full"
-                loading={refreshing}
-                onClick={() => void loadUsage(true)}
-                disabled={refreshing}
-              >
-                Refresh
-              </Button>
-            }
           />
         }
       />

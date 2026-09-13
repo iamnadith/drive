@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { DashboardPage, DashboardPageHeader } from "@/components/dashboard/page-shell"
+import { formatLastSyncedAt } from "@/lib/dashboard-format"
 import { DashboardDataTable } from "@/components/dashboard/data-table"
 
 const PERMISSION_KEYS = [
@@ -172,6 +173,7 @@ export default function ProjectKeysPage() {
   const [project, setProject] = React.useState<Project | null>(null)
   const [keys, setKeys] = React.useState<ApiKey[]>([])
   const [loading, setLoading] = React.useState(true)
+  const [lastSyncedAt, setLastSyncedAt] = React.useState<string | null>(null)
   const [createKeyOpen, setCreateKeyOpen] = React.useState(false)
   const [keyName, setKeyName] = React.useState("")
   const [keyPreset, setKeyPreset] = React.useState("Read only")
@@ -198,6 +200,7 @@ export default function ProjectKeysPage() {
       if (!keysRes.ok) throw new Error(String(keysData.error ?? "Unable to load API keys"))
 
       setProject((projectData.project as Project) ?? null)
+      setLastSyncedAt(new Date().toISOString())
       setKeys(Array.isArray(keysData.keys) ? (keysData.keys as ApiKey[]) : [])
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to load project access")
@@ -351,7 +354,7 @@ export default function ProjectKeysPage() {
       <div className="dashboard-motion-item">
         <DashboardPageHeader
           title={project ? `${project.name} / API keys` : "Project API keys"}
-          description={project ? `${keys.length} issued / ${project.projectId}` : "Manage scoped credentials for this project."}
+          description={formatLastSyncedAt(lastSyncedAt)}
           actions={
             <div className="flex w-full items-center gap-2 sm:w-auto sm:flex-wrap sm:justify-end">
               <Button variant="outline" size="icon" className="size-9 rounded-full" asChild>

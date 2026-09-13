@@ -7,7 +7,6 @@ import {
   AlertTriangle,
   ChevronLeft,
   ChevronRight,
-  RefreshCw,
   RotateCcw,
   X,
 } from "lucide-react"
@@ -27,13 +26,13 @@ import {
 } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Spinner } from "@/components/ui/spinner"
 import { DashboardActivitySkeleton } from "@/components/dashboard/loading-skeletons"
 import {
   DashboardPage,
   DashboardPageHeader,
 } from "@/components/dashboard/page-shell"
 import { DashboardSearchFilterToolbar, type SearchFilterOption } from "@/components/dashboard/search-filter-toolbar"
+import { formatLastSyncedAt } from "@/lib/dashboard-format"
 import { useDashboardResource } from "@/hooks/use-dashboard-resource"
 
 type ActivityEvent = {
@@ -397,17 +396,15 @@ export default function ActivityPage() {
       <DashboardPageHeader
         className="dashboard-motion-item"
         title="Activity"
-        description={
-          <>
-            Recent user and system activity. Last refreshed{" "}
-            {formatRelative(data?.generatedAt)}.
-          </>
-        }
+        description={formatLastSyncedAt(data?.generatedAt)}
         actions={
           <DashboardSearchFilterToolbar
             searchValue={filters.q}
             onSearchChange={(value) => updateFilter("q", value)}
             searchPlaceholder="Search"
+            onRefresh={() => void refresh({ background: true, force: true })}
+            refreshing={refreshing}
+            refreshLabel="Sync activity"
             countSearch
             filters={activityFilters}
             filterValues={{
@@ -431,18 +428,6 @@ export default function ActivityPage() {
             onClear={resetFilters}
             title="Activity filters"
             description="Narrow activity by action, entity, status, undo state, date, and page size."
-            actions={
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={() => void refresh({ background: true, force: true })}
-              disabled={refreshing}
-              aria-busy={refreshing || undefined}
-              className="h-10 min-h-10 w-10 min-w-10 shrink-0 aspect-square rounded-full [border-radius:9999px] p-0 border border-border/70 bg-background/85 shadow-sm ring-1 ring-inset ring-white/15 backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:border-border hover:bg-muted/55 hover:shadow-md"
-            >
-              {refreshing ? <Spinner className="size-4" /> : <RefreshCw className="h-4 w-4" />}
-            </Button>
-            }
           />
         }
       />
