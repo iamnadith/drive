@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import type { ColumnDef } from "@tanstack/react-table"
 import Link from "next/link"
 import { useParams } from "next/navigation"
 import { ArrowLeft, FolderPlus, KeyRound, MoreHorizontal, RefreshCw, Star, Trash2 } from "lucide-react"
@@ -8,9 +9,6 @@ import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-} from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
@@ -36,16 +34,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Skeleton } from "@/components/ui/skeleton"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
 import { DashboardPage, DashboardPageHeader } from "@/components/dashboard/page-shell"
+import { DashboardDataTable } from "@/components/dashboard/data-table"
 import { validateProjectBucketCandidate } from "@/lib/project-bucket-name"
 
 type Project = {
@@ -218,6 +208,60 @@ export default function ProjectBucketsPage() {
     }
   }
 
+  const bucketColumns: ColumnDef<ProjectBucket, unknown>[] = [
+    {
+      accessorKey: "bucketName",
+      header: "Bucket",
+      meta: { width: "min-w-[280px]" },
+      cell: ({ row }) => (
+        <div className="min-w-0">
+          <div className="truncate font-mono text-sm">{row.original.bucketName}</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {row.original.projectCount > 1 ? `Shared across ${row.original.projectCount} projects` : "Used only by this project"}
+          </div>
+        </div>
+      ),
+    },
+    {
+      id: "role",
+      header: "Role",
+      meta: { width: "min-w-[130px]", align: "center" },
+      cell: ({ row }) => <Badge variant={row.original.isPrimary ? "default" : "secondary"}>{row.original.isPrimary ? "Primary" : "Secondary"}</Badge>,
+    },
+    {
+      accessorKey: "createdAt",
+      header: "Assigned",
+      meta: { width: "min-w-[200px]" },
+      cell: ({ row }) => <span className="text-xs text-muted-foreground">{formatDate(row.original.createdAt)}</span>,
+    },
+    {
+      id: "actions",
+      header: "Actions",
+      meta: { width: "min-w-[190px]", align: "right", divider: false },
+      cell: ({ row }) => {
+        const bucket = row.original
+        return (
+          <div className="flex items-center justify-end gap-1">
+            <Button variant="ghost" size="sm" className="rounded-full" asChild>
+              <Link href={`/dashboard/storage?bucket=${encodeURIComponent(bucket.bucketName)}`}>Open storage</Link>
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon-sm" className="rounded-full" aria-label={`Actions for ${bucket.bucketName}`}><MoreHorizontal /></Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuGroup>
+                  {!bucket.isPrimary ? <DropdownMenuItem onClick={() => void setPrimaryBucket(bucket.bucketName)} disabled={actingBucketName === bucket.bucketName}><Star /> Set as primary</DropdownMenuItem> : null}
+                  <DropdownMenuItem variant="destructive" onClick={() => void unlinkBucket(bucket.bucketName)} disabled={actingBucketName === bucket.bucketName}><Trash2 /> Remove from project</DropdownMenuItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        )
+      },
+    },
+  ]
+
   return (
     <DashboardPage className="dashboard-motion-stage">
       <div className="dashboard-motion-item">
@@ -257,64 +301,16 @@ export default function ProjectBucketsPage() {
         </DashboardPageHeader>
       </div>
 
-      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
-        <Table className="min-w-[760px] w-full" containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full">
-          <TableHeader>
-            <TableRow className="h-9 border-b">
-              <TableHead className="relative min-w-[280px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Bucket<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
-              <TableHead className="relative min-w-[130px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Role<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
-              <TableHead className="relative min-w-[200px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Assigned<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
-              <TableHead className="min-w-[160px] px-2.5 text-right text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {loading && projectBuckets.length === 0 ? (
-              Array.from({ length: 5 }).map((_, index) => <TableRow key={index} className="h-[64px]"><TableCell colSpan={4}><Skeleton className="h-10 w-full rounded-xl" /></TableCell></TableRow>)
-            ) : projectBuckets.length ? (
-              projectBuckets.map((bucket) => (
-                <TableRow key={bucket.bucketName} className="h-[64px] border-b last:border-b-0 hover:bg-muted/30">
-                  <TableCell className="relative px-2.5 py-2 font-mono text-sm">
-                    <span className="block max-w-[320px] truncate">{bucket.bucketName}</span>
-                    <span className="mt-1 block font-sans text-xs text-muted-foreground">{bucket.projectCount > 1 ? `Shared across ${bucket.projectCount} projects` : "Used only by this project"}</span>
-                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
-                  </TableCell>
-                  <TableCell className="relative px-2.5 py-2">
-                    <Badge variant={bucket.isPrimary ? "default" : "secondary"}>{bucket.isPrimary ? "Primary" : "Secondary"}</Badge>
-                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
-                  </TableCell>
-                  <TableCell className="relative px-2.5 py-2 text-xs text-muted-foreground">
-                    {formatDate(bucket.createdAt)}
-                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
-                  </TableCell>
-                  <TableCell className="px-2.5 py-2">
-                    <div className="flex items-center justify-end gap-1">
-                      <Button variant="ghost" size="sm" className="rounded-full" asChild>
-                        <Link href={`/dashboard/storage?bucket=${encodeURIComponent(bucket.bucketName)}`}>Open storage</Link>
-                      </Button>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon-sm" className="rounded-full" aria-label={`Actions for ${bucket.bucketName}`}><MoreHorizontal /></Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuGroup>
-                            {!bucket.isPrimary ? <DropdownMenuItem onClick={() => void setPrimaryBucket(bucket.bucketName)} disabled={actingBucketName === bucket.bucketName}><Star /> Set as primary</DropdownMenuItem> : null}
-                            <DropdownMenuItem variant="destructive" onClick={() => void unlinkBucket(bucket.bucketName)} disabled={actingBucketName === bucket.bucketName}><Trash2 /> Remove from project</DropdownMenuItem>
-                          </DropdownMenuGroup>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))
-            ) : (
-              <TableRow><TableCell colSpan={4} className="h-28 text-center text-muted-foreground">No buckets are assigned to this project.</TableCell></TableRow>
-            )}
-          </TableBody>
-        </Table>
-        <div className="border-t px-3 py-2 text-center text-xs text-muted-foreground">
-          {project?.bucketName ? <>Primary bucket: <span className="font-mono text-foreground">{project.bucketName}</span></> : "Choose Add bucket to connect storage."}
-        </div>
-      </Card>
+      <DashboardDataTable
+        data={projectBuckets}
+        columns={bucketColumns}
+        minWidth="780px"
+        pageSize={10}
+        loading={loading && projectBuckets.length === 0}
+        emptyState="No buckets are assigned to this project."
+        className="dashboard-motion-delay-2"
+        footer={project?.bucketName ? <>Primary bucket: <span className="font-mono text-foreground">{project.bucketName}</span></> : "Choose Add bucket to connect storage."}
+      />
 
       <Dialog open={addBucketOpen} onOpenChange={setAddBucketOpen}>
         <DialogContent className="rounded-2xl sm:max-w-md">

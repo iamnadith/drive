@@ -17,6 +17,7 @@ import { type ColumnDef } from "@tanstack/react-table"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
@@ -161,6 +162,10 @@ export default function ProjectsPage() {
       )
     })
   }, [projects, search])
+
+  const activeProjectCount = projects.filter((project) => project.status === "active").length
+  const disabledProjectCount = projects.length - activeProjectCount
+  const projectsWithBuckets = projects.filter((project) => Boolean(project.bucketName)).length
 
 
   const openCreateDialog = () => {
@@ -433,6 +438,37 @@ export default function ProjectsPage() {
             </div>
           }
         />
+      </div>
+
+      <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-4">
+        <Card className="gap-0 py-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+            <CardDescription className="text-[13px] leading-4">Total Projects</CardDescription>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{projects.length}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Connected to this account</p></CardContent>
+        </Card>
+        <Card className="gap-0 py-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+            <CardDescription className="text-[13px] leading-4">Active</CardDescription>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{activeProjectCount}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Available to use</p></CardContent>
+        </Card>
+        <Card className="gap-0 py-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+            <CardDescription className="text-[13px] leading-4">Disabled</CardDescription>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{disabledProjectCount}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Inactive projects</p></CardContent>
+        </Card>
+        <Card className="gap-0 py-0">
+          <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+            <CardDescription className="text-[13px] leading-4">Buckets Assigned</CardDescription>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{projectsWithBuckets}</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Projects with a primary bucket</p></CardContent>
+        </Card>
       </div>
 
       <DashboardDataTable

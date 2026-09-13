@@ -1741,17 +1741,6 @@ export default function MigrationDetailsPage() {
   const historyReadOnly = getMigrationReadOnlyState(migration)
   const missingHistoricalDetails = historyReadOnly.readOnly && items.length === 0 && repairJobs.length === 0
 
-  const activeIcon =
-    overviewBadgeStatus === "completed" ? (
-      <CheckCircle2 className="h-4 w-4 text-green-600" />
-    ) : overviewBadgeStatus === "running" || overviewBadgeStatus === "scanning" || overviewBadgeStatus === "verifying" ? (
-      <Clock className="h-4 w-4 text-primary" />
-    ) : overviewBadgeStatus === "failed" ? (
-      <AlertCircle className="h-4 w-4 text-red-600" />
-    ) : (
-      <Clock className="h-4 w-4 text-muted-foreground" />
-    )
-
   const sourceLabel = accountLabelById.get(migration.sourceAccountId) ?? migration.sourceAccountId
   const targetLabel = accountLabelById.get(migration.targetAccountId) ?? migration.targetAccountId
 
@@ -1902,23 +1891,6 @@ export default function MigrationDetailsPage() {
 
   return (
     <div className="space-y-6 max-w-full">
-      <div className="flex items-center justify-between gap-3">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold flex items-center gap-2">
-            {activeIcon}
-            <span className="truncate">Migration details</span>
-            {historyReadOnly.readOnly ? <Badge variant="outline">Read only</Badge> : null}
-          </h1>
-          <p className="text-sm text-muted-foreground font-mono truncate">{migration.id}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="destructive" onClick={() => setDeleteOpen(true)} disabled={Boolean(busyAction)}>
-            <Trash2 className="h-4 w-4 mr-0" />
-            Delete
-          </Button>
-        </div>
-      </div>
-
       {error ? (
         <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">{error}</div>
       ) : null}
@@ -3210,6 +3182,13 @@ export default function MigrationDetailsPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      <div className="flex justify-end border-t pt-4">
+        <Button variant="destructive" onClick={() => setDeleteOpen(true)} disabled={Boolean(busyAction)}>
+          <Trash2 className="h-4 w-4 mr-0" />
+          Delete migration
+        </Button>
+      </div>
 
       <AlertDialog open={manualCompleteOpen} onOpenChange={setManualCompleteOpen}>
         <AlertDialogContent>

@@ -3,19 +3,13 @@
 import * as React from "react"
 import {
   ColumnDef,
-  flexRender,
-  getCoreRowModel,
-  useReactTable,
 } from "@tanstack/react-table"
 import {
   MoreHorizontal,
   UserPlus,
   Shield,
   Search,
-  Ban,
   HardDrive,
-  ChevronLeft,
-  ChevronRight,
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -24,25 +18,15 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
-  CardTitle,
 } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -57,7 +41,14 @@ import {
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { useAuth } from "@/components/auth-provider"
-import { DashboardTableSkeleton } from "@/components/dashboard/loading-skeletons"
+import { DashboardDataTable } from "@/components/dashboard/data-table"
+import {
+  DashboardFilterGrid,
+  DashboardPage,
+  DashboardPageHeader,
+  DashboardPageSkeleton,
+} from "@/components/dashboard/page-shell"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
 type UserRow = {
   id: string
@@ -87,7 +78,6 @@ export default function UsersPage() {
   >("")
   const [isDialogOpen, setIsDialogOpen] = React.useState(false)
   const [isQuotaOnly, setIsQuotaOnly] = React.useState(false)
-  const [page, setPage] = React.useState(0)
   const { user: currentUser } = useAuth()
 
   const activeSuperAdminCount = React.useMemo(
@@ -500,28 +490,9 @@ export default function UsersPage() {
     return result
   }, [users, search, roleFilter, statusFilter])
 
-    React.useEffect(() => {
-      setPage(0)
-    }, [search, roleFilter, statusFilter])
-
-  const totalPages = React.useMemo(() => {
-    if (filteredUsers.length === 0) {
-      return 1
-    }
-    return Math.ceil(filteredUsers.length / PAGE_SIZE)
-  }, [filteredUsers.length])
-
-  React.useEffect(() => {
-    const lastPageIndex = Math.max(0, totalPages - 1)
-    if (page > lastPageIndex) {
-      setPage(lastPageIndex)
-    }
-  }, [page, totalPages])
-
-  const pageSlice = React.useMemo(() => {
-    const start = page * PAGE_SIZE
-    return filteredUsers.slice(start, start + PAGE_SIZE)
-  }, [filteredUsers, page])
+  const activeUserCount = users.filter((user) => user.status === "active").length
+  const disabledUserCount = users.length - activeUserCount
+  const privilegedUserCount = users.filter((user) => user.role === "admin" || user.role === "superadmin").length
 
   const columns: ColumnDef<UserRow>[] = [
     {
@@ -793,12 +764,6 @@ export default function UsersPage() {
     },
   ]
 
-  const table = useReactTable({
-    data: pageSlice,
-    columns,
-    getCoreRowModel: getCoreRowModel(),
-  })
-
   const handleSaveUser = async () => {
     try {
       const trimmedUsername = formState.username.trim()
@@ -866,8 +831,6 @@ export default function UsersPage() {
             formState.id && users.find((u) => u.id === formState.id)
           const isPromotion =
             !!existing && existing.role !== "superadmin" && formState.id
-          const isNewSuperAdmin = !formState.id
-
           const message = isPromotion
             ? `WARNING: You are about to promote "${fullName}" to Super Admin. Super Admins have full control over all users and storage. Continue?`
             : `WARNING: You are about to create a new Super Admin account. Super Admins have full control over all users and storage. Continue?`
@@ -935,191 +898,91 @@ export default function UsersPage() {
   }
 
   if (!mounted || (usersLoading && users.length === 0)) {
-    return <DashboardTableSkeleton actions={1} columns={5} filters={3} rows={10} titleWidth="w-28" />
+    return <DashboardPageSkeleton rows={7} />
   }
 
   return (
-    <div className="flex flex-1 flex-col gap-4 pt-0">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight">Users</h2>
-          <p className="text-sm text-muted-foreground">
-            Manage user access and storage quotas.
-          </p>
-        </div>
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-2 top-2 h-4 w-4 text-muted-foreground" />
-              <Input
-                className="w-[220px] pl-8"
-                placeholder="Search users..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
+    <DashboardPage className="dashboard-motion-stage">
+      <div className="dashboard-motion-item">
+        <DashboardPageHeader
+          title="Users"
+          description="Manage user access, roles, and storage quotas."
+          actions={
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+              <div className="relative min-w-0 sm:w-[220px]">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input className="h-9 w-full pl-8" placeholder="Search users..." value={search} onChange={(event) => setSearch(event.target.value)} />
+              </div>
+              <Button className="w-full sm:w-auto" onClick={openAddDialog}>
+                <UserPlus className="mr-2 h-4 w-4" /> Add user
+              </Button>
             </div>
-            <select
-              className="h-9 rounded-md border bg-background px-2 text-sm"
-              value={roleFilter}
-              onChange={(e) =>
-                setRoleFilter(
-                  e.target.value as "" | "superadmin" | "admin" | "user"
-                )
-              }
-            >
-              <option value="">All roles</option>
-              <option value="superadmin">Super Admin</option>
-              <option value="admin">Admin</option>
-              <option value="user">User</option>
-            </select>
-            <select
-              className="h-9 rounded-md border bg-background px-2 text-sm"
-              value={statusFilter}
-              onChange={(e) =>
-                setStatusFilter(
-                  e.target.value as "" | "active" | "disabled"
-                )
-              }
-            >
-              <option value="">All statuses</option>
-              <option value="active">Active</option>
-              <option value="disabled">Disabled</option>
-            </select>
-          </div>
-          <Button onClick={openAddDialog}>
-            <UserPlus className="mr-2 h-4 w-4" /> Add user
-          </Button>
-        </div>
+          }
+        />
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Team Members</CardTitle>
-          <CardDescription>
-            Users with access to this organization.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="rounded-md border">
-            <Table className="table-fixed">
-              <TableHeader>
-                {table.getHeaderGroups().map((headerGroup) => (
-                  <TableRow key={headerGroup.id}>
-                    {headerGroup.headers.map((header) => (
-                      <TableHead
-                        key={header.id}
-                        className={
-                          header.column.id === "name"
-                            ? "w-[260px]"
-                            : header.column.id === "role"
-                            ? "w-[120px] text-center"
-                            : header.column.id === "status"
-                            ? "w-[120px] text-center"
-                            : header.column.id === "quotaLimitMb"
-                            ? "w-[260px] pl-6 text-center"
-                            : header.column.id === "actions"
-                            ? "w-[160px]"
-                            : ""
-                        }
-                      >
-                        {header.isPlaceholder
-                          ? null
-                          : flexRender(
-                              header.column.columnDef.header,
-                              header.getContext()
-                            )}
-                      </TableHead>
-                    ))}
-                  </TableRow>
-                ))}
-              </TableHeader>
-              <TableBody>
-                {table.getRowModel().rows?.length ? (
-                  table.getRowModel().rows.map((row) => (
-                    <TableRow
-                      key={row.id}
-                      data-state={row.getIsSelected() && "selected"}
-                    >
-                      {row.getVisibleCells().map((cell) => (
-                        <TableCell
-                          key={cell.id}
-                          className={
-                            cell.column.id === "name"
-                              ? "w-[260px]"
-                              : cell.column.id === "role"
-                              ? "w-[120px] text-center"
-                              : cell.column.id === "status"
-                              ? "w-[120px] text-center"
-                              : cell.column.id === "quotaLimitMb"
-                              ? "w-[260px] pl-6 text-center"
-                              : cell.column.id === "actions"
-                              ? "w-[160px] text-right"
-                              : ""
-                          }
-                        >
-                          {flexRender(
-                            cell.column.columnDef.cell,
-                            cell.getContext()
-                          )}
-                        </TableCell>
-                      ))}
-                    </TableRow>
-                  ))
-                ) : (
-                  <TableRow>
-                    <TableCell
-                      colSpan={columns.length}
-                      className="h-24 text-center"
-                    >
-                      No results.
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
+      <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-4">
+        {[
+          { title: "Total Users", value: users.length, detail: "Accounts in this organization" },
+          { title: "Active", value: activeUserCount, detail: "Enabled accounts" },
+          { title: "Administrators", value: privilegedUserCount, detail: "Admins and super admins" },
+          { title: "Disabled", value: disabledUserCount, detail: "Access currently disabled" },
+        ].map(({ title, value, detail }) => (
+          <Card key={title} className="gap-0 py-0">
+            <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
+              <CardDescription className="text-[13px] leading-4">{title}</CardDescription>
+            </CardHeader>
+            <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3">
+              <div className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{value}</div>
+              <p className="mt-2 text-[11px] leading-4 text-muted-foreground">{detail}</p>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      <div className="dashboard-motion-item dashboard-motion-delay-2">
+        <DashboardFilterGrid className="sm:grid-cols-2 xl:grid-cols-[1fr_220px_220px]">
+          <div className="text-sm font-medium text-muted-foreground sm:col-span-2 xl:col-span-1">
+            Showing {filteredUsers.length} of {users.length} users
           </div>
-          <div className="flex flex-col gap-2 pt-4 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-sm text-muted-foreground">
-              {filteredUsers.length === 0
-                ? "No users found"
-                : `Showing ${page * PAGE_SIZE + 1}-${Math.min(
-                    filteredUsers.length,
-                    (page + 1) * PAGE_SIZE
-                  )} of ${filteredUsers.length} users`}
+          <Select value={roleFilter || "all"} onValueChange={(value) => setRoleFilter(value === "all" ? "" : value as typeof roleFilter)}>
+            <SelectTrigger aria-label="Filter users by role"><SelectValue placeholder="All roles" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All roles</SelectItem>
+              <SelectItem value="superadmin">Super Admin</SelectItem>
+              <SelectItem value="admin">Admin</SelectItem>
+              <SelectItem value="user">User</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={statusFilter || "all"} onValueChange={(value) => setStatusFilter(value === "all" ? "" : value as typeof statusFilter)}>
+            <SelectTrigger aria-label="Filter users by status"><SelectValue placeholder="All statuses" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All statuses</SelectItem>
+              <SelectItem value="active">Active</SelectItem>
+              <SelectItem value="disabled">Disabled</SelectItem>
+            </SelectContent>
+          </Select>
+        </DashboardFilterGrid>
+      </div>
+
+      <div className="dashboard-motion-item dashboard-motion-delay-3">
+      <DashboardDataTable
+        data={filteredUsers}
+        columns={columns}
+        pageSize={PAGE_SIZE}
+        minWidth="920px"
+        resetKey={`${search}:${roleFilter}:${statusFilter}`}
+        emptyState="No users found."
+        header={
+          <div>
+            <h2 className="text-sm font-semibold">Team Members</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Users with access to this organization.
             </p>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPage((prev) => Math.max(0, prev - 1))}
-                disabled={page === 0 || filteredUsers.length === 0}
-              >
-                <ChevronLeft className="mr-1 h-4 w-4" />
-                Previous
-              </Button>
-              <span className="text-sm font-medium">
-                Page {filteredUsers.length === 0 ? 0 : page + 1} of{" "}
-                {totalPages}
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  setPage((prev) =>
-                    Math.min(totalPages - 1, prev + 1)
-                  )
-                }
-                disabled={
-                  filteredUsers.length === 0 || page >= totalPages - 1
-                }
-              >
-                Next
-                <ChevronRight className="ml-1 h-4 w-4" />
-              </Button>
-            </div>
           </div>
-        </CardContent>
-      </Card>
+        }
+      />
+      </div>
 
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="max-h-[90vh] overflow-y-auto">
@@ -1627,6 +1490,6 @@ export default function UsersPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </DashboardPage>
   )
 }

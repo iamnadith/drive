@@ -1,10 +1,9 @@
 "use client"
 
 import * as React from "react"
+import type { ColumnDef } from "@tanstack/react-table"
 import {
   Check,
-  ChevronLeft,
-  ChevronRight,
   Copy,
   Database,
   Globe2,
@@ -18,6 +17,7 @@ import {
 import { toast } from "sonner"
 
 import { BucketsPageSkeleton } from "@/components/dashboard/loading-skeletons"
+import { DashboardDataTable } from "@/components/dashboard/data-table"
 import { DashboardPage, DashboardPageHeader } from "@/components/dashboard/page-shell"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -34,7 +34,6 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
@@ -92,7 +91,6 @@ type ApiResponse = {
 
 const HTTP_METHODS = ["GET", "HEAD", "PUT", "POST", "DELETE"]
 const BUCKETS_CACHE_KEY = "dashboard:buckets:v1"
-const BUCKETS_PAGE_SIZE = 10
 const WILDCARD_RULE: CorsRule = {
   allowedOrigins: ["*"],
   allowedMethods: ["GET", "HEAD", "PUT", "POST"],
@@ -220,7 +218,6 @@ export default function BucketsPage() {
   const [refreshing, setRefreshing] = React.useState(false)
   const [search, setSearch] = React.useState("")
   const [selected, setSelected] = React.useState<BucketRecord | null>(null)
-  const [pageIndex, setPageIndex] = React.useState(0)
   const didHydrateCacheRef = React.useRef(false)
 
   const load = React.useCallback(async (quiet = false, silent = false) => {
@@ -269,19 +266,95 @@ export default function BucketsPage() {
     })
   }, [data?.buckets, search])
 
-  const totalRows = buckets.length
-  const totalPages = Math.max(1, Math.ceil(totalRows / BUCKETS_PAGE_SIZE))
-  const currentPageIndex = Math.min(pageIndex, totalPages - 1)
-  const paginatedBuckets = buckets.slice(
-    currentPageIndex * BUCKETS_PAGE_SIZE,
-    currentPageIndex * BUCKETS_PAGE_SIZE + BUCKETS_PAGE_SIZE,
-  )
-  const mobilePageCount = Math.min(totalPages, 3)
-  const desktopPageCount = Math.min(totalPages, 5)
-  const mobileStart = Math.max(0, Math.min(currentPageIndex - 1, totalPages - mobilePageCount))
-  const desktopStart = Math.max(0, Math.min(currentPageIndex - 2, totalPages - desktopPageCount))
-  const mobilePages = Array.from({ length: mobilePageCount }, (_, index) => mobileStart + index)
-  const desktopPages = Array.from({ length: desktopPageCount }, (_, index) => desktopStart + index)
+  const bucketColumns: ColumnDef<BucketRecord, unknown>[] = [
+    {
+      accessorKey: "name",
+      header: "Bucket",
+      meta: { width: "min-w-[240px]" },
+      cell: ({ row }) => (
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border bg-background">
+            <Database className="size-3 text-muted-foreground" />
+          </span>
+          <div className="min-w-0">
+            <div className="truncate text-[13px] font-medium leading-4">{row.original.name}</div>
+            <div className="truncate font-mono text-[10px] leading-4 text-muted-foreground">{row.original.jurisdiction} / {row.original.storageClass}</div>
+          </div>
+        </div>
+      ),
+    },
+    {
+      accessorKey: "accountLabel",
+      header: "Account",
+      meta: { width: "min-w-[160px]", align: "center" },
+      cell: ({ row }) => (
+        <div className="flex flex-col items-center gap-1 text-center">
+          <span className="max-w-[145px] truncate text-[11px] leading-4 text-muted-foreground">{row.original.accountLabel}</span>
+          <Badge variant={row.original.accountStatus === "active" ? "default" : row.original.accountStatus === "available" ? "outline" : "secondary"} className="capitalize">{row.original.accountStatus}</Badge>
+        </div>
+      ),
+    },
+    {
+      id: "usage",
+      header: "Usage",
+      meta: { width: "min-w-[150px]", align: "center" },
+      cell: ({ row }) => (
+        <div className="flex flex-col items-center gap-0.5 text-center">
+          <div className="text-[13px] font-medium leading-4">{formatBytes(row.original.bytes)}</div>
+          <div className="text-[10px] leading-4 text-muted-foreground">{formatNumber(row.original.objects)} objects</div>
+        </div>
+      ),
+    },
+    {
+      id: "publicUrl",
+      header: "Public URL",
+      meta: { width: "min-w-[125px]", align: "center" },
+      cell: ({ row }) => {
+        const bucket = row.original
+        return bucket.settings
+          ? <Badge variant={bucket.settings.publicAccess.enabled ? "default" : bucket.settingsStatus === "error" ? "destructive" : "secondary"}>{bucket.settingsStatus === "error" ? "Stale" : bucket.settings.publicAccess.enabled ? "Enabled" : "Disabled"}</Badge>
+          : <Badge variant="outline">Pending sync</Badge>
+      },
+    },
+    {
+      id: "driveDelivery",
+      header: "Drive Delivery",
+      meta: { width: "min-w-[145px]", align: "center" },
+      cell: ({ row }) => {
+        const delivery = row.original.deliverySettings
+        return delivery
+          ? <Badge variant={delivery.deliveryPublicAccessEnabled ? "default" : "secondary"}>{delivery.deliveryPublicAccessEnabled ? "Enabled" : "API required"}</Badge>
+          : <Badge variant="outline">Unavailable</Badge>
+      },
+    },
+    {
+      id: "cors",
+      header: "CORS",
+      meta: { width: "min-w-[110px]", align: "center" },
+      cell: ({ row }) => {
+        const bucket = row.original
+        return bucket.settings
+          ? <Badge variant={bucket.settingsStatus === "error" ? "destructive" : bucket.settings.corsRules.length > 0 ? "outline" : "secondary"}>{bucket.settingsStatus === "error" ? "Stale" : bucket.settings.corsRules.length > 0 ? "Configured" : "Not set"}</Badge>
+          : <span className="text-muted-foreground">Pending</span>
+      },
+    },
+    {
+      id: "actions",
+      header: "Actions",
+      meta: { width: "min-w-[90px]", align: "center", divider: false },
+      cell: ({ row }) => (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="outline" size="icon-sm" className="rounded-full" onClick={() => setSelected(row.original)} aria-label={`Manage ${row.original.name}`}>
+              <Settings2 />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Manage settings</TooltipContent>
+        </Tooltip>
+      ),
+    },
+  ]
+
 
   if (loading && !data) {
     return <BucketsPageSkeleton />
@@ -304,7 +377,6 @@ export default function BucketsPage() {
                   value={search}
                   onChange={(event) => {
                     setSearch(event.target.value)
-                    setPageIndex(0)
                   }}
                   placeholder="Search buckets..."
                   className="h-9 w-full pl-8"
@@ -332,133 +404,15 @@ export default function BucketsPage() {
         <Metric title="Public URLs" value={formatNumber(summary.publicBuckets)} detail={`${formatNumber(summary.corsPolicies)} CORS policies`} />
       </div>
 
-      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
-        <Table
-          className="min-w-[1060px] w-full"
-          containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full [-ms-overflow-style:none] [scrollbar-width:thin]"
-        >
-          <TableHeader>
-            <TableRow className="h-9 border-b">
-              {[
-                ["Bucket", "min-w-[240px]"],
-                ["Account", "min-w-[160px]"],
-                ["Usage", "min-w-[150px]"],
-                ["Public URL", "min-w-[125px]"],
-                ["Drive Delivery", "min-w-[145px]"],
-                ["CORS", "min-w-[110px]"],
-                ["Actions", "min-w-[90px]"],
-              ].map(([label, width], index, headers) => (
-                <TableHead
-                  key={label}
-                  className={cn(width, "relative px-2.5 text-center text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground")}
-                >
-                  {label}
-                  {index < headers.length - 1 ? <span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /> : null}
-                </TableHead>
-              ))}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {paginatedBuckets.map((bucket) => (
-              <TableRow key={bucket.id} className="h-[64px] border-b last:border-b-0 hover:bg-muted/30">
-                <BucketCell separator>
-                  <div className="flex min-h-[40px] items-center gap-1.5">
-                    <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border bg-background">
-                      <Database className="size-3 text-muted-foreground" />
-                    </span>
-                    <div className="min-w-0">
-                      <div className="truncate text-[13px] font-medium leading-4">{bucket.name}</div>
-                      <div className="text-[10px] font-mono leading-3.5 text-muted-foreground">
-                        {bucket.jurisdiction} / {bucket.storageClass}
-                      </div>
-                    </div>
-                  </div>
-                </BucketCell>
-                <BucketCell separator>
-                  <div className="flex min-h-[40px] w-full flex-col items-center justify-center gap-1 text-center">
-                    <span className="max-w-[145px] truncate text-[11px] leading-4 text-muted-foreground">{bucket.accountLabel}</span>
-                    <Badge variant={bucket.accountStatus === "active" ? "default" : bucket.accountStatus === "available" ? "outline" : "secondary"} className="capitalize">
-                      {bucket.accountStatus}
-                    </Badge>
-                  </div>
-                </BucketCell>
-                <BucketCell separator>
-                  <div className="flex min-h-[40px] w-full flex-col items-center justify-center gap-0.5 text-center">
-                    <div className="text-[13px] font-medium leading-4">{formatBytes(bucket.bytes)}</div>
-                    <div className="text-[10px] leading-4 text-muted-foreground">{formatNumber(bucket.objects)} objects</div>
-                  </div>
-                </BucketCell>
-                <BucketCell separator>
-                  <div className="flex min-h-[40px] items-center justify-center">
-                    {bucket.settings ? <Badge variant={bucket.settings.publicAccess.enabled ? "default" : bucket.settingsStatus === "error" ? "destructive" : "secondary"}>{bucket.settingsStatus === "error" ? "Stale" : bucket.settings.publicAccess.enabled ? "Enabled" : "Disabled"}</Badge> : <Badge variant="outline">Pending sync</Badge>}
-                  </div>
-                </BucketCell>
-                <BucketCell separator>
-                  <div className="flex min-h-[40px] items-center justify-center">
-                    {bucket.deliverySettings ? <Badge variant={bucket.deliverySettings.deliveryPublicAccessEnabled ? "default" : "secondary"}>{bucket.deliverySettings.deliveryPublicAccessEnabled ? "Enabled" : "API required"}</Badge> : <Badge variant="outline">Unavailable</Badge>}
-                  </div>
-                </BucketCell>
-                <BucketCell separator>
-                  <div className="flex min-h-[40px] items-center justify-center">
-                    {bucket.settings ? <Badge variant={bucket.settingsStatus === "error" ? "destructive" : bucket.settings.corsRules.length > 0 ? "outline" : "secondary"}>{bucket.settingsStatus === "error" ? "Stale" : bucket.settings.corsRules.length > 0 ? "Configured" : "Not set"}</Badge> : <span className="text-muted-foreground">Pending</span>}
-                  </div>
-                </BucketCell>
-                <BucketCell>
-                  <div className="flex min-h-[40px] items-center justify-center">
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button variant="outline" size="icon" className="size-7 rounded-full" onClick={() => setSelected(bucket)}>
-                          <Settings2 />
-                          <span className="sr-only">Manage {bucket.name}</span>
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>Manage settings</TooltipContent>
-                    </Tooltip>
-                  </div>
-                </BucketCell>
-              </TableRow>
-            ))}
-            {paginatedBuckets.length === 0 ? <TableRow><TableCell colSpan={7} className="h-24 text-center">No results.</TableCell></TableRow> : null}
-          </TableBody>
-        </Table>
-
-        <div className="border-t px-3 py-2 text-xs text-muted-foreground max-sm:-mb-2">
-          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-            <Button
-              variant="outline"
-              size="icon"
-              className="size-8 justify-self-start rounded-full sm:w-auto sm:px-2.5"
-              disabled={currentPageIndex === 0}
-              onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
-            >
-              <ChevronLeft data-icon="inline-start" />
-              <span className="sr-only sm:not-sr-only">Previous</span>
-            </Button>
-            <div className="flex items-center justify-center gap-1 justify-self-center">
-              <div className="flex items-center gap-1 sm:hidden">
-                {mobilePages.map((page) => <PageButton key={`mobile-${page}`} page={page} currentPage={currentPageIndex} onSelect={setPageIndex} />)}
-              </div>
-              <div className="hidden items-center gap-1 sm:flex">
-                {desktopPages.map((page) => <PageButton key={`desktop-${page}`} page={page} currentPage={currentPageIndex} onSelect={setPageIndex} />)}
-              </div>
-            </div>
-            <Button
-              variant="outline"
-              size="icon"
-              className="size-8 justify-self-end rounded-full sm:w-auto sm:px-2.5"
-              disabled={currentPageIndex >= totalPages - 1 || totalRows === 0}
-              onClick={() => setPageIndex((current) => Math.min(totalPages - 1, current + 1))}
-            >
-              <ChevronRight data-icon="inline-end" />
-              <span className="sr-only sm:not-sr-only">Next</span>
-            </Button>
-          </div>
-        </div>
-      </Card>
-
-      <div className="-mt-2 text-center text-xs text-muted-foreground">
-        Page {totalRows ? currentPageIndex + 1 : 0} of {totalRows ? totalPages : 0}
-      </div>
+      <DashboardDataTable
+        data={buckets}
+        columns={bucketColumns}
+        pageSize={10}
+        minWidth="1060px"
+        emptyState={search.trim() ? "No buckets match your search." : "No buckets found."}
+        resetKey={search}
+        className="dashboard-motion-delay-2"
+      />
 
       <BucketSettingsDialog bucket={selected} onOpenChange={(open) => !open && setSelected(null)} onUpdated={(bucket) => {
         setData((current) => current ? { ...current, buckets: current.buckets.map((item) => item.id === bucket.id ? bucket : item), summary: {
@@ -496,31 +450,6 @@ function Metric({ title, value, detail }: { title: string; value: string; detail
         <p className="truncate text-[11px] leading-4 text-muted-foreground">{detail}</p>
       </CardContent>
     </Card>
-  )
-}
-
-function BucketCell({ children, separator = false }: { children: React.ReactNode; separator?: boolean }) {
-  return (
-    <TableCell className="relative px-2.5 py-2 align-middle">
-      {children}
-      {separator ? <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" /> : null}
-    </TableCell>
-  )
-}
-
-function PageButton({ page, currentPage, onSelect }: { page: number; currentPage: number; onSelect: (page: number) => void }) {
-  const active = page === currentPage
-  return (
-    <Button
-      type="button"
-      variant={active ? "default" : "outline"}
-      size="icon"
-      className="size-[1.875rem] rounded-full text-[11px]"
-      onClick={() => onSelect(page)}
-      aria-current={active ? "page" : undefined}
-    >
-      {page + 1}
-    </Button>
   )
 }
 

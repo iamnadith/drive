@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import type { ColumnDef } from "@tanstack/react-table"
 import Link from "next/link"
 import { useParams } from "next/navigation"
 import { ArrowLeft, BookOpen, Copy, FolderPlus, MoreHorizontal, Plus, RefreshCw, Settings2, Trash2 } from "lucide-react"
@@ -8,9 +9,6 @@ import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-} from "@/components/ui/card"
 import {
   Dialog,
   DialogContent,
@@ -37,16 +35,8 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
-import { Skeleton } from "@/components/ui/skeleton"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
 import { DashboardPage, DashboardPageHeader } from "@/components/dashboard/page-shell"
+import { DashboardDataTable } from "@/components/dashboard/data-table"
 
 const PERMISSION_KEYS = [
   "list",
@@ -301,6 +291,58 @@ export default function ProjectKeysPage() {
     setEditPermissions(normalizePermissions(key.permissions))
   }
 
+  const keyColumns: ColumnDef<ApiKey, unknown>[] = [
+    {
+      accessorKey: "name",
+      header: "API key",
+      meta: { width: "min-w-[250px]" },
+      cell: ({ row }) => (
+        <div className="max-w-[280px] min-w-0">
+          <div className="truncate font-medium">{row.original.name}</div>
+          <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{row.original.keyPrefix}********</div>
+        </div>
+      ),
+    },
+    {
+      accessorKey: "status",
+      header: "Status",
+      meta: { width: "min-w-[120px]", align: "center" },
+      cell: ({ row }) => <Badge variant={row.original.status === "active" ? "default" : "secondary"}>{row.original.status}</Badge>,
+    },
+    {
+      accessorKey: "lastUsedAt",
+      header: "Last used",
+      meta: { width: "min-w-[190px]" },
+      cell: ({ row }) => <span className="text-xs text-muted-foreground">{formatDate(row.original.lastUsedAt)}</span>,
+    },
+    {
+      accessorKey: "createdAt",
+      header: "Created",
+      meta: { width: "min-w-[190px]" },
+      cell: ({ row }) => <span className="text-xs text-muted-foreground">{formatDate(row.original.createdAt)}</span>,
+    },
+    {
+      id: "actions",
+      header: "Actions",
+      meta: { width: "min-w-[100px]", align: "right", divider: false },
+      cell: ({ row }) => (
+        <div className="flex justify-end">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon-sm" className="rounded-full" aria-label={`Actions for ${row.original.name}`}><MoreHorizontal /></Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuGroup>
+                <DropdownMenuItem onClick={() => openEditKey(row.original)}><Settings2 /> Edit access</DropdownMenuItem>
+                <DropdownMenuItem variant="destructive" onClick={() => setDeleteKey(row.original)}><Trash2 /> Delete</DropdownMenuItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      ),
+    },
+  ]
+
   const docsProjectId = project?.projectId ?? "your_project_id"
   const docsApiKey = "your_api_key"
 
@@ -332,50 +374,16 @@ export default function ProjectKeysPage() {
         </DashboardPageHeader>
       </div>
 
-      <Card className="dashboard-motion-item dashboard-motion-delay-2 overflow-hidden gap-0 sm:gap-0 md:gap-0">
-        <Table className="min-w-[820px] w-full" containerClassName="rounded-b-none max-sm:-mt-3 max-sm:!mx-0 max-sm:!w-full">
-          <TableHeader>
-            <TableRow className="h-9 border-b">
-              <TableHead className="relative min-w-[250px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">API key<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
-              <TableHead className="relative min-w-[120px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Status<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
-              <TableHead className="relative min-w-[190px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Last used<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
-              <TableHead className="relative min-w-[190px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Created<span className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" /></TableHead>
-              <TableHead className="min-w-[100px] px-2.5 text-right text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {loading && keys.length === 0 ? (
-              Array.from({ length: 6 }).map((_, index) => <TableRow key={index} className="h-[64px]"><TableCell colSpan={5}><Skeleton className="h-10 w-full rounded-xl" /></TableCell></TableRow>)
-            ) : keys.length ? (
-              keys.map((key) => (
-                <TableRow key={key.id} className="h-[64px] border-b last:border-b-0 hover:bg-muted/30">
-                  <TableCell className="relative px-2.5 py-2">
-                    <div className="max-w-[280px]"><div className="truncate font-medium">{key.name}</div><div className="mt-1 truncate font-mono text-xs text-muted-foreground">{key.keyPrefix}********</div></div>
-                    <span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" />
-                  </TableCell>
-                  <TableCell className="relative px-2.5 py-2"><Badge variant={key.status === "active" ? "default" : "secondary"}>{key.status}</Badge><span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" /></TableCell>
-                  <TableCell className="relative px-2.5 py-2 text-xs text-muted-foreground">{formatDate(key.lastUsedAt)}<span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" /></TableCell>
-                  <TableCell className="relative px-2.5 py-2 text-xs text-muted-foreground">{formatDate(key.createdAt)}<span className="absolute right-0 top-1/2 h-8 w-px -translate-y-1/2 bg-border" /></TableCell>
-                  <TableCell className="px-2.5 py-2">
-                    <div className="flex justify-end">
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="rounded-full" aria-label={`Actions for ${key.name}`}><MoreHorizontal /></Button></DropdownMenuTrigger>
-                        <DropdownMenuContent align="end"><DropdownMenuGroup>
-                          <DropdownMenuItem onClick={() => openEditKey(key)}><Settings2 /> Edit access</DropdownMenuItem>
-                          <DropdownMenuItem variant="destructive" onClick={() => setDeleteKey(key)}><Trash2 /> Delete</DropdownMenuItem>
-                        </DropdownMenuGroup></DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))
-            ) : (
-              <TableRow><TableCell colSpan={5} className="h-28 text-center text-muted-foreground">No API keys have been issued for this project.</TableCell></TableRow>
-            )}
-          </TableBody>
-        </Table>
-        <div className="border-t px-3 py-2 text-center text-xs text-muted-foreground">{keys.length} key{keys.length === 1 ? "" : "s"} / secrets are shown only once</div>
-      </Card>
+      <DashboardDataTable
+        data={keys}
+        columns={keyColumns}
+        minWidth="860px"
+        pageSize={10}
+        loading={loading && keys.length === 0}
+        emptyState="No API keys have been issued for this project."
+        className="dashboard-motion-delay-2"
+        footer={<>{keys.length} key{keys.length === 1 ? "" : "s"} / secrets are shown only once</>}
+      />
 
       <Dialog open={createKeyOpen} onOpenChange={setCreateKeyOpen}>
         <DialogContent className="rounded-2xl sm:max-w-md">

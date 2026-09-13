@@ -448,7 +448,6 @@ export default function ActivityPage() {
             </Button>
           ) : null}
         </div>
-        <div className="shrink-0 text-sm text-muted-foreground">Page {currentPage} of {totalPages}</div>
       </div>
 
       <Card className="dashboard-motion-item dashboard-motion-delay-2 py-0">

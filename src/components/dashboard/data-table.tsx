@@ -10,7 +10,6 @@ import {
 } from "@tanstack/react-table"
 import { ChevronLeft, ChevronRight } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
@@ -36,7 +35,10 @@ type DashboardDataTableProps<TData> = {
   columns: ColumnDef<TData, unknown>[]
   pageSize?: number
   minWidth?: string
+  header?: React.ReactNode
   emptyState?: React.ReactNode
+  footer?: React.ReactNode
+  paginationContent?: React.ReactNode
   loading?: boolean
   loadingRows?: number
   className?: string
@@ -49,13 +51,18 @@ type DashboardDataTableProps<TData> = {
 
 const paginationButtonClass =
   "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border/80 bg-background/85 p-0 text-foreground shadow-sm backdrop-blur-sm transition-colors hover:bg-muted/55 disabled:pointer-events-none disabled:opacity-50 sm:w-auto sm:gap-1 sm:px-2.5"
+const pageButtonClass =
+  "inline-flex size-8 min-w-8 max-w-8 shrink-0 items-center justify-center rounded-full border border-border/80 bg-background/85 p-0 text-xs font-medium text-foreground shadow-sm backdrop-blur-sm transition-colors hover:bg-muted/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
 
 export function DashboardDataTable<TData>({
   data,
   columns,
   pageSize = 10,
   minWidth = "900px",
+  header,
   emptyState = "No results.",
+  footer,
+  paginationContent,
   loading = false,
   loadingRows = 6,
   className,
@@ -85,7 +92,6 @@ export function DashboardDataTable<TData>({
   })
   const pageCount = table.getPageCount()
   const pageIndex = table.getState().pagination.pageIndex
-  const totalRows = table.getRowCount()
   const pageWindow = Math.min(pageCount, 3)
   const desktopPageWindow = Math.min(pageCount, 5)
   const mobileStart = Math.max(0, Math.min(pageIndex - Math.floor(pageWindow / 2), pageCount - pageWindow))
@@ -97,6 +103,7 @@ export function DashboardDataTable<TData>({
   return (
     <>
       <TableSurface withCard={withCard} className={className}>
+        {header ? <div className="border-b px-4 py-3">{header}</div> : null}
         <Table
           className={cn("w-full", tableClassName)}
           style={{ minWidth }}
@@ -181,45 +188,53 @@ export function DashboardDataTable<TData>({
             )}
           </TableBody>
         </Table>
-        <div className="border-t px-3 py-2 text-xs text-muted-foreground max-sm:-mb-2">
-          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-            <button
-              type="button"
-              className={cn(paginationButtonClass, "justify-self-start")}
-              aria-label="Previous page"
-              disabled={!table.getCanPreviousPage()}
-              onClick={() => table.previousPage()}
-            >
-              <ChevronLeft className="h-4 w-4 sm:mr-1" />
-              <span className="hidden sm:inline">Previous</span>
-            </button>
-            <div className="flex items-center justify-center gap-1 justify-self-center">
-              <div className="flex items-center gap-1 sm:hidden">
-                {mobilePages.map((page) => (
-                  <PageButton key={`m-${page}`} page={page} currentPage={pageIndex} onSelect={() => table.setPageIndex(page)} />
-                ))}
-              </div>
-              <div className="hidden items-center gap-1 sm:flex">
-                {desktopPages.map((page) => (
-                  <PageButton key={`d-${page}`} page={page} currentPage={pageIndex} onSelect={() => table.setPageIndex(page)} />
-                ))}
-              </div>
-            </div>
-            <button
-              type="button"
-              className={cn(paginationButtonClass, "justify-self-end")}
-              aria-label="Next page"
-              disabled={!table.getCanNextPage()}
-              onClick={() => table.nextPage()}
-            >
-              <span className="hidden sm:inline">Next</span>
-              <ChevronRight className="h-4 w-4 sm:ml-1" />
-            </button>
+        {footer ? (
+          <div className="border-t px-3 py-2 text-center text-xs text-muted-foreground">
+            {footer}
           </div>
-        </div>
-        <div className="px-3 pb-2 text-center text-xs text-muted-foreground" aria-live="polite">
-          Page {totalRows ? pageIndex + 1 : 0} of {totalRows ? pageCount : 0}
-        </div>
+        ) : null}
+        {paginationContent ? (
+          <div className="border-t px-3 py-2 text-xs text-muted-foreground">
+            {paginationContent}
+          </div>
+        ) : (
+          <div className="border-t px-3 py-2 text-xs text-muted-foreground max-sm:-mb-2">
+            <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
+              <button
+                type="button"
+                className={cn(paginationButtonClass, "justify-self-start")}
+                aria-label="Previous page"
+                disabled={!table.getCanPreviousPage()}
+                onClick={() => table.previousPage()}
+              >
+                <ChevronLeft className="h-4 w-4 sm:mr-1" />
+                <span className="hidden sm:inline">Previous</span>
+              </button>
+              <div className="flex min-w-0 max-w-full items-center justify-center gap-1 justify-self-center overflow-x-auto">
+                <div className="flex min-w-0 items-center gap-1 sm:hidden">
+                  {mobilePages.map((page) => (
+                    <PageButton key={`m-${page}`} page={page} currentPage={pageIndex} onSelect={() => table.setPageIndex(page)} />
+                  ))}
+                </div>
+                <div className="hidden min-w-0 items-center gap-1 sm:flex">
+                  {desktopPages.map((page) => (
+                    <PageButton key={`d-${page}`} page={page} currentPage={pageIndex} onSelect={() => table.setPageIndex(page)} />
+                  ))}
+                </div>
+              </div>
+              <button
+                type="button"
+                className={cn(paginationButtonClass, "justify-self-end")}
+                aria-label="Next page"
+                disabled={!table.getCanNextPage()}
+                onClick={() => table.nextPage()}
+              >
+                <span className="hidden sm:inline">Next</span>
+                <ChevronRight className="h-4 w-4 sm:ml-1" />
+              </button>
+            </div>
+          </div>
+        )}
       </TableSurface>
     </>
   )
@@ -237,7 +252,7 @@ function TableSurface({
   return withCard ? (
     <Card className={cn("dashboard-motion-item overflow-hidden gap-0 sm:gap-0 md:gap-0", className)}>{children}</Card>
   ) : (
-    <div className={cn("min-w-0 overflow-hidden", className)}>{children}</div>
+    <div className={cn("min-w-0 overflow-hidden rounded-xl border bg-card", className)}>{children}</div>
   )
 }
 
@@ -252,17 +267,15 @@ function PageButton({
 }) {
   const active = page === currentPage
   return (
-    <Button
+    <button
       type="button"
-      variant={active ? "default" : "outline"}
-      size="icon-sm"
-      className="size-[1.875rem] rounded-full p-0 text-[11px] leading-none"
+      className={cn(pageButtonClass, active && "bg-muted/60")}
       aria-label={`Page ${page + 1}`}
       aria-current={active ? "page" : undefined}
       disabled={active}
       onClick={onSelect}
     >
       {page + 1}
-    </Button>
+    </button>
   )
 }
