@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { AlertCircle, CheckCircle2, Clock, ExternalLink, Plus, RefreshCw, Play, X } from "lucide-react"
+import { CheckCircle2, ExternalLink, Plus, RefreshCw, Play, X } from "lucide-react"
 import { useRouter } from "next/navigation"
 
 import { Badge } from "@/components/ui/badge"
@@ -1014,68 +1014,74 @@ export default function MigrationsPage() {
           </Card>
         ) : null}
 
-        <Card>
-          <CardHeader className="pb-1">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <CardTitle className="text-lg">Recent Migrations</CardTitle>
-                <CardDescription>Latest 3 migrations.</CardDescription>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => router.push("/dashboard/migrations/history")}
-                disabled={Boolean(busyAction) || migrations.length === 0}
-              >
-                View all
-              </Button>
+        <Card className="overflow-hidden">
+          <CardHeader className="flex flex-row items-center justify-between gap-4 border-b px-5 py-4">
+            <div className="min-w-0 space-y-1">
+              <CardTitle className="text-base">Recent migrations</CardTitle>
+              <CardDescription>Latest 3 migration runs and their results.</CardDescription>
             </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() => router.push("/dashboard/migrations/history")}
+              disabled={Boolean(busyAction) || migrations.length === 0}
+            >
+              View history
+            </Button>
           </CardHeader>
-          <CardContent className="space-y-2">
+          <CardContent className="p-0">
             {migrations.length === 0 ? (
-              <div className="text-sm text-muted-foreground">No migrations yet</div>
+              <div className="flex flex-col items-center gap-1 px-6 py-12 text-center">
+                <p className="text-sm font-medium">No migrations yet</p>
+                <p className="text-sm text-muted-foreground">Created migrations will appear here.</p>
+              </div>
             ) : (
-              migrations.slice(0, 3).map((m) => {
-                const isVerificationFailed = m.status === "verifying" && m.syncStatus === "error"
-                const icon =
-                  m.status === "completed" ? (
-                    <CheckCircle2 className="h-5 w-5 text-green-600" />
-                  ) : isVerificationFailed ? (
-                    <AlertCircle className="h-5 w-5 text-red-600" />
-                  ) : m.status === "verifying" ? (
-                    <Clock className="h-5 w-5 text-purple-600" />
-                  ) : m.status === "running" ? (
-                    <Clock className="h-5 w-5 text-primary" />
-                  ) : m.status === "failed" ? (
-                    <AlertCircle className="h-5 w-5 text-red-600" />
-                  ) : (
-                    <Clock className="h-5 w-5 text-muted-foreground" />
-                  )
-                return (
-                  <div key={m.id} className="flex items-start justify-between gap-3 rounded-md border p-3">
-                    <div className="flex gap-3">
-                      {icon}
-                      <div className="space-y-1">
-                        <div className="text-sm font-medium">
-                          {isVerificationFailed ? "verification_failed" : m.status}
-                        </div>
-                        <div className="text-xs text-muted-foreground font-mono">{m.id}</div>
-                        <div className="text-xs text-muted-foreground">{new Date(m.createdAt).toLocaleString()}</div>
-                      </div>
-                    </div>
-                    <div className="flex flex-col items-end gap-2">
-                      {(m.syncMessage ?? "").trim().length > 0 ? (
-                        <div className="text-xs text-muted-foreground line-clamp-2 max-w-[280px] text-right">
-                          {m.syncMessage}
-                        </div>
-                      ) : null}
-                      <Button size="sm" variant="outline" onClick={() => router.push(`/dashboard/migrations/${encodeURIComponent(m.id)}`)}>
-                        Details
-                      </Button>
-                    </div>
-                  </div>
-                )
-              })
+              <div className="overflow-x-auto">
+                <Table className="min-w-[760px]">
+                  <TableHeader>
+                    <TableRow className="bg-muted/30 hover:bg-muted/30">
+                      <TableHead className="w-[34%] px-5 text-xs font-medium uppercase tracking-wide text-muted-foreground">Migration</TableHead>
+                      <TableHead className="w-[18%] text-xs font-medium uppercase tracking-wide text-muted-foreground">Status</TableHead>
+                      <TableHead className="w-[12%] text-right text-xs font-medium uppercase tracking-wide text-muted-foreground">Buckets</TableHead>
+                      <TableHead className="w-[14%] text-right text-xs font-medium uppercase tracking-wide text-muted-foreground">Objects</TableHead>
+                      <TableHead className="w-[14%] text-right text-xs font-medium uppercase tracking-wide text-muted-foreground">Data</TableHead>
+                      <TableHead className="w-[8%] pr-5" />
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {migrations.slice(0, 3).map((m) => (
+                      <TableRow key={m.id} className="group">
+                        <TableCell className="px-5 py-3.5">
+                          <div className="min-w-0 space-y-1">
+                            <div className="max-w-[280px] truncate font-mono text-xs font-medium" title={m.id}>
+                              {m.id}
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              {new Date(m.createdAt).toLocaleString()} <span aria-hidden="true">·</span>{" "}
+                              {m.options.executionMode === "migration_workers" ? "Worker pool" : "Super Slurper"}
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell>{statusBadge(m.status, m.syncStatus, m.syncMessage)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{formatNumber(m.summaryItemCount)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{formatNumber(m.summaryObjects)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{formatBytes(m.summaryBytes)}</TableCell>
+                        <TableCell className="pr-5 text-right">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-8"
+                            onClick={() => router.push(`/dashboard/migrations/${encodeURIComponent(m.id)}`)}
+                          >
+                            Details
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
             )}
           </CardContent>
         </Card>
