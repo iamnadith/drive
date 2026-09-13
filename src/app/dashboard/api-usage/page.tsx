@@ -441,12 +441,6 @@ export default function ApiUsagePage() {
           minWidth="1080px"
           loading={loading && !data}
           emptyState="No API usage events found."
-          header={
-            <div>
-              <h2 className="text-sm font-semibold">Recent API Events</h2>
-              <p className="mt-1 text-xs text-muted-foreground">Latest project API activity. Results are loaded {filters.limit} at a time.</p>
-            </div>
-          }
           serverPagination={{
             pageIndex: cursorStack.length,
             pageCount: cursorStack.length + 1 + (data?.nextCursor ? 1 : 0),

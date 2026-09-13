@@ -321,6 +321,8 @@ test('migration UI exposes both engines while preserving Super Slurper as the de
   assert.match(details, /"Worker pool"/)
   assert.match(details, /Source: /)
   assert.match(details, /Destination: /)
+  assert.match(details, /dashboard-motion-stage space-y-6 max-w-full/)
+  assert.match(details, /<DashboardDataTable/)
   assert.doesNotMatch(details, /scanner-indexed per-file queue/)
   assert.match(details, /executionMode === "migration_workers" \? "migration" : workerMode/)
   assert.match(details, /if \(mode === "migration"\) return "Migration"/)

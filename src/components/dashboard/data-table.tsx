@@ -133,16 +133,21 @@ export function DashboardDataTable<TData>({
                     <TableHead
                       key={header.id}
                       className={cn(
-                        "relative px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground",
+                        "relative px-2.5 text-center align-middle text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground",
                         meta?.width ?? (isLastAction ? "min-w-[110px]" : "min-w-[120px]"),
                         meta?.align === "center" && "text-center",
                         meta?.align === "right" && "text-right",
                         meta?.headerClassName,
+                        "text-center align-middle",
                       )}
                     >
                       {header.isPlaceholder
                         ? null
-                        : flexRender(header.column.columnDef.header, header.getContext())}
+                        : (
+                          <div className="flex min-h-9 w-full items-center justify-center text-center">
+                            {flexRender(header.column.columnDef.header, header.getContext())}
+                          </div>
+                        )}
                       {meta?.divider !== false && !isLastAction ? (
                         <span aria-hidden="true" className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" />
                       ) : null}
