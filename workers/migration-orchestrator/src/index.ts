@@ -197,8 +197,12 @@ async function refreshSuperSlurperProgress(db: Client, migration: Row) {
     refreshed += 1
   })
   const verification = await db.query(`
-    insert into drive_migration_verification_state(migration_item_id,migration_id,generation,status,phase)
-    select i.id,i.migration_id,1,'pending','source' from drive_migration_items i
+    insert into drive_migration_verification_state(
+      migration_item_id,migration_id,generation,source_scan_id,source_objects,source_bytes,status,phase
+    )
+    select i.id,i.migration_id,1,nullif(i.progress->>'sourceScanId','')::uuid,i.source_objects,i.source_bytes,'pending',
+      case when nullif(i.progress->>'sourceScanId','') is null then 'source' else 'destination' end
+    from drive_migration_items i
     where i.migration_id=$1 and i.slurper_status='completed'
       and coalesce(i.progress->>'stage','')<>'worker_bucket_create_failed'
     on conflict(migration_item_id) do nothing
@@ -567,8 +571,197 @@ async function cloudflare(account: Row, path: string, method = "GET", body?: unk
   })
   if (allow404 && response.status === 404) return null
   const payload = await response.json().catch(() => ({})) as Row
-  if (!response.ok || payload.success === false) throw new Error(payload.errors?.[0]?.message || `Cloudflare API returned HTTP ${response.status}`)
+  if (!response.ok || payload.success === false) throw new Error(`${payload.errors?.[0]?.message || "Cloudflare API request failed"} (HTTP ${response.status})`)
   return payload.result ?? payload
+}
+function slurperJobRows(payload: unknown): Row[] {
+  if (Array.isArray(payload)) return payload.filter((row): row is Row => Boolean(row) && typeof row === "object")
+  if (!payload || typeof payload !== "object") return []
+  const record = payload as Row
+  for (const candidate of [record.jobs, record.items, record.result]) {
+    if (Array.isArray(candidate)) return candidate.filter((row): row is Row => Boolean(row) && typeof row === "object")
+  }
+  return []
+}
+function slurperJobId(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return typeof payload === "string" && payload.trim() ? payload.trim() : null
+  const row = payload as Row
+  const result = row.result && typeof row.result === "object" ? row.result as Row : {}
+  const nestedValue = result.job && typeof result.job === "object" ? result.job : row.job
+  const nested = nestedValue && typeof nestedValue === "object" ? nestedValue as Row : {}
+  for (const value of [row.id, row.jobId, row.job_id, result.id, result.jobId, result.job_id, nested.id, nested.jobId, nested.job_id]) {
+    if (typeof value === "string" && value.trim()) return value.trim()
+  }
+  if (typeof row.result === "string" && row.result.trim()) return row.result.trim()
+  return null
+}
+function appendMigrationEvent(progress: Row, stage: string, status: string, message: string) {
+  const events = Array.isArray(progress.events) ? progress.events : []
+  const previous = events.at(-1) as Row | undefined
+  if (previous?.stage === stage && previous?.status === status) return events
+  return [...events, { at: new Date().toISOString(), stage, status, message }].slice(-100)
+}
+async function ensureSuperSlurperInventory(db: Client, migration: Row) {
+  const items = await db.query(`select id,source_bucket,slurper_job_id,slurper_status,progress from drive_migration_items where migration_id=$1 order by created_at`, [migration.id])
+  let pending = 0
+  let failed = 0
+  for (const item of items.rows) {
+    if (item.slurper_job_id || ["completed", "failed", "aborted", "bucket_create_failed", "verification_failed"].includes(String(item.slurper_status || ""))) continue
+    if (item.progress?.sourceScanStatus === "failed") { failed += 1; continue }
+    let scanId = typeof item.progress?.sourceScanId === "string" ? item.progress.sourceScanId : ""
+    let scan = scanId
+      ? (await db.query(`select id,status,objects,bytes,error from drive_bucket_scans where id=$1 and migration_id=$2 and migration_item_id=$3 and kind='source' limit 1`, [scanId, migration.id, item.id])).rows[0]
+      : null
+    if (!scan) {
+      const existing = await db.query(`select id,status,objects,bytes,error from drive_bucket_scans where migration_id=$1 and migration_item_id=$2 and kind='source' order by updated_at desc limit 1`, [migration.id, item.id])
+      scan = existing.rows[0] || null
+    }
+    if (!scan) {
+      const inserted = await db.query(`
+        insert into drive_bucket_scans(id,account_id,bucket_name,kind,migration_id,migration_item_id,prefix,status,updated_at)
+        values(gen_random_uuid(),$1,$2,'source',$3,$4,$5,'pending',now()) returning id,status,objects,bytes,error
+      `, [migration.source_account_id, item.source_bucket, migration.id, item.id, opts(migration).pathPrefix || null])
+      scan = inserted.rows[0]
+    }
+    const progress = { ...(item.progress || {}) }
+    const scanStatus = String(scan.status || "pending")
+    if (scanStatus === "failed") {
+      failed += 1
+      const message = String(scan.error || `File Scanner failed for ${item.source_bucket}`)
+      await db.query(`update drive_migration_items set slurper_status='precheck_failed',progress=$2::jsonb,last_progress_at=now(),updated_at=now() where id=$1`, [item.id, JSON.stringify({ ...progress, stage: "scan_failed", sourceScanId: scan.id, sourceScanStatus: "failed", error: message, lastError: message, events: appendMigrationEvent(progress, "source_scan", "failed", message) })])
+      continue
+    }
+    if (scanStatus !== "completed") pending += 1
+    const completed = scanStatus === "completed"
+    await db.query(`
+      update drive_migration_items set
+        slurper_status=case when $2 then case when slurper_status='scanning' then 'queued' else coalesce(slurper_status,'queued') end else 'scanning' end,
+        source_objects=case when $2 then $3 else source_objects end,
+        source_bytes=case when $2 then $4 else source_bytes end,
+        progress=$5::jsonb,last_progress_at=now(),updated_at=now()
+      where id=$1
+    `, [item.id, completed, scan.objects || 0, scan.bytes || 0, JSON.stringify({
+      ...progress,
+      stage: completed ? "scan_completed" : "scanning_source",
+      sourceScanId: scan.id,
+      sourceScanStatus: scanStatus,
+      ...(completed ? { error: null, lastError: null } : {}),
+      events: appendMigrationEvent(progress, "source_scan", completed ? "completed" : "running", completed ? `File Scanner indexed ${Number(scan.objects || 0).toLocaleString()} source objects` : `File Scanner is scanning ${item.source_bucket}`),
+    })])
+  }
+  return { total: items.rowCount || 0, pending, failed }
+}
+async function createSuperSlurperJobs(db: Client, migration: Row) {
+  const accountsResult = await db.query(`select id,cloudflare_account_id,api_token,r2_access_key_id,r2_secret_access_key from drive_accounts where id in($1,$2)`, [migration.source_account_id, migration.target_account_id])
+  const source = accountsResult.rows.find((row) => row.id === migration.source_account_id)
+  const target = accountsResult.rows.find((row) => row.id === migration.target_account_id)
+  if (!source?.cloudflare_account_id || !source.r2_access_key_id || !source.r2_secret_access_key) throw new Error("Source Cloudflare account or R2 credentials are incomplete")
+  if (!target?.cloudflare_account_id || !target.api_token || !target.r2_access_key_id || !target.r2_secret_access_key) throw new Error("Destination Cloudflare account or R2 credentials are incomplete")
+
+  const [bucketPayload, jobsPayload, itemsResult] = await Promise.all([
+    cloudflare(target, "/r2/buckets"),
+    cloudflare(target, "/slurper/jobs"),
+    db.query(`select id,source_bucket,target_bucket,source_jurisdiction,source_storage_class,slurper_job_id,slurper_status,progress from drive_migration_items where migration_id=$1 and slurper_job_id is null order by created_at`, [migration.id]),
+  ])
+  const bucketList = Array.isArray(bucketPayload) ? bucketPayload : Array.isArray(bucketPayload?.buckets) ? bucketPayload.buckets : []
+  const bucketNames = new Set(bucketList.map((bucket: Row) => String(bucket.name || "")))
+  const remoteJobs = slurperJobRows(jobsPayload)
+  const terminal = new Set(["completed", "complete", "finished", "success", "succeeded", "aborted", "canceled", "cancelled", "failed", "error"])
+  let activeCount = remoteJobs.filter((job) => typeof job.status === "string" && !terminal.has(job.status.toLowerCase())).length
+  const limit = Math.max(1, Math.min(3, integer(opts(migration).concurrency, 3, 1, 3)))
+  let created = 0
+  let attached = 0
+  let failed = 0
+
+  for (const item of itemsResult.rows) {
+    const progress = { ...(item.progress || {}) }
+    const scanId = String(progress.sourceScanId || "")
+    if (!scanId || progress.sourceScanStatus !== "completed") continue
+    const jurisdiction = ["default", "eu", "fedramp"].includes(String(item.source_jurisdiction)) ? item.source_jurisdiction : undefined
+    if (activeCount >= limit) {
+      await db.query(`update drive_migration_items set slurper_status='queued',progress=$2::jsonb,updated_at=now() where id=$1`, [item.id, JSON.stringify({ ...progress, stage: "cloudflare_job_limit", queueReason: `Waiting for a Super Slurper slot (limit ${limit})` })])
+      continue
+    }
+
+    const recent = remoteJobs.find((job) => {
+      const ageMs = Date.now() - Date.parse(String(job.createdAt || job.created_at || ""))
+      const sourceBucket = job.source && typeof job.source === "object" ? String(job.source.bucket || "") : ""
+      const targetBucket = job.target && typeof job.target === "object" ? String(job.target.bucket || "") : ""
+      return sourceBucket === item.source_bucket && targetBucket === item.target_bucket && Number.isFinite(ageMs) && ageMs >= -60_000 && ageMs <= 10 * 60_000
+    })
+    if (recent?.id) {
+      await db.query(`update drive_migration_items set slurper_job_id=$2,slurper_status='running',progress=$3::jsonb,last_progress_at=now(),updated_at=now() where id=$1 and slurper_job_id is null`, [item.id, String(recent.id), JSON.stringify({ ...progress, stage: "job_attached", jobName: `drive-migration-${migration.id}-${item.id}`, events: appendMigrationEvent(progress, "super_slurper_job", "running", "Attached existing Cloudflare Super Slurper job") })])
+      attached += 1
+      if (typeof recent.status !== "string" || !terminal.has(recent.status.toLowerCase())) activeCount += 1
+      continue
+    }
+
+    try {
+      if (!bucketNames.has(item.target_bucket)) {
+        try {
+          await cloudflare(target, "/r2/buckets", "POST", {
+            name: item.target_bucket,
+            ...(jurisdiction ? { jurisdiction } : {}),
+            ...(item.source_storage_class ? { storageClass: item.source_storage_class } : {}),
+          })
+        } catch (error) {
+          const listed = await cloudflare(target, "/r2/buckets")
+          const current = Array.isArray(listed) ? listed : Array.isArray(listed?.buckets) ? listed.buckets : []
+          if (!current.some((bucket: Row) => bucket.name === item.target_bucket)) throw error
+        }
+        bucketNames.add(item.target_bucket)
+      }
+
+      const overwrite = opts(migration).overwrite !== false
+      const jobName = `drive-migration-${migration.id}-${item.id}`
+      const targetSpec = { vendor: "r2", bucket: item.target_bucket, secret: { accessKeyId: target.r2_access_key_id, secretAccessKey: target.r2_secret_access_key }, ...(jurisdiction ? { jurisdiction } : {}) }
+      const sourceS3 = { vendor: "s3", bucket: item.source_bucket, secret: { accessKeyId: source.r2_access_key_id, secretAccessKey: source.r2_secret_access_key }, endpoint: `https://${source.cloudflare_account_id}.r2.cloudflarestorage.com/${encodeURIComponent(item.source_bucket)}`, ...(typeof opts(migration).pathPrefix === "string" ? { pathPrefix: opts(migration).pathPrefix } : {}) }
+      const sourceR2 = { vendor: "r2", bucket: item.source_bucket, secret: { accessKeyId: source.r2_access_key_id, secretAccessKey: source.r2_secret_access_key }, ...(jurisdiction ? { jurisdiction } : {}), ...(typeof opts(migration).pathPrefix === "string" ? { pathPrefix: opts(migration).pathPrefix } : {}) }
+
+      await cloudflare(target, "/slurper/target/connectivity-precheck", "PUT", targetSpec)
+      let sourceSpec: Row = sourceS3
+      try { await cloudflare(target, "/slurper/source/connectivity-precheck", "PUT", sourceS3) }
+      catch (s3Error) {
+        try { await cloudflare(target, "/slurper/source/connectivity-precheck", "PUT", sourceR2); sourceSpec = sourceR2 }
+        catch (r2Error) { throw new Error(`Source precheck failed (S3: ${s3Error instanceof Error ? s3Error.message : String(s3Error)}; R2: ${r2Error instanceof Error ? r2Error.message : String(r2Error)})`) }
+      }
+
+      const response = await cloudflare(target, "/slurper/jobs", "POST", {
+        overwrite,
+        jobName,
+        configuration: { overwriteObjects: overwrite },
+        source: sourceSpec,
+        target: targetSpec,
+      })
+      let jobId = slurperJobId(response)
+      if (!jobId) {
+        const createStartedAt = Date.now()
+        const refreshed = slurperJobRows(await cloudflare(target, "/slurper/jobs"))
+        const match = refreshed.find((job) => {
+          const sourceBucket = job.source && typeof job.source === "object" ? String(job.source.bucket || "") : ""
+          const targetBucket = job.target && typeof job.target === "object" ? String(job.target.bucket || "") : ""
+          const createdAt = Date.parse(String(job.createdAt || job.created_at || ""))
+          return sourceBucket === item.source_bucket && targetBucket === item.target_bucket && Number.isFinite(createdAt) && createdAt >= createStartedAt - 60_000 && createdAt <= Date.now() + 60_000
+        })
+        jobId = typeof match?.id === "string" ? match.id : null
+      }
+      if (!jobId) {
+        await db.query(`update drive_migration_items set slurper_status='job_id_pending',progress=$2::jsonb,last_progress_at=now(),updated_at=now() where id=$1`, [item.id, JSON.stringify({ ...progress, stage: "job_id_missing", jobName, lastError: "Cloudflare accepted the job but no job ID was returned", events: appendMigrationEvent(progress, "super_slurper_job", "pending", "Waiting for Cloudflare to return the new job ID") })])
+        continue
+      }
+      await db.query(`update drive_migration_items set slurper_job_id=$2,slurper_status='running',progress=$3::jsonb,last_progress_at=now(),updated_at=now() where id=$1 and slurper_job_id is null`, [item.id, jobId, JSON.stringify({ ...progress, stage: "job_created", jobName, sourceModeUsed: sourceSpec.vendor, events: appendMigrationEvent(progress, "super_slurper_job", "running", "Cloudflare Super Slurper job started") })])
+      remoteJobs.push({ id: jobId, status: "queued", createdAt: new Date().toISOString(), source: { bucket: item.source_bucket }, target: { bucket: item.target_bucket } })
+      activeCount += 1
+      created += 1
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const retryable = /HTTP (?:409|429)|rate.?limit|concurren|job limit/i.test(message)
+      const status = retryable ? "queued" : message.toLowerCase().includes("bucket") && !bucketNames.has(item.target_bucket) ? "bucket_create_failed" : "precheck_failed"
+      if (!retryable) failed += 1
+      await db.query(`update drive_migration_items set slurper_status=$2,progress=$3::jsonb,last_progress_at=now(),updated_at=now() where id=$1`, [item.id, status, JSON.stringify({ ...progress, stage: retryable ? "cloudflare_job_limit" : status === "bucket_create_failed" ? "create_target_bucket" : "create_job", error: message, lastError: message, events: appendMigrationEvent(progress, "super_slurper_job", retryable ? "queued" : "failed", message) })])
+    }
+  }
+  return { created, attached, failed, active: activeCount, limit }
 }
 async function syncNextBucketSettings(db: Client, migration: Row) {
   const pending = await db.query(`select i.* from drive_migration_items i
@@ -865,6 +1058,19 @@ async function cycle(env: Env) {
       if (!migration) return complete(db, owner, null, { ok: true, idle: true })
       migrationId = migration.id
       if (opts(migration).executionMode !== "migration_workers") {
+        const inventory = await ensureSuperSlurperInventory(db, migration)
+        if (inventory.pending > 0) {
+          const configuration = setting.rows[0]?.value || {}
+          const scannerEnabled = configuration.fileScannerEnabled === true || configuration.enabled === true
+          const fileScanner = scannerEnabled ? await wakeFileScanner(db) : "disabled"
+          const message = scannerEnabled
+            ? `File Scanner is scanning source buckets (${inventory.pending} remaining)`
+            : "Waiting for File Scanner to be enabled before starting Super Slurper jobs"
+          await db.query(`update drive_migrations set status='running',sync_status='running',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id, message])
+          await renew(db, owner)
+          return complete(db, owner, migration.id, { ok: true, migrationId, executionMode: "super_slurper", inventory, fileScanner, waitingFor: "source_inventory" })
+        }
+        const jobs = await createSuperSlurperJobs(db, migration)
         const slurper = await refreshSuperSlurperProgress(db, migration)
         await finalizeVerifiedBuckets(db, migration, 1)
         const verificationQueue = await db.query(`select
@@ -875,9 +1081,12 @@ async function cycle(env: Env) {
         const verification = Number(slurper.total) > 0 && Number(slurper.completed) === Number(slurper.total)
           ? await finishOrRepair(db, migration, 1)
           : { verification: Number(slurper.failed) > 0 ? "failed" : "waiting_for_super_slurper" }
+        if (jobs.active >= jobs.limit && slurper.completed < slurper.total && slurper.failed === 0) {
+          await db.query(`update drive_migrations set sync_message=$2 where id=$1 and status in('running','verifying')`, [migration.id, `Waiting for a Super Slurper concurrency slot (${jobs.active}/${jobs.limit} active)`])
+        }
         await renew(db, owner)
         await db.query(`update drive_migrations set last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
-        return complete(db, owner, migration.id, { ok: true, migrationId, executionMode: "super_slurper", ...slurper, ...verification, fileScanner })
+        return complete(db, owner, migration.id, { ok: true, migrationId, executionMode: "super_slurper", inventory, jobs, ...slurper, ...verification, fileScanner })
       }
       const shards = await ensureShards(db, migration)
       // Keep the migration at the scanner-owned stage until every source
