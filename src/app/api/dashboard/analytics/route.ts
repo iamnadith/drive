@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server"
+import type { QueryResultRow } from "pg"
 
 import { getAllAccounts } from "@/lib/accounts-store"
 import { listAgents, type DriveAgent, type DriveAgentRun } from "@/lib/agents-store"
@@ -9,8 +10,7 @@ import {
 } from "@/lib/migrations-store"
 import { getMergedBucketSnapshot } from "@/lib/migration-bucket-state"
 import { type DriveRepairJob } from "@/lib/repair-jobs-store"
-import { isPostgresConfigured, queryDb } from "@/lib/db"
-import { getSupabaseServerClient } from "@/lib/supabase"
+import { queryDb } from "@/lib/db"
 import { getAllUsers, type User } from "@/lib/users-store"
 import { requireAdmin } from "@/lib/server-auth"
 
@@ -182,25 +182,18 @@ async function capture<T>(
   }
 }
 
-async function selectRows<T>(table: string, columns = "*", order?: { column: string; ascending?: boolean }, limit?: number) {
-  const supabase = getSupabaseServerClient()
-  let query = supabase.from(table).select(columns)
-  if (order) query = query.order(order.column, { ascending: order.ascending ?? false })
-  if (limit) query = query.limit(limit)
-  const { data, error } = await query
-  if (error) throw new Error(error.message)
-  return (Array.isArray(data) ? data : []) as T[]
+async function selectRows<T extends QueryResultRow>(table: string, columns = "*", order?: { column: string; ascending?: boolean }, limit?: number) {
+  const sql = `select ${columns} from public.${table}${order ? ` order by ${order.column} ${order.ascending ? "asc" : "desc"}` : ""}${limit ? " limit $1" : ""}`
+  const { rows } = await queryDb<T>(sql, limit ? [Math.max(1, limit)] : undefined)
+  return rows
 }
 
 async function countRows(table: string): Promise<number> {
-  const supabase = getSupabaseServerClient()
-  const { count, error } = await supabase.from(table).select("id", { count: "exact", head: true })
-  if (error) throw new Error(error.message)
-  return count ?? 0
+  const { rows } = await queryDb<{ count: string }>(`select count(*)::text as count from public.${table}`)
+  return Number(rows[0]?.count ?? 0)
 }
 
 async function listActiveAccountSnapshots(): Promise<ActiveAccountSnapshotRow[]> {
-  if (!isPostgresConfigured()) return []
   const { rows } = await queryDb<ActiveAccountSnapshotRow>(`
     select captured_day, account_id, account_label, account_email, buckets, objects, bytes, captured_at
     from (

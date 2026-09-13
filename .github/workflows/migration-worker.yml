@@ -45,6 +45,8 @@ jobs:
 
       - name: Run migration worker
         env:
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          POSTGRES_SSL: ${{ secrets.POSTGRES_SSL || 'true' }}
           SERVER_URL: ${{ secrets.DRIVE_MIGRATION_ORCHESTRATOR_URL }}
           AGENT_ID: ${{ github.event.client_payload.agent_id }}
           WORKER_INSTANCE_ID: ${{ github.event.client_payload.worker_instance_id || github.run_id }}

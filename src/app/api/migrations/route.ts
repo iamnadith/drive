@@ -3,7 +3,6 @@ import { getAllAccounts, getActiveAccount } from "@/lib/accounts-store"
 import { r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
 import { createMigration, listMigrations } from "@/lib/migrations-store"
 import { getBucketStatsMap } from "@/lib/bucket-stats-store"
-import { syncMigrationLiveState } from "@/lib/migration-live-state"
 import { requireAdmin } from "@/lib/server-auth"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -18,26 +17,14 @@ function jsonBad(error: string, status = 400, extra?: Record<string, unknown>) {
   return NextResponse.json({ error, ...(extra ?? {}) }, { status })
 }
 
-async function runBounded<T>(values: T[], concurrency: number, task: (value: T) => Promise<unknown>) {
-  for (let index = 0; index < values.length; index += concurrency) {
-    await Promise.all(values.slice(index, index + concurrency).map(task))
-  }
-}
-
 export async function GET() {
   try {
     const auth = await requireAdmin()
     if (!auth.ok) return auth.response
 
-    const migrations = await listMigrations()
-
-    const candidates = migrations
-      .filter((m) => m.status !== "draft" && m.status !== "canceled" && m.options.executionMode !== "migration_workers")
-      .slice(0, 20)
-    await runBounded(candidates, 4, (migration) => syncMigrationLiveState(migration.id).catch(() => undefined))
-
-    const refreshed = await listMigrations()
-    return jsonOk({ migrations: refreshed })
+    // Return the durable projection written by the orchestrator. A dashboard
+    // read must not fan out into per-migration synchronization work.
+    return jsonOk({ migrations: await listMigrations() })
   } catch (error: unknown) {
     const message =
       typeof error === "object" && error !== null && "message" in error

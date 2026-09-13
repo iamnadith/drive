@@ -1,6 +1,5 @@
 import crypto from "crypto"
-import { isPostgresConfigured, queryDb } from "./db"
-import { getSupabaseServerClient } from "./supabase"
+import { queryDb, withDbTransaction } from "./db"
 
 export type CloudflareAccountStatus = "active" | "disabled" | "available"
 export type CloudflareAccountSyncStatus = "idle" | "syncing" | "ok" | "error"
@@ -53,64 +52,6 @@ type DriveAccountRow = {
 const ACCOUNTS_TABLE = "drive_accounts"
 const MIGRATIONS_TABLE = "drive_migrations"
 
-async function archiveAccountBucketStatsBeforeDelete(account: CloudflareAccount): Promise<void> {
-  if (!isPostgresConfigured()) return
-  await queryDb(`
-    create table if not exists drive_analytics_bucket_snapshots (
-      account_id uuid not null,
-      account_label text,
-      account_email text,
-      bucket_name text not null,
-      objects bigint not null default 0,
-      bytes bigint not null default 0,
-      status text,
-      source_updated_at timestamptz,
-      captured_at timestamptz not null default now(),
-      primary key (account_id, bucket_name)
-    );
-  `)
-  await queryDb(
-    `
-      insert into drive_analytics_bucket_snapshots
-        (account_id, account_label, account_email, bucket_name, objects, bytes, status, source_updated_at)
-      select account_id, $2, $3, bucket_name, objects, bytes, status, updated_at
-      from drive_bucket_stats
-      where account_id = $1
-      on conflict (account_id, bucket_name) do update set
-        account_label = excluded.account_label,
-        account_email = excluded.account_email,
-        objects = excluded.objects,
-        bytes = excluded.bytes,
-        status = excluded.status,
-        source_updated_at = excluded.source_updated_at,
-        captured_at = now();
-    `,
-    [account.id, account.label, account.email]
-  )
-}
-
-function normalizeSupabaseError(error: { message: string }): Error {
-  const message = String(error?.message ?? "Supabase error")
-  if (
-    message.includes("Could not find the table") &&
-    message.includes(ACCOUNTS_TABLE)
-  ) {
-    return new Error(
-      `Supabase table '${ACCOUNTS_TABLE}' is missing. Create it by running 'supabase/drive_schema.sql' in the Supabase SQL editor for ${process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "your project"}.`
-    )
-  }
-  if (
-    message.includes("violates foreign key constraint") &&
-    (message.includes("drive_migrations_source_account_id_fkey") ||
-      message.includes("drive_migrations_target_account_id_fkey"))
-  ) {
-    return new Error(
-      "Cannot delete this account because it is referenced by one or more migrations. Delete/archive those migrations first."
-    )
-  }
-  return new Error(message)
-}
-
 function mapRow(row: DriveAccountRow): CloudflareAccount {
   const numeric = (value: number | string) => {
     const parsed = typeof value === "number" ? value : Number(value)
@@ -154,24 +95,22 @@ function compareRowsByRecency(a: DriveAccountRow, b: DriveAccountRow): number {
   return (b.created_at || "").localeCompare(a.created_at || "")
 }
 
-async function readAllAccountRows(supabase: ReturnType<typeof getSupabaseServerClient>): Promise<DriveAccountRow[]> {
-  const { data, error } = await supabase
-    .from(ACCOUNTS_TABLE)
-    .select("*")
-    .order("created_at", { ascending: true })
-
-  if (error) throw normalizeSupabaseError(error)
-  return (data as DriveAccountRow[]) ?? []
+async function readAllAccountRows(): Promise<DriveAccountRow[]> {
+  const { rows } = await queryDb<DriveAccountRow>(
+    `select * from public.${ACCOUNTS_TABLE} order by created_at asc, id asc`
+  )
+  return rows
 }
 
 async function reconcileAccountStatuses(
-  supabase: ReturnType<typeof getSupabaseServerClient>,
   options?: {
     preferredActiveAccountId?: string
     promoteFirstAvailable?: boolean
   }
 ): Promise<DriveAccountRow[]> {
-  let rows = await readAllAccountRows(supabase)
+  return withDbTransaction(async (client) => {
+  await client.query(`select pg_advisory_xact_lock(hashtext('drive_accounts'), hashtext('active-status'))`)
+  let rows = (await client.query<DriveAccountRow>(`select * from public.${ACCOUNTS_TABLE} order by created_at asc, id asc for update`)).rows
   const preferredId = typeof options?.preferredActiveAccountId === "string" ? options.preferredActiveAccountId.trim() : ""
   const preferred = preferredId ? rows.find((row) => row.id === preferredId) ?? null : null
 
@@ -193,12 +132,11 @@ async function reconcileAccountStatuses(
 
   let changed = false
   if (activeIdsToDemote.length > 0) {
-    const { error } = await supabase
-      .from(ACCOUNTS_TABLE)
-      .update({ status: "disabled" })
-      .in("id", activeIdsToDemote)
-    if (error) throw normalizeSupabaseError(error)
-    changed = true
+    const result = await client.query(
+      `update public.${ACCOUNTS_TABLE} set status='disabled',updated_at=now() where id=any($1::uuid[]) and status='active'`,
+      [activeIdsToDemote]
+    )
+    changed ||= (result.rowCount ?? 0) > 0
   }
 
   if (desiredActiveId) {
@@ -206,33 +144,39 @@ async function reconcileAccountStatuses(
     if (desired && desired.status !== "active") {
       const canPromote = desired.status === "available"
       if (canPromote) {
-        const { error } = await supabase
-          .from(ACCOUNTS_TABLE)
-          .update({ status: "active" })
-          .eq("id", desiredActiveId)
-        if (error) throw normalizeSupabaseError(error)
-        changed = true
+        const result = await client.query(
+          `update public.${ACCOUNTS_TABLE} set status='active',updated_at=now() where id=$1 and status='available'`,
+          [desiredActiveId]
+        )
+        changed ||= (result.rowCount ?? 0) > 0
       }
     }
   }
 
   if (changed) {
-    rows = await readAllAccountRows(supabase)
+    rows = (await client.query<DriveAccountRow>(`select * from public.${ACCOUNTS_TABLE} order by created_at asc, id asc`)).rows
   }
 
   return rows
+  })
 }
 
 export async function getAllAccounts(): Promise<CloudflareAccount[]> {
-  const supabase = getSupabaseServerClient()
-  const rows = await reconcileAccountStatuses(supabase, { promoteFirstAvailable: true })
+  const rows = await readAllAccountRows()
   return rows.map(mapRow)
 }
 
+export async function getAccountById(accountId: string): Promise<CloudflareAccount | null> {
+  const { rows } = await queryDb<DriveAccountRow>(
+    `select * from public.${ACCOUNTS_TABLE} where id=$1 limit 1`,
+    [accountId]
+  )
+  return rows[0] ? mapRow(rows[0]) : null
+}
+
 export async function getActiveAccount(): Promise<CloudflareAccount | null> {
-  const supabase = getSupabaseServerClient()
-  const rows = await reconcileAccountStatuses(supabase, { promoteFirstAvailable: true })
-  const row = rows.find((account) => account.status === "active")
+  const { rows } = await queryDb<DriveAccountRow>(`select * from public.${ACCOUNTS_TABLE} where status='active' limit 1`)
+  const row = rows[0]
   return row ? mapRow(row) : null
 }
 
@@ -246,119 +190,47 @@ export async function createAccount(input: {
   r2SecretAccessKey: string
   makeActive?: boolean
 }): Promise<CloudflareAccount> {
-  const supabase = getSupabaseServerClient()
-
   const normalizedEmail = input.email.trim().toLowerCase()
   const normalizedLabel = input.label.trim()
+  const inserted = await withDbTransaction(async (client) => {
+    await client.query(`select pg_advisory_xact_lock(hashtext('drive_accounts'), hashtext('active-status'))`)
+    const checks = await client.query<{
+      account_count: string
+      email_exists: boolean
+      label_exists: boolean
+      token_exists: boolean
+      r2_exists: boolean
+    }>(`
+      select count(*)::text as account_count,
+        exists(select 1 from public.${ACCOUNTS_TABLE} where email=$1) as email_exists,
+        exists(select 1 from public.${ACCOUNTS_TABLE} where lower(label)=lower($2)) as label_exists,
+        exists(select 1 from public.${ACCOUNTS_TABLE} where api_token=$3) as token_exists,
+        exists(select 1 from public.${ACCOUNTS_TABLE} where $4::text<>'' and r2_access_key_id=$4) as r2_exists
+      from public.${ACCOUNTS_TABLE}
+    `, [normalizedEmail, normalizedLabel, input.apiToken, input.r2AccessKeyId || ""])
+    const check = checks.rows[0]
+    if (check.email_exists) throw new Error("An account with this email already exists")
+    if (check.label_exists) throw new Error("An account with this label already exists")
+    if (check.token_exists) throw new Error("An account with this API token already exists")
+    if (check.r2_exists) throw new Error("An account with this R2 access key already exists")
 
-  const existingEmail = await supabase
-    .from(ACCOUNTS_TABLE)
-    .select("id", { count: "exact", head: true })
-    .eq("email", normalizedEmail)
-  if (existingEmail.error) throw normalizeSupabaseError(existingEmail.error)
-  if ((existingEmail.count ?? 0) > 0) {
-    throw new Error("An account with this email already exists")
-  }
-
-  const existingLabel = await supabase
-    .from(ACCOUNTS_TABLE)
-    .select("id", { count: "exact", head: true })
-    .ilike("label", normalizedLabel)
-  if (existingLabel.error) throw normalizeSupabaseError(existingLabel.error)
-  if ((existingLabel.count ?? 0) > 0) {
-    throw new Error("An account with this label already exists")
-  }
-
-  const existingToken = await supabase
-    .from(ACCOUNTS_TABLE)
-    .select("id", { count: "exact", head: true })
-    .eq("api_token", input.apiToken)
-  if (existingToken.error) throw normalizeSupabaseError(existingToken.error)
-  if ((existingToken.count ?? 0) > 0) {
-    throw new Error("An account with this API token already exists")
-  }
-
-  if (input.r2AccessKeyId) {
-    const existingR2 = await supabase
-      .from(ACCOUNTS_TABLE)
-      .select("id", { count: "exact", head: true })
-      .eq("r2_access_key_id", input.r2AccessKeyId)
-    if (existingR2.error) throw normalizeSupabaseError(existingR2.error)
-    if ((existingR2.count ?? 0) > 0) {
-      throw new Error("An account with this R2 access key already exists")
+    const status: CloudflareAccountStatus = input.makeActive || Number(check.account_count) === 0 ? "active" : "available"
+    if (status === "active") {
+      await client.query(`update public.${ACCOUNTS_TABLE} set status='disabled',updated_at=now() where status='active'`)
     }
-  }
-
-  const accountCountRes = await supabase
-    .from(ACCOUNTS_TABLE)
-    .select("id", { count: "exact", head: true })
-  if (accountCountRes.error) throw normalizeSupabaseError(accountCountRes.error)
-  const accountCount = accountCountRes.count ?? 0
-
-  let status: CloudflareAccountStatus = "available"
-  if (input.makeActive || accountCount === 0) status = "active"
-
-  let previousActiveIds: string[] = []
-  if (status === "active") {
-    const { data: activeRows, error: activeRowsError } = await supabase
-      .from(ACCOUNTS_TABLE)
-      .select("id")
-      .eq("status", "active")
-    if (activeRowsError) throw normalizeSupabaseError(activeRowsError)
-    previousActiveIds = ((activeRows as Array<{ id: string }> | null) ?? []).map((row) => row.id)
-
-    const { error } = await supabase
-      .from(ACCOUNTS_TABLE)
-      .update({ status: "disabled" })
-      .eq("status", "active")
-    if (error) throw normalizeSupabaseError(error)
-  }
-
-  const row = {
-    id: crypto.randomUUID(),
-    label: normalizedLabel,
-    email: normalizedEmail,
-    password: input.password,
-    two_factor_secret: input.twoFactorSecret?.trim() || null,
-    api_token: input.apiToken,
-    r2_access_key_id: input.r2AccessKeyId,
-    r2_secret_access_key: input.r2SecretAccessKey,
-    cloudflare_account_id: null,
-    cloudflare_account_name: null,
-    status,
-    last_migrated: "-",
-    total_buckets: 0,
-    total_objects: 0,
-    total_bytes: 0,
-    last_synced_at: null,
-    sync_status: "idle",
-    sync_message: null,
-  }
-
-  const { data, error } = await supabase
-    .from(ACCOUNTS_TABLE)
-    .insert(row)
-    .select("*")
-    .single()
-  if (error) {
-    if (status === "active" && previousActiveIds.length > 0) {
-      try {
-        await supabase
-          .from(ACCOUNTS_TABLE)
-          .update({ status: "active" })
-          .in("id", previousActiveIds)
-      } catch {
-        // Best-effort rollback only.
-      }
-    }
-    throw normalizeSupabaseError(error)
-  }
-  if (status === "active") {
-    const rows = await reconcileAccountStatuses(supabase, { preferredActiveAccountId: row.id })
-    const created = rows.find((account) => account.id === row.id)
-    if (created) return mapRow(created)
-  }
-  return mapRow(data as DriveAccountRow)
+    const { rows } = await client.query<DriveAccountRow>(`
+      insert into public.${ACCOUNTS_TABLE} (
+        id,label,email,password,two_factor_secret,api_token,r2_access_key_id,r2_secret_access_key,
+        cloudflare_account_id,cloudflare_account_name,status,last_migrated,total_buckets,total_objects,
+        total_bytes,last_synced_at,sync_status,sync_message
+      ) values ($1,$2,$3,$4,$5,$6,$7,$8,null,null,$9,'-',0,0,0,null,'idle',null)
+      returning *
+    `, [crypto.randomUUID(), normalizedLabel, normalizedEmail, input.password, input.twoFactorSecret?.trim() || null,
+      input.apiToken, input.r2AccessKeyId, input.r2SecretAccessKey, status])
+    if (!rows[0]) throw new Error("Failed to create Cloudflare account")
+    return rows[0]
+  })
+  return mapRow(inserted)
 }
 
 export async function updateAccount(
@@ -386,68 +258,6 @@ export async function updateAccount(
     >
   > & { lastSyncedAt?: string | null }
 ): Promise<CloudflareAccount> {
-  const supabase = getSupabaseServerClient()
-
-  const { data: currentRows, error: currentError } = await supabase
-    .from(ACCOUNTS_TABLE)
-    .select("*")
-    .eq("id", id)
-    .limit(1)
-
-  if (currentError) throw new Error(currentError.message)
-  const current = (currentRows as DriveAccountRow[])[0]
-  if (!current) throw new Error("Account not found")
-
-  if (
-    current.status === "disabled" &&
-    typeof updates.status !== "undefined" &&
-    updates.status !== "disabled"
-  ) {
-    throw new Error("Disabled Cloudflare accounts are permanent and cannot be re-enabled")
-  }
-
-  let previousActiveIds: string[] = []
-  if (updates.status === "active") {
-    const { data: activeRows, error: activeRowsError } = await supabase
-      .from(ACCOUNTS_TABLE)
-      .select("id")
-      .eq("status", "active")
-      .neq("id", id)
-    if (activeRowsError) throw normalizeSupabaseError(activeRowsError)
-    previousActiveIds = ((activeRows as Array<{ id: string }> | null) ?? []).map((row) => row.id)
-
-    const { error } = await supabase
-      .from(ACCOUNTS_TABLE)
-      .update({ status: "disabled" })
-      .eq("status", "active")
-      .neq("id", id)
-    if (error) throw normalizeSupabaseError(error)
-  }
-
-  if (
-    typeof updates.status !== "undefined" &&
-    updates.status !== "active" &&
-    current.status === "active"
-  ) {
-    const remainingCountRes = await supabase
-      .from(ACCOUNTS_TABLE)
-      .select("id", { count: "exact", head: true })
-      .neq("id", id)
-    if (remainingCountRes.error) throw new Error(remainingCountRes.error.message)
-    const remaining = remainingCountRes.count ?? 0
-    if (remaining > 0) {
-      const anyActive = await supabase
-        .from(ACCOUNTS_TABLE)
-        .select("id", { count: "exact", head: true })
-        .neq("id", id)
-        .eq("status", "active")
-      if (anyActive.error) throw new Error(anyActive.error.message)
-      if ((anyActive.count ?? 0) === 0) {
-        throw new Error("At least one Cloudflare account must remain active")
-      }
-    }
-  }
-
   const dbUpdates: Record<string, unknown> = {}
   if (updates.label !== undefined) dbUpdates.label = updates.label
   if (updates.email !== undefined) dbUpdates.email = updates.email
@@ -477,32 +287,39 @@ export async function updateAccount(
   if (updates.syncMessage !== undefined)
     dbUpdates.sync_message = updates.syncMessage ?? null
 
-  const { data, error } = await supabase
-    .from(ACCOUNTS_TABLE)
-    .update(dbUpdates)
-    .eq("id", id)
-    .select("*")
-    .single()
-
-  if (error) {
-    if (updates.status === "active" && previousActiveIds.length > 0) {
-      try {
-        await supabase
-          .from(ACCOUNTS_TABLE)
-          .update({ status: "active" })
-          .in("id", previousActiveIds)
-      } catch {
-        // Best-effort rollback only.
+  const updated = await withDbTransaction(async (client) => {
+    await client.query(`select pg_advisory_xact_lock(hashtext('drive_accounts'), hashtext('active-status'))`)
+    const current = (await client.query<DriveAccountRow>(
+      `select * from public.${ACCOUNTS_TABLE} where id=$1 for update`, [id]
+    )).rows[0]
+    if (!current) throw new Error("Account not found")
+    if (current.status === "disabled" && updates.status !== undefined && updates.status !== "disabled") {
+      throw new Error("Disabled Cloudflare accounts are permanent and cannot be re-enabled")
+    }
+    if (updates.status !== undefined && updates.status !== "active" && current.status === "active") {
+      const result = await client.query(`select
+        count(*) filter(where id<>$1)::int remaining,
+        count(*) filter(where id<>$1 and status='active')::int active
+        from public.${ACCOUNTS_TABLE}`, [id])
+      const row = result.rows[0]
+      if (Number(row?.remaining || 0) > 0 && Number(row?.active || 0) === 0) {
+        throw new Error("At least one Cloudflare account must remain active")
       }
     }
-    throw normalizeSupabaseError(error)
-  }
-  if (updates.status === "active") {
-    const rows = await reconcileAccountStatuses(supabase, { preferredActiveAccountId: id })
-    const updatedRow = rows.find((account) => account.id === id)
-    if (updatedRow) return mapRow(updatedRow)
-  }
-  return mapRow(data as DriveAccountRow)
+    if (updates.status === "active") {
+      await client.query(`update public.${ACCOUNTS_TABLE} set status='disabled',updated_at=now() where status='active' and id<>$1`, [id])
+    }
+    const columns = Object.keys(dbUpdates)
+    if (!columns.length) return current
+    const assignments = columns.map((column, index) => `${column}=$${index + 2}`).join(",")
+    const result = await client.query<DriveAccountRow>(
+      `update public.${ACCOUNTS_TABLE} set ${assignments},updated_at=now() where id=$1 returning *`,
+      [id, ...columns.map((column) => dbUpdates[column])]
+    )
+    if (!result.rows[0]) throw new Error("Account not found")
+    return result.rows[0]
+  })
+  return mapRow(updated)
 }
 
 export async function activateAccountForCompletedMigration(input: {
@@ -552,7 +369,7 @@ export async function activateAccountForCompletedMigration(input: {
       syncStatus: "syncing",
       syncMessage: "Awaiting Backend Orchestrator refresh; showing last committed totals",
     })
-    const rows = await reconcileAccountStatuses(getSupabaseServerClient(), { preferredActiveAccountId: target.id })
+    const rows = await reconcileAccountStatuses({ preferredActiveAccountId: target.id })
     const reconciled = rows.find((account) => account.id === target.id)
     return reconciled ? mapRow(reconciled) : updated
   } catch (error: unknown) {
@@ -580,59 +397,33 @@ export async function activateAccountForCompletedMigration(input: {
 }
 
 export async function deleteAccount(id: string): Promise<void> {
-  const supabase = getSupabaseServerClient()
-
-  const { data: targetRows, error: targetError } = await supabase
-    .from(ACCOUNTS_TABLE)
-    .select("*")
-    .eq("id", id)
-    .limit(1)
-
-  if (targetError) throw new Error(targetError.message)
-  const targetRow = (targetRows as DriveAccountRow[])[0]
-  const target = targetRow ? mapRow(targetRow) : null
-  if (!target) return
-
-  if (target.status === "active") {
-    const remainingRes = await supabase
-      .from(ACCOUNTS_TABLE)
-      .select("id", { count: "exact", head: true })
-      .neq("id", id)
-    if (remainingRes.error) throw new Error(remainingRes.error.message)
-    const remaining = remainingRes.count ?? 0
-    if (remaining > 0) {
-      const anyActive = await supabase
-        .from(ACCOUNTS_TABLE)
-        .select("id", { count: "exact", head: true })
-        .neq("id", id)
-        .eq("status", "active")
-      if (anyActive.error) throw new Error(anyActive.error.message)
-      if ((anyActive.count ?? 0) === 0) {
+  await withDbTransaction(async (client) => {
+    await client.query(`select pg_advisory_xact_lock(hashtext('drive_accounts'), hashtext('active-status'))`)
+    const target = (await client.query<DriveAccountRow>(`select * from public.${ACCOUNTS_TABLE} where id=$1 for update`, [id])).rows[0]
+    if (!target) return
+    if (target.status === "active") {
+      const result = await client.query(`select
+        count(*) filter(where id<>$1)::int remaining,
+        count(*) filter(where id<>$1 and status='active')::int active
+        from public.${ACCOUNTS_TABLE}`, [id])
+      const row = result.rows[0]
+      if (Number(row?.remaining || 0) > 0 && Number(row?.active || 0) === 0) {
         throw new Error("Cannot delete the last active Cloudflare account")
       }
     }
-  }
-
-  const sourceRefs = await supabase
-    .from(MIGRATIONS_TABLE)
-    .select("id", { count: "exact", head: true })
-    .eq("source_account_id", id)
-  if (sourceRefs.error) throw normalizeSupabaseError(sourceRefs.error)
-
-  const targetRefs = await supabase
-    .from(MIGRATIONS_TABLE)
-    .select("id", { count: "exact", head: true })
-    .eq("target_account_id", id)
-  if (targetRefs.error) throw normalizeSupabaseError(targetRefs.error)
-
-  if ((sourceRefs.count ?? 0) > 0 || (targetRefs.count ?? 0) > 0) {
-    throw new Error(
-      "Cannot delete this account because it is referenced by one or more migrations. Delete/archive those migrations first."
-    )
-  }
-
-  await archiveAccountBucketStatsBeforeDelete(target).catch(() => undefined)
-
-  const { error } = await supabase.from(ACCOUNTS_TABLE).delete().eq("id", id)
-  if (error) throw normalizeSupabaseError(error)
+    const references = await client.query(`select exists(select 1 from public.${MIGRATIONS_TABLE} where source_account_id=$1 or target_account_id=$1) referenced`, [id])
+    if (references.rows[0]?.referenced) {
+      throw new Error("Cannot delete this account because it is referenced by one or more migrations. Delete/archive those migrations first.")
+    }
+    await client.query(`
+      insert into public.drive_analytics_bucket_snapshots
+        (account_id,account_label,account_email,bucket_name,objects,bytes,status,source_updated_at)
+      select account_id,$2,$3,bucket_name,objects,bytes,status,updated_at
+      from public.drive_bucket_stats where account_id=$1
+      on conflict(account_id,bucket_name) do update set account_label=excluded.account_label,
+        account_email=excluded.account_email,objects=excluded.objects,bytes=excluded.bytes,status=excluded.status,
+        source_updated_at=excluded.source_updated_at,captured_at=now()
+    `, [id, target.label, target.email])
+    await client.query(`delete from public.${ACCOUNTS_TABLE} where id=$1`, [id])
+  })
 }

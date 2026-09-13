@@ -30,7 +30,7 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const ambientThemeSettings = await getAmbientThemeSettings().catch(() => undefined)
+  const ambientThemeSettings = await getAmbientThemeSettings()
 
   return (
     <html lang="en" suppressHydrationWarning>

@@ -9,7 +9,6 @@ import {
   listGitHubWorkflowRuns,
   GITHUB_TOKEN_COOKIE,
 } from "@/lib/github-oauth"
-import { syncMigrationLiveState } from "@/lib/migration-live-state"
 import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
@@ -239,11 +238,6 @@ async function stopGithubWorkerById(workerId: string) {
     },
     lastHeartbeatAt: now,
   }).catch(() => undefined)
-
-  const migrationIds = Array.from(new Set(linkedJobs.map((job) => job.migrationId).filter(Boolean)))
-  for (const migrationId of migrationIds) {
-    await syncMigrationLiveState(migrationId).catch(() => undefined)
-  }
 
   return {
     workerId,

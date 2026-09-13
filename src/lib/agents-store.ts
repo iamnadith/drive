@@ -1,5 +1,5 @@
 import crypto from "crypto"
-import { getSupabaseServerClient } from "./supabase"
+import { queryDb } from "./db"
 import { getMigrationWorkerSharedSecret } from "./migration-worker-settings-store"
 
 export type AgentCategory = "worker" | "agent"
@@ -104,35 +104,6 @@ const AGENTS_TABLE = "drive_agents"
 const AGENT_RUNS_TABLE = "drive_agent_runs"
 const MAX_AGENT_TOKEN_LENGTH = 512
 
-function normalizeSupabaseError(error: { message: string }): Error {
-  const message = String(error?.message ?? "Supabase error")
-  if (message.includes("Could not find the table") && message.includes(AGENTS_TABLE)) {
-    return new Error(
-      `Supabase table '${AGENTS_TABLE}' is missing. Apply 'supabase/drive_schema.sql' before using agents/workers.`
-    )
-  }
-  const lower = message.toLowerCase()
-  if (lower.includes("<!doctype html") || lower.includes("<html")) {
-    if (lower.includes("502") || lower.includes("bad gateway")) {
-      return new Error("Supabase returned 502 Bad Gateway. This is a temporary upstream outage; retry in a few minutes.")
-    }
-    return new Error("Supabase returned an HTML error page instead of JSON. The backend is temporarily unavailable.")
-  }
-  return new Error(message)
-}
-
-function wrapSupabaseQueryError(error: unknown, context: string): Error {
-  if (error instanceof SyntaxError) {
-    return new Error(
-      `Supabase returned invalid or empty JSON while ${context}. This usually means the upstream response was truncated or an HTML/error page was returned instead of JSON.`
-    )
-  }
-  if (error && typeof error === "object" && "message" in error) {
-    return normalizeSupabaseError(error as { message: string })
-  }
-  return error instanceof Error ? error : new Error(`${context} failed`)
-}
-
 function sanitizeCapabilities(value: unknown): AgentCapability[] {
   if (!Array.isArray(value)) return []
   return value
@@ -234,58 +205,23 @@ function deriveInitialStatus(input: {
 }
 
 export async function listAgents(): Promise<Array<DriveAgent & { latestRun: DriveAgentRun | null; runs: DriveAgentRun[] }>> {
-  const supabase = getSupabaseServerClient()
-  let data: unknown
-  let error: { message: string } | null = null
-  try {
-    const response = await supabase.from(AGENTS_TABLE).select("*").order("created_at", { ascending: false })
-    data = response.data
-    error = response.error
-  } catch (caughtError) {
-    throw wrapSupabaseQueryError(caughtError, `reading '${AGENTS_TABLE}'`)
-  }
-  if (error) throw normalizeSupabaseError(error)
-
-  const agents = (Array.isArray(data) ? (data as DriveAgentRow[]) : []).map(mapAgentRow)
-  if (agents.length === 0) return []
-
-  let activeRuns: unknown
-  let recentRuns: unknown
-  let runsError: { message: string } | null = null
-  try {
-    const agentIds = agents.map((agent) => agent.id)
-    const [activeResponse, recentResponse] = await Promise.all([
-      supabase.from(AGENT_RUNS_TABLE).select("*").in("agent_id", agentIds).in("status", ["pending", "running"]).order("created_at", { ascending: false }).limit(500),
-      supabase.from(AGENT_RUNS_TABLE).select("*").in("agent_id", agentIds).in("status", ["completed", "failed", "canceled"]).order("created_at", { ascending: false }).limit(100),
-    ])
-    activeRuns = activeResponse.data
-    recentRuns = recentResponse.data
-    runsError = activeResponse.error ?? recentResponse.error
-  } catch (caughtError) {
-    throw wrapSupabaseQueryError(caughtError, `reading '${AGENT_RUNS_TABLE}' for latest worker runs`)
-  }
-  if (runsError) throw new Error(runsError.message)
-
-  const latestByAgent = new Map<string, DriveAgentRun>()
-  const runsByAgent = new Map<string, DriveAgentRun[]>()
-  const uniqueRuns = new Map<string, DriveAgentRunRow>()
-  for (const run of [
-    ...(Array.isArray(activeRuns) ? (activeRuns as DriveAgentRunRow[]) : []),
-    ...(Array.isArray(recentRuns) ? (recentRuns as DriveAgentRunRow[]) : []),
-  ].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))) uniqueRuns.set(run.id, run)
-  for (const run of uniqueRuns.values()) {
-    const mapped = mapRunRow(run)
-    if (!latestByAgent.has(run.agent_id)) latestByAgent.set(run.agent_id, mapped)
-    const agentRuns = runsByAgent.get(run.agent_id) ?? []
-    if (agentRuns.length < 20) agentRuns.push(mapped)
-    runsByAgent.set(run.agent_id, agentRuns)
-  }
-
-  return agents.map((agent) => ({
-    ...agent,
-    latestRun: latestByAgent.get(agent.id) ?? null,
-    runs: runsByAgent.get(agent.id) ?? [],
-  }))
+  const { rows } = await queryDb<DriveAgentRow & { recent_runs: DriveAgentRunRow[] }>(
+    `select a.*,
+       coalesce(r.runs, '[]'::jsonb) as recent_runs
+     from public.${AGENTS_TABLE} a
+     left join lateral (
+       select jsonb_agg(to_jsonb(recent) order by recent.created_at desc, recent.id desc) as runs
+       from (
+         select * from public.${AGENT_RUNS_TABLE} where agent_id = a.id
+         order by created_at desc, id desc limit 20
+       ) recent
+     ) r on true
+     order by a.created_at desc, a.id desc`
+  )
+  return rows.map((row) => {
+    const runs = Array.isArray(row.recent_runs) ? row.recent_runs.map(mapRunRow) : []
+    return { ...mapAgentRow(row), latestRun: runs[0] ?? null, runs }
+  })
 }
 
 export async function createAgent(input: {
@@ -304,7 +240,6 @@ export async function createAgent(input: {
   workerCount?: number
   notes?: string
 }): Promise<{ agent: DriveAgent; registrationToken?: string }> {
-  const supabase = getSupabaseServerClient()
   const name = input.name.trim()
   if (!name) throw new Error("Agent/worker name is required")
 
@@ -332,60 +267,57 @@ export async function createAgent(input: {
     metadata: {},
   }
 
-  const { data, error } = await supabase.from(AGENTS_TABLE).insert(row).select("*").single()
-  if (error) throw normalizeSupabaseError(error)
-
-  return { agent: mapAgentRow(data as DriveAgentRow), ...(registrationToken ? { registrationToken } : {}) }
+  const { rows } = await queryDb<DriveAgentRow>(
+    `insert into public.${AGENTS_TABLE} (
+       id, name, category, provider, status, capabilities, endpoint_domain,
+       endpoint_ip, github_repo_owner, github_repo_name, github_workflow_file,
+       github_ref, github_repository_id, github_token, worker_count, notes,
+       registration_token, registration_token_hash, metadata
+     ) values (
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+     ) returning *`,
+    [row.id, row.name, row.category, row.provider, row.status, JSON.stringify(row.capabilities),
+      row.endpoint_domain, row.endpoint_ip, row.github_repo_owner, row.github_repo_name,
+      row.github_workflow_file, row.github_ref, row.github_repository_id, row.github_token,
+      row.worker_count, row.notes, row.registration_token, row.registration_token_hash, JSON.stringify(row.metadata)]
+  )
+  return { agent: mapAgentRow(rows[0]), registrationToken }
 }
 
 export async function getAgentById(id: string): Promise<DriveAgent | null> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase.from(AGENTS_TABLE).select("*").eq("id", id).limit(1)
-  if (error) throw normalizeSupabaseError(error)
-  const row = Array.isArray(data) ? (data[0] as DriveAgentRow | undefined) : undefined
+  const { rows } = await queryDb<DriveAgentRow>(`select * from public.${AGENTS_TABLE} where id = $1 limit 1`, [id])
+  const row = rows[0]
   return row ? mapAgentRow(row) : null
 }
 
 export async function getAgentGithubToken(agentId: string): Promise<string | null> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase.from(AGENTS_TABLE).select("github_token").eq("id", agentId).limit(1)
-  if (error) throw normalizeSupabaseError(error)
-  const row = Array.isArray(data) ? (data[0] as { github_token?: string | null } | undefined) : undefined
+  const { rows } = await queryDb<{ github_token: string | null }>(`select github_token from public.${AGENTS_TABLE} where id = $1 limit 1`, [agentId])
+  const row = rows[0]
   return typeof row?.github_token === "string" && row.github_token.trim() ? row.github_token.trim() : null
 }
 
 export async function getAgentRegistrationToken(agentId: string): Promise<string | null> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase.from(AGENTS_TABLE).select("registration_token").eq("id", agentId).limit(1)
-  if (error) throw normalizeSupabaseError(error)
-  const row = Array.isArray(data) ? (data[0] as { registration_token?: string | null } | undefined) : undefined
+  const { rows } = await queryDb<{ registration_token: string | null }>(`select registration_token from public.${AGENTS_TABLE} where id = $1 limit 1`, [agentId])
+  const row = rows[0]
   return typeof row?.registration_token === "string" && row.registration_token.trim() ? row.registration_token.trim() : null
 }
 
 export async function ensureAgentRegistrationToken(agentId: string): Promise<string> {
-  const existing = await getAgentRegistrationToken(agentId)
-  if (existing) return existing
+  const existingToken = await getAgentRegistrationToken(agentId)
+  if (existingToken) return existingToken
 
-  const supabase = getSupabaseServerClient()
   const registrationToken = buildRegistrationToken()
-  const { data, error } = await supabase
-    .from(AGENTS_TABLE)
-    .update({
-      registration_token: registrationToken,
-      registration_token_hash: hashRegistrationToken(registrationToken),
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", agentId)
-    .select("registration_token")
-    .single()
-  if (error) throw normalizeSupabaseError(error)
-
-  const token =
-    isRecord(data) && typeof data.registration_token === "string" && data.registration_token.trim()
-      ? data.registration_token.trim()
-      : registrationToken
-
-  return token
+  const { rows } = await queryDb<{ registration_token: string }>(
+    `update public.${AGENTS_TABLE}
+     set registration_token = $2, registration_token_hash = $3, updated_at = now()
+     where id = $1 and (registration_token is null or registration_token = '')
+     returning registration_token`,
+    [agentId, registrationToken, hashRegistrationToken(registrationToken)]
+  )
+  if (rows[0]?.registration_token) return rows[0].registration_token
+  const existing = await getAgentRegistrationToken(agentId)
+  if (!existing) throw new Error("Agent/worker not found")
+  return existing
 }
 
 export async function createAgentRun(input: {
@@ -397,27 +329,17 @@ export async function createAgentRun(input: {
   summary?: string
   payload?: Record<string, unknown>
 }): Promise<DriveAgentRun> {
-  const supabase = getSupabaseServerClient()
   const now = new Date().toISOString()
-  const { data, error } = await supabase
-    .from(AGENT_RUNS_TABLE)
-    .insert({
-      id: crypto.randomUUID(),
-      agent_id: input.agentId,
-      run_type: input.runType,
-      status: input.status ?? "pending",
-      external_run_id: input.externalRunId ?? null,
-      job_reference: input.jobReference ?? null,
-      summary: input.summary ?? null,
-      payload: input.payload ?? {},
-      started_at: input.status === "running" ? now : null,
-      created_at: now,
-      updated_at: now,
-    })
-    .select("*")
-    .single()
-  if (error) throw normalizeSupabaseError(error)
-  return mapRunRow(data as DriveAgentRunRow)
+  const { rows } = await queryDb<DriveAgentRunRow>(
+    `insert into public.${AGENT_RUNS_TABLE} (
+       id, agent_id, run_type, status, external_run_id, job_reference,
+       summary, payload, started_at, created_at, updated_at
+     ) values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11) returning *`,
+    [crypto.randomUUID(), input.agentId, input.runType, input.status ?? "pending",
+      input.externalRunId ?? null, input.jobReference ?? null, input.summary ?? null,
+      JSON.stringify(input.payload ?? {}), input.status === "running" ? now : null, now, now]
+  )
+  return mapRunRow(rows[0])
 }
 
 export async function updateAgentRun(
@@ -431,45 +353,42 @@ export async function updateAgentRun(
     completedAt: string | null
   }>
 ): Promise<DriveAgentRun> {
-  const supabase = getSupabaseServerClient()
-  const now = new Date().toISOString()
-  const dbUpdates: Record<string, unknown> = { updated_at: now }
-  if (updates.status !== undefined) dbUpdates.status = updates.status
-  if (updates.externalRunId !== undefined) dbUpdates.external_run_id = updates.externalRunId ?? null
-  if (updates.jobReference !== undefined) dbUpdates.job_reference = updates.jobReference ?? null
-  if (updates.summary !== undefined) dbUpdates.summary = updates.summary ?? null
-  if (updates.payload !== undefined) dbUpdates.payload = updates.payload
-  if (updates.completedAt !== undefined) dbUpdates.completed_at = updates.completedAt ?? null
-  const { data, error } = await supabase.from(AGENT_RUNS_TABLE).update(dbUpdates).eq("id", id).select("*").single()
-  if (error) throw normalizeSupabaseError(error)
-  return mapRunRow(data as DriveAgentRunRow)
+  const columns: Record<string, unknown> = { updated_at: new Date().toISOString() }
+  if (updates.status !== undefined) columns.status = updates.status
+  if (updates.externalRunId !== undefined) columns.external_run_id = updates.externalRunId ?? null
+  if (updates.jobReference !== undefined) columns.job_reference = updates.jobReference ?? null
+  if (updates.summary !== undefined) columns.summary = updates.summary ?? null
+  if (updates.payload !== undefined) columns.payload = JSON.stringify(updates.payload)
+  if (updates.completedAt !== undefined) columns.completed_at = updates.completedAt ?? null
+  const values: unknown[] = [id]
+  const assignments = Object.entries(columns).map(([column, value], index) => {
+    values.push(value)
+    return `${column} = $${index + 2}${column === "payload" ? "::jsonb" : ""}`
+  })
+  const { rows } = await queryDb<DriveAgentRunRow>(
+    `update public.${AGENT_RUNS_TABLE} set ${assignments.join(", ")} where id = $1 returning *`,
+    values
+  )
+  if (!rows[0]) throw new Error("Agent run not found")
+  return mapRunRow(rows[0])
 }
 
 export async function getLatestAgentRunByJobReference(jobReference: string): Promise<DriveAgentRun | null> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(AGENT_RUNS_TABLE)
-    .select("*")
-    .eq("job_reference", jobReference)
-    .order("created_at", { ascending: false })
-    .limit(1)
-
-  if (error) throw normalizeSupabaseError(error)
-  const row = Array.isArray(data) ? (data[0] as DriveAgentRunRow | undefined) : undefined
+  const { rows } = await queryDb<DriveAgentRunRow>(
+    `select * from public.${AGENT_RUNS_TABLE} where job_reference = $1 order by created_at desc, id desc limit 1`,
+    [jobReference]
+  )
+  const row = rows[0]
   return row ? mapRunRow(row) : null
 }
 
 export async function listAgentRunsByAgentId(agentId: string, limit = 20): Promise<DriveAgentRun[]> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(AGENT_RUNS_TABLE)
-    .select("*")
-    .eq("agent_id", agentId)
-    .order("created_at", { ascending: false })
-    .limit(limit)
-
-  if (error) throw normalizeSupabaseError(error)
-  return (Array.isArray(data) ? (data as DriveAgentRunRow[]) : []).map(mapRunRow)
+  const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)))
+  const { rows } = await queryDb<DriveAgentRunRow>(
+    `select * from public.${AGENT_RUNS_TABLE} where agent_id = $1 order by created_at desc, id desc limit $2`,
+    [agentId, boundedLimit]
+  )
+  return rows.map(mapRunRow)
 }
 
 export async function updateAgent(
@@ -482,24 +401,28 @@ export async function updateAgent(
     workerCount: number
   }>
 ): Promise<DriveAgent> {
-  const supabase = getSupabaseServerClient()
-  const dbUpdates: Record<string, unknown> = { updated_at: new Date().toISOString() }
-  if (updates.status !== undefined) dbUpdates.status = updates.status
-  if (updates.lastError !== undefined) dbUpdates.last_error = updates.lastError ?? null
-  if (updates.metadata !== undefined) dbUpdates.metadata = updates.metadata
-  if (updates.lastHeartbeatAt !== undefined) dbUpdates.last_heartbeat_at = updates.lastHeartbeatAt ?? null
-  if (updates.workerCount !== undefined) dbUpdates.worker_count = Math.max(1, Math.min(5, Math.floor(updates.workerCount)))
-
-  const { data, error } = await supabase.from(AGENTS_TABLE).update(dbUpdates).eq("id", id).select("*").single()
-  if (error) throw normalizeSupabaseError(error)
-  return mapAgentRow(data as DriveAgentRow)
+  const columns: Record<string, unknown> = { updated_at: new Date().toISOString() }
+  if (updates.status !== undefined) columns.status = updates.status
+  if (updates.lastError !== undefined) columns.last_error = updates.lastError ?? null
+  if (updates.metadata !== undefined) columns.metadata = JSON.stringify(updates.metadata)
+  if (updates.lastHeartbeatAt !== undefined) columns.last_heartbeat_at = updates.lastHeartbeatAt ?? null
+  if (updates.workerCount !== undefined) columns.worker_count = Math.max(1, Math.min(5, Math.floor(updates.workerCount)))
+  const values: unknown[] = [id]
+  const assignments = Object.entries(columns).map(([column, value], index) => {
+    values.push(value)
+    return `${column} = $${index + 2}${column === "metadata" ? "::jsonb" : ""}`
+  })
+  const { rows } = await queryDb<DriveAgentRow>(
+    `update public.${AGENTS_TABLE} set ${assignments.join(", ")} where id = $1 returning *`,
+    values
+  )
+  if (!rows[0]) throw new Error("Agent/worker not found")
+  return mapAgentRow(rows[0])
 }
 
 export async function authenticateAgent(input: { agentId: string; token: string }): Promise<DriveAgent> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase.from(AGENTS_TABLE).select("*").eq("id", input.agentId).limit(1)
-  if (error) throw normalizeSupabaseError(error)
-  const row = Array.isArray(data) ? (data[0] as DriveAgentRow | undefined) : undefined
+  const { rows } = await queryDb<DriveAgentRow>(`select * from public.${AGENTS_TABLE} where id = $1 limit 1`, [input.agentId])
+  const row = rows[0]
   if (!row) throw new Error("Agent/worker not found")
   if (String(row.status ?? "").trim().toLowerCase() === "disabled") {
     throw new Error("Worker is disabled")
@@ -525,9 +448,7 @@ export async function authenticateAgent(input: { agentId: string; token: string 
 }
 
 export async function deleteAgent(id: string): Promise<void> {
-  const supabase = getSupabaseServerClient()
-  const { error } = await supabase.from(AGENTS_TABLE).delete().eq("id", id)
-  if (error) throw normalizeSupabaseError(error)
+  await queryDb(`delete from public.${AGENTS_TABLE} where id = $1`, [id])
 }
 
 export async function recordAgentHeartbeat(input: {
@@ -539,40 +460,29 @@ export async function recordAgentHeartbeat(input: {
   capabilities?: AgentCapability[]
   metadata?: Record<string, unknown>
 }): Promise<DriveAgent> {
-  const supabase = getSupabaseServerClient()
   const authenticated = await authenticateAgent({ agentId: input.agentId, token: input.token })
-  const { data, error } = await supabase.from(AGENTS_TABLE).select("*").eq("id", input.agentId).limit(1)
-  if (error) throw normalizeSupabaseError(error)
-  const row = Array.isArray(data) ? (data[0] as DriveAgentRow | undefined) : undefined
-  if (!row) throw new Error("Agent/worker not found")
 
   const now = new Date().toISOString()
   const nextCapabilities =
     input.capabilities && input.capabilities.length > 0 ? Array.from(new Set(input.capabilities)) : authenticated.capabilities
-  const nextStatus: AgentStatus = row.status === "disabled" ? "disabled" : "online"
-
-  const { data: updated, error: updateError } = await supabase
-    .from(AGENTS_TABLE)
-    .update({
-      status: nextStatus,
-      last_heartbeat_at: now,
-      endpoint_ip: input.remoteIp ?? row.endpoint_ip,
-      endpoint_domain: normalizeEndpointDomain(input.host) ?? row.endpoint_domain,
-      last_seen_ip: input.remoteIp ?? row.last_seen_ip,
-      last_seen_host: input.host ?? row.last_seen_host,
-      last_seen_version: input.version ?? row.last_seen_version,
-      capabilities: nextCapabilities,
-      metadata: {
-        ...(isRecord(row.metadata) ? row.metadata : {}),
-        ...(input.metadata ?? {}),
-      },
-      updated_at: now,
-      last_error: null,
-    })
-    .eq("id", input.agentId)
-    .select("*")
-    .single()
-
-  if (updateError) throw new Error(updateError.message)
-  return mapAgentRow(updated as DriveAgentRow)
+  const nextStatus: AgentStatus = authenticated.status === "disabled" ? "disabled" : "online"
+  const metadata = { ...(authenticated.metadata ?? {}), ...(input.metadata ?? {}) }
+  const { rows } = await queryDb<DriveAgentRow>(
+    `update public.${AGENTS_TABLE} set
+       status = $2, last_heartbeat_at = $3,
+       endpoint_ip = coalesce($4, endpoint_ip),
+       endpoint_domain = coalesce($5, endpoint_domain),
+       last_seen_ip = coalesce($4, last_seen_ip),
+       last_seen_host = coalesce($6, last_seen_host),
+       last_seen_version = coalesce($7, last_seen_version),
+       capabilities = $8::jsonb, metadata = $9::jsonb,
+       updated_at = now(), last_error = null
+     where id = $1 and status <> 'disabled'
+     returning *`,
+    [input.agentId, nextStatus, now, input.remoteIp ?? null,
+      normalizeEndpointDomain(input.host) ?? null, input.host ?? null,
+      input.version ?? null, JSON.stringify(nextCapabilities), JSON.stringify(metadata)]
+  )
+  if (!rows[0]) throw new Error("Worker was disabled while registering its heartbeat")
+  return mapAgentRow(rows[0])
 }

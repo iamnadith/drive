@@ -34,20 +34,26 @@ type HostingPreference = { mode: "automatic" | "manual"; manual?: RuntimeSnapsho
 const API = "https://api.cloudflare.com/client/v4"
 const ORDER: HostedWorker[] = ["backend", "scanner", "migration"]
 
+function primaryEncryptionKey() {
+  const material = [process.env.CLOUDFLARE_TOKEN_ENCRYPTION_KEY, process.env.AUTH_SECRET, process.env.NEXTAUTH_SECRET]
+    .map((value) => String(value || "").trim())
+    .find((value) => value.length >= 24)
+  if (!material) throw new Error("Configure CLOUDFLARE_TOKEN_ENCRYPTION_KEY or AUTH_SECRET to securely save Cloudflare tokens")
+  return createHash("sha256").update(`drive-cloudflare-token:${material}`).digest()
+}
+
 function encryptionKeys() {
-  const materials = [
-    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_KEY,
-    process.env.CLOUDFLARE_TOKEN_ENCRYPTION_KEY,
-    process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET,
-    process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL,
-  ].map((value) => String(value || "")).filter((value, index, values) => value.length >= 24 && values.indexOf(value) === index)
-  if (!materials.length) throw new Error("Configure the Supabase server key to securely save Cloudflare tokens")
+  const stable = [process.env.CLOUDFLARE_TOKEN_ENCRYPTION_KEY, process.env.AUTH_SECRET, process.env.NEXTAUTH_SECRET]
+  const legacy = [process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.SUPABASE_SECRET_KEY, process.env.SUPABASE_SERVICE_KEY]
+  const materials = [...stable, ...legacy].map((value) => String(value || "").trim())
+    .filter((value, index, values) => value.length >= 24 && values.indexOf(value) === index)
+  if (!materials.length) throw new Error("No Cloudflare token decryption key is configured")
   return materials.map((material) => createHash("sha256").update(`drive-cloudflare-token:${material}`).digest())
 }
 
 function encryptToken(token: string, installationId: string, worker: HostedWorker) {
   const iv = randomBytes(12)
-  const cipher = createCipheriv("aes-256-gcm", encryptionKeys()[0], iv)
+  const cipher = createCipheriv("aes-256-gcm", primaryEncryptionKey(), iv)
   cipher.setAAD(Buffer.from(`${installationId}:${worker}`))
   const encrypted = Buffer.concat([cipher.update(token, "utf8"), cipher.final()])
   return `v1.${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${encrypted.toString("base64url")}`
@@ -58,12 +64,18 @@ function decryptToken(value: string, installationId: string, worker: HostedWorke
   if (version !== "v1" || !iv || !tag || !encrypted) throw new Error("Saved Cloudflare token is invalid; replace it")
   for (const key of encryptionKeys()) {
     try {
-      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"))
-      decipher.setAAD(Buffer.from(`${installationId}:${worker}`)); decipher.setAuthTag(Buffer.from(tag, "base64url"))
-      return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8")
+      return decryptTokenWithKey(value, installationId, worker, key)
     } catch { /* Try legacy key material so saved tokens survive a safe key migration. */ }
   }
   throw new Error("Saved Cloudflare token cannot be decrypted; replace it")
+}
+
+function decryptTokenWithKey(value: string, installationId: string, worker: HostedWorker, key: Buffer) {
+  const [version, iv, tag, encrypted] = String(value).split(".")
+  if (version !== "v1" || !iv || !tag || !encrypted) throw new Error("Saved Cloudflare token is invalid; replace it")
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"))
+  decipher.setAAD(Buffer.from(`${installationId}:${worker}`)); decipher.setAuthTag(Buffer.from(tag, "base64url"))
+  return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8")
 }
 
 function panelUrl() {
@@ -110,6 +122,32 @@ async function saveState(state: InstallState) {
   state.updatedAt = new Date().toISOString()
   await queryDb(`insert into drive_cloudflare_worker_installations(id,state,updated_at) values($1,$2::jsonb,now())
     on conflict(id) do update set state=excluded.state,updated_at=now()`, [state.id, JSON.stringify(state)])
+}
+
+async function rotateSavedTokenEncryption(state: InstallState): Promise<InstallState> {
+  let primary: Buffer
+  try { primary = primaryEncryptionKey() } catch { return state }
+  if (!state.encryptedTokens || !ORDER.every((worker) => state.encryptedTokens?.[worker])) return state
+  let changed = false
+  const encryptedTokens = {} as TokenMap
+  for (const worker of ORDER) {
+    const encrypted = state.encryptedTokens[worker]!
+    try {
+      decryptTokenWithKey(encrypted, state.id, worker, primary)
+      encryptedTokens[worker] = encrypted
+    } catch {
+      encryptedTokens[worker] = encryptToken(decryptToken(encrypted, state.id, worker), state.id, worker)
+      changed = true
+    }
+  }
+  if (!changed) return state
+  const result = await queryDb<{ state: unknown }>(`
+    update public.drive_cloudflare_worker_installations
+    set state=jsonb_set(state,'{encryptedTokens}',$2::jsonb),updated_at=now()
+    where id=$1 and state->'encryptedTokens'=$3::jsonb
+    returning state
+  `, [state.id, JSON.stringify(encryptedTokens), JSON.stringify(state.encryptedTokens)])
+  return result.rows[0] ? (jsonState(result.rows[0].state) ?? state) : (await loadState() ?? state)
 }
 
 async function saveRuntimeConfiguration(state: InstallState, enabled: boolean) {
@@ -427,7 +465,8 @@ export async function reconcileAndRepairCloudflareWorkers(force = false) {
 }
 
 export async function getCloudflareInstallation() {
-  const state = await loadState()
+  const loaded = await loadState()
+  const state = loaded ? await rotateSavedTokenEncryption(loaded) : null
   if (!state) return null
   const { encryptedTokens, ...safe } = state
   const tokensSaved = ORDER.every((worker) => Boolean(encryptedTokens?.[worker]))
@@ -474,11 +513,11 @@ export async function replaceCloudflareTokens(input: { mode: InstallMode; tokens
   })
 }
 
-export async function installCloudflareWorkers(input: { mode: InstallMode; tokens: Partial<TokenMap>; restart?: boolean }) {
+export async function installCloudflareWorkers(input: { mode: InstallMode; tokens: Partial<TokenMap>; restart?: boolean; checkForUpdates?: boolean }) {
   return withDbAdvisoryLock("cloudflare-worker-install", "singleton", async () => {
     const previous = await loadState()
     const hasSuppliedToken = ORDER.some((worker) => Boolean(String(input.tokens[worker] || "").trim()))
-    if (previous?.status === "ready" && !input.restart && !hasSuppliedToken) return getCloudflareInstallation()
+    if (previous?.status === "ready" && !input.restart && !input.checkForUpdates && !hasSuppliedToken) return getCloudflareInstallation()
     const supplied = input.mode === "single"
       ? { backend: String(input.tokens.backend || "").trim(), scanner: String(input.tokens.backend || "").trim(), migration: String(input.tokens.backend || "").trim() }
       : { backend: String(input.tokens.backend || "").trim(), scanner: String(input.tokens.scanner || "").trim(), migration: String(input.tokens.migration || "").trim() }
@@ -486,7 +525,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
     for (const worker of ORDER) tokens[worker] = supplied[worker] || (previous?.mode === input.mode && previous.encryptedTokens?.[worker] ? decryptToken(previous.encryptedTokens[worker]!, previous.id, worker) : "")
     if (ORDER.some((worker) => tokens[worker].length < 20)) throw new Error("Enter every Cloudflare token once; saved tokens can then be reused")
     let state = input.restart ? null : previous
-    if (!state || state.status === "ready" || state.mode !== input.mode) {
+    if (!state || (state.status === "ready" && !input.checkForUpdates) || state.mode !== input.mode) {
       state = freshState(input.mode)
       // Releases rotate code, not credentials. Preserving the already-generated
       // role secrets keeps the database and peer authentication synchronized

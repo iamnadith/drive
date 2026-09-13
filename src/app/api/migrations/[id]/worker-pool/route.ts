@@ -5,7 +5,6 @@ import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-s
 import { listMigrationItems } from "@/lib/migrations-store"
 import { listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
-import { scheduleWorkerRepair } from "@/lib/worker-failure-response"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -82,14 +81,14 @@ function cachedPool(id: string) {
 }
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
-  const auth = await requireAdmin()
-  if (!auth.ok) return auth.response
-  const { id } = await context.params
-  const cached = await cachedPool(id)
-  if (new URL(request.url).searchParams.get("live") !== "1") {
-    return NextResponse.json({ ...cached, source: "database" }, { headers: { "Cache-Control": "no-store, max-age=0" } })
-  }
   try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+    const { id } = await context.params
+    const cached = await cachedPool(id)
+    if (new URL(request.url).searchParams.get("live") !== "1") {
+      return NextResponse.json({ ...cached, source: "database" }, { headers: { "Cache-Control": "no-store, max-age=0" } })
+    }
     const settings = await getMigrationOrchestratorSettings()
     if (!settings.orchestratorUrl || settings.sharedSecret.length < 24) throw new Error("Migration Orchestrator is not configured")
     const response = await fetch(`${settings.orchestratorUrl}/migrations/${encodeURIComponent(id)}/live`, {
@@ -101,7 +100,9 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     if (!response.ok) throw new Error(live.error || `Migration Orchestrator returned HTTP ${response.status}`)
     return NextResponse.json({ ...cached, snapshot: live.snapshot ?? cached.snapshot, jobs: Array.isArray(live.jobs) ? live.jobs : cached.jobs, source: "orchestrator" }, { headers: { "Cache-Control": "no-store, max-age=0" } })
   } catch (error) {
-    scheduleWorkerRepair()
-    return NextResponse.json({ ...cached, source: "database", liveWarning: error instanceof Error ? error.message : String(error) }, { headers: { "Cache-Control": "no-store, max-age=0", "X-Drive-Worker-Failure": "1" } })
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : String(error) },
+      { status: 500, headers: { "Cache-Control": "no-store, max-age=0", "X-Drive-Worker-Failure": "1" } }
+    )
   }
 }

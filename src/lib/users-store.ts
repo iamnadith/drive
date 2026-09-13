@@ -1,6 +1,5 @@
 import crypto from "crypto"
-import { isPostgresConfigured, queryDb } from "./db"
-import { getSupabaseServerClient } from "./supabase"
+import { queryDb, withDbTransaction } from "./db"
 
 export type UserRole = "superadmin" | "admin" | "user"
 export type UserStatus = "active" | "disabled"
@@ -63,29 +62,14 @@ type DriveUserRow = {
   updated_at?: string
 }
 
-const USERS_TABLE = "drive_users"
-
-function normalizeSupabaseError(error: { message: string }): Error {
-  const message = String(error?.message ?? "Supabase error")
-  if (message.includes("Could not find the table") && message.includes(USERS_TABLE)) {
-    return new Error(
-      `Supabase table '${USERS_TABLE}' is missing. Create it by running 'supabase/drive_schema.sql' in the Supabase SQL editor for ${process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "your project"}.`
-    )
+function normalizeDatabaseError(error: unknown): Error {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = String((error as { code?: unknown }).code ?? "")
+    const constraint = String((error as { constraint?: unknown }).constraint ?? "")
+    if (code === "23505" && constraint.includes("email")) return new Error("Email already in use")
+    if (code === "23505" && constraint.includes("username")) return new Error("Username already in use")
   }
-
-  const lower = message.toLowerCase()
-  if (lower.includes("fetch failed") || lower.includes("failed to fetch")) {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? ""
-    const hintParts = [
-      "Supabase request failed (network).",
-      url ? `URL: ${url}` : "Missing SUPABASE_URL / NEXT_PUBLIC_SUPABASE_URL.",
-      "Check your internet/VPN/firewall and that the Supabase project is reachable.",
-      "If you're on Windows and IPv6/DNS is flaky, try: `set NODE_OPTIONS=--dns-result-order=ipv4first` before `npm run dev`.",
-    ]
-    return new Error(`${message} — ${hintParts.join(" ")}`)
-  }
-
-  return new Error(message)
+  return error instanceof Error ? error : new Error("Database request failed")
 }
 
 export function hashPassword(password: string): string {
@@ -227,59 +211,41 @@ export function toPublicUser(user: User): PublicUser {
 }
 
 export async function getAllUsers(): Promise<User[]> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(USERS_TABLE)
-    .select("*")
-    .order("created_at", { ascending: true })
-
-  if (error) throw normalizeSupabaseError(error)
-  return (data as DriveUserRow[]).map(mapRow)
+  const { rows } = await queryDb<DriveUserRow>(`select * from public.drive_users order by created_at asc, id asc`)
+  return rows.map(mapRow)
 }
 
 export async function hasAnyUsers(): Promise<boolean> {
-  const supabase = getSupabaseServerClient()
-  const { error, count } = await supabase
-    .from(USERS_TABLE)
-    .select("id", { count: "exact", head: true })
-
-  if (error) throw normalizeSupabaseError(error)
-  return (count ?? 0) > 0
+  const { rows } = await queryDb<{ exists: boolean }>(`select exists(select 1 from public.drive_users) as exists`)
+  return rows[0]?.exists === true
 }
 
 export async function hasAdminUser(): Promise<boolean> {
-  const supabase = getSupabaseServerClient()
-  const { error, count } = await supabase
-    .from(USERS_TABLE)
-    .select("id", { count: "exact", head: true })
-    .eq("role", "admin")
-
-  if (error) throw normalizeSupabaseError(error)
-  return (count ?? 0) > 0
+  const { rows } = await queryDb<{ exists: boolean }>(`select exists(select 1 from public.drive_users where role = 'admin') as exists`)
+  return rows[0]?.exists === true
 }
 
 export async function hasSuperAdminUser(): Promise<boolean> {
-  const supabase = getSupabaseServerClient()
-  const { error, count } = await supabase
-    .from(USERS_TABLE)
-    .select("id", { count: "exact", head: true })
-    .eq("role", "superadmin")
+  const { rows } = await queryDb<{ exists: boolean }>(`select exists(select 1 from public.drive_users where role = 'superadmin') as exists`)
+  return rows[0]?.exists === true
+}
 
-  if (error) throw normalizeSupabaseError(error)
-  return (count ?? 0) > 0
+export async function hasActiveSuperAdmin(excludingUserId?: string): Promise<boolean> {
+  const { rows } = await queryDb<{ exists: boolean }>(
+    `select exists(
+       select 1 from public.drive_users
+       where role = 'superadmin' and status = 'active'
+         and ($1::text is null or id <> $1)
+     ) as exists`,
+    [excludingUserId ?? null]
+  )
+  return rows[0]?.exists === true
 }
 
 export async function findUserByEmail(email: string): Promise<User | undefined> {
   const normalized = email.trim().toLowerCase()
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(USERS_TABLE)
-    .select("*")
-    .eq("email", normalized)
-    .limit(1)
-
-  if (error) throw normalizeSupabaseError(error)
-  const row = (data as DriveUserRow[])[0]
+  const { rows } = await queryDb<DriveUserRow>(`select * from public.drive_users where email = $1 limit 1`, [normalized])
+  const row = rows[0]
   return row ? mapRow(row) : undefined
 }
 
@@ -287,28 +253,14 @@ export async function findUserByUsername(
   username: string
 ): Promise<User | undefined> {
   const normalized = username.trim().toLowerCase()
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(USERS_TABLE)
-    .select("*")
-    .eq("username", normalized)
-    .limit(1)
-
-  if (error) throw normalizeSupabaseError(error)
-  const row = (data as DriveUserRow[])[0]
+  const { rows } = await queryDb<DriveUserRow>(`select * from public.drive_users where username = $1 limit 1`, [normalized])
+  const row = rows[0]
   return row ? mapRow(row) : undefined
 }
 
 export async function findUserById(id: string): Promise<User | undefined> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(USERS_TABLE)
-    .select("*")
-    .eq("id", id)
-    .limit(1)
-
-  if (error) throw normalizeSupabaseError(error)
-  const row = (data as DriveUserRow[])[0]
+  const { rows } = await queryDb<DriveUserRow>(`select * from public.drive_users where id = $1 limit 1`, [id])
+  const row = rows[0]
   return row ? mapRow(row) : undefined
 }
 
@@ -333,52 +285,27 @@ export async function createUser(input: {
   totpEnabled?: boolean
   totpSecret?: string
 }): Promise<User> {
-  const supabase = getSupabaseServerClient()
-
   const email = input.email.trim().toLowerCase()
-  const existing = await findUserByEmail(email)
-  if (existing) throw new Error("Email already in use")
-
   const username = input.username?.trim().toLowerCase()
   if (username) {
     if (username.includes("@")) throw new Error("Username cannot be an email address")
     if (!usernameIsValid(username)) {
       throw new Error("Username must be 3-30 characters and use letters, numbers, dots, dashes, or underscores")
     }
-    const existingUsername = await findUserByUsername(username)
-    if (existingUsername) throw new Error("Username already in use")
   }
 
   const { firstName, lastName } = deriveNameParts(input.name, email)
   const computedName =
     lastName && lastName.length > 0 ? `${firstName} ${lastName}` : firstName
 
-  const superAdminCount = await supabase
-    .from(USERS_TABLE)
-    .select("id", { count: "exact", head: true })
-    .eq("role", "superadmin")
-
-  if (superAdminCount.error) throw normalizeSupabaseError(superAdminCount.error)
-  const hasSuperAdmin = (superAdminCount.count ?? 0) > 0
-
-  const role: UserRole = input.role ?? (hasSuperAdmin ? "user" : "superadmin")
-  const quotaLimitMb =
-    input.quotaLimitMb !== undefined
-      ? input.quotaLimitMb
-      : role === "superadmin"
-        ? 0
-        : 500
-
-  const row: DriveUserRow = {
+  const row = {
     id: crypto.randomUUID(),
     name: computedName,
     first_name: firstName,
     last_name: lastName ?? null,
     username: username ?? null,
     email,
-    role,
     status: input.status ?? "active",
-    quota_limit_mb: quotaLimitMb,
     quota_used_mb: 0,
     profile_image_url: input.profileImageUrl ?? "",
     google_linked: input.googleLinked ?? false,
@@ -396,13 +323,39 @@ export async function createUser(input: {
     password_hash: hashPassword(input.password),
   }
 
-  const { data, error } = await supabase
-    .from(USERS_TABLE)
-    .insert(row)
-    .select("*")
-    .single()
-  if (error) throw normalizeSupabaseError(error)
-  return mapRow(data as DriveUserRow)
+  try {
+    return await withDbTransaction(async (client) => {
+      await client.query(`select pg_advisory_xact_lock(hashtext('drive.users.create'))`)
+      const existing = await client.query(`select 1 from public.drive_users where email = $1 limit 1`, [email])
+      if (existing.rowCount) throw new Error("Email already in use")
+      if (username) {
+        const existingUsername = await client.query(`select 1 from public.drive_users where username = $1 limit 1`, [username])
+        if (existingUsername.rowCount) throw new Error("Username already in use")
+      }
+      const superAdmins = await client.query<{ exists: boolean }>(`select exists(select 1 from public.drive_users where role = 'superadmin') as exists`)
+      const resolvedRole: UserRole = input.role ?? (superAdmins.rows[0]?.exists ? "user" : "superadmin")
+      const resolvedQuota = input.quotaLimitMb !== undefined ? input.quotaLimitMb : resolvedRole === "superadmin" ? 0 : 500
+      const created = await client.query<DriveUserRow>(
+        `insert into public.drive_users (
+          id, name, first_name, last_name, username, email, role, status,
+          quota_limit_mb, quota_used_mb, profile_image_url, google_linked, google_sub,
+          email_verified, email_verified_at, mobile_number, mobile_verified, mobile_verified_at,
+          password_source, two_factor_enabled, totp_enabled, totp_secret,
+          totp_last_used_counter, password_hash
+        ) values (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24
+        ) returning *`,
+        [row.id, row.name, row.first_name, row.last_name, row.username, row.email, resolvedRole, row.status,
+          resolvedQuota, row.quota_used_mb, row.profile_image_url, row.google_linked, row.google_sub,
+          row.email_verified, row.email_verified_at, row.mobile_number, row.mobile_verified, row.mobile_verified_at,
+          row.password_source, row.two_factor_enabled, row.totp_enabled, row.totp_secret,
+          row.totp_last_used_counter, row.password_hash]
+      )
+      return mapRow(created.rows[0])
+    })
+  } catch (error) {
+    throw normalizeDatabaseError(error)
+  }
 }
 
 export async function updateUser(
@@ -436,17 +389,10 @@ export async function updateUser(
     >
   >
 ): Promise<User> {
-  const supabase = getSupabaseServerClient()
-
-  const current = await findUserById(id)
-  if (!current) throw new Error("User not found")
-
   const nextUpdates: typeof updates = { ...updates }
 
   if (nextUpdates.email) {
     const normalized = nextUpdates.email.trim().toLowerCase()
-    const conflict = await findUserByEmail(normalized)
-    if (conflict && conflict.id !== id) throw new Error("Email already in use")
     nextUpdates.email = normalized
   }
 
@@ -456,125 +402,98 @@ export async function updateUser(
     if (!usernameIsValid(normalizedUsername)) {
       throw new Error("Username must be 3-30 characters and use letters, numbers, dots, dashes, or underscores")
     }
-    const conflict = await findUserByUsername(normalizedUsername)
-    if (conflict && conflict.id !== id) throw new Error("Username already in use")
     nextUpdates.username = normalizedUsername
   }
 
-  let nextFirstName = current.firstName
-  let nextLastName = current.lastName
-  let nextName = current.name
+  try {
+    return await withDbTransaction(async (client) => {
+      const currentResult = await client.query<DriveUserRow>(`select * from public.drive_users where id = $1 for update`, [id])
+      const currentRow = currentResult.rows[0]
+      if (!currentRow) throw new Error("User not found")
+      const current = mapRow(currentRow)
 
-  if (
-    nextUpdates.firstName !== undefined ||
-    nextUpdates.lastName !== undefined ||
-    nextUpdates.name !== undefined
-  ) {
-    const fromName = nextUpdates.name !== undefined ? nextUpdates.name : current.name
-    const fromFirst =
-      nextUpdates.firstName !== undefined ? nextUpdates.firstName : current.firstName
-    const fromLast =
-      nextUpdates.lastName !== undefined ? nextUpdates.lastName : current.lastName
-
-    if (nextUpdates.name && !nextUpdates.firstName && !nextUpdates.lastName) {
-      const parts = deriveNameParts(
-        nextUpdates.name,
-        (nextUpdates.email as string | undefined) ?? current.email
-      )
-      nextFirstName = parts.firstName
-      nextLastName = parts.lastName
-    } else {
-      nextFirstName = normalizeNamePart(fromFirst) ?? current.firstName
-      nextLastName = normalizeNamePart(fromLast) ?? current.lastName
-      if (!nextFirstName) {
-        const parts = deriveNameParts(fromName, current.email)
-        nextFirstName = parts.firstName
-        nextLastName = parts.lastName
+      if (nextUpdates.email) {
+        const conflict = await client.query(`select 1 from public.drive_users where email = $1 and id <> $2 limit 1`, [nextUpdates.email, id])
+        if (conflict.rowCount) throw new Error("Email already in use")
       }
-    }
+      if (nextUpdates.username) {
+        const conflict = await client.query(`select 1 from public.drive_users where username = $1 and id <> $2 limit 1`, [nextUpdates.username, id])
+        if (conflict.rowCount) throw new Error("Username already in use")
+      }
 
-    nextName =
-      nextLastName && nextLastName.length > 0
-        ? `${nextFirstName} ${nextLastName}`
-        : nextFirstName
+      let nextFirstName = current.firstName
+      let nextLastName = current.lastName
+      let nextName = current.name
+      if (nextUpdates.firstName !== undefined || nextUpdates.lastName !== undefined || nextUpdates.name !== undefined) {
+        const fromName = nextUpdates.name !== undefined ? nextUpdates.name : current.name
+        const fromFirst = nextUpdates.firstName !== undefined ? nextUpdates.firstName : current.firstName
+        const fromLast = nextUpdates.lastName !== undefined ? nextUpdates.lastName : current.lastName
+        if (nextUpdates.name && !nextUpdates.firstName && !nextUpdates.lastName) {
+          const parts = deriveNameParts(nextUpdates.name, nextUpdates.email ?? current.email)
+          nextFirstName = parts.firstName
+          nextLastName = parts.lastName
+        } else {
+          nextFirstName = normalizeNamePart(fromFirst) ?? current.firstName
+          nextLastName = normalizeNamePart(fromLast) ?? current.lastName
+          if (!nextFirstName) {
+            const parts = deriveNameParts(fromName, current.email)
+            nextFirstName = parts.firstName
+            nextLastName = parts.lastName
+          }
+        }
+        nextName = nextLastName ? `${nextFirstName} ${nextLastName}` : nextFirstName
+      }
+
+      const dbUpdates = mapUpdateToDb({ ...nextUpdates, name: nextName, firstName: nextFirstName, lastName: nextLastName })
+      const entries = Object.entries(dbUpdates)
+      const values: unknown[] = [id]
+      const assignments = entries.map(([column, value], index) => {
+        values.push(value)
+        return `"${column}" = $${index + 2}`
+      })
+      const updated = await client.query<DriveUserRow>(
+        `update public.drive_users set ${assignments.join(", ")}, updated_at = now() where id = $1 returning *`,
+        values
+      )
+      return mapRow(updated.rows[0])
+    })
+  } catch (error) {
+    throw normalizeDatabaseError(error)
   }
-
-  const finalUpdates: Partial<User> = {
-    ...nextUpdates,
-    name: nextName,
-    firstName: nextFirstName,
-    lastName: nextLastName,
-  }
-
-  const dbUpdates = mapUpdateToDb(finalUpdates)
-  const { data, error } = await supabase
-    .from(USERS_TABLE)
-    .update(dbUpdates)
-    .eq("id", id)
-    .select("*")
-    .single()
-
-  if (error) throw normalizeSupabaseError(error)
-  return mapRow(data as DriveUserRow)
 }
 
 export async function markTotpCounterUsed(userId: string, counter: number): Promise<boolean> {
-  if (isPostgresConfigured()) {
-    const result = await queryDb<{ id: string }>(
-      `
-        update public.drive_users
-        set totp_last_used_counter = $2
-        where id = $1
-          and (totp_last_used_counter is null or totp_last_used_counter < $2)
-        returning id;
-      `,
-      [userId, counter]
-    )
-    return (result.rowCount ?? 0) > 0
-  }
-
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(USERS_TABLE)
-    .update({ totp_last_used_counter: counter })
-    .eq("id", userId)
-    .or(`totp_last_used_counter.is.null,totp_last_used_counter.lt.${counter}`)
-    .select("id")
-    .maybeSingle()
-
-  if (error) throw normalizeSupabaseError(error)
-  return Boolean(data)
+  const result = await queryDb<{ id: string }>(
+    `update public.drive_users set totp_last_used_counter = $2 where id = $1 and (totp_last_used_counter is null or totp_last_used_counter < $2) returning id`,
+    [userId, counter]
+  )
+  return (result.rowCount ?? 0) > 0
 }
 
 export async function deleteUser(id: string): Promise<void> {
-  const supabase = getSupabaseServerClient()
-  const { error } = await supabase.from(USERS_TABLE).delete().eq("id", id)
-  if (error) throw normalizeSupabaseError(error)
+  await queryDb(`delete from public.drive_users where id = $1`, [id])
 }
 
 export async function searchUsers(
   query?: string,
   role?: UserRole
 ): Promise<User[]> {
-  const supabase = getSupabaseServerClient()
-  let q = supabase.from(USERS_TABLE).select("*")
-
-  if (role) q = q.eq("role", role)
-
+  const values: unknown[] = []
+  const conditions: string[] = []
+  if (role) {
+    values.push(role)
+    conditions.push(`role = $${values.length}`)
+  }
   const term = query?.trim()
   if (term) {
-    const escaped = term.replace(/,/g, "\\,")
-    q = q.or(
-      [
-        `name.ilike.%${escaped}%`,
-        `email.ilike.%${escaped}%`,
-        `role.ilike.%${escaped}%`,
-        `status.ilike.%${escaped}%`,
-      ].join(",")
-    )
+    values.push(`%${term}%`)
+    const parameter = `$${values.length}`
+    conditions.push(`(name ilike ${parameter} or email ilike ${parameter} or coalesce(username, '') ilike ${parameter} or role ilike ${parameter} or status ilike ${parameter})`)
   }
-
-  const { data, error } = await q.order("created_at", { ascending: true })
-  if (error) throw normalizeSupabaseError(error)
-  return (data as DriveUserRow[]).map(mapRow)
+  const where = conditions.length ? `where ${conditions.join(" and ")}` : ""
+  const { rows } = await queryDb<DriveUserRow>(
+    `select * from public.drive_users ${where} order by created_at asc, id asc`,
+    values
+  )
+  return rows.map(mapRow)
 }

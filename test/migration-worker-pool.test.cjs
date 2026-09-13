@@ -1,6 +1,6 @@
-const test = require('node:test')
-const assert = require('node:assert/strict')
-const fs = require('node:fs')
+const test = process.getBuiltinModule('node:test')
+const assert = process.getBuiltinModule('node:assert/strict')
+const fs = process.getBuiltinModule('node:fs')
 
 const read = (file) => fs.readFileSync(file, 'utf8')
 
@@ -34,7 +34,38 @@ test('the GitHub workflow exposes no manual dispatch fields and receives system 
   assert.doesNotMatch(workflow, /workflow_dispatch:/)
   assert.match(workflow, /repository_dispatch:/)
   assert.match(workflow, /DRIVE_REPAIR_JOB_ID: \$\{\{ github\.event\.client_payload\.repair_job_id \|\| '' \}\}/)
+  assert.match(workflow, /POSTGRES_URL: \$\{\{ secrets\.POSTGRES_URL \}\}/)
+  assert.match(workflow, /POSTGRES_SSL: \$\{\{ secrets\.POSTGRES_SSL \|\| 'true' \}\}/)
   assert.doesNotMatch(workflow, /DRIVE_REPAIR_JOB_ID:.*vars\.DRIVE_REPAIR_JOB_ID/)
+})
+
+test('worker-pool details hydrate from PostgreSQL and refresh the orchestrator live endpoint', () => {
+  const route = read('src/app/api/migrations/[id]/worker-pool/route.ts')
+  const page = read('src/app/dashboard/migrations/[id]/worker-pool/page.tsx')
+  assert.match(route, /ensureDriveSchema\(\)/)
+  assert.match(route, /listRepairJobsByMigration\(id, 500\)/)
+  assert.match(route, /drive_migration_worker_live_state/)
+  assert.match(route, /catch \(error\)[\s\S]*?status: 500/)
+  assert.match(page, /load\(active, false, true\),\s*active \? 5000 : 20000/)
+})
+
+test('reusable data-table column headers use the compact centered height', () => {
+  const table = read('src/components/dashboard/data-table.tsx')
+  assert.match(table, /TableRow key=\{headerGroup\.id\} className="h-8 border-b"/)
+  assert.match(table, /min-h-8 w-full items-center justify-center/)
+  assert.doesNotMatch(table, /min-h-9|className="h-9 border-b"/)
+})
+
+test('migration worker requires PostgreSQL and honors the configured SSL switch', () => {
+  const runtime = read('workers/migration-worker/migration-worker.mjs')
+  const workerPackage = read('workers/migration-worker/package.json')
+  assert.match(runtime, /if \(!POSTGRES_URL \|\| !SERVER_URL \|\| AGENT_TOKEN\.length < 24\)/)
+  assert.match(runtime, /POSTGRES_SSL === "false"/)
+  assert.match(runtime, /if \(currentMigrationId && Array\.isArray\(body\.items\)\)[\s\S]*?updateMigrationItemLocal\(currentMigrationId, jobId, itemUpdate\)/)
+  assert.match(runtime, /update drive_migration_items set progress=\$3::jsonb/)
+  assert.match(runtime, /if \(!REPAIR_JOB_ID\) return claimJobDirectPostgres\(\)/)
+  assert.doesNotMatch(runtime, /supabase/i)
+  assert.doesNotMatch(workerPackage, /supabase/i)
 })
 
 test('orchestrator binds the migration id as one PostgreSQL type while materializing file jobs', () => {
@@ -107,13 +138,21 @@ test('worker job details live only below their migration route', () => {
 test('migration details never regress worker counters on refresh or reconnect', () => {
   const detailsPage = read('src/app/dashboard/migrations/[id]/page.tsx')
   const bucketState = read('src/lib/migration-bucket-state.ts')
-  const panelReconciler = read('src/lib/migration-live-state.ts')
+  const migrationOrchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const backendReconciler = read('src/app/api/internal/backend-orchestrator/reconcile/route.ts')
+  const itemActionRoute = read('src/app/api/migrations/[id]/items/[itemId]/action/route.ts')
   assert.match(detailsPage, /const sameWorkerGeneration =/)
   assert.match(detailsPage, /prevGeneration === nextGeneration/)
   assert.match(detailsPage, /totalObjects: Math\.max\(prevLive\.totalObjects, nextLive\.totalObjects\)/)
   assert.match(detailsPage, /transferredBytes:[\s\S]*Math\.max\(prevLive\.transferredBytes, nextLive\.transferredBytes\)/)
   assert.match(bucketState, /live\.workerStage === "migration" \|\| live\.workerStage === "verification"/)
-  assert.match(panelReconciler, /if \(migration\.options\.executionMode === "migration_workers"\) return/)
+  assert.match(migrationOrchestrator, /async function refreshSuperSlurperProgress/)
+  assert.match(migrationOrchestrator, /slurper\/jobs\/\$\{encodeURIComponent\(item\.slurper_job_id\)\}\/progress/)
+  assert.match(migrationOrchestrator, /drive_migration_verification_state/)
+  assert.doesNotMatch(backendReconciler, /syncMigrationLiveState|listMigrations/)
+  assert.doesNotMatch(detailsPage, /syncMigrationLiveState/)
+  assert.match(itemActionRoute, /queueMigrationItemVerification\(id, item\.id\)/)
+  assert.doesNotMatch(itemActionRoute, /runBucketScanBatch|r2ListAllObjects|r2HeadObject|createInitialBucketVerifyState/)
 })
 
 test('file scanner comparison binds UUID and text parameters explicitly', () => {

@@ -10,12 +10,13 @@ Standalone worker package for full migrations, recovery, repair, and verificatio
 
 ## Runtime configuration
 
-The worker requires only two deployment values:
+The worker requires these deployment values:
 
 - `POSTGRES_URL`
+- `POSTGRES_SSL` (`true` by default; set to `false` only when the database requires SSL to be disabled)
 - `AGENT_ID`
 
-It loads the shared worker secret and optional panel origin from PostgreSQL. It claims and updates fenced per-file migration jobs directly, so panel downtime does not stop a migration. Existing panel API and Supabase variables remain accepted for compatibility.
+It loads the shared worker secret and optional panel origin from PostgreSQL. It claims and updates fenced per-file migration jobs directly, so panel downtime does not stop a migration. PostgreSQL is required; the worker does not switch migration synchronization to the panel API or Supabase when the database is unavailable.
 
 ## Local run
 
@@ -27,13 +28,14 @@ npm start -- --postgres-url POSTGRES_URL --agent-id YOUR_AGENT_ID
 The same values can be supplied as environment variables instead of command-line arguments:
 
 ```bash
-POSTGRES_URL=postgresql://... AGENT_ID=YOUR_AGENT_ID npm start
+POSTGRES_URL=postgresql://... POSTGRES_SSL=true AGENT_ID=YOUR_AGENT_ID npm start
 ```
 
 PowerShell:
 
 ```powershell
 $env:POSTGRES_URL="postgresql://..."
+$env:POSTGRES_SSL="true"
 $env:AGENT_ID="YOUR_AGENT_ID"
 npm start
 ```
@@ -46,29 +48,13 @@ Required repository secret:
 
 - `POSTGRES_URL`
 
+Optional repository secret:
+
+- `POSTGRES_SSL` (`true` by default; set to `false` only when your database requires SSL to be disabled)
+
 The agent id is passed per dispatch, so one GitHub account and repository can host many separately identified worker registrations. Non-secret tuning values can be added as repository variables, such as `COPY_CONCURRENCY`, `UPLOAD_QUEUE_SIZE`, and `UPLOAD_PART_SIZE_MB`.
 
-When the panel dispatches a GitHub worker, it passes the migration and unique agent id as workflow inputs and synchronizes `POSTGRES_URL`. The shared secret remains in the database and is common to every migration worker; the agent id keeps concurrent workers separately identifiable. A per-claim UUID fences stale processes after recovery. Each worker claims one scanner-generated per-file job at a time and keeps polling for more work. The generation-scoped unique work key gives every source object one durable queue record.
-
-## Legacy Supabase compatibility
-
-Older deployments can still provide:
-
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-
-Example:
-
-```bash
-npm start -- \
-  --server-url https://your-app.example.com \
-  --agent-id YOUR_AGENT_ID \
-  --token YOUR_TOKEN \
-  --supabase-url https://xyzcompany.supabase.co \
-  --supabase-service-role-key YOUR_SERVICE_ROLE_KEY
-```
-
-New deployments should use `POSTGRES_URL`; the Supabase variables are retained only for compatibility.
+When the panel dispatches a GitHub worker, it passes the migration and unique agent id as workflow inputs and synchronizes the orchestrator URL and shared worker secret. The database URL and SSL setting are repository secrets consumed directly by the worker. The shared worker secret remains in the database and is common to every migration worker; the agent id keeps concurrent workers separately identifiable. A per-claim UUID fences stale processes after recovery. Each worker claims one scanner-generated per-file job at a time and keeps polling for more work. The generation-scoped unique work key gives every source object one durable queue record.
 
 ## Performance tuning
 

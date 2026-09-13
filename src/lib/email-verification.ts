@@ -1,6 +1,6 @@
 import crypto from "crypto"
-import { getSupabaseServerClient } from "./supabase"
-import { findUserById, toPublicUser, updateUser, type PublicUser } from "./users-store"
+import { withDbTransaction } from "./db"
+import { findUserById, toPublicUser, type PublicUser } from "./users-store"
 
 export type VerificationPurpose = "signup" | "login" | "password-reset"
 
@@ -47,28 +47,17 @@ export async function createEmailVerificationCode(
   email: string,
   purpose: VerificationPurpose
 ) {
-  const supabase = getSupabaseServerClient()
   const code = generateCode()
   const expiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60 * 1000).toISOString()
   const normalizedEmail = normalizeEmail(email)
 
-  await supabase
-    .from(TABLE)
-    .delete()
-    .eq("user_id", userId)
-    .eq("purpose", purpose)
-    .is("consumed_at", null)
-
-  const { error } = await supabase.from(TABLE).insert({
-    id: crypto.randomUUID(),
-    user_id: userId,
-    token_hash: hashCode(userId, normalizedEmail, purpose, code),
-    email: normalizedEmail,
-    purpose,
-    attempts: 0,
-    expires_at: expiresAt,
+  await withDbTransaction(async (client) => {
+    await client.query(`delete from public.${TABLE} where user_id=$1 and purpose=$2 and consumed_at is null`, [userId, purpose])
+    await client.query(`
+      insert into public.${TABLE}(id,user_id,token_hash,email,purpose,attempts,expires_at)
+      values($1,$2,$3,$4,$5,0,$6)
+    `, [crypto.randomUUID(), userId, hashCode(userId, normalizedEmail, purpose, code), normalizedEmail, purpose, expiresAt])
   })
-  if (error) throw new Error(error.message)
 
   return { code, expiresAt }
 }
@@ -144,56 +133,41 @@ export async function verifyEmailCode(input: {
   const code = input.code.replace(/\D/g, "")
   if (code.length !== 6) throw new Error("Enter the 6-digit verification code")
 
-  const supabase = getSupabaseServerClient()
   const email = normalizeEmail(input.email)
-  const { data, error } = await supabase
-    .from(TABLE)
-    .select("*")
-    .eq("email", email)
-    .eq("purpose", input.purpose)
-    .is("consumed_at", null)
-    .order("created_at", { ascending: false })
-    .limit(1)
-
-  if (error) throw new Error(error.message)
-  const row = (data as VerificationRow[])[0]
-  if (!row) throw new Error("Verification code is invalid")
-  if (Date.parse(row.expires_at) < Date.now()) {
-    throw new Error("Verification code has expired")
-  }
-  if ((row.attempts ?? 0) >= 5) {
-    throw new Error("Verification code has too many failed attempts. Request a new code.")
-  }
-  const tokenHash = hashCode(row.user_id, email, input.purpose, code)
-  if (row.token_hash !== tokenHash) {
-    await supabase
-      .from(TABLE)
-      .update({ attempts: (row.attempts ?? 0) + 1 })
-      .eq("id", row.id)
-    throw new Error("Verification code is invalid")
-  }
-
-  const user = await findUserById(row.user_id)
+  const outcome = await withDbTransaction(async (client) => {
+    const result = await client.query<VerificationRow>(`
+      select * from public.${TABLE}
+      where email=$1 and purpose=$2 and consumed_at is null
+      order by created_at desc limit 1 for update
+    `, [email, input.purpose])
+    const row = result.rows[0]
+    if (!row) return { error: "Verification code is invalid" }
+    if (new Date(row.expires_at).getTime() < Date.now()) return { error: "Verification code has expired" }
+    if (row.attempts >= 5) return { error: "Verification code has too many failed attempts. Request a new code." }
+    const expected = Buffer.from(hashCode(row.user_id, email, input.purpose, code), "hex")
+    const actual = Buffer.from(row.token_hash, "hex")
+    if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+      await client.query(`update public.${TABLE} set attempts=attempts+1 where id=$1`, [row.id])
+      return { error: "Verification code is invalid" }
+    }
+    const userResult = await client.query<{ id: string; email: string; email_verified: boolean }>(
+      `select id,email,email_verified from public.drive_users where id=$1 for update`, [row.user_id]
+    )
+    const user = userResult.rows[0]
+    if (!user) return { error: "User not found" }
+    if (user.email.toLowerCase() !== email) return { error: "Verification email no longer matches this account" }
+    const consumedAt = new Date().toISOString()
+    if (input.consume !== false) {
+      const consumed = await client.query(`update public.${TABLE} set consumed_at=$2 where id=$1 and consumed_at is null`, [row.id, consumedAt])
+      if (consumed.rowCount !== 1) return { error: "Verification code has already been used" }
+      if (input.purpose === "signup" && !user.email_verified) {
+        await client.query(`update public.drive_users set email_verified=true,email_verified_at=$2,updated_at=now() where id=$1`, [user.id, consumedAt])
+      }
+    }
+    return { userId: user.id }
+  })
+  if ("error" in outcome) throw new Error(outcome.error)
+  const user = await findUserById(outcome.userId)
   if (!user) throw new Error("User not found")
-  if (user.email.toLowerCase() !== email) {
-    throw new Error("Verification email no longer matches this account")
-  }
-
-  const consumedAt = new Date().toISOString()
-  if (input.consume !== false) {
-    await supabase
-      .from(TABLE)
-      .update({ consumed_at: consumedAt })
-      .eq("id", row.id)
-  }
-
-  if (input.consume !== false && input.purpose === "signup" && !user.emailVerified) {
-    const updated = await updateUser(user.id, {
-      emailVerified: true,
-      emailVerifiedAt: consumedAt,
-    })
-    return toPublicUser(updated)
-  }
-
   return toPublicUser(user)
 }

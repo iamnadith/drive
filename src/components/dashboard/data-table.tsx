@@ -125,7 +125,7 @@ export function DashboardDataTable<TData>({
         >
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id} className="h-9 border-b">
+              <TableRow key={headerGroup.id} className="h-8 border-b">
                 {headerGroup.headers.map((header) => {
                   const meta = header.column.columnDef.meta as DashboardColumnMeta | undefined
                   const isLastAction = header.column.id === "actions"
@@ -144,12 +144,12 @@ export function DashboardDataTable<TData>({
                       {header.isPlaceholder
                         ? null
                         : (
-                          <div className="flex min-h-9 w-full items-center justify-center text-center">
+                          <div className="flex min-h-8 w-full items-center justify-center text-center">
                             {flexRender(header.column.columnDef.header, header.getContext())}
                           </div>
                         )}
                       {meta?.divider !== false && !isLastAction ? (
-                        <span aria-hidden="true" className="absolute right-0 top-1/2 h-6 w-px -translate-y-1/2 bg-border" />
+                        <span aria-hidden="true" className="absolute right-0 top-1/2 h-5 w-px -translate-y-1/2 bg-border" />
                       ) : null}
                     </TableHead>
                   )

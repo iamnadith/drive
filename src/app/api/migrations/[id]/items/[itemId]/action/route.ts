@@ -1,21 +1,21 @@
 import { NextResponse } from "next/server"
-import { getAllAccounts } from "@/lib/accounts-store"
+import { getAccountById } from "@/lib/accounts-store"
 import {
   slurperAbortJob,
-  slurperGetJobProgress,
   slurperListJobLogs,
   slurperPauseJob,
   slurperResumeJob,
 } from "@/lib/cloudflare-r2-super-slurper"
-import { createInitialBucketVerifyState } from "@/lib/bucket-verifier"
 import {
   getMigration,
-  listMigrationItems,
+  getMigrationItem,
+  queueMigrationItemVerification,
   updateMigration,
   updateMigrationItem,
 } from "@/lib/migrations-store"
 import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
 import { requireAdmin } from "@/lib/server-auth"
+import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
 
 export const runtime = "nodejs"
 
@@ -39,6 +39,19 @@ function isCompletedStatus(value: string | undefined): boolean {
   )
 }
 
+async function wakeMigrationOrchestrator(): Promise<void> {
+  const settings = await getMigrationOrchestratorSettings()
+  if (!settings.migrationEnabled || !settings.orchestratorUrl || settings.sharedSecret.length < 24) {
+    throw new Error("Migration Orchestrator is not configured and enabled")
+  }
+  const response = await fetch(`${settings.orchestratorUrl.replace(/\/+$/, "")}/wake`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${settings.sharedSecret}` },
+    signal: AbortSignal.timeout(8_000),
+  })
+  if (!response.ok) throw new Error(`Migration Orchestrator wake-up returned HTTP ${response.status}`)
+}
+
 export async function POST(
   request: Request,
   context: { params: Promise<{ id: string; itemId: string }> }
@@ -60,10 +73,16 @@ export async function POST(
       return NextResponse.json({ error: `Migration history is read-only: ${readOnly.reason}` }, { status: 409 })
     }
 
-    const items = await listMigrationItems(id)
-    const item = items.find((i) => i.id === itemId)
+    const item = await getMigrationItem(id, itemId)
     if (!item) {
       return NextResponse.json({ error: "Migration item not found" }, { status: 404 })
+    }
+
+    // Progress is synchronized by Migration Orchestrator and read from the
+    // persisted snapshot; a dashboard request must not poll Cloudflare or
+    // write migration state as a side effect.
+    if (action === "progress") {
+      return NextResponse.json({ ok: true, result: item.progress }, { status: 200 })
     }
 
     if (migration.options.executionMode === "migration_workers" && !["logs", "progress"].includes(action)) {
@@ -79,8 +98,7 @@ export async function POST(
       return NextResponse.json({ ok: true, result: item.progress }, { status: 200 })
     }
 
-    const accounts = await getAllAccounts()
-    const target = accounts.find((a) => a.id === migration.targetAccountId)
+    const target = await getAccountById(migration.targetAccountId)
     if (!target?.cloudflareAccountId) {
       return NextResponse.json({ error: "Target Cloudflare account is not synced" }, { status: 400 })
     }
@@ -95,17 +113,12 @@ export async function POST(
           return NextResponse.json({ error: "Bucket must be completed before verification" }, { status: 400 })
         }
 
-        const prefix =
-          typeof migration.options?.pathPrefix === "string" && migration.options.pathPrefix.trim().length > 0
-            ? migration.options.pathPrefix
-            : undefined
-
+        await queueMigrationItemVerification(id, item.id)
         await updateMigrationItem(item.id, {
           progress: {
             ...item.progress,
-            stage: "verify_requested",
-            verify: createInitialBucketVerifyState({ prefix }),
-            destScanId: null,
+            stage: "verification_queued",
+            fileVerification: { status: "pending", requestedAt: new Date().toISOString() },
           },
           lastProgressAt: new Date().toISOString(),
         })
@@ -117,6 +130,7 @@ export async function POST(
           syncMessage: `Verification started for ${item.sourceBucket}`,
           lastSyncedAt: new Date().toISOString(),
         })
+        await wakeMigrationOrchestrator()
 
         return NextResponse.json({ ok: true }, { status: 200 })
       }
@@ -204,20 +218,6 @@ export async function POST(
 
     if (action === "logs") {
       const res = await slurperListJobLogs(jobArgs)
-      await updateMigrationItem(item.id, {
-        progress: { ...item.progress, stage: "logs_fetched", logs: res },
-        lastProgressAt: new Date().toISOString(),
-      })
-      return NextResponse.json({ ok: true, result: res }, { status: 200 })
-    }
-
-    if (action === "progress") {
-      const res = await slurperGetJobProgress(jobArgs)
-      await updateMigrationItem(item.id, {
-        slurperStatus: res.result?.status ?? item.slurperStatus,
-        progress: { ...item.progress, stage: "progress_updated", slurper: res },
-        lastProgressAt: new Date().toISOString(),
-      })
       return NextResponse.json({ ok: true, result: res }, { status: 200 })
     }
 
@@ -264,17 +264,12 @@ export async function POST(
         return NextResponse.json({ error: "Bucket must be completed before verification" }, { status: 400 })
       }
 
-      const prefix =
-        typeof migration.options?.pathPrefix === "string" && migration.options.pathPrefix.trim().length > 0
-          ? migration.options.pathPrefix
-          : undefined
-
+      await queueMigrationItemVerification(id, item.id)
       await updateMigrationItem(item.id, {
         progress: {
           ...item.progress,
-          stage: "verify_requested",
-          verify: createInitialBucketVerifyState({ prefix }),
-          destScanId: null,
+          stage: "verification_queued",
+          fileVerification: { status: "pending", requestedAt: new Date().toISOString() },
         },
         lastProgressAt: new Date().toISOString(),
       })
@@ -286,6 +281,7 @@ export async function POST(
         syncMessage: `Verification started for ${item.sourceBucket}`,
         lastSyncedAt: new Date().toISOString(),
       })
+      await wakeMigrationOrchestrator()
 
       return NextResponse.json({ ok: true }, { status: 200 })
     }

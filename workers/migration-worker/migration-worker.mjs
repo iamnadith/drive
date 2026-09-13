@@ -9,7 +9,6 @@ import {
   UploadPartCommand,
 } from "@aws-sdk/client-s3"
 import { Upload } from "@aws-sdk/lib-storage"
-import { createClient as createSupabaseClient } from "@supabase/supabase-js"
 import { Client as PostgresClient } from "pg"
 import { createHash, randomUUID } from "crypto"
 import { mkdir, readFile, rename, writeFile } from "fs/promises"
@@ -55,22 +54,13 @@ const RANGE_COPY_CONCURRENCY = Math.max(1, Math.min(16, Number(getArg("range-cop
 // Keep one heartbeat cycle well below the panel's stale-lease window. A
 // 60-second timeout with five retries can block for several minutes, causing
 // the orchestrator to requeue a live worker while it is still copying.
-const HEARTBEAT_TIMEOUT_MS = Math.max(5_000, Math.min(API_TIMEOUT_MS, 15_000))
-const HEARTBEAT_RETRIES = Math.max(2, Math.min(API_RETRIES, 3))
-const SUPABASE_TIMEOUT_MS = Math.max(1_000, Number(getArg("supabase-timeout-ms", "5000")) || 5_000)
 const DEFAULT_EXIT_AFTER_JOB = POOL_MODE ? "false" : process.env.GITHUB_ACTIONS === "true" ? "true" : "false"
 const EXIT_AFTER_JOB = ["1", "true", "yes"].includes(
   String(getArg("exit-after-job", DEFAULT_EXIT_AFTER_JOB)).toLowerCase()
 )
-const SUPABASE_URL = String(getArg("supabase-url", process.env.NEXT_PUBLIC_SUPABASE_URL || ""))
-const SUPABASE_SERVICE_ROLE_KEY = String(getArg("supabase-service-role-key", ""))
 const POSTGRES_URL = String(getArg("postgres-url", ""))
-const supabase =
-  SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
-    ? createSupabaseClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
-    : null
+const POSTGRES_SSL = String(getArg("postgres-ssl", "true")).trim().toLowerCase()
 const migrationItemProgressCache = new Map()
-const repairJobProgressCache = new Map()
 const jobAbortControllers = new Map()
 const jobUpdateQueues = new Map()
 const jobClaimTokens = new Map()
@@ -78,15 +68,16 @@ let runtimeConfigurationLoadedAt = 0
 const WORKER_STATE_DIR = path.resolve(String(getArg("state-dir", path.join(process.cwd(), ".drive-worker"))))
 const WORKER_IDENTITY_PATH = path.join(WORKER_STATE_DIR, "identity.json")
 
-if (!SERVER_URL || AGENT_TOKEN.length < 24) {
-  console.error("Missing required configuration. Provide SERVER_URL and TOKEN (the common Migration Worker secret).")
+if (!POSTGRES_URL || !SERVER_URL || AGENT_TOKEN.length < 24) {
+  console.error("Missing required configuration. Provide POSTGRES_URL, SERVER_URL, and TOKEN (the common Migration Worker secret).")
   process.exit(1)
 }
 
 async function postgres(operation) {
-  if (!POSTGRES_URL) throw new Error("POSTGRES_URL is not configured")
+  if (POSTGRES_SSL !== "true" && POSTGRES_SSL !== "false") throw new Error("POSTGRES_SSL must be set to true or false")
   const hostname = new URL(POSTGRES_URL).hostname
-  const client = new PostgresClient({ connectionString: POSTGRES_URL, ssl: ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false }, connectionTimeoutMillis: 10_000 })
+  const ssl = POSTGRES_SSL === "false" || ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false }
+  const client = new PostgresClient({ connectionString: POSTGRES_URL, ssl, connectionTimeoutMillis: 10_000 })
   await client.connect()
   try { return await operation(client) } finally { await client.end().catch(() => undefined) }
 }
@@ -167,22 +158,6 @@ async function ensureWorkerIdentity() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function withTimeout(label, promise, timeoutMs = SUPABASE_TIMEOUT_MS) {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs)
-    Promise.resolve(promise).then(
-      (value) => {
-        clearTimeout(timeout)
-        resolve(value)
-      },
-      (error) => {
-        clearTimeout(timeout)
-        reject(error)
-      }
-    )
-  })
 }
 
 function isRecord(value) {
@@ -375,87 +350,34 @@ async function api(path, body, options = {}) {
 }
 
 async function heartbeat(extra = {}) {
-  let response = null
-  let directRequired = Boolean(POSTGRES_URL)
-  if (!directRequired) {
-    try {
-      response = await api(
-        `/workers/${encodeURIComponent(AGENT_ID)}/heartbeat`,
-        { token: AGENT_TOKEN, host: os.hostname(), version: "worker-v2", capabilities: ["scan", "verify", "repair", "bulk_migrate", "diagnostics"], metadata: { ...extra, workerInstanceId: WORKER_INSTANCE_ID || undefined } },
-        { timeoutMs: HEARTBEAT_TIMEOUT_MS, retries: HEARTBEAT_RETRIES }
-      )
-    } catch (error) {
-      if ((!POSTGRES_URL && !supabase) || !isRetryableError(error)) throw error
-      directRequired = true
-      console.warn("Panel heartbeat unavailable; syncing directly through the orchestration database")
+  await loadRuntimeConfiguration()
+  await postgres(async (db) => {
+    const auth = await db.query(`select a.id,a.status,s.value->>'sharedSecret' secret from drive_agents a left join drive_app_settings s on s.key='migration-workers' where a.id=$1 limit 1`, [AGENT_ID])
+    const row = auth.rows[0]
+    if (!row || row.status === "disabled" || row.secret !== AGENT_TOKEN) throw new Error("Worker is missing, disabled, or has an invalid shared secret")
+    await db.query(`update drive_agents set status='online',last_heartbeat_at=now(),last_seen_host=$2,last_seen_version='worker-v2',metadata=coalesce(metadata,'{}'::jsonb)||$3::jsonb,updated_at=now() where id=$1 and status<>'disabled'`, [AGENT_ID, os.hostname(), JSON.stringify(extra)])
+    if (WORKER_INSTANCE_ID) {
+      await db.query(`update drive_agent_runs set status='running',updated_at=now() where agent_id=$1 and payload->>'workerInstanceId'=$2 and status in('pending','running')`, [AGENT_ID, WORKER_INSTANCE_ID])
     }
-  }
-
-  if (directRequired && POSTGRES_URL) {
-    await loadRuntimeConfiguration()
-    await postgres(async (db) => {
-      const auth = await db.query(`select a.id,a.status,s.value->>'sharedSecret' secret from drive_agents a left join drive_app_settings s on s.key='migration-workers' where a.id=$1 limit 1`, [AGENT_ID])
-      const row = auth.rows[0]
-      if (!row || row.status === "disabled" || row.secret !== AGENT_TOKEN) throw new Error("Worker is missing, disabled, or has an invalid shared secret")
-      await db.query(`update drive_agents set status='online',last_heartbeat_at=now(),last_seen_host=$2,last_seen_version='worker-v2',metadata=coalesce(metadata,'{}'::jsonb)||$3::jsonb,updated_at=now() where id=$1 and status<>'disabled'`, [AGENT_ID, os.hostname(), JSON.stringify(extra)])
-      if (WORKER_INSTANCE_ID) {
-        await db.query(`update drive_agent_runs set status='running',updated_at=now() where agent_id=$1 and payload->>'workerInstanceId'=$2 and status in('pending','running')`, [AGENT_ID, WORKER_INSTANCE_ID])
-      }
-      if (currentJobId) {
-        const renewed = await db.query(`update drive_repair_jobs set last_heartbeat_at=now(),updated_at=now() where id=$1 and claimed_by_agent_id=$2 and ($3::uuid is null or claim_token=$3::uuid) and status in('claimed','running') returning id`, [currentJobId, AGENT_ID, jobClaimTokens.get(currentJobId) || null])
-        if (!renewed.rowCount) throw new Error("This job lease is no longer owned by this worker")
-      }
-    })
-    return { ok: true, direct: true }
-  }
-
-  if (supabase) {
-    const currentAgent = await withTimeout(
-      "supabase load worker metadata",
-      supabase.from("drive_agents").select("metadata").eq("id", AGENT_ID).limit(1)
-    ).catch(() => ({ data: null }))
-    const currentAgentRow = currentAgent && typeof currentAgent === "object" && Array.isArray(currentAgent.data)
-      ? currentAgent.data[0]
-      : null
-    const currentMetadata = isRecord(currentAgentRow?.metadata) ? currentAgentRow.metadata : {}
-    const heartbeatResult = await withTimeout(
-      "supabase worker heartbeat",
-      supabase
-        .from("drive_agents")
-        .update({
-          status: "online",
-          last_heartbeat_at: new Date().toISOString(),
-          last_seen_host: os.hostname(),
-          last_seen_version: "worker-v2",
-          metadata: { ...currentMetadata, ...extra },
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", AGENT_ID)
-    ).catch((error) => ({ error }))
-    if (directRequired && heartbeatResult?.error) {
-      throw new Error(heartbeatResult.error?.message || "Direct worker heartbeat failed")
+    if (currentJobId) {
+      const renewed = await db.query(`update drive_repair_jobs set last_heartbeat_at=now(),updated_at=now() where id=$1 and claimed_by_agent_id=$2 and ($3::uuid is null or claim_token=$3::uuid) and status in('claimed','running') returning id`, [currentJobId, AGENT_ID, jobClaimTokens.get(currentJobId) || null])
+      if (!renewed.rowCount) throw new Error("This job lease is no longer owned by this worker")
     }
-  }
-  return response || { ok: true, direct: true }
+  })
+  return { ok: true, direct: true }
 }
 
 async function claimJob() {
   await loadRuntimeConfiguration()
-  if (POSTGRES_URL) return claimJobDirectPostgres()
-  try {
-    return await api(`/workers/${encodeURIComponent(AGENT_ID)}/claim-job`, {
-      token: AGENT_TOKEN,
-      ...(MIGRATION_ID ? { migrationId: MIGRATION_ID } : {}),
-      ...(POOL_MODE ? { pool: true } : {}),
-      ...(REPAIR_JOB_ID ? { jobId: REPAIR_JOB_ID } : {}),
-      ...(GITHUB_RUN_ID ? { githubRunId: GITHUB_RUN_ID } : {}),
-      ...(WORKER_INSTANCE_ID ? { workerInstanceId: WORKER_INSTANCE_ID } : {}),
-    })
-  } catch (error) {
-    if ((!POSTGRES_URL && !supabase) || !isRetryableError(error)) throw error
-    console.warn("Panel claim unavailable; claiming a fenced shard directly from the orchestration database")
-    return POSTGRES_URL ? claimJobDirectPostgres() : claimJobDirect()
-  }
+  if (!REPAIR_JOB_ID) return claimJobDirectPostgres()
+  return api(`/workers/${encodeURIComponent(AGENT_ID)}/claim-job`, {
+    token: AGENT_TOKEN,
+    ...(MIGRATION_ID ? { migrationId: MIGRATION_ID } : {}),
+    ...(POOL_MODE ? { pool: true } : {}),
+    jobId: REPAIR_JOB_ID,
+    ...(GITHUB_RUN_ID ? { githubRunId: GITHUB_RUN_ID } : {}),
+    ...(WORKER_INSTANCE_ID ? { workerInstanceId: WORKER_INSTANCE_ID } : {}),
+  })
 }
 
 async function claimJobDirectPostgres() {
@@ -506,76 +428,8 @@ async function claimJobDirectPostgres() {
   })
 }
 
-async function supabaseRows(label, query) {
-  const result = await withTimeout(label, query)
-  if (result?.error) throw new Error(result.error.message || `${label} failed`)
-  return Array.isArray(result?.data) ? result.data : []
-}
-
-async function authenticateDirectWorker() {
-  const [agents, settings] = await Promise.all([
-    supabaseRows("load direct worker", supabase.from("drive_agents").select("*").eq("id", AGENT_ID).limit(1)),
-    supabaseRows("load shared worker secret", supabase.from("drive_app_settings").select("value").eq("key", "migration-workers").limit(1)),
-  ])
-  const agent = agents[0]
-  const configuredSecret = String(settings[0]?.value?.sharedSecret || "")
-  if (!agent || agent.status === "disabled") throw new Error("Worker is missing or disabled")
-  if (configuredSecret.length < 24 || configuredSecret.length > 512 || configuredSecret !== AGENT_TOKEN) throw new Error("Invalid shared worker secret")
-  if (!Array.isArray(agent.capabilities) || !agent.capabilities.includes("bulk_migrate")) throw new Error("Worker is not registered for bulk migrations")
-  return agent
-}
-
-async function claimJobDirect() {
-  await authenticateDirectWorker()
-  if (!MIGRATION_ID) throw new Error("Direct autonomous claim requires migrationId")
-  const migrations = await supabaseRows("load direct migration", supabase.from("drive_migrations").select("*").eq("id", MIGRATION_ID).limit(1))
-  const migration = migrations[0]
-  if (!migration || migration.options?.executionMode !== "migration_workers") throw new Error("Direct claim requires a migration worker migration")
-  if (["completed", "failed", "canceled"].includes(migration.status)) return { ok: true, job: null, poolComplete: true, poolStatus: migration.status }
-
-  const candidates = await supabaseRows(
-    "find pending autonomous shard",
-    supabase.from("drive_repair_jobs").select("*").eq("migration_id", MIGRATION_ID).eq("status", "pending").order("created_at", { ascending: true }).limit(8)
-  )
-  let job = null
-  for (const candidate of candidates) {
-    if (!String(candidate.work_key || "").startsWith(`migration:${MIGRATION_ID}:generation:${Math.max(1, Math.trunc(Number(migration.options?.workerGeneration) || 1))}:inventory:`)) continue
-    const claimed = await supabaseRows(
-      `claim autonomous shard ${candidate.id}`,
-      supabase.from("drive_repair_jobs").update({
-        status: "running", claimed_by_agent_id: AGENT_ID, claimed_at: new Date().toISOString(), started_at: new Date().toISOString(),
-        last_heartbeat_at: new Date().toISOString(), summary: "Claimed directly through orchestration database", updated_at: new Date().toISOString(),
-        payload: { ...(isRecord(candidate.payload) ? candidate.payload : {}), claimedWorkerInstanceId: WORKER_INSTANCE_ID || null },
-      }).eq("id", candidate.id).eq("status", "pending").is("claimed_by_agent_id", null).select("*")
-    )
-    if (claimed[0]) { job = claimed[0]; break }
-  }
-  if (!job) return { ok: true, job: null }
-
-  const requested = new Set(Array.isArray(job.payload?.itemIds) ? job.payload.itemIds : [])
-  const [items, sourceAccounts, targetAccounts] = await Promise.all([
-    supabaseRows("load direct migration items", supabase.from("drive_migration_items").select("*").eq("migration_id", MIGRATION_ID).order("created_at", { ascending: true })),
-    supabaseRows("load direct source account", supabase.from("drive_accounts").select("*").eq("id", migration.source_account_id).limit(1)),
-    supabaseRows("load direct target account", supabase.from("drive_accounts").select("*").eq("id", migration.target_account_id).limit(1)),
-  ])
-  const source = sourceAccounts[0]; const target = targetAccounts[0]
-  if (!source?.cloudflare_account_id || !target?.cloudflare_account_id) throw new Error("Source or target account is incomplete")
-  const selectedItems = requested.size ? items.filter((item) => requested.has(item.id)) : items
-  const payload = {
-    job: { id: job.id, mode: job.mode, migrationId: MIGRATION_ID, verifyAllBuckets: true, strictCompletion: true, kind: job.payload?.kind, progress: job.progress || {} },
-    ...(isRecord(job.payload?.workerShard) ? { workerShard: job.payload.workerShard } : {}),
-    ...(typeof job.payload?.workerGeneration === "number" ? { workerGeneration: job.payload.workerGeneration } : {}),
-    ...(Array.isArray(job.payload?.inventoryObjects) ? { inventoryObjects: job.payload.inventoryObjects } : {}),
-    migration: { id: MIGRATION_ID, options: migration.options || {}, pathPrefix: migration.options?.pathPrefix || null },
-    source: { accountId: source.cloudflare_account_id, accessKeyId: source.r2_access_key_id, secretAccessKey: source.r2_secret_access_key },
-    target: { accountId: target.cloudflare_account_id, accessKeyId: target.r2_access_key_id, secretAccessKey: target.r2_secret_access_key },
-    items: selectedItems.map((item) => ({ id: item.id, sourceBucket: item.source_bucket, targetBucket: item.target_bucket, sourceObjects: Number(item.source_objects || 0), sourceBytes: Number(item.source_bytes || 0), slurperStatus: item.slurper_status, progress: item.progress || {} })),
-  }
-  return { ok: true, job: { id: job.id, migrationId: MIGRATION_ID, mode: job.mode, payload: job.payload || {} }, payload, direct: true }
-}
-
 async function updateMigrationItemLocal(migrationId, repairJobId, itemUpdate) {
-  if (!supabase || !migrationId || !itemUpdate || typeof itemUpdate !== "object") return
+  if (!migrationId || !itemUpdate || typeof itemUpdate !== "object") return
 
   const itemId = typeof itemUpdate.itemId === "string" ? itemUpdate.itemId : ""
   if (!itemId) return
@@ -592,17 +446,11 @@ async function updateMigrationItemLocal(migrationId, repairJobId, itemUpdate) {
   let currentRow = migrationItemProgressCache.get(cacheKey) || null
 
   if (!currentRow) {
-    const selectResult = await withTimeout(
-      `supabase load migration item ${itemId}`,
-      supabase
-        .from("drive_migration_items")
-        .select("progress, slurper_status")
-        .eq("id", itemId)
-        .eq("migration_id", migrationId)
-        .limit(1)
-    ).catch(() => ({ data: null }))
-    const data = selectResult && typeof selectResult === "object" ? selectResult.data : null
-    currentRow = Array.isArray(data) ? data[0] : null
+    const selected = await postgres((db) => db.query(
+      "select progress,slurper_status from drive_migration_items where id=$1 and migration_id=$2 limit 1",
+      [itemId, migrationId]
+    ))
+    currentRow = selected.rows[0] || null
   }
 
   const currentProgress = isRecord(currentRow?.progress) ? currentRow.progress : {}
@@ -720,19 +568,11 @@ async function updateMigrationItemLocal(migrationId, repairJobId, itemUpdate) {
           ? currentRow.slurper_status
           : null
 
-  await withTimeout(
-    `supabase update migration item ${itemId}`,
-    supabase
-      .from("drive_migration_items")
-      .update({
-        progress: nextProgress,
-        slurper_status: nextSlurperStatus,
-        last_progress_at: now,
-        updated_at: now,
-      })
-      .eq("id", itemId)
-      .eq("migration_id", migrationId)
-  ).catch(() => undefined)
+  const updated = await postgres((db) => db.query(
+    "update drive_migration_items set progress=$3::jsonb,slurper_status=$4,last_progress_at=$5,updated_at=$5 where id=$1 and migration_id=$2 returning id",
+    [itemId, migrationId, JSON.stringify(nextProgress), nextSlurperStatus, now]
+  ))
+  if (!updated.rowCount) throw new Error(`Migration item ${itemId} no longer exists under migration ${migrationId}`)
 
   migrationItemProgressCache.set(cacheKey, {
     progress: nextProgress,
@@ -741,7 +581,7 @@ async function updateMigrationItemLocal(migrationId, repairJobId, itemUpdate) {
 }
 
 async function updateMigrationLocal(migrationId, body) {
-  if (!supabase || !migrationId || !body || typeof body !== "object") return
+  if (!migrationId || !body || typeof body !== "object") return
 
   const now = new Date().toISOString()
   const status = typeof body.status === "string" ? body.status : undefined
@@ -749,146 +589,53 @@ async function updateMigrationLocal(migrationId, body) {
   const error = typeof body.error === "string" ? body.error : undefined
 
   if (status === "completed") {
-    await withTimeout(
-      `supabase update migration ${migrationId} completed`,
-      supabase
-        .from("drive_migrations")
-        .update({
-          sync_status: "ok",
-          sync_message: summary || "Worker reconciliation completed",
-          last_synced_at: now,
-          updated_at: now,
-        })
-        .eq("id", migrationId)
-    ).catch(() => undefined)
+    await postgres((db) => db.query(
+      "update drive_migrations set sync_status='ok',sync_message=$2,last_synced_at=$3,updated_at=$3 where id=$1",
+      [migrationId, summary || "Worker reconciliation completed", now]
+    ))
     return
   }
 
   if (status === "failed") {
-    await withTimeout(
-      `supabase update migration ${migrationId} failed`,
-      supabase
-        .from("drive_migrations")
-        .update({
-          status: "failed",
-          sync_status: "error",
-          sync_message: error || summary || "Worker reconciliation failed",
-          last_synced_at: now,
-          updated_at: now,
-        })
-        .eq("id", migrationId)
-    ).catch(() => undefined)
+    await postgres((db) => db.query(
+      "update drive_migrations set status='failed',sync_status='error',sync_message=$2,last_synced_at=$3,updated_at=$3 where id=$1",
+      [migrationId, error || summary || "Worker reconciliation failed", now]
+    ))
     return
   }
 
   if (status === "canceled") {
-    await withTimeout(
-      `supabase update migration ${migrationId} canceled`,
-      supabase
-        .from("drive_migrations")
-        .update({
-          sync_status: "ok",
-          sync_message: summary || "Worker reconciliation aborted",
-          last_synced_at: now,
-          updated_at: now,
-        })
-        .eq("id", migrationId)
-    ).catch(() => undefined)
+    await postgres((db) => db.query(
+      "update drive_migrations set sync_status='ok',sync_message=$2,last_synced_at=$3,updated_at=$3 where id=$1",
+      [migrationId, summary || "Worker reconciliation aborted", now]
+    ))
   }
 }
 
 async function updateJob(jobId, body, options = {}) {
   const allowOffline = options?.allowOffline === true
-  let persistLocally = null
-  const persistPostgres = POSTGRES_URL
-    ? async () => postgres(async (db) => {
-        const status = typeof body.status === "string" ? body.status : null
-        const completed = ["completed", "failed", "canceled"].includes(status)
-        const result = await db.query(`
-          update drive_repair_jobs set
-            status=coalesce($3,status),progress=coalesce(progress,'{}'::jsonb)||$4::jsonb,result=coalesce(result,'{}'::jsonb)||$5::jsonb,
-            summary=case when $6::text is null then summary else $6 end,error=case when $7::text is null then error else $7 end,
-            last_heartbeat_at=now(),completed_at=case when $8::boolean then now() else completed_at end,updated_at=now()
-          where id=$1 and claimed_by_agent_id=$2 and ($9::uuid is null or claim_token=$9::uuid) and status in('claimed','running') returning id
-        `, [jobId, AGENT_ID, status, JSON.stringify(isRecord(body.progress) ? body.progress : {}), JSON.stringify(isRecord(body.result) ? body.result : {}), typeof body.summary === "string" ? body.summary : null, typeof body.error === "string" ? body.error : null, completed, jobClaimTokens.get(jobId) || null])
-        if (!result.rowCount) throw new Error("This job lease is no longer owned by this worker")
-      })
-    : null
-  if (jobClaimTokens.has(jobId) && persistPostgres) {
+  const persistPostgres = async () => postgres(async (db) => {
+    const status = typeof body.status === "string" ? body.status : null
+    const completed = ["completed", "failed", "canceled"].includes(status)
+    const result = await db.query(`
+      update drive_repair_jobs set
+        status=coalesce($3,status),progress=coalesce(progress,'{}'::jsonb)||$4::jsonb,result=coalesce(result,'{}'::jsonb)||$5::jsonb,
+        summary=case when $6::text is null then summary else $6 end,error=case when $7::text is null then error else $7 end,
+        last_heartbeat_at=now(),completed_at=case when $8::boolean then now() else completed_at end,updated_at=now()
+      where id=$1 and claimed_by_agent_id=$2 and ($9::uuid is null or claim_token=$9::uuid) and status in('claimed','running') returning id
+    `, [jobId, AGENT_ID, status, JSON.stringify(isRecord(body.progress) ? body.progress : {}), JSON.stringify(isRecord(body.result) ? body.result : {}), typeof body.summary === "string" ? body.summary : null, typeof body.error === "string" ? body.error : null, completed, jobClaimTokens.get(jobId) || null])
+    if (!result.rowCount) throw new Error("This job lease is no longer owned by this worker")
+    if (currentMigrationId && Array.isArray(body.items)) {
+      for (const itemUpdate of body.items) {
+        await updateMigrationItemLocal(currentMigrationId, jobId, itemUpdate)
+      }
+    }
+    if (currentMigrationId && completed) await updateMigrationLocal(currentMigrationId, body)
+  })
+  if (jobClaimTokens.has(jobId)) {
     await persistPostgres()
     if (["completed", "failed", "canceled"].includes(String(body.status || ""))) jobClaimTokens.delete(jobId)
     return { ok: true, direct: true }
-  }
-  if (supabase) {
-    const status = typeof body.status === "string" ? body.status : undefined
-    const progress = body.progress && typeof body.progress === "object" ? body.progress : undefined
-    const result = body.result && typeof body.result === "object" ? body.result : undefined
-    const summary = typeof body.summary === "string" ? body.summary : undefined
-    const error = typeof body.error === "string" ? body.error : undefined
-    const now = new Date().toISOString()
-    persistLocally = async () => {
-      // The API endpoint fences updates by claimed agent id. Keep the direct
-      // Supabase fallback under the same lease fence so an offline worker
-      // cannot overwrite a shard after the orchestrator requeues it.
-      const selectResult = await withTimeout(
-        `supabase load repair job ${jobId}`,
-        supabase
-          .from("drive_repair_jobs")
-          .select("status, claimed_by_agent_id, migration_id, progress, result")
-          .eq("id", jobId)
-          .limit(1)
-      ).catch(() => ({ data: null }))
-      const data = selectResult && typeof selectResult === "object" ? selectResult.data : null
-      const currentRow = Array.isArray(data) ? data[0] : null
-      if (
-        !currentRow ||
-        currentRow.claimed_by_agent_id !== AGENT_ID ||
-        !["claimed", "running"].includes(String(currentRow.status || ""))
-      ) {
-        return
-      }
-
-      const currentProgress = isRecord(currentRow?.progress) ? currentRow.progress : {}
-      const currentResult = isRecord(currentRow?.result) ? currentRow.result : {}
-      const mergedProgress = progress ? { ...currentProgress, ...progress } : undefined
-      const mergedResult = result ? { ...currentResult, ...result } : undefined
-
-      const persisted = await withTimeout(
-        `supabase update repair job ${jobId}`,
-        supabase
-          .from("drive_repair_jobs")
-          .update({
-            ...(status ? { status } : {}),
-            ...(mergedProgress ? { progress: mergedProgress } : {}),
-            ...(mergedResult ? { result: mergedResult } : {}),
-            ...(summary !== undefined ? { summary } : {}),
-            ...(error !== undefined ? { error } : {}),
-            last_heartbeat_at: now,
-            updated_at: now,
-            ...((status === "completed" || status === "failed" || status === "canceled") ? { completed_at: now } : {}),
-          })
-          .eq("id", jobId)
-          .eq("claimed_by_agent_id", AGENT_ID)
-          .in("status", ["claimed", "running"])
-          .select("id")
-      ).catch(() => null)
-      if (!persisted || persisted.error || !Array.isArray(persisted.data) || persisted.data.length === 0) return
-
-      if (currentMigrationId && Array.isArray(body.items)) {
-        for (const itemUpdate of body.items) {
-          await updateMigrationItemLocal(currentMigrationId, jobId, itemUpdate).catch(() => undefined)
-        }
-      }
-
-      if (currentMigrationId && (status === "completed" || status === "failed" || status === "canceled")) {
-        await updateMigrationLocal(currentMigrationId, body).catch(() => undefined)
-      }
-
-      repairJobProgressCache.set(jobId, {
-        progress: mergedProgress || currentProgress,
-        result: mergedResult || currentResult,
-      })
-    }
   }
   let response
   try {
@@ -898,9 +645,7 @@ async function updateJob(jobId, body, options = {}) {
     })
   } catch (error) {
     if (allowOffline && !(error instanceof JobAbortedError) && isRetryableError(error)) {
-      if (persistPostgres) await persistPostgres()
-      else if (persistLocally) await persistLocally()
-      else throw error
+      await persistPostgres()
       return { offline: true, error: error instanceof Error ? error.message : String(error) }
     }
     throw error
@@ -2501,7 +2246,6 @@ async function main() {
       currentJobId = claimed.job.id
       currentMigrationId = claimed.payload?.migration?.id || null
       migrationItemProgressCache.clear()
-      repairJobProgressCache.clear()
       jobAbortControllers.set(claimed.job.id, new AbortController())
       console.log(`Claimed job ${claimed.job.id} for migration ${claimed.payload?.migration?.id || "-"}`)
       await runJob(claimed.job, claimed.payload)
@@ -2509,7 +2253,6 @@ async function main() {
       currentJobId = null
       currentMigrationId = null
       migrationItemProgressCache.clear()
-      repairJobProgressCache.clear()
       jobAbortControllers.delete(claimed.job.id)
       if (EXIT_AFTER_JOB) {
         console.log(`Exit-after-job enabled; stopping worker after job ${claimed.job.id}`)
@@ -2535,7 +2278,6 @@ async function main() {
       currentJobId = null
       currentMigrationId = null
       migrationItemProgressCache.clear()
-      repairJobProgressCache.clear()
       if (failedJobId) jobAbortControllers.delete(failedJobId)
       if (EXIT_AFTER_JOB && failedJobId) {
         console.log(`Exit-after-job enabled; stopping worker after terminal job ${failedJobId}`)
@@ -2559,7 +2301,6 @@ async function runWorkerForever() {
       currentJobId = null
       currentMigrationId = null
       migrationItemProgressCache.clear()
-      repairJobProgressCache.clear()
       if (EXIT_AFTER_JOB) {
         stopHeartbeatLoop()
         return

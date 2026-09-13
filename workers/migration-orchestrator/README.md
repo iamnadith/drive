@@ -1,8 +1,8 @@
 # Migration Orchestrator
 
-This autonomous Cloudflare Worker owns the migration-worker execution lane. It connects directly to PostgreSQL, converts the durable File Scanner inventory into one-file jobs, recovers stale or aborted leases, fans GitHub dispatch intents through Cloudflare Queues, waits for independent File Scanner verification, retries bounded repair generations, and activates the verified target account.
+This autonomous Cloudflare Worker owns migration progress and database synchronization for both Super Slurper and the migration worker pool. It connects directly to PostgreSQL, polls and persists Super Slurper job progress, hands completed buckets to the File Scanner for independent verification, and activates the verified target account. For the worker pool it also converts File Scanner inventory into one-file jobs, recovers stale or aborted leases, fans GitHub dispatch intents through Cloudflare Queues, and retries bounded repair generations.
 
-It only selects migrations whose execution mode is `migration_workers`. It never selects migrations using the Cloudflare Super Slurper engine and does not modify the Backend Orchestrator. Coordination uses durable database rows plus authenticated wake-up calls to the File Scanner and Backend Orchestrator.
+It selects active migrations in either execution mode, including `migration_workers`. File enumeration and verification remain File Scanner responsibilities; account refresh remains a Backend Orchestrator responsibility. Coordination uses durable database rows plus authenticated wake-up calls to the File Scanner and Backend Orchestrator.
 
 ## Deploy
 
@@ -17,4 +17,4 @@ The deploy script verifies Wrangler authentication, creates the dispatch queue a
 
 GitHub dispatch messages use one-message consumer invocations. Every dispatch has a durable database intent and unique worker instance ID; retries reconcile that ID before any external dispatch. Workers claim one scanner-generated file job with `FOR UPDATE SKIP LOCKED`, so two workers cannot own the same file. A job succeeds only after independently streaming source and destination SHA-256 hashes and persisting the proof; final File Scanner verification also requires that proof and the same committed destination ETag.
 
-`GET /health` is a cheap liveness check. Authenticated `GET /status` reads durable database state and `POST /run` runs one lease-guarded cycle.
+`GET /health` is a cheap liveness check. Authenticated `GET /status` reads durable database state, `POST /wake` queues a non-blocking cycle request for the dashboard, and `POST /run` runs one lease-guarded cycle for operator checks.

@@ -7,7 +7,6 @@ import {
   getGitHubWorkflowRun,
   GITHUB_TOKEN_COOKIE,
 } from "@/lib/github-oauth"
-import { syncMigrationLiveState } from "@/lib/migration-live-state"
 import { abortRepairJob, deleteRepairJob, getRepairJob } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
 
@@ -132,7 +131,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     const linkedRun = await getLatestAgentRunByJobReference(id).catch(() => null)
     return NextResponse.json({ job: { ...job, linkedRun } })
   } catch (error: unknown) {
-    return NextResponse.json({ error: errorMessage(error, "Unable to load repair job") }, { status: 400 })
+    return NextResponse.json({ error: errorMessage(error, "Unable to load repair job") }, { status: 500 })
   }
 }
 
@@ -155,9 +154,6 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const agentId = job.claimedByAgentId || job.requestedByAgentId
     const agent = agentId ? await getAgentById(agentId).catch(() => null) : null
     const locallyAbortedJob = await abortRepairJob(id)
-    if (locallyAbortedJob) {
-      await syncMigrationLiveState(locallyAbortedJob.migrationId).catch(() => undefined)
-    }
 
     if (
       agent &&
@@ -297,7 +293,6 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
       if (action === "stop_github_run") {
         const currentJob = await getRepairJob(id).catch(() => null)
-        await syncMigrationLiveState(job.migrationId).catch(() => undefined)
         const refreshedRun = await getLatestAgentRunByJobReference(id).catch(() => null)
         return NextResponse.json({
           ok: true,
@@ -307,7 +302,6 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       }
 
       const updatedJob = locallyAbortedJob ?? (await abortRepairJob(id))
-      await syncMigrationLiveState(updatedJob.migrationId).catch(() => undefined)
       const refreshedRun = await getLatestAgentRunByJobReference(id).catch(() => null)
       return NextResponse.json({
         ok: true,
@@ -329,7 +323,6 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     const updatedJob = locallyAbortedJob ?? (await abortRepairJob(id))
-    await syncMigrationLiveState(updatedJob.migrationId).catch(() => undefined)
     const refreshedRun = await getLatestAgentRunByJobReference(id).catch(() => null)
     return NextResponse.json({ ok: true, job: { ...updatedJob, linkedRun: refreshedRun } })
   } catch (error: unknown) {
@@ -350,7 +343,6 @@ export async function DELETE(_request: Request, context: { params: Promise<{ id:
       await abortRepairJob(id)
     }
     await deleteRepairJob(id)
-    await syncMigrationLiveState(job.migrationId).catch(() => undefined)
     return NextResponse.json({ ok: true })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to delete repair job") }, { status: 400 })

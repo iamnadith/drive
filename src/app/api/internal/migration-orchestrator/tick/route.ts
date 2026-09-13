@@ -6,7 +6,6 @@ import {
   reconcileRepairJobs,
   requeueStaleMigrationWorkerJobs,
 } from "@/lib/repair-jobs-store"
-import { syncMigrationLiveState } from "@/lib/migration-live-state"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -36,7 +35,6 @@ export async function POST(request: Request) {
     try {
       const queue = await ensureMigrationWorkerJobs({ migrationId: migration.id, mode: "migration" })
       const requeued = await requeueStaleMigrationWorkerJobs({ migrationId: migration.id }).catch(() => 0)
-      await syncMigrationLiveState(migration.id, { runSettingsSync: true })
       results.push({ id: migration.id, ok: true, created: queue.created, existing: queue.existing, requeued })
     } catch (error) {
       results.push({ id: migration.id, ok: false, error: error instanceof Error ? error.message : String(error) })

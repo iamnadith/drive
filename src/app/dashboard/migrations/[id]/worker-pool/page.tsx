@@ -207,6 +207,12 @@ export default function MigrationWorkerPoolDetailsPage() {
           typeof data.liveWarning === "string" ? data.liveWarning : "",
         );
       } catch (error) {
+        if (live)
+          setLiveWarning(
+            error instanceof Error
+              ? error.message
+              : "Unable to refresh live migration worker data",
+          );
         if (!live)
           toast.error(
             error instanceof Error
@@ -226,13 +232,16 @@ export default function MigrationWorkerPoolDetailsPage() {
   }, [load]);
   React.useEffect(() => {
     if (loading) return;
-    const online = num(snapshot.onlineWorkers) > 0;
+    const active =
+      num(snapshot.onlineWorkers) > 0 ||
+      num(snapshot.runningJobs) > 0 ||
+      num(snapshot.queuedJobs) > 0;
     const timer = window.setTimeout(
-      () => void load(false, false, true),
-      online ? 6000 : 20000,
+      () => void load(active, false, true),
+      active ? 5000 : 20000,
     );
     return () => window.clearTimeout(timer);
-  }, [loading, load, snapshot.onlineWorkers]);
+  }, [loading, load, snapshot.onlineWorkers, snapshot.runningJobs, snapshot.queuedJobs]);
 
   const telemetry = React.useMemo(() => {
     const files: Array<Record<string, unknown>> = [];
@@ -323,8 +332,8 @@ export default function MigrationWorkerPoolDetailsPage() {
           <Server />
           <AlertTitle>Showing the last synced state</AlertTitle>
           <AlertDescription>
-            The Migration Orchestrator is temporarily unavailable. Saved
-            progress remains visible and live refresh will retry automatically.
+            {liveWarning} Saved database progress remains visible; live refresh
+            will retry automatically.
           </AlertDescription>
         </Alert>
       ) : null}

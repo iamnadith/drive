@@ -1,6 +1,6 @@
 import crypto from "crypto"
-import { getSupabaseServerClient } from "./supabase"
-import { findUserById, toPublicUser, updateUser, type PublicUser } from "./users-store"
+import { withDbTransaction } from "./db"
+import { findUserById, toPublicUser, type PublicUser } from "./users-store"
 import type { VerificationPurpose } from "./email-verification"
 
 type SmsVerificationPurpose = VerificationPurpose | "mobile-setup"
@@ -74,28 +74,17 @@ export async function createSmsVerificationCode(input: {
   mobileNumber: string
   purpose: SmsVerificationPurpose
 }) {
-  const supabase = getSupabaseServerClient()
   const code = generateCode()
   const expiresAt = new Date(Date.now() + CODE_TTL_MINUTES * 60 * 1000).toISOString()
   const mobileNumber = normalizeSriLankaMobile(input.mobileNumber)
 
-  await supabase
-    .from(TABLE)
-    .delete()
-    .eq("user_id", input.userId)
-    .eq("purpose", input.purpose)
-    .is("consumed_at", null)
-
-  const { error } = await supabase.from(TABLE).insert({
-    id: crypto.randomUUID(),
-    user_id: input.userId,
-    token_hash: hashCode(input.userId, mobileNumber, input.purpose, code),
-    mobile_number: mobileNumber,
-    purpose: input.purpose,
-    attempts: 0,
-    expires_at: expiresAt,
+  await withDbTransaction(async (client) => {
+    await client.query(`delete from public.${TABLE} where user_id=$1 and purpose=$2 and consumed_at is null`, [input.userId, input.purpose])
+    await client.query(`
+      insert into public.${TABLE}(id,user_id,token_hash,mobile_number,purpose,attempts,expires_at)
+      values($1,$2,$3,$4,$5,0,$6)
+    `, [crypto.randomUUID(), input.userId, hashCode(input.userId, mobileNumber, input.purpose, code), mobileNumber, input.purpose, expiresAt])
   })
-  if (error) throw new Error(error.message)
 
   return { code, expiresAt, mobileNumber }
 }
@@ -120,47 +109,37 @@ export async function verifySmsCode(input: {
   const code = input.code.replace(/\D/g, "")
   if (code.length !== 6) throw new Error("Enter the 6-digit verification code")
 
-  const supabase = getSupabaseServerClient()
   const mobileNumber = normalizeSriLankaMobile(input.mobileNumber)
-  const { data, error } = await supabase
-    .from(TABLE)
-    .select("*")
-    .eq("user_id", input.userId)
-    .eq("mobile_number", mobileNumber)
-    .eq("purpose", input.purpose)
-    .is("consumed_at", null)
-    .order("created_at", { ascending: false })
-    .limit(1)
-
-  if (error) throw new Error(error.message)
-  const row = (data as SmsVerificationRow[])[0]
-  if (!row) throw new Error("Verification code is invalid")
-  if (Date.parse(row.expires_at) < Date.now()) throw new Error("Verification code has expired")
-  if ((row.attempts ?? 0) >= 5) {
-    throw new Error("Verification code has too many failed attempts. Request a new code.")
-  }
-  const tokenHash = hashCode(input.userId, mobileNumber, input.purpose, code)
-  if (row.token_hash !== tokenHash) {
-    await supabase.from(TABLE).update({ attempts: (row.attempts ?? 0) + 1 }).eq("id", row.id)
-    throw new Error("Verification code is invalid")
-  }
-
-  const user = await findUserById(row.user_id)
+  const outcome = await withDbTransaction(async (client) => {
+    const result = await client.query<SmsVerificationRow>(`
+      select * from public.${TABLE}
+      where user_id=$1 and mobile_number=$2 and purpose=$3 and consumed_at is null
+      order by created_at desc limit 1 for update
+    `, [input.userId, mobileNumber, input.purpose])
+    const row = result.rows[0]
+    if (!row) return { error: "Verification code is invalid" }
+    if (new Date(row.expires_at).getTime() < Date.now()) return { error: "Verification code has expired" }
+    if (row.attempts >= 5) return { error: "Verification code has too many failed attempts. Request a new code." }
+    const expected = Buffer.from(hashCode(input.userId, mobileNumber, input.purpose, code), "hex")
+    const actual = Buffer.from(row.token_hash, "hex")
+    if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+      await client.query(`update public.${TABLE} set attempts=attempts+1 where id=$1`, [row.id])
+      return { error: "Verification code is invalid" }
+    }
+    const userResult = await client.query<{ id: string }>(`select id from public.drive_users where id=$1 for update`, [row.user_id])
+    if (!userResult.rows[0]) return { error: "User not found" }
+    const consumedAt = new Date().toISOString()
+    if (input.consume !== false) {
+      const consumed = await client.query(`update public.${TABLE} set consumed_at=$2 where id=$1 and consumed_at is null`, [row.id, consumedAt])
+      if (consumed.rowCount !== 1) return { error: "Verification code has already been used" }
+      if (input.purpose === "mobile-setup") {
+        await client.query(`update public.drive_users set mobile_number=$2,mobile_verified=true,mobile_verified_at=$3,updated_at=now() where id=$1`, [row.user_id, mobileNumber, consumedAt])
+      }
+    }
+    return { userId: row.user_id }
+  })
+  if ("error" in outcome) throw new Error(outcome.error)
+  const user = await findUserById(outcome.userId)
   if (!user) throw new Error("User not found")
-
-  const consumedAt = new Date().toISOString()
-  if (input.consume !== false) {
-    await supabase.from(TABLE).update({ consumed_at: consumedAt }).eq("id", row.id)
-  }
-
-  if (input.consume !== false && input.purpose === "mobile-setup") {
-    const updated = await updateUser(user.id, {
-      mobileNumber,
-      mobileVerified: true,
-      mobileVerifiedAt: consumedAt,
-    })
-    return toPublicUser(updated)
-  }
-
   return toPublicUser(user)
 }

@@ -1,5 +1,5 @@
 import crypto from "crypto"
-import { getSupabaseServerClient } from "./supabase"
+import { queryDb, withDbTransaction } from "./db"
 import { r2ListObjectsPage, type R2ClientConfig } from "./r2-s3"
 
 type ScanStatus = "pending" | "running" | "completed" | "failed"
@@ -27,35 +27,34 @@ const SCANS_TABLE = "drive_bucket_scans"
 const SCAN_OBJECTS_TABLE = "drive_bucket_scan_objects"
 const VERIFY_DIFFS_TABLE = "drive_bucket_verify_diffs"
 
-type ScanObjectRow = {
-  key: string
-  size: number
-  isDirMarker?: boolean
-}
-
-function supabaseErrorMessage(error: unknown): string {
-  if (typeof error === "object" && error !== null && "message" in error) {
-    const message = (error as { message?: unknown }).message
-    if (typeof message === "string" && message.trim()) return message
-  }
-  return String(error ?? "")
-}
-
-function isSchemaCacheMissingColumn(error: unknown, column: string): boolean {
-  const message = supabaseErrorMessage(error).toLowerCase()
-  if (!message.includes("schema cache")) return false
-  // PostgREST messages typically include: could not find the 'col' column of 'table' in the schema cache
-  return message.includes(`'${column.toLowerCase()}'`)
+type DriveBucketScanRow = {
+  id: string
+  account_id: string
+  bucket_name: string
+  kind: string
+  migration_id: string | null
+  migration_item_id: string | null
+  prefix: string | null
+  status: string
+  last_key: string | null
+  objects: string | number
+  bytes: string | number
+  error: string | null
+  started_at: string | null
+  completed_at: string | null
+  updated_at: string | null
+  lease_owner?: string | null
+  lease_expires_at?: string | null
 }
 
 function isDirMarkerObject(input: { key: string; size: number }): boolean {
   // R2 (and some S3 tools) can store "folder markers" as 0-byte objects that end with "/".
   // Users generally do not consider these "files" and want them excluded from counts/verification.
-  // We still store them in Supabase for auditability.
+  // Keep folder markers in PostgreSQL for auditability, but exclude them from file counts.
   return input.size === 0 && input.key.endsWith("/")
 }
 
-function mapScanRow(row: any): DriveBucketScan {
+function mapScanRow(row: DriveBucketScanRow): DriveBucketScan {
   return {
     id: String(row.id),
     accountId: String(row.account_id),
@@ -83,78 +82,37 @@ export async function ensureBucketScan(input: {
   migrationItemId?: string | null
   prefix?: string | null
 }): Promise<DriveBucketScan> {
-  const supabase = getSupabaseServerClient()
   // Reuse an active scan for the same migration item if one exists (resume),
   // otherwise create a new scan (keeps full history in DB).
-  if (input.migrationItemId) {
-    const { data: existing, error: existingErr } = await supabase
-      .from(SCANS_TABLE)
-      .select("*")
-      .eq("account_id", input.accountId)
-      .eq("bucket_name", input.bucketName)
-      .eq("kind", input.kind)
-      .eq("migration_item_id", input.migrationItemId)
-      .order("updated_at", { ascending: false })
-      .limit(1)
-
-    // If the column isn't yet present (or PostgREST schema cache hasn't reloaded),
-    // fall back to creating a new scan and rely on item.progress.{sourceScanId,destScanId}.
-    if (existingErr) {
-      if (!isSchemaCacheMissingColumn(existingErr, "migration_item_id")) {
-        throw new Error(supabaseErrorMessage(existingErr) || "Unable to query bucket scans")
-      }
+  return withDbTransaction(async (client) => {
+    const lockKey = `${input.accountId}:${input.bucketName}:${input.kind}:${input.migrationItemId ?? "-"}`
+    await client.query(`select pg_advisory_xact_lock(hashtext('drive.bucket-scan'), hashtext($1))`, [lockKey])
+    if (input.migrationItemId) {
+      const existing = await client.query<DriveBucketScanRow>(
+        `select * from public.${SCANS_TABLE}
+         where account_id = $1 and bucket_name = $2 and kind = $3 and migration_item_id = $4
+           and status in ('pending','running')
+         order by updated_at desc, id desc limit 1`,
+        [input.accountId, input.bucketName, input.kind, input.migrationItemId]
+      )
+      if (existing.rows[0]) return mapScanRow(existing.rows[0])
     }
-    const row = Array.isArray(existing) ? existing[0] : null
-    if (row) {
-      const mapped = mapScanRow(row)
-      if (mapped.status === "pending" || mapped.status === "running") return mapped
-    }
-  }
-
-  const now = new Date().toISOString()
-  const id = crypto.randomUUID()
-
-  const baseInsert = {
-    id,
-    account_id: input.accountId,
-    bucket_name: input.bucketName,
-    kind: input.kind,
-    prefix: typeof input.prefix === "undefined" ? null : input.prefix,
-    status: "pending",
-    last_key: null,
-    objects: 0,
-    bytes: 0,
-    error: null,
-    started_at: null,
-    completed_at: null,
-    updated_at: now,
-  }
-
-  const scopedInsert = {
-    ...baseInsert,
-    migration_id: typeof input.migrationId === "undefined" ? null : input.migrationId,
-    migration_item_id: typeof input.migrationItemId === "undefined" ? null : input.migrationItemId,
-  }
-
-  // Prefer inserting scoped columns for auditability, but gracefully fall back if the DB/schema cache
-  // hasn't been updated yet.
-  const tryInsert = async (payload: any) =>
-    supabase.from(SCANS_TABLE).insert(payload).select("*").single()
-
-  let result = await tryInsert(scopedInsert)
-  if (result.error && (isSchemaCacheMissingColumn(result.error, "migration_id") || isSchemaCacheMissingColumn(result.error, "migration_item_id"))) {
-    result = await tryInsert(baseInsert)
-  }
-
-  if (result.error) throw new Error(supabaseErrorMessage(result.error) || "Unable to create bucket scan")
-  return mapScanRow(result.data as any)
+    const { rows } = await client.query<DriveBucketScanRow>(
+      `insert into public.${SCANS_TABLE} (
+         id, account_id, bucket_name, kind, migration_id, migration_item_id,
+         prefix, status, last_key, objects, bytes, error, started_at, completed_at, updated_at
+       ) values ($1,$2,$3,$4,$5,$6,$7,'pending',null,0,0,null,null,null,now())
+       returning *`,
+      [crypto.randomUUID(), input.accountId, input.bucketName, input.kind,
+        input.migrationId ?? null, input.migrationItemId ?? null, input.prefix ?? null]
+    )
+    return mapScanRow(rows[0])
+  })
 }
 
 export async function getBucketScan(scanId: string): Promise<DriveBucketScan | null> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase.from(SCANS_TABLE).select("*").eq("id", scanId).limit(1)
-  if (error) throw new Error(String((error as any)?.message ?? "Unable to load bucket scan"))
-  const row = Array.isArray(data) ? data[0] : null
+  const { rows } = await queryDb<DriveBucketScanRow>(`select * from public.${SCANS_TABLE} where id = $1 limit 1`, [scanId])
+  const row = rows[0]
   return row ? mapScanRow(row) : null
 }
 
@@ -167,165 +125,129 @@ export async function runBucketScanBatch(input: {
   // We count "real objects" (non-dir markers) separately for scan.objects/scan.bytes.
   maxObjects?: number
 }): Promise<DriveBucketScan> {
-  const supabase = getSupabaseServerClient()
-  const scan = await getBucketScan(input.scanId)
-  if (!scan) throw new Error("Bucket scan not found")
-  if (scan.status === "completed" || scan.status === "failed") return scan
-
-  const maxKeysToProcess = Math.max(100, Math.min(25_000, input.maxObjects ?? 2_000))
-  const now = new Date().toISOString()
-
-  if (!scan.startedAt) {
-    await supabase
-      .from(SCANS_TABLE)
-      .update({ status: "running", started_at: now, updated_at: now })
-      .eq("id", input.scanId)
+  const leaseOwner = crypto.randomUUID()
+  const claim = await queryDb<DriveBucketScanRow>(
+    `update public.${SCANS_TABLE}
+     set lease_owner = $2, lease_expires_at = now() + interval '2 minutes',
+         attempt_count = attempt_count + 1, status = 'running',
+         started_at = coalesce(started_at, now()), updated_at = now()
+     where id = $1 and status in ('pending','running')
+       and (lease_owner is null or lease_expires_at is null or lease_expires_at < now())
+     returning *`,
+    [input.scanId, leaseOwner]
+  )
+  const scanRow = claim.rows[0]
+  if (!scanRow) {
+    const current = await getBucketScan(input.scanId)
+    if (!current) throw new Error("Bucket scan not found")
+    if (current.status === "completed" || current.status === "failed") return current
+    return current
   }
-
+  const scan = mapScanRow(scanRow)
+  const maxKeysToProcess = Math.max(100, Math.min(25_000, input.maxObjects ?? 2_000))
   let keysProcessed = 0
   let objectsAdded = 0
   let bytesAdded = 0
   let lastKey = scan.lastKey ?? undefined
 
-  while (keysProcessed < maxKeysToProcess) {
-    const page = await r2ListObjectsPage(input.r2, input.bucketName, {
-      prefix: typeof input.prefix === "undefined" ? undefined : input.prefix ?? undefined,
-      startAfter: lastKey,
-      maxKeys: Math.min(1000, maxKeysToProcess - keysProcessed),
-    })
+  try {
+    while (keysProcessed < maxKeysToProcess) {
+      const renewed = await queryDb(
+        `update public.${SCANS_TABLE}
+         set lease_expires_at = now() + interval '2 minutes'
+         where id = $1 and lease_owner = $2 and status = 'running'
+         returning id`,
+        [input.scanId, leaseOwner]
+      )
+      if ((renewed.rowCount ?? 0) === 0) throw new Error("Bucket scan lease was lost")
 
-    const contents = Array.isArray(page.Contents) ? page.Contents : []
-    if (contents.length === 0) {
-      // Important: we might have processed one or more full 1000-key pages in this same batch.
-      // If the total object count is a multiple of 1000, the next request returns empty; we must
-      // still persist the counters from this run before finalizing.
-      const { data, error } = await supabase
-        .from(SCANS_TABLE)
-        .update({
-          status: "completed",
-          completed_at: now,
-          last_key: lastKey ?? null,
-          objects: (scan.objects ?? 0) + objectsAdded,
-          bytes: (scan.bytes ?? 0) + bytesAdded,
-          error: null,
-          updated_at: now,
-        })
-        .eq("id", input.scanId)
-        .select("*")
-        .single()
-      if (error) throw new Error(String((error as any)?.message ?? "Unable to finalize bucket scan"))
-      return mapScanRow(data as any)
-    }
-
-    const rows: any[] = []
-    for (const obj of contents) {
-      const key = typeof obj?.Key === "string" ? obj.Key : ""
-      if (!key) continue
-      const size = typeof obj?.Size === "number" && Number.isFinite(obj.Size) ? obj.Size : 0
-      const isDirMarker = isDirMarkerObject({ key, size })
-      const etag = typeof obj?.ETag === "string" ? obj.ETag : null
-      const lastModified = obj?.LastModified instanceof Date ? obj.LastModified.toISOString() : null
-      rows.push({
-        scan_id: input.scanId,
-        key,
-        size,
-        is_dir_marker: isDirMarker,
-        etag,
-        last_modified: lastModified,
-        created_at: now,
+      const page = await r2ListObjectsPage(input.r2, input.bucketName, {
+        prefix: typeof input.prefix === "undefined" ? undefined : input.prefix ?? undefined,
+        startAfter: lastKey,
+        maxKeys: Math.min(1000, maxKeysToProcess - keysProcessed),
       })
-      lastKey = key
-      keysProcessed += 1
-
-      if (!isDirMarker) {
-        objectsAdded += 1
-        bytesAdded += size
+      const contents = Array.isArray(page.Contents) ? page.Contents : []
+      if (contents.length === 0) {
+        const finalized = await queryDb<DriveBucketScanRow>(
+          `update public.${SCANS_TABLE} set
+             status = 'completed', completed_at = now(), last_key = $3,
+             objects = objects + $4, bytes = bytes + $5, error = null,
+             lease_owner = null, lease_expires_at = null, updated_at = now()
+           where id = $1 and lease_owner = $2 returning *`,
+          [input.scanId, leaseOwner, lastKey ?? null, objectsAdded, bytesAdded]
+        )
+        if (!finalized.rows[0]) throw new Error("Bucket scan lease was lost before finalization")
+        return mapScanRow(finalized.rows[0])
       }
-      if (keysProcessed >= maxKeysToProcess) break
-    }
 
-    if (rows.length > 0) {
-      let upsertResult = await supabase.from(SCAN_OBJECTS_TABLE).upsert(rows, { onConflict: "scan_id,key" })
-      if (upsertResult.error && isSchemaCacheMissingColumn(upsertResult.error, "is_dir_marker")) {
-        const withoutFlag = rows.map((r) => {
-          const { is_dir_marker: _, ...rest } = r
-          return rest
+      const objects: Array<Record<string, unknown>> = []
+      for (const obj of contents) {
+        const key = typeof obj?.Key === "string" ? obj.Key : ""
+        if (!key) continue
+        const size = typeof obj?.Size === "number" && Number.isFinite(obj.Size) ? obj.Size : 0
+        const isDirMarker = isDirMarkerObject({ key, size })
+        objects.push({
+          key, size, isDirMarker,
+          etag: typeof obj?.ETag === "string" ? obj.ETag : null,
+          lastModified: obj?.LastModified instanceof Date ? obj.LastModified.toISOString() : null,
         })
-        upsertResult = await supabase.from(SCAN_OBJECTS_TABLE).upsert(withoutFlag, { onConflict: "scan_id,key" })
+        lastKey = key
+        keysProcessed += 1
+        if (!isDirMarker) {
+          objectsAdded += 1
+          bytesAdded += size
+        }
+        if (keysProcessed >= maxKeysToProcess) break
       }
-      if (upsertResult.error) {
-        throw new Error(supabaseErrorMessage(upsertResult.error) || "Unable to upsert bucket scan objects")
+
+      if (objects.length > 0) {
+        await queryDb(
+          `insert into public.${SCAN_OBJECTS_TABLE} (
+             scan_id, key, size, is_dir_marker, etag, last_modified, created_at
+           )
+           select $1, o.key, o.size, o.is_dir_marker, o.etag, o.last_modified, now()
+           from jsonb_to_recordset($2::jsonb) as o(
+             key text, size bigint, is_dir_marker boolean, etag text, last_modified timestamptz
+           )
+           on conflict (scan_id, key) do update set
+             size = excluded.size, is_dir_marker = excluded.is_dir_marker,
+             etag = excluded.etag, last_modified = excluded.last_modified,
+             created_at = excluded.created_at`,
+          [input.scanId, JSON.stringify(objects)]
+        )
       }
+
+      if (contents.length < 1000) break
     }
 
-    // Continue while we still have room in maxObjects; stop if page smaller than requested (near end).
-    if (contents.length < 1000) break
+    const updated = await queryDb<DriveBucketScanRow>(
+      `update public.${SCANS_TABLE} set
+         status = 'running', last_key = $3, objects = objects + $4,
+         bytes = bytes + $5, lease_owner = null, lease_expires_at = null,
+         updated_at = now()
+       where id = $1 and lease_owner = $2 returning *`,
+      [input.scanId, leaseOwner, lastKey ?? null, objectsAdded, bytesAdded]
+    )
+    if (!updated.rows[0]) throw new Error("Bucket scan lease was lost before progress was saved")
+    return mapScanRow(updated.rows[0])
+  } catch (error) {
+    await queryDb(
+      `update public.${SCANS_TABLE} set lease_owner = null, lease_expires_at = null, updated_at = now()
+       where id = $1 and lease_owner = $2`,
+      [input.scanId, leaseOwner]
+    ).catch(() => undefined)
+    throw error
   }
-
-  const { data, error } = await supabase
-    .from(SCANS_TABLE)
-    .update({
-      status: "running",
-      last_key: lastKey ?? null,
-      objects: (scan.objects ?? 0) + objectsAdded,
-      bytes: (scan.bytes ?? 0) + bytesAdded,
-      updated_at: now,
-    })
-    .eq("id", input.scanId)
-    .select("*")
-    .single()
-  if (error) throw new Error(String((error as any)?.message ?? "Unable to update bucket scan"))
-  return mapScanRow(data as any)
 }
 
 export async function markBucketScanFailed(input: { scanId: string; error: string }): Promise<void> {
-  const supabase = getSupabaseServerClient()
-  const now = new Date().toISOString()
-  await supabase
-    .from(SCANS_TABLE)
-    .update({ status: "failed", error: input.error, updated_at: now, completed_at: now })
-    .eq("id", input.scanId)
-}
-
-async function loadNonDirScanObjectsPage(
-  supabase: ReturnType<typeof getSupabaseServerClient>,
-  scanId: string,
-  afterKey: string | null
-): Promise<ScanObjectRow[]> {
-  // Prefer filtering server-side by is_dir_marker, but fall back if the column isn't present yet.
-  let query = supabase
-    .from(SCAN_OBJECTS_TABLE)
-    .select("key,size,is_dir_marker")
-    .eq("scan_id", scanId)
-    .eq("is_dir_marker", false)
-    .order("key", { ascending: true })
-    .limit(1000)
-
-  if (afterKey) query = query.gt("key", afterKey)
-
-  let result: any = await query
-  if (result.error && isSchemaCacheMissingColumn(result.error, "is_dir_marker")) {
-    let q2 = supabase
-      .from(SCAN_OBJECTS_TABLE)
-      .select("key,size")
-      .eq("scan_id", scanId)
-      .order("key", { ascending: true })
-      .limit(1000)
-    if (afterKey) q2 = q2.gt("key", afterKey)
-    result = await q2
-  }
-
-  if (result.error) throw new Error(supabaseErrorMessage(result.error) || "Unable to read scan objects")
-
-  const raw = Array.isArray(result.data) ? (result.data as any[]) : []
-  return raw
-    .map((r) => ({
-      key: String(r.key ?? ""),
-      size: typeof r.size === "number" ? r.size : Number(r.size ?? 0),
-      isDirMarker: typeof r.is_dir_marker === "boolean" ? r.is_dir_marker : undefined,
-    }))
-    .filter((r) => r.key)
-    .filter((r) => (typeof r.isDirMarker === "boolean" ? !r.isDirMarker : !isDirMarkerObject({ key: r.key, size: r.size })))
+  await queryDb(
+    `update public.${SCANS_TABLE}
+     set status = 'failed', error = $2, updated_at = now(), completed_at = now(),
+         lease_owner = null, lease_expires_at = null
+     where id = $1`,
+    [input.scanId, input.error]
+  )
 }
 
 export async function inferVerifyDiffsFromScans(input: {
@@ -334,76 +256,40 @@ export async function inferVerifyDiffsFromScans(input: {
   limit?: number
   includeExtra?: boolean
 }): Promise<Array<{ kind: string; key: string; sourceSize?: number | null; destSize?: number | null }>> {
-  const supabase = getSupabaseServerClient()
-  const limit = Math.max(1, Math.min(5_000, input.limit ?? 500))
-  const includeExtra = input.includeExtra === true
-  const diffs: Array<{ kind: string; key: string; sourceSize?: number | null; destSize?: number | null }> = []
-
-  let after: string | null = null
-  while (diffs.length < limit) {
-    const page = await loadNonDirScanObjectsPage(supabase, input.sourceScanId, after)
-    if (page.length === 0) break
-
-    const keys = page.map((r) => r.key)
-    const { data: destMatches, error: destErr } = await supabase
-      .from(SCAN_OBJECTS_TABLE)
-      .select("key,size,is_dir_marker")
-      .eq("scan_id", input.destScanId)
-      .in("key", keys)
-    if (destErr) throw new Error(String((destErr as any)?.message ?? "Unable to read destination scan objects"))
-
-    const destMap = new Map<string, number>()
-    for (const r of Array.isArray(destMatches) ? (destMatches as any[]) : []) {
-      const key = String((r as any).key ?? "")
-      const size = typeof (r as any).size === "number" ? (r as any).size : Number((r as any).size ?? 0)
-      const isDirMarker =
-        typeof (r as any).is_dir_marker === "boolean"
-          ? Boolean((r as any).is_dir_marker)
-          : isDirMarkerObject({ key, size })
-      if (key && !isDirMarker) destMap.set(key, size)
-    }
-
-    for (const row of page) {
-      const destSize = destMap.get(row.key)
-      if (typeof destSize === "undefined") {
-        diffs.push({ kind: "missing", key: row.key, sourceSize: row.size, destSize: null })
-      } else if (destSize !== row.size) {
-        diffs.push({ kind: "size_mismatch", key: row.key, sourceSize: row.size, destSize })
-      }
-      if (diffs.length >= limit) break
-    }
-
-    after = page[page.length - 1]?.key ?? after
-  }
-
-  if (!includeExtra || diffs.length >= limit) return diffs
-
-  let afterDest: string | null = null
-  while (diffs.length < limit) {
-    const page = await loadNonDirScanObjectsPage(supabase, input.destScanId, afterDest)
-    if (page.length === 0) break
-
-    const keys = page.map((r) => r.key)
-    const { data: sourceMatches, error: sourceErr } = await supabase
-      .from(SCAN_OBJECTS_TABLE)
-      .select("key")
-      .eq("scan_id", input.sourceScanId)
-      .in("key", keys)
-    if (sourceErr) throw new Error(String((sourceErr as any)?.message ?? "Unable to read source scan objects"))
-
-    const sourceSet = new Set<string>(
-      (Array.isArray(sourceMatches) ? sourceMatches : []).map((row: any) => String(row.key ?? "")).filter(Boolean)
-    )
-
-    for (const row of page) {
-      if (!sourceSet.has(row.key)) diffs.push({ kind: "extra", key: row.key, sourceSize: null, destSize: row.size })
-      if (diffs.length >= limit) break
-    }
-
-    afterDest = page[page.length - 1]?.key ?? afterDest
-  }
-
-  return diffs
+  const limit = Math.max(1, Math.min(5_000, Math.floor(input.limit ?? 500)))
+  const { rows } = await queryDb<{
+    kind: string
+    key: string
+    source_size: string | number | null
+    dest_size: string | number | null
+  }>(
+    `with source_objects as (
+       select key, size from public.${SCAN_OBJECTS_TABLE}
+       where scan_id = $1 and is_dir_marker = false
+     ), dest_objects as (
+       select key, size from public.${SCAN_OBJECTS_TABLE}
+       where scan_id = $2 and is_dir_marker = false
+     ), diffs as (
+       select 'missing'::text as kind, s.key, s.size as source_size, null::bigint as dest_size
+       from source_objects s left join dest_objects d using (key) where d.key is null
+       union all
+       select 'size_mismatch', s.key, s.size, d.size
+       from source_objects s join dest_objects d using (key) where s.size <> d.size
+       union all
+       select 'extra', d.key, null::bigint, d.size
+       from dest_objects d left join source_objects s using (key)
+       where $3::boolean and s.key is null
+     )
+     select kind, key, source_size, dest_size from diffs
+     order by key asc, kind asc limit $4`,
+    [input.sourceScanId, input.destScanId, input.includeExtra === true, limit]
+  )
+  return rows.map((row) => ({
+    kind: row.kind,
+    key: row.key,
+    sourceSize: row.source_size === null ? null : Number(row.source_size),
+    destSize: row.dest_size === null ? null : Number(row.dest_size),
+  }))
 }
 
 export async function computeAndStoreVerifyDiffs(input: {
@@ -421,125 +307,78 @@ export async function computeAndStoreVerifyDiffs(input: {
   sampleExtraKeys: string[]
   note?: string
 }> {
-  const supabase = getSupabaseServerClient()
-  const sampleLimit = Math.max(1, Math.min(200, input.sampleLimit ?? 25))
-
-  // Clear previous diffs for this migration item (re-run verification).
-  await supabase.from(VERIFY_DIFFS_TABLE).delete().eq("migration_item_id", input.migrationItemId)
-
-  const toDiffRow = (r: { key: string; source_size?: number | null; dest_size?: number | null }, kind: string) => ({
-    id: crypto.randomUUID(),
-    migration_item_id: input.migrationItemId,
-    source_scan_id: input.sourceScanId,
-    dest_scan_id: input.destScanId,
-    kind,
-    key: String(r.key ?? ""),
-    source_size: typeof r.source_size === "number" ? r.source_size : r.source_size ?? null,
-    dest_size: typeof r.dest_size === "number" ? r.dest_size : r.dest_size ?? null,
-    created_at: new Date().toISOString(),
+  const sampleLimit = Math.max(1, Math.min(200, Math.floor(input.sampleLimit ?? 25)))
+  const result = await withDbTransaction(async (client) => {
+    await client.query(`select pg_advisory_xact_lock(hashtext('drive.bucket-verify'), hashtext($1))`, [input.migrationItemId])
+    await client.query(
+      `delete from public.${VERIFY_DIFFS_TABLE} where migration_item_id = $1`,
+      [input.migrationItemId]
+    )
+    const { rows } = await client.query<{
+      missing_count: string | number
+      mismatched_count: string | number
+      extra_count: string | number
+      sample_missing: string[]
+      sample_mismatched: string[]
+      sample_extra: string[]
+      source_objects: string | number | null
+    }>(
+      `with source_objects as materialized (
+         select key, size from public.${SCAN_OBJECTS_TABLE}
+         where scan_id = $2 and is_dir_marker = false
+       ), dest_objects as materialized (
+         select key, size from public.${SCAN_OBJECTS_TABLE}
+         where scan_id = $3 and is_dir_marker = false
+       ), differences as materialized (
+         select 'missing'::text as kind, s.key, s.size as source_size, null::bigint as dest_size
+         from source_objects s left join dest_objects d using (key) where d.key is null
+         union all
+         select 'size_mismatch', s.key, s.size, d.size
+         from source_objects s join dest_objects d using (key) where s.size <> d.size
+         union all
+         select 'extra', d.key, null::bigint, d.size
+         from dest_objects d left join source_objects s using (key)
+         where $4::boolean and s.key is null
+       ), inserted as (
+         insert into public.${VERIFY_DIFFS_TABLE} (
+           id, migration_item_id, source_scan_id, dest_scan_id,
+           kind, key, source_size, dest_size
+         )
+         select gen_random_uuid(), $1, $2, $3, kind, key, source_size, dest_size
+         from differences
+         returning kind, key
+       )
+       select
+         count(*) filter (where kind = 'missing') as missing_count,
+         count(*) filter (where kind = 'size_mismatch') as mismatched_count,
+         count(*) filter (where kind = 'extra') as extra_count,
+         coalesce(array(
+           select key from inserted where kind = 'missing' order by key limit $5
+         ), array[]::text[]) as sample_missing,
+         coalesce(array(
+           select key from inserted where kind = 'size_mismatch' order by key limit $5
+         ), array[]::text[]) as sample_mismatched,
+         coalesce(array(
+           select key from inserted where kind = 'extra' order by key limit $5
+         ), array[]::text[]) as sample_extra,
+         (select objects from public.${SCANS_TABLE} where id = $2) as source_objects
+       from inserted`,
+      [input.migrationItemId, input.sourceScanId, input.destScanId, input.strictDestination, sampleLimit]
+    )
+    return rows[0]
   })
-
-  let missing = 0
-  let sizeMismatched = 0
-  let extra = 0
-  const sampleMissingKeys: string[] = []
-  const sampleMismatchedKeys: string[] = []
-  const sampleExtraKeys: string[] = []
-
-  const insertChunked = async (rows: any[]) => {
-    for (let i = 0; i < rows.length; i += 500) {
-      const chunk = rows.slice(i, i + 500)
-      const { error } = await supabase.from(VERIFY_DIFFS_TABLE).insert(chunk)
-      if (error) throw new Error(String((error as any)?.message ?? "Unable to store verification diffs"))
-    }
-  }
-
-  // Walk source keys and check presence/size in dest.
-  let after: string | null = null
-  while (true) {
-    const page = await loadNonDirScanObjectsPage(supabase, input.sourceScanId, after)
-    if (page.length === 0) break
-
-    const keys = page.map((r) => r.key)
-    const { data: destMatches, error: destErr } = await supabase
-      .from(SCAN_OBJECTS_TABLE)
-      .select("key,size,is_dir_marker")
-      .eq("scan_id", input.destScanId)
-      .in("key", keys)
-    if (destErr) throw new Error(String((destErr as any)?.message ?? "Unable to read destination scan objects"))
-    const destMap = new Map<string, number>()
-    for (const r of Array.isArray(destMatches) ? (destMatches as any[]) : []) {
-      const k = String((r as any).key ?? "")
-      const s = typeof (r as any).size === "number" ? (r as any).size : Number((r as any).size ?? 0)
-      const isDirMarker =
-        typeof (r as any).is_dir_marker === "boolean"
-          ? Boolean((r as any).is_dir_marker)
-          : isDirMarkerObject({ key: k, size: s })
-      if (k && !isDirMarker) destMap.set(k, s)
-    }
-
-    const diffsToInsert: any[] = []
-    for (const r of page) {
-      const dSize = destMap.get(r.key)
-      if (typeof dSize === "undefined") {
-        missing += 1
-        if (sampleMissingKeys.length < sampleLimit) sampleMissingKeys.push(r.key)
-        diffsToInsert.push(toDiffRow({ key: r.key, source_size: r.size, dest_size: null }, "missing"))
-      } else if (dSize !== r.size) {
-        sizeMismatched += 1
-        if (sampleMismatchedKeys.length < sampleLimit) sampleMismatchedKeys.push(r.key)
-        diffsToInsert.push(toDiffRow({ key: r.key, source_size: r.size, dest_size: dSize }, "size_mismatch"))
-      }
-    }
-
-    if (diffsToInsert.length > 0) await insertChunked(diffsToInsert)
-    after = page[page.length - 1]?.key ?? after
-  }
-
-  // Walk destination keys for extras only when strict.
-  if (input.strictDestination) {
-    let afterD: string | null = null
-    while (true) {
-      const page = await loadNonDirScanObjectsPage(supabase, input.destScanId, afterD)
-      if (page.length === 0) break
-
-      const keys = page.map((r) => r.key)
-      const { data: sourceMatches, error: sourceErr2 } = await supabase
-        .from(SCAN_OBJECTS_TABLE)
-        .select("key")
-        .eq("scan_id", input.sourceScanId)
-        .in("key", keys)
-      if (sourceErr2) throw new Error(String((sourceErr2 as any)?.message ?? "Unable to read source scan objects"))
-      const sourceSet = new Set<string>()
-      for (const r of Array.isArray(sourceMatches) ? (sourceMatches as any[]) : []) {
-        const k = String((r as any).key ?? "")
-        if (k) sourceSet.add(k)
-      }
-
-      const diffsToInsert: any[] = []
-      for (const r of page) {
-        if (sourceSet.has(r.key)) continue
-        extra += 1
-        if (sampleExtraKeys.length < sampleLimit) sampleExtraKeys.push(r.key)
-        diffsToInsert.push(toDiffRow({ key: r.key, source_size: null, dest_size: r.size }, "extra"))
-      }
-      if (diffsToInsert.length > 0) await insertChunked(diffsToInsert)
-      afterD = page[page.length - 1]?.key ?? afterD
-    }
-  }
-
-  // If source scan had zero objects, flag it as "no files".
-  const sourceScan = await getBucketScan(input.sourceScanId).catch(() => null)
-  const note = sourceScan && (sourceScan.objects ?? 0) === 0 ? "no_source_objects" : undefined
-
+  const count = (value: string | number | null | undefined) => Math.max(0, Number(value ?? 0) || 0)
+  const sourceObjects = result?.source_objects
   return {
-    missing,
-    sizeMismatched,
-    extra,
-    sampleMissingKeys,
-    sampleMismatchedKeys,
-    sampleExtraKeys,
-    ...(note ? { note } : {}),
+    missing: count(result?.missing_count),
+    sizeMismatched: count(result?.mismatched_count),
+    extra: count(result?.extra_count),
+    sampleMissingKeys: Array.isArray(result?.sample_missing) ? result.sample_missing : [],
+    sampleMismatchedKeys: Array.isArray(result?.sample_mismatched) ? result.sample_mismatched : [],
+    sampleExtraKeys: Array.isArray(result?.sample_extra) ? result.sample_extra : [],
+    ...(sourceObjects !== null && sourceObjects !== undefined && count(sourceObjects) === 0
+      ? { note: "no_source_objects" }
+      : {}),
   }
 }
 
@@ -547,20 +386,22 @@ export async function listVerifyDiffsForItem(input: {
   migrationItemId: string
   limit?: number
 }): Promise<Array<{ kind: string; key: string; sourceSize?: number | null; destSize?: number | null }>> {
-  const supabase = getSupabaseServerClient()
-  const limit = Math.max(1, Math.min(2_000, input.limit ?? 500))
-  const { data, error } = await supabase
-    .from(VERIFY_DIFFS_TABLE)
-    .select("kind,key,source_size,dest_size")
-    .eq("migration_item_id", input.migrationItemId)
-    .order("created_at", { ascending: true })
-    .limit(limit)
-
-  if (error) throw new Error(String((error as any)?.message ?? "Unable to read verification diffs"))
-  return (Array.isArray(data) ? data : []).map((row: any) => ({
-    kind: String(row.kind ?? ""),
-    key: String(row.key ?? ""),
-    sourceSize: typeof row.source_size === "number" ? row.source_size : row.source_size ?? null,
-    destSize: typeof row.dest_size === "number" ? row.dest_size : row.dest_size ?? null,
+  const limit = Math.max(1, Math.min(2_000, Math.floor(input.limit ?? 500)))
+  const { rows } = await queryDb<{
+    kind: string
+    key: string
+    source_size: string | number | null
+    dest_size: string | number | null
+  }>(
+    `select kind, key, source_size, dest_size
+     from public.${VERIFY_DIFFS_TABLE}
+     where migration_item_id = $1 order by created_at asc, id asc limit $2`,
+    [input.migrationItemId, limit]
+  )
+  return rows.map((row) => ({
+    kind: row.kind,
+    key: row.key,
+    sourceSize: row.source_size === null ? null : Number(row.source_size),
+    destSize: row.dest_size === null ? null : Number(row.dest_size),
   }))
 }

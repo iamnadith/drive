@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server"
 import { deleteMigration, getMigration, listMigrationItems } from "@/lib/migrations-store"
-import { syncMigrationLiveState } from "@/lib/migration-live-state"
 import { listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
 import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
@@ -15,22 +14,18 @@ export async function GET(
     if (!auth.ok) return auth.response
 
     const { id } = await context.params
-    let migration = await getMigration(id)
+    const migration = await getMigration(id)
     if (!migration) {
       return NextResponse.json({ error: "Migration not found" }, { status: 404 })
     }
-    const initialReadOnly = getMigrationReadOnlyState(migration)
-    // Migration Orchestrator owns worker-pool projection. Keep this page load
-    // bounded instead of scanning thousands of internal file records.
-    if (!initialReadOnly.readOnly && migration.options.executionMode !== "migration_workers") {
-      await syncMigrationLiveState(id).catch(() => undefined)
-      migration = await getMigration(id) ?? migration
-    }
+    // Read the persisted migration projection. Synchronization is owned by the
+    // orchestrator and must not delay every page/detail read.
     const readOnly = getMigrationReadOnlyState(migration)
+    const usesLegacyProjection = migration.options.executionMode !== "migration_workers"
     const [items, repairJobs, workerRuns] = await Promise.all([
       listMigrationItems(id),
-      migration.options.executionMode === "migration_workers" ? Promise.resolve([]) : listRepairJobsByMigration(id, 20).catch(() => []),
-      migration.options.executionMode === "migration_workers" ? listMigrationWorkerRuns(id).catch(() => []) : Promise.resolve([]),
+      usesLegacyProjection ? listRepairJobsByMigration(id, 20).catch(() => []) : Promise.resolve([]),
+      usesLegacyProjection ? Promise.resolve([]) : listMigrationWorkerRuns(id).catch(() => []),
     ])
     return NextResponse.json({ migration, items, repairJobs: repairJobs.filter((job) => job.mode !== "migration"), workerRuns, historyReadOnly: readOnly }, { status: 200 })
   } catch (error: unknown) {

@@ -839,8 +839,6 @@ create table if not exists drive_bucket_scan_objects (
   primary key (scan_id, key)
 );
 
-create index if not exists drive_bucket_scan_objects_key_idx on drive_bucket_scan_objects (scan_id, key);
-
 create table if not exists drive_bucket_verify_diffs (
   id uuid primary key,
   migration_item_id uuid not null references drive_migration_items(id) on delete cascade,
@@ -947,6 +945,33 @@ create table if not exists drive_app_settings (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+create table if not exists drive_backend_orchestrator_metric_candidates (
+  account_id uuid not null,
+  bucket_name text not null,
+  objects bigint not null,
+  bytes bigint not null,
+  observed_at timestamptz not null,
+  confirmations integer not null default 1,
+  first_observed_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (account_id, bucket_name)
+);
+
+create table if not exists drive_backend_orchestrator_progress (
+  id boolean primary key default true check (id),
+  account_id uuid not null,
+  bucket_names jsonb not null default '[]'::jsonb,
+  bucket_offset integer not null default 0 check (bucket_offset >= 0),
+  reconciled boolean not null default false,
+  metrics_incomplete boolean not null default false,
+  pending_decreases boolean not null default false,
+  started_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table public.drive_backend_orchestrator_progress add column if not exists reconciled boolean not null default false;
+alter table public.drive_backend_orchestrator_progress add column if not exists metrics_incomplete boolean not null default false;
+alter table public.drive_backend_orchestrator_progress add column if not exists pending_decreases boolean not null default false;
 
 -- Runtime state for the autonomous migration control plane. This row is also
 -- the cross-isolate cycle lease, preventing duplicate cron/manual cycles.
@@ -1168,5 +1193,5 @@ create table if not exists public.drive_schema_meta (
   updated_at timestamptz not null default now()
 );
 insert into public.drive_schema_meta(id, version, updated_at)
-values (true, 2026091102, now())
+values (true, 2026091303, now())
 on conflict (id) do update set version = excluded.version, updated_at = now();

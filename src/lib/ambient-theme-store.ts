@@ -1,6 +1,5 @@
 import { unstable_cache, revalidateTag } from "next/cache"
-import { ensureDriveSchema } from "@/lib/db"
-import { getSupabaseServerClient } from "@/lib/supabase"
+import { ensureDriveSchema, queryDb } from "@/lib/db"
 
 export type AmbientPaletteMode = "light" | "dark"
 
@@ -14,12 +13,6 @@ export type AmbientThemeConfig = {
 export type AmbientThemeSettings = {
   activeThemeId: string
   themes: AmbientThemeConfig[]
-}
-
-type AmbientThemeSettingsRow = {
-  key: string
-  value: AmbientThemeSettings
-  updated_at?: string
 }
 
 const SETTINGS_TABLE = "drive_app_settings"
@@ -152,34 +145,16 @@ export function normalizeAmbientThemeSettings(value: unknown): AmbientThemeSetti
   }
 }
 
-function normalizeSupabaseError(error: { message: string }): Error {
-  const message = String(error?.message ?? "Supabase error")
-  if (message.includes("Could not find the table") && message.includes(SETTINGS_TABLE)) {
-    return new Error(
-      `Supabase table '${SETTINGS_TABLE}' is missing. Create it from the Drive schema before using shared ambient theme settings.`
-    )
-  }
-
-  return new Error(message)
-}
-
 async function loadAmbientThemeSettings(): Promise<AmbientThemeSettings> {
-  await ensureDriveSchema().catch(() => undefined)
-
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(SETTINGS_TABLE)
-    .select("key, value, updated_at")
-    .eq("key", SETTINGS_KEY)
-    .maybeSingle()
-
-  if (error) throw normalizeSupabaseError(error)
-
-  if (!data) {
+  await ensureDriveSchema()
+  const { rows } = await queryDb<{ value: unknown }>(
+    `select value from public.${SETTINGS_TABLE} where key=$1 limit 1`,
+    [SETTINGS_KEY]
+  )
+  if (!rows[0]) {
     return getDefaultAmbientThemeSettings()
   }
-
-  return normalizeAmbientThemeSettings((data as AmbientThemeSettingsRow).value)
+  return normalizeAmbientThemeSettings(rows[0].value)
 }
 
 const getAmbientThemeSettingsCached = unstable_cache(loadAmbientThemeSettings, ["ambient-theme-settings"], {
@@ -194,25 +169,16 @@ export async function getAmbientThemeSettings(): Promise<AmbientThemeSettings> {
 export async function saveAmbientThemeSettings(
   input: AmbientThemeSettings
 ): Promise<AmbientThemeSettings> {
-  await ensureDriveSchema().catch(() => undefined)
-
+  await ensureDriveSchema()
   const next = normalizeAmbientThemeSettings(input)
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(SETTINGS_TABLE)
-    .upsert(
-      {
-        key: SETTINGS_KEY,
-        value: next,
-      },
-      { onConflict: "key" }
-    )
-    .select("key, value, updated_at")
-    .single()
-
-  if (error) throw normalizeSupabaseError(error)
+  const { rows } = await queryDb<{ value: unknown }>(
+    `insert into public.${SETTINGS_TABLE}(key,value,updated_at) values($1,$2::jsonb,now())
+     on conflict(key) do update set value=excluded.value,updated_at=now() returning value`,
+    [SETTINGS_KEY, JSON.stringify(next)]
+  )
+  if (!rows[0]) throw new Error("Ambient theme settings were not saved")
 
   revalidateTag(AMBIENT_THEME_CACHE_TAG, "max")
 
-  return normalizeAmbientThemeSettings((data as AmbientThemeSettingsRow).value)
+  return normalizeAmbientThemeSettings(rows[0].value)
 }

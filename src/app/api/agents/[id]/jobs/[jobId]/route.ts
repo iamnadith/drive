@@ -1,4 +1,4 @@
-import { after, NextResponse } from "next/server"
+import { NextResponse } from "next/server"
 import {
   authenticateAgent,
   getAgentGithubToken,
@@ -7,7 +7,6 @@ import {
   updateAgentRun,
 } from "@/lib/agents-store"
 import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun } from "@/lib/github-oauth"
-import { syncMigrationLiveState } from "@/lib/migration-live-state"
 import { applyRepairJobItemUpdate, finalizeCompletedMigrationWorkerShards, getRepairJob, updateRepairJob, type RepairJobStatus } from "@/lib/repair-jobs-store"
 import { updateMigration } from "@/lib/migrations-store"
 
@@ -251,12 +250,6 @@ export async function POST(
       // already terminal. This keeps the worker lane flowing even when the
       // scheduler is temporarily disabled or delayed.
       await finalizeCompletedMigrationWorkerShards(job.migrationId).catch(() => undefined)
-    }
-    await syncMigrationLiveState(job.migrationId).catch(() => undefined)
-    if (effectiveStatus === "completed") {
-      after(async () => {
-        await syncMigrationLiveState(job.migrationId, { runSettingsSync: true }).catch(() => undefined)
-      })
     }
 
     return NextResponse.json({ ok: true, job: updated })

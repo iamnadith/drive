@@ -56,7 +56,8 @@ type BucketSettings = {
 const BUCKET_BATCH_SIZE = 10
 const EXTERNAL_REQUEST_TIMEOUT_MS = 8_000
 const METRICS_CACHE_TTL_MS = 10_000
-const WORKER_BUILD = 21
+const WORKER_BUILD = 22
+const REQUIRED_SCHEMA_VERSION = 2026091303
 const RETENTION_BATCH_SIZE = 250
 const metricsCache = new Map<string, { expiresAt: number; metrics: BucketMetric[] }>()
 
@@ -128,6 +129,14 @@ function dbClient(connectionString: string, disablePostgresSsl: boolean) {
 }
 
 async function ensureSchema(db: Client) {
+  const result = await db.query<{ version: string | number }>(`select version from drive_schema_meta where id=true limit 1`)
+  const version = Number(result.rows[0]?.version ?? 0)
+  if (version < REQUIRED_SCHEMA_VERSION) {
+    throw new Error(`Database schema ${version || "unknown"} is behind Backend Orchestrator requirement ${REQUIRED_SCHEMA_VERSION}; deploy the panel schema first`)
+  }
+}
+
+async function legacyEnsureSchema(db: Client) {
   await db.query(`
     create table if not exists drive_backend_orchestrator_state (
       id boolean primary key default true check (id),
@@ -248,13 +257,15 @@ async function ensureSchema(db: Client) {
       bucket_names jsonb not null default '[]'::jsonb,
       bucket_offset integer not null default 0 check (bucket_offset >= 0),
       reconciled boolean not null default false,
+      metrics_incomplete boolean not null default false,
+      pending_decreases boolean not null default false,
       started_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     )
   `)
 }
 
-async function ensureProgressSchema(db: Client) {
+async function legacyEnsureProgressSchema(db: Client) {
   await db.query(`do $$ begin
     if to_regclass('public.drive_bucket_stat_history') is not null
        and to_regclass('public.drive_storage_stats_history') is null then
@@ -268,11 +279,15 @@ async function ensureProgressSchema(db: Client) {
       bucket_names jsonb not null default '[]'::jsonb,
       bucket_offset integer not null default 0 check (bucket_offset >= 0),
       reconciled boolean not null default false,
+      metrics_incomplete boolean not null default false,
+      pending_decreases boolean not null default false,
       started_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     )
   `)
   await db.query(`alter table drive_backend_orchestrator_progress add column if not exists reconciled boolean not null default false`)
+  await db.query(`alter table drive_backend_orchestrator_progress add column if not exists metrics_incomplete boolean not null default false`)
+  await db.query(`alter table drive_backend_orchestrator_progress add column if not exists pending_decreases boolean not null default false`)
 }
 
 async function setState(db: Client, input: { status: string; orchestratorUrl?: string; error?: string | null; result?: unknown; completed?: boolean }) {
@@ -410,12 +425,12 @@ async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Pro
   if (cached && cached.expiresAt > Date.now()) return cached.metrics
   if (cached) metricsCache.delete(cacheKey)
   const query = `
-    query R2Storage($accountTag: string!, $startDate: Time!, $endDate: Time!) {
+    query R2Storage($accountTag: string!, $startDate: Time!, $endDate: Time!, $bucketNames: [string!]!) {
       viewer {
         accounts(filter: { accountTag: $accountTag }) {
           r2StorageAdaptiveGroups(
             limit: 10000
-            filter: { datetime_geq: $startDate, datetime_leq: $endDate }
+            filter: { datetime_geq: $startDate, datetime_leq: $endDate, bucketName_in: $bucketNames }
             orderBy: [datetime_DESC]
           ) {
             max { objectCount payloadSize }
@@ -434,6 +449,7 @@ async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Pro
         accountTag: account.cloudflare_account_id,
         startDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
         endDate: new Date().toISOString(),
+        bucketNames: buckets.map((bucket) => bucket.jurisdiction === "default" ? bucket.name : `${bucket.jurisdiction}_${bucket.name}`),
       },
     }),
   })
@@ -635,8 +651,8 @@ async function selectNextAccount(db: Client, syncIntervalMinutes: number) {
 }
 
 async function loadSyncProgress(db: Client) {
-  const result = await db.query<{ account_id: string; bucket_names: unknown; bucket_offset: number; reconciled: boolean }>(
-    `select account_id, bucket_names, bucket_offset, reconciled from drive_backend_orchestrator_progress where id=true limit 1`
+  const result = await db.query<{ account_id: string; bucket_names: unknown; bucket_offset: number; reconciled: boolean; metrics_incomplete: boolean; pending_decreases: boolean }>(
+    `select account_id, bucket_names, bucket_offset, reconciled, metrics_incomplete, pending_decreases from drive_backend_orchestrator_progress where id=true limit 1`
   )
   const row = result.rows[0]
   if (!row || !Array.isArray(row.bucket_names)) return null
@@ -670,6 +686,8 @@ async function loadSyncProgress(db: Client) {
     }),
     bucketOffset: Math.max(0, Math.trunc(Number(row.bucket_offset) || 0)),
     reconciled: row.reconciled === true,
+    metricsIncomplete: row.metrics_incomplete === true,
+    pendingDecreases: row.pending_decreases === true,
   }
 }
 
@@ -681,14 +699,17 @@ async function selectAccountById(db: Client, accountId: string) {
   return result.rows[0] ?? null
 }
 
-async function saveSyncProgress(db: Client, input: { accountId: string; buckets: BucketInfo[]; bucketOffset: number; reconciled?: boolean }) {
+async function saveSyncProgress(db: Client, input: { accountId: string; buckets: BucketInfo[]; bucketOffset: number; reconciled?: boolean; metricsIncomplete?: boolean; pendingDecreases?: boolean; resetMetricFlags?: boolean }) {
   await db.query(`
-    insert into drive_backend_orchestrator_progress (id,account_id,bucket_names,bucket_offset,reconciled,started_at,updated_at)
-    values (true,$1,$2::jsonb,$3,$4::boolean,now(),now())
+    insert into drive_backend_orchestrator_progress (id,account_id,bucket_names,bucket_offset,reconciled,metrics_incomplete,pending_decreases,started_at,updated_at)
+    values (true,$1,$2::jsonb,$3,$4::boolean,$5::boolean,$6::boolean,now(),now())
     on conflict (id) do update set
       account_id=excluded.account_id, bucket_names=excluded.bucket_names,
-      bucket_offset=excluded.bucket_offset, reconciled=excluded.reconciled, updated_at=now()
-  `, [input.accountId, JSON.stringify(input.buckets), input.bucketOffset, input.reconciled === true])
+      bucket_offset=excluded.bucket_offset, reconciled=excluded.reconciled,
+      metrics_incomplete=case when $7::boolean or drive_backend_orchestrator_progress.account_id is distinct from excluded.account_id then excluded.metrics_incomplete else drive_backend_orchestrator_progress.metrics_incomplete or excluded.metrics_incomplete end,
+      pending_decreases=case when $7::boolean or drive_backend_orchestrator_progress.account_id is distinct from excluded.account_id then excluded.pending_decreases else drive_backend_orchestrator_progress.pending_decreases or excluded.pending_decreases end,
+      updated_at=now()
+  `, [input.accountId, JSON.stringify(input.buckets), input.bucketOffset, input.reconciled === true, input.metricsIncomplete === true, input.pendingDecreases === true, input.resetMetricFlags === true])
 }
 
 async function clearSyncProgress(db: Client) {
@@ -905,61 +926,42 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
       await recordDailyAccountSnapshot(db, account.id)
       return { account: account.label, status: "completed", buckets: 0 }
     }
-    const metrics = await getBucketMetrics(account, buckets)
     const batch = buckets.slice(bucketOffset, bucketOffset + BUCKET_BATCH_SIZE)
-    const metricByBucket = new Map(metrics.map((metric) => [metric.bucket, metric]))
+    const metrics = await getBucketMetrics(account, batch)
     const settingsErrors = await syncBucketSettingsBatch(db, account, batch)
-    if (metrics.length < buckets.length) {
-      // Cloudflare analytics can lag after account activation or migration.
-      // Missing provider data is not a valid zero snapshot: preserve the last
-      // known totals. Bucket settings use the same durable cursor and continue
-      // refreshing even while analytics is temporarily incomplete.
-      const nextSettingsOffset = bucketOffset + batch.length < buckets.length
-        ? bucketOffset + batch.length
-        : 0
-      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: nextSettingsOffset, reconciled: true })
-      await db.query(
-        `update drive_accounts set sync_status='syncing',sync_message=$2,updated_at=now() where id=$1`,
-        [account.id, `R2 analytics unavailable for ${buckets.length - metrics.length} bucket(s); retaining last known totals`]
-      )
-      return {
-        account: account.label,
-        status: "incomplete",
-        buckets: buckets.length,
-        metrics: metrics.length,
-        missingMetrics: buckets.length - metrics.length,
-        refreshedSettings: batch.length,
-        settingsErrors,
-      }
-    }
     const pendingDecreases = await pendingMetricDecreases(db, account.id, metrics)
-    if (pendingDecreases.length > 0) {
-      const nextSettingsOffset = bucketOffset + batch.length < buckets.length
-        ? bucketOffset + batch.length
-        : 0
-      await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: nextSettingsOffset, reconciled: true })
-      await db.query(
-        `update drive_accounts set sync_status='syncing',sync_message=$2,updated_at=now() where id=$1`,
-        [account.id, `R2 decrease awaiting a second provider observation for ${pendingDecreases.length} bucket(s); retaining last known totals`]
-      )
-      return {
-        account: account.label,
-        status: "incomplete",
-        buckets: buckets.length,
-        pendingDecreases: pendingDecreases.map((candidate) => candidate.bucketName),
-        refreshedSettings: batch.length,
-        settingsErrors,
-      }
-    }
-    const batchMetrics = batch.flatMap((bucket) => {
-      const metric = metricByBucket.get(bucket.name)
-      return metric ? [metric] : []
-    })
-    await applyBucketMetrics(db, account, batchMetrics)
+    const missingMetrics = Math.max(0, batch.length - metrics.length)
+    const nextMetricsIncomplete = Boolean(progress?.metricsIncomplete || missingMetrics > 0)
+    const nextPendingDecreases = Boolean(progress?.pendingDecreases || pendingDecreases.length > 0)
+    if (missingMetrics === 0 && pendingDecreases.length === 0) await applyBucketMetrics(db, account, metrics)
     const nextOffset = bucketOffset + batch.length
-    await saveSyncProgress(db, { accountId: account.id, buckets, bucketOffset: nextOffset, reconciled: true })
+    await saveSyncProgress(db, {
+      accountId: account.id,
+      buckets,
+      bucketOffset: nextOffset,
+      reconciled: true,
+      metricsIncomplete: nextMetricsIncomplete,
+      pendingDecreases: nextPendingDecreases,
+    })
     if (nextOffset < buckets.length) {
       return { account: account.label, status: "in_progress", buckets: buckets.length, processedBuckets: nextOffset, remainingBuckets: buckets.length - nextOffset }
+    }
+    if (nextMetricsIncomplete || nextPendingDecreases) {
+      await clearSyncProgress(db)
+      const messages = [
+        nextMetricsIncomplete ? "R2 analytics missing for one or more buckets" : null,
+        nextPendingDecreases ? "R2 decreases are awaiting a second provider observation" : null,
+      ].filter((message): message is string => Boolean(message))
+      await db.query(`update drive_accounts set sync_status='syncing',sync_message=$2,updated_at=now() where id=$1`, [account.id, `${messages.join("; ")}; retaining last known totals`])
+      return {
+        account: account.label,
+        status: "incomplete",
+        buckets: buckets.length,
+        missingMetrics: nextMetricsIncomplete,
+        pendingDecreases: nextPendingDecreases,
+        refreshedSettings: buckets.length,
+        settingsErrors,
+      }
     }
     await clearSyncProgress(db)
     const staleSettings = await db.query<{ count: string }>(`
@@ -1086,7 +1088,6 @@ async function runCycle(env: Env, orchestratorUrl?: string) {
   let claimed = false
   try {
     await ensureSchema(db)
-    await ensureProgressSchema(db)
     claimed = await claimCycle(db, orchestratorUrl)
     if (!claimed) return { ok: true, skipped: "Another Backend Orchestrator cycle is active" }
     // This panel reconciliation also checks a durable batch of project/bucket

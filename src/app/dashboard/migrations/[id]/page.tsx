@@ -1433,7 +1433,7 @@ export default function MigrationDetailsPage() {
       if (!id) return null
       const item = items.find((x) => x.id === itemId)
       const res = await fetch(
-        `/api/migrations/${encodeURIComponent(id)}/items/${encodeURIComponent(itemId)}/failures?limit=250&refresh=1`
+        `/api/migrations/${encodeURIComponent(id)}/items/${encodeURIComponent(itemId)}/failures?limit=250`
       )
       const json: unknown = await res.json().catch(() => ({}))
       const errorMessage =

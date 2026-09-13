@@ -6,7 +6,6 @@ import {
   updateAgentRun,
 } from "./agents-store"
 import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflowRun, listGitHubWorkflowRunJobs, listGitHubWorkflowRuns } from "./github-oauth"
-import { getSupabaseServerClient } from "./supabase"
 import { getMigration, listMigrationItems, updateMigration, updateMigrationItem, type DriveMigrationItem } from "./migrations-store"
 import { getAllAccounts } from "./accounts-store"
 import { queryDb } from "./db"
@@ -65,34 +64,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
 
-function parseWorkerShardWorkKey(value: unknown): {
-  migrationId: string
-  generation: number
-  index: number
-  count: number
-} | null {
-  if (typeof value !== "string") return null
-  const match = value.match(/^migration:([^:]+):generation:(\d+):shard:(\d+)\/(\d+)$/)
-  if (!match) return null
-  const generation = Number(match[2])
-  const index = Number(match[3])
-  const count = Number(match[4])
-  if (
-    !match[1] ||
-    !Number.isInteger(generation) ||
-    generation < 1 ||
-    !Number.isInteger(index) ||
-    !Number.isInteger(count) ||
-    count < 1 ||
-    count > MAX_WORKER_SHARD_COUNT ||
-    index < 0 ||
-    index >= count
-  ) {
-    return null
-  }
-  return { migrationId: match[1], generation, index, count }
-}
-
 function parseWorkerInventoryWorkKey(value: unknown): { migrationId: string; generation: number } | null {
   if (typeof value !== "string") return null
   const match = value.match(/^migration:([^:]+):generation:(\d+):inventory:[^:]+:[0-9a-f]+$/i)
@@ -138,40 +109,6 @@ function mapJobRow(row: DriveRepairJobRow): DriveRepairJob {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
-}
-
-function normalizeSupabaseError(error: { message: string }): Error {
-  const message = String(error?.message ?? "Supabase error")
-  if (message.includes("Could not find the table") && message.includes(REPAIR_JOBS_TABLE)) {
-    return new Error(
-      `Supabase table '${REPAIR_JOBS_TABLE}' is missing. Apply 'supabase/drive_schema.sql' before using worker jobs.`
-    )
-  }
-  const lower = message.toLowerCase()
-  if (lower.includes("<!doctype html") || lower.includes("<html")) {
-    if (lower.includes("502") || lower.includes("bad gateway")) {
-      return new Error("Supabase returned 502 Bad Gateway. This is a temporary upstream outage; retry in a few minutes.")
-    }
-    return new Error("Supabase returned an HTML error page instead of JSON. The backend is temporarily unavailable.")
-  }
-  return new Error(message)
-}
-
-function wrapSupabaseQueryError(error: unknown, context: string): Error {
-  if (error instanceof SyntaxError) {
-    return new Error(
-      `Supabase returned invalid or empty JSON while ${context}. This usually means the upstream response was truncated or an HTML/error page was returned instead of JSON.`
-    )
-  }
-  if (error && typeof error === "object" && "message" in error) {
-    return normalizeSupabaseError(error as { message: string })
-  }
-  return error instanceof Error ? error : new Error(`${context} failed`)
-}
-
-async function syncMigrationStatusFromLiveState(migrationId: string): Promise<void> {
-  const { syncMigrationLiveState } = await import("./migration-live-state")
-  await syncMigrationLiveState(migrationId)
 }
 
 function getGitHubTokenFallback(): string {
@@ -274,18 +211,8 @@ function matchGithubRunToDispatch(
 }
 
 async function getRepairJobRaw(id: string): Promise<DriveRepairJob | null> {
-  const supabase = getSupabaseServerClient()
-  let data: unknown
-  let error: { message: string } | null = null
-  try {
-    const response = await supabase.from(REPAIR_JOBS_TABLE).select("*").eq("id", id).limit(1)
-    data = response.data
-    error = response.error
-  } catch (caughtError) {
-    throw wrapSupabaseQueryError(caughtError, `reading '${REPAIR_JOBS_TABLE}' by id`)
-  }
-  if (error) throw normalizeSupabaseError(error)
-  const row = Array.isArray(data) ? (data[0] as DriveRepairJobRow | undefined) : undefined
+  const { rows } = await queryDb<DriveRepairJobRow>(`select * from ${REPAIR_JOBS_TABLE} where id=$1 limit 1`, [id])
+  const row = rows[0]
   return row ? mapJobRow(row) : null
 }
 
@@ -473,7 +400,6 @@ export async function reconcileRepairJobs(input?: { jobId?: string; migrationId?
             lastSyncedAt: now,
           }).catch(() => undefined)
 
-          await syncMigrationStatusFromLiveState(repairJob.migrationId).catch(() => undefined)
         }
       }
     }
@@ -515,7 +441,6 @@ export async function reconcileRepairJobs(input?: { jobId?: string; migrationId?
             lastSyncedAt: now,
           }).catch(() => undefined)
 
-          await syncMigrationStatusFromLiveState(job.migrationId).catch(() => undefined)
 
           await updateAgent(agent.id, {
             status: "offline",
@@ -538,30 +463,13 @@ export async function reconcileRepairJobs(input?: { jobId?: string; migrationId?
 }
 
 async function listRepairJobsRaw(limit = 50): Promise<DriveRepairJob[]> {
-  const supabase = getSupabaseServerClient()
-  let data: unknown
-  let error: { message: string } | null = null
-  try {
-    const response = await supabase.from(REPAIR_JOBS_TABLE).select("*").order("created_at", { ascending: false }).limit(limit)
-    data = response.data
-    error = response.error
-  } catch (caughtError) {
-    throw wrapSupabaseQueryError(caughtError, `reading '${REPAIR_JOBS_TABLE}'`)
-  }
-  if (error) throw normalizeSupabaseError(error)
-  return (Array.isArray(data) ? (data as DriveRepairJobRow[]) : []).map(mapJobRow)
+  const { rows } = await queryDb<DriveRepairJobRow>(`select * from ${REPAIR_JOBS_TABLE} order by created_at desc limit $1`, [Math.max(1, Math.min(500, limit))])
+  return rows.map(mapJobRow)
 }
 
 async function listRepairJobsByMigrationRaw(migrationId: string, limit = 20): Promise<DriveRepairJob[]> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(REPAIR_JOBS_TABLE)
-    .select("*")
-    .eq("migration_id", migrationId)
-    .order("created_at", { ascending: false })
-    .limit(limit)
-  if (error) throw normalizeSupabaseError(error)
-  return (Array.isArray(data) ? (data as DriveRepairJobRow[]) : []).map(mapJobRow)
+  const { rows } = await queryDb<DriveRepairJobRow>(`select * from ${REPAIR_JOBS_TABLE} where migration_id=$1 order by created_at desc limit $2`, [migrationId, Math.max(1, Math.min(500, limit))])
+  return rows.map(mapJobRow)
 }
 
 async function listWorkerShardJobsByMigrationRaw(
@@ -569,42 +477,29 @@ async function listWorkerShardJobsByMigrationRaw(
   generation: number,
   limit = MAX_WORKER_SHARD_COUNT
 ): Promise<DriveRepairJob[]> {
-  const supabase = getSupabaseServerClient()
   const prefix = `migration:${migrationId}:generation:${generation}:shard:`
-  const { data, error } = await supabase
-    .from(REPAIR_JOBS_TABLE)
-    .select("*")
-    .eq("migration_id", migrationId)
-    .like("work_key", `${prefix}%`)
-    .order("created_at", { ascending: false })
-    .limit(Math.max(1, Math.min(MAX_WORKER_SHARD_COUNT, limit)))
-  if (error) throw normalizeSupabaseError(error)
-  return (Array.isArray(data) ? (data as DriveRepairJobRow[]) : []).map(mapJobRow)
+  const { rows } = await queryDb<DriveRepairJobRow>(
+    `select * from ${REPAIR_JOBS_TABLE} where migration_id=$1 and work_key like $2 order by created_at desc limit $3`,
+    [migrationId, `${prefix}%`, Math.max(1, Math.min(MAX_WORKER_SHARD_COUNT, limit))]
+  )
+  return rows.map(mapJobRow)
 }
 
 export async function listRepairJobs(limit = 50): Promise<DriveRepairJob[]> {
-  await reconcileRepairJobs().catch(() => undefined)
   return listRepairJobsRaw(limit)
 }
 
 export async function listLiveRepairJobs(activeLimit = 500, recentLimit = 50): Promise<DriveRepairJob[]> {
-  const supabase = getSupabaseServerClient()
-  const [active, recent] = await Promise.all([
-    supabase.from(REPAIR_JOBS_TABLE).select("*").in("status", ["pending", "claimed", "running"]).order("updated_at", { ascending: false }).limit(activeLimit),
-    supabase.from(REPAIR_JOBS_TABLE).select("*").in("status", ["completed", "failed", "canceled"]).order("updated_at", { ascending: false }).limit(recentLimit),
-  ])
-  if (active.error) throw normalizeSupabaseError(active.error)
-  if (recent.error) throw normalizeSupabaseError(recent.error)
-  const rows = new Map<string, DriveRepairJobRow>()
-  for (const row of [
-    ...(Array.isArray(active.data) ? (active.data as DriveRepairJobRow[]) : []),
-    ...(Array.isArray(recent.data) ? (recent.data as DriveRepairJobRow[]) : []),
-  ].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))) rows.set(row.id, row)
-  return [...rows.values()].map(mapJobRow)
+  const { rows } = await queryDb<DriveRepairJobRow>(`
+    (select * from ${REPAIR_JOBS_TABLE} where status in ('pending','claimed','running') order by updated_at desc limit $1)
+    union all
+    (select * from ${REPAIR_JOBS_TABLE} where status in ('completed','failed','canceled') order by updated_at desc limit $2)
+    order by updated_at desc
+  `, [Math.max(1, Math.min(5000, activeLimit)), Math.max(1, Math.min(500, recentLimit))])
+  return rows.map(mapJobRow)
 }
 
 export async function listRepairJobsByMigration(migrationId: string, limit = 20): Promise<DriveRepairJob[]> {
-  await reconcileRepairJobs({ migrationId }).catch(() => undefined)
   return listRepairJobsByMigrationRaw(migrationId, limit)
 }
 
@@ -612,23 +507,13 @@ export async function findActiveRepairJobForDispatch(input: {
   migrationId: string
   requestedByAgentId?: string
 }): Promise<DriveRepairJob | null> {
-  const supabase = getSupabaseServerClient()
-  let query = supabase
-    .from(REPAIR_JOBS_TABLE)
-    .select("*")
-    .eq("migration_id", input.migrationId)
-    .in("status", ["pending", "claimed", "running"])
-    .order("created_at", { ascending: false })
-    .limit(10)
-
-  if (input.requestedByAgentId) {
-    query = query.eq("requested_by_agent_id", input.requestedByAgentId)
-  }
-
-  const { data, error } = await query
-  if (error) throw normalizeSupabaseError(error)
-  const rows = Array.isArray(data) ? (data as DriveRepairJobRow[]) : []
-  return rows.length > 0 ? mapJobRow(rows[0]) : null
+  const { rows } = await queryDb<DriveRepairJobRow>(`
+    select * from ${REPAIR_JOBS_TABLE}
+    where migration_id=$1 and status in ('pending','claimed','running')
+      and ($2::uuid is null or requested_by_agent_id=$2)
+    order by created_at desc limit 1
+  `, [input.migrationId, input.requestedByAgentId ?? null])
+  return rows[0] ? mapJobRow(rows[0]) : null
 }
 
 export async function createRepairJob(input: {
@@ -641,35 +526,20 @@ export async function createRepairJob(input: {
   const migration = await getMigration(input.migrationId)
   if (!migration) throw new Error("Migration not found")
 
-  const supabase = getSupabaseServerClient()
-  const row = {
-    id: crypto.randomUUID(),
-    migration_id: input.migrationId,
-    work_key: input.workKey?.trim() || null,
-    requested_by_agent_id: input.requestedByAgentId ?? null,
-    status: "pending",
-    mode: input.mode ?? "repair_and_verify",
-    payload: input.payload ?? {},
-    progress: {},
-    result: {},
-  }
-
-  const { data, error } = await supabase.from(REPAIR_JOBS_TABLE).insert(row).select("*").single()
-  if (error) {
-    // Shard jobs are idempotent. Concurrent orchestrator ticks can race here;
-    // the unique work_key index makes one row win and the loser reuses it.
-    if (input.workKey && /duplicate|unique constraint|already exists/i.test(String(error.message ?? ""))) {
-      const existing = await supabase
-        .from(REPAIR_JOBS_TABLE)
-        .select("*")
-        .eq("work_key", input.workKey.trim())
-        .limit(1)
-      if (!existing.error && Array.isArray(existing.data) && existing.data[0]) {
-        return mapJobRow(existing.data[0] as DriveRepairJobRow)
-      }
-    }
-    throw normalizeSupabaseError(error)
-  }
+  const { rows } = await queryDb<DriveRepairJobRow>(`
+    insert into ${REPAIR_JOBS_TABLE} (
+      id,migration_id,work_key,requested_by_agent_id,status,mode,payload,progress,result
+    ) values ($1,$2,$3,$4,'pending',$5,$6::jsonb,'{}'::jsonb,'{}'::jsonb)
+    on conflict (work_key) where work_key is not null do update
+      set work_key=excluded.work_key
+    returning *
+  `, [
+    crypto.randomUUID(), input.migrationId, input.workKey?.trim() || null,
+    input.requestedByAgentId ?? null, input.mode ?? "repair_and_verify",
+    JSON.stringify(input.payload ?? {}),
+  ])
+  const data = rows[0]
+  if (!data) throw new Error("Failed to create repair job")
 
   await updateMigration(input.migrationId, {
     syncStatus: "ok",
@@ -677,7 +547,7 @@ export async function createRepairJob(input: {
     lastSyncedAt: new Date().toISOString(),
   }).catch(() => undefined)
 
-  return mapJobRow(data as DriveRepairJobRow)
+  return mapJobRow(data)
 }
 
 export async function claimRepairJob(
@@ -686,7 +556,6 @@ export async function claimRepairJob(
   migrationId?: string,
   poolOnly = false
 ): Promise<DriveRepairJob | null> {
-  const supabase = getSupabaseServerClient()
   const poolMigration = poolOnly && migrationId ? await getMigration(migrationId) : null
   if (
     poolOnly &&
@@ -695,67 +564,37 @@ export async function claimRepairJob(
       !["running", "verifying"].includes(poolMigration.status))
   ) return null
   const poolCoordinates = poolMigration ? workerGenerationAndShardCount(poolMigration) : null
-  let pendingQuery = supabase
-    .from(REPAIR_JOBS_TABLE)
-    .select("*")
-    .eq("status", "pending")
-    .or(`requested_by_agent_id.is.null,requested_by_agent_id.eq.${agentId}`)
-    .order("created_at", { ascending: true })
-    // A pool worker may only claim durable scanner-inventory records. Without this filter
-    // an older/manual repair row in the same migration could be claimed first
-    // and make the worker process the whole migration again.
-    .limit(poolOnly ? 100 : 1)
-  if (requestedJobId) pendingQuery = pendingQuery.eq("id", requestedJobId)
-  if (migrationId) pendingQuery = pendingQuery.eq("migration_id", migrationId)
-  if (poolOnly && migrationId && poolCoordinates) {
-    pendingQuery = pendingQuery.like(
-      "work_key",
-      `migration:${migrationId}:generation:${poolCoordinates.generation}:inventory:%`
-    )
-  }
-  const { data: pendingRows, error: listError } = await pendingQuery
-  if (listError) throw normalizeSupabaseError(listError)
-  const candidate = Array.isArray(pendingRows)
-    ? ((pendingRows.find((row) => {
-        if (!poolOnly) return true
-        const key = parseWorkerInventoryWorkKey(typeof row === "object" && row !== null ? (row as DriveRepairJobRow).work_key : null)
-        return Boolean(
-          key &&
-            key.migrationId === migrationId &&
-            key.generation === poolCoordinates?.generation
-        )
-      }) ?? undefined) as DriveRepairJobRow | undefined)
-    : undefined
-  if (!candidate) return null
-
   const now = new Date().toISOString()
-  const { data, error } = await supabase
-    .from(REPAIR_JOBS_TABLE)
-    .update({
-      status: "claimed",
-      claimed_by_agent_id: agentId,
-      claimed_at: now,
-      started_at: now,
-      last_heartbeat_at: now,
-      updated_at: now,
-    })
-    .eq("id", candidate.id)
-    .eq("status", "pending")
-    .select("*")
-    .single()
-  if (error) return null
-  return mapJobRow(data as DriveRepairJobRow)
+  const poolWorkPrefix = poolCoordinates && migrationId
+    ? `migration:${migrationId}:generation:${poolCoordinates.generation}:inventory:%`
+    : null
+  const { rows } = await queryDb<DriveRepairJobRow>(`
+    with candidate as (
+      select id from ${REPAIR_JOBS_TABLE}
+      where status='pending'
+        and (requested_by_agent_id is null or requested_by_agent_id=$1)
+        and ($2::uuid is null or id=$2)
+        and ($3::uuid is null or migration_id=$3)
+        and (not $4::boolean or work_key like $5)
+      order by created_at asc
+      limit 1
+      for update skip locked
+    )
+    update ${REPAIR_JOBS_TABLE} as job set
+      status='claimed', claimed_by_agent_id=$1, claimed_at=$6, started_at=$6,
+      last_heartbeat_at=$6, updated_at=$6
+    from candidate where job.id=candidate.id and job.status='pending'
+    returning job.*
+  `, [agentId, requestedJobId ?? null, migrationId ?? null, poolOnly, poolWorkPrefix, now])
+  return rows[0] ? mapJobRow(rows[0]) : null
 }
 
 export async function getRepairJob(id: string): Promise<DriveRepairJob | null> {
-  await reconcileRepairJobs({ jobId: id }).catch(() => undefined)
   return getRepairJobRaw(id)
 }
 
 export async function deleteRepairJob(id: string): Promise<void> {
-  const supabase = getSupabaseServerClient()
-  const { error } = await supabase.from(REPAIR_JOBS_TABLE).delete().eq("id", id)
-  if (error) throw normalizeSupabaseError(error)
+  await queryDb(`delete from ${REPAIR_JOBS_TABLE} where id=$1`, [id])
 }
 
 export async function abortRepairJob(id: string): Promise<DriveRepairJob> {
@@ -803,7 +642,6 @@ export async function abortRepairJob(id: string): Promise<DriveRepairJob> {
     lastSyncedAt: now,
   }).catch(() => undefined)
 
-  await syncMigrationStatusFromLiveState(existing.migrationId).catch(() => undefined)
 
   return updated
 }
@@ -824,25 +662,32 @@ export async function updateRepairJob(
     lastHeartbeatAt?: string | null
   }
 ): Promise<DriveRepairJob> {
-  const supabase = getSupabaseServerClient()
-  const dbUpdates: Record<string, unknown> = { updated_at: new Date().toISOString() }
-  if (updates.status !== undefined) dbUpdates.status = updates.status
-  if (updates.progress !== undefined) dbUpdates.progress = updates.progress
-  if (updates.result !== undefined) dbUpdates.result = updates.result
-  if (updates.summary !== undefined) dbUpdates.summary = updates.summary ?? null
-  if (updates.error !== undefined) dbUpdates.error = updates.error ?? null
-  if (updates.claimedByAgentId !== undefined) dbUpdates.claimed_by_agent_id = updates.claimedByAgentId ?? null
-  if (updates.startedAt !== undefined) dbUpdates.started_at = updates.startedAt ?? null
-  if (updates.completedAt !== undefined) dbUpdates.completed_at = updates.completedAt ?? null
-  if (updates.lastHeartbeatAt !== undefined) dbUpdates.last_heartbeat_at = updates.lastHeartbeatAt ?? null
-
-  let query = supabase.from(REPAIR_JOBS_TABLE).update(dbUpdates).eq("id", id)
-  if (updates.expectedAgentId) {
-    query = query.eq("claimed_by_agent_id", updates.expectedAgentId).in("status", ["claimed", "running"])
-  }
-  const { data, error } = await query.select("*")
-  if (error) throw normalizeSupabaseError(error)
-  const row = Array.isArray(data) ? (data[0] as DriveRepairJobRow | undefined) : undefined
+  const now = new Date().toISOString()
+  const { rows } = await queryDb<DriveRepairJobRow>(`
+    update ${REPAIR_JOBS_TABLE} set
+      status=coalesce($2,status), progress=coalesce($3::jsonb,progress), result=coalesce($4::jsonb,result),
+      summary=case when $5::boolean then $6 else summary end,
+      error=case when $7::boolean then $8 else error end,
+      claimed_by_agent_id=case when $9::boolean then $10::uuid else claimed_by_agent_id end,
+      started_at=case when $11::boolean then $12::timestamptz else started_at end,
+      completed_at=case when $13::boolean then $14::timestamptz else completed_at end,
+      last_heartbeat_at=case when $15::boolean then $16::timestamptz else last_heartbeat_at end,
+      updated_at=$17
+    where id=$1 and ($18::uuid is null or (claimed_by_agent_id=$18 and status in ('claimed','running')))
+    returning *
+  `, [
+    id, updates.status ?? null,
+    updates.progress === undefined ? null : JSON.stringify(updates.progress),
+    updates.result === undefined ? null : JSON.stringify(updates.result),
+    updates.summary !== undefined, updates.summary ?? null,
+    updates.error !== undefined, updates.error ?? null,
+    updates.claimedByAgentId !== undefined, updates.claimedByAgentId ?? null,
+    updates.startedAt !== undefined, updates.startedAt ?? null,
+    updates.completedAt !== undefined, updates.completedAt ?? null,
+    updates.lastHeartbeatAt !== undefined, updates.lastHeartbeatAt ?? null,
+    now, updates.expectedAgentId ?? null,
+  ])
+  const row = rows[0]
   if (!row) {
     if (updates.expectedAgentId) throw new Error("This job is no longer owned by this worker")
     throw new Error("Repair job not found")
@@ -1117,7 +962,6 @@ export async function getMigrationWorkerPoolState(migrationId: string): Promise<
 /** Requeue a claimed migration file after its worker has disappeared. */
 export async function requeueStaleMigrationWorkerJobs(input?: { migrationId?: string }): Promise<number> {
   const scopedMigration = input?.migrationId ? await getMigration(input.migrationId) : null
-  const scopedGeneration = scopedMigration ? workerGenerationAndShardCount(scopedMigration) : null
   const jobs =
     input?.migrationId && scopedMigration && scopedMigration.options.executionMode === "migration_workers"
       ? await listRepairJobsByMigrationRaw(input.migrationId, 500)
@@ -1151,29 +995,16 @@ export async function requeueStaleMigrationWorkerJobs(input?: { migrationId?: st
       const retryCount = Number.isFinite(previousAttempts) ? Math.max(0, Math.floor(previousAttempts)) : 0
       if (retryCount >= MAX_WORKER_REQUEUE_ATTEMPTS) continue
       const now = new Date().toISOString()
-      const supabase = getSupabaseServerClient()
-      const { data, error } = await supabase
-        .from(REPAIR_JOBS_TABLE)
-        .update({
-          status: "pending",
-          claimed_by_agent_id: null,
-          claimed_at: null,
-          started_at: null,
-          completed_at: null,
-          last_heartbeat_at: null,
-          summary: `Retrying failed migration file (attempt ${retryCount + 1}/${MAX_WORKER_REQUEUE_ATTEMPTS})`,
-          error: null,
-          result: {
-            ...(job.result ?? {}),
-            retryCount: retryCount + 1,
-            lastRetryAt: now,
-          },
-          updated_at: now,
-        })
-        .eq("id", job.id)
-        .eq("status", "failed")
-        .select("id")
-      if (!error && Array.isArray(data) && data.length > 0) requeued += 1
+      const { rowCount } = await queryDb(`
+        update ${REPAIR_JOBS_TABLE} set
+          status='pending',
+          claimed_by_agent_id=null, claimed_at=null, started_at=null, completed_at=null,
+          last_heartbeat_at=null, summary=$2, error=null, result=$3::jsonb, updated_at=$4
+        where id=$1 and status='failed'
+      `, [job.id, `Retrying failed migration file (attempt ${retryCount + 1}/${MAX_WORKER_REQUEUE_ATTEMPTS})`, JSON.stringify({
+        ...(job.result ?? {}), retryCount: retryCount + 1, lastRetryAt: now,
+      }), now])
+      if ((rowCount ?? 0) > 0) requeued += 1
       continue
     }
 
@@ -1195,26 +1026,15 @@ export async function requeueStaleMigrationWorkerJobs(input?: { migrationId?: st
       isRecentIso(agent.latestRun.updatedAt, 120_000)
     if (freshJob || freshAgent || activeRun) continue
 
-    const supabase = getSupabaseServerClient()
     const now = new Date().toISOString()
-    const { data, error } = await supabase
-      .from(REPAIR_JOBS_TABLE)
-      .update({
-        status: "pending",
-        claimed_by_agent_id: null,
-        claimed_at: null,
-        started_at: null,
-        completed_at: null,
-        last_heartbeat_at: now,
-        summary: "Requeued after the worker heartbeat expired",
-        error: null,
-        updated_at: now,
-      })
-      .eq("id", job.id)
-      .eq("status", job.status)
-      .eq("claimed_by_agent_id", job.claimedByAgentId)
-      .select("id")
-    if (!error && Array.isArray(data) && data.length > 0) requeued += 1
+    const { rowCount } = await queryDb(`
+      update ${REPAIR_JOBS_TABLE} set
+        status='pending', claimed_by_agent_id=null, claimed_at=null, started_at=null,
+        completed_at=null, last_heartbeat_at=$4,
+        summary='Requeued after the worker heartbeat expired', error=null, updated_at=$4
+      where id=$1 and status=$2 and claimed_by_agent_id=$3
+    `, [job.id, job.status, job.claimedByAgentId, now])
+    if ((rowCount ?? 0) > 0) requeued += 1
   }
   if (requeued > 0 && input?.migrationId) {
     await updateMigration(input.migrationId, {

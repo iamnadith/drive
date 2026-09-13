@@ -1,7 +1,7 @@
 import { Pool } from "pg"
 import type { PoolClient, QueryResultRow } from "pg"
 
-const DRIVE_SCHEMA_VERSION = 2026091102
+const DRIVE_SCHEMA_VERSION = 2026091303
 
 declare global {
   var __drivePgPool: Pool | undefined
@@ -50,7 +50,11 @@ function getPoolMax(): number {
   const raw = getEnv("POSTGRES_POOL_MAX")
   const parsed = raw ? Number(raw) : NaN
   if (Number.isFinite(parsed) && parsed > 0) return parsed
-  return process.env.NODE_ENV === "production" ? 5 : 1
+  // Each serverless instance owns one process-local pool. Keeping the implicit
+  // production pool small prevents horizontal scale-out from multiplying the
+  // database connection count; raise it only when the provider's pooler and
+  // measured query concurrency justify it.
+  return process.env.NODE_ENV === "production" ? 2 : 1
 }
 
 function attachPoolErrorHandler(pool: Pool) {
@@ -162,29 +166,13 @@ export function getDbPool(): Pool {
     const port = Number(getEnv("POSTGRES_PORT") ?? 5432)
 
     const urlString =
-      getEnv("POSTGRES_URL_NON_POOLING") ??
       getEnv("POSTGRES_URL") ??
-      getEnv("POSTGRES_PRISMA_URL")
+      getEnv("POSTGRES_PRISMA_URL") ??
+      getEnv("POSTGRES_URL_NON_POOLING")
 
-    const preferUrl =
-      parseBooleanEnv(getEnv("POSTGRES_PREFER_URL")) ??
-      (() => {
-        if (!urlString) return false
-        try {
-          const url = new URL(urlString)
-          const hostname = url.hostname.toLowerCase()
-          // Prefer a direct `db.<ref>.supabase.co` URL over other sources.
-          return hostname.startsWith("db.") && hostname.includes(".supabase.co")
-        } catch {
-          return false
-        }
-      })()
-
-    // Supabase pooler connections can be terminated by the pooler (e.g. `{:shutdown, :db_termination}`).
-    // Prefer direct DB host config when available unless explicitly disabled.
     const preferHostConfig =
       parseBooleanEnv(getEnv("POSTGRES_USE_HOST_CONFIG")) ??
-      (Boolean(host && user && password && database) && !preferUrl)
+      (parseBooleanEnv(getEnv("POSTGRES_PREFER_URL")) === false && Boolean(host && user && password && database))
 
     if (preferHostConfig && host && user && password && database) {
       global.__drivePgPool = new Pool({
@@ -325,6 +313,24 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(`create index if not exists drive_email_verification_tokens_user_idx on drive_email_verification_tokens (user_id, purpose, created_at desc);`)
       await queryDb(`create index if not exists drive_email_verification_tokens_expires_idx on drive_email_verification_tokens (expires_at);`)
       await queryDb(`create index if not exists drive_email_verification_tokens_email_purpose_idx on drive_email_verification_tokens (email, purpose, created_at desc);`)
+
+      await queryDb(`
+        create table if not exists drive_sms_verification_tokens (
+          id uuid primary key default gen_random_uuid(),
+          user_id uuid not null references drive_users(id) on delete cascade,
+          token_hash text not null,
+          mobile_number text not null,
+          purpose text not null default 'signup',
+          attempts integer not null default 0,
+          expires_at timestamptz not null,
+          consumed_at timestamptz,
+          created_at timestamptz not null default now()
+        );
+      `)
+      await queryDb(`create index if not exists drive_sms_verification_tokens_hash_idx on drive_sms_verification_tokens (token_hash);`)
+      await queryDb(`create index if not exists drive_sms_verification_tokens_user_idx on drive_sms_verification_tokens (user_id,purpose,created_at desc);`)
+      await queryDb(`create index if not exists drive_sms_verification_tokens_expires_idx on drive_sms_verification_tokens (expires_at);`)
+      await queryDb(`create index if not exists drive_sms_verification_tokens_mobile_purpose_idx on drive_sms_verification_tokens (mobile_number,purpose,created_at desc);`)
 
       await queryDb(`
         create table if not exists drive_accounts (
@@ -1078,6 +1084,35 @@ export async function ensureDriveSchema(): Promise<void> {
         );
       `)
       await queryDb(`
+        create table if not exists drive_backend_orchestrator_metric_candidates (
+          account_id uuid not null,
+          bucket_name text not null,
+          objects bigint not null,
+          bytes bigint not null,
+          observed_at timestamptz not null,
+          confirmations integer not null default 1,
+          first_observed_at timestamptz not null default now(),
+          updated_at timestamptz not null default now(),
+          primary key (account_id, bucket_name)
+        );
+      `)
+      await queryDb(`
+        create table if not exists drive_backend_orchestrator_progress (
+          id boolean primary key default true check (id),
+          account_id uuid not null,
+          bucket_names jsonb not null default '[]'::jsonb,
+          bucket_offset integer not null default 0 check (bucket_offset >= 0),
+          reconciled boolean not null default false,
+          metrics_incomplete boolean not null default false,
+          pending_decreases boolean not null default false,
+          started_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        );
+      `)
+      await queryDb(`alter table drive_backend_orchestrator_progress add column if not exists reconciled boolean not null default false;`)
+      await queryDb(`alter table drive_backend_orchestrator_progress add column if not exists metrics_incomplete boolean not null default false;`)
+      await queryDb(`alter table drive_backend_orchestrator_progress add column if not exists pending_decreases boolean not null default false;`)
+      await queryDb(`
         create table if not exists drive_bucket_scans (
           id uuid primary key,
           account_id uuid not null references drive_accounts(id) on delete cascade,
@@ -1116,7 +1151,7 @@ export async function ensureDriveSchema(): Promise<void> {
           primary key (scan_id, key)
         );
       `)
-      await queryDb(`create index if not exists drive_bucket_scan_objects_key_idx on drive_bucket_scan_objects (scan_id, key);`)
+      await queryDb(`drop index concurrently if exists public.drive_bucket_scan_objects_key_idx;`)
       await queryDb(`
         create table if not exists drive_bucket_verify_diffs (
           id uuid primary key,

@@ -107,19 +107,19 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
     finally { setBusy(false) }
   }
 
-  const deploy = async (restart = false) => {
+  const deploy = async (restart = false, checkForUpdates = false) => {
     setBusy(true)
     try {
       const body = mode === "single"
-        ? { mode, token, restart }
-        : { mode, backendToken: token, scannerToken, migrationToken, restart }
+        ? { mode, token, restart, checkForUpdates }
+        : { mode, backendToken: token, scannerToken, migrationToken, restart, checkForUpdates }
       const response = await fetch("/api/workers/cloudflare-install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
       const payload = await response.json().catch(() => ({})) as { installation?: Installation; error?: string }
       if (payload.installation) setInstallation(payload.installation)
       if (!response.ok) throw new Error(payload.error || "Cloudflare Worker installation failed")
       setToken(""); setScannerToken(""); setMigrationToken("")
       if (!onboarding) await loadConnections()
-      toast.success("All Cloudflare Workers were deployed, verified and enabled")
+      toast.success(checkForUpdates ? "Latest Worker release checked; all Workers are verified" : "All Cloudflare Workers were deployed, verified and enabled")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Cloudflare Worker installation failed")
       await refresh().catch(() => undefined)
@@ -218,8 +218,9 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
 
             <div className="flex flex-wrap gap-2">
               {!installationReady ? <Button onClick={() => void deploy(false)} disabled={busy || (!installation?.tokensSaved && !tokenInputReady)}>{busy ? "Working…" : installation?.status === "failed" || installation?.status === "running" ? "Repair and continue" : "Deploy Workers"}</Button> : null}
+              {installationReady ? <Button variant="outline" onClick={() => void deploy(false, true)} disabled={busy}><RefreshCw data-icon="inline-start" />{busy ? "Checking release…" : "Check for updates"}</Button> : null}
               {installation?.status === "failed" ? <Button variant="outline" onClick={() => void deploy(true)} disabled={busy || (!installation.tokensSaved && !tokenInputReady)}>Start fresh</Button> : null}
-              <Button variant="outline" onClick={() => void refresh()} disabled={busy}><RefreshCw data-icon="inline-start" />Check now</Button>
+              <Button variant="outline" onClick={() => void refresh()} disabled={busy}><RefreshCw data-icon="inline-start" />Refresh status</Button>
               {installation?.tokensSaved && canRevealTokens ? <Button variant="outline" onClick={() => void revealTokens()} disabled={busy}>{tokensVisible ? <EyeOff data-icon="inline-start" /> : <Eye data-icon="inline-start" />}{tokensVisible ? "Hide token" : "View saved token"}</Button> : null}
               {installation?.tokensSaved && !canRevealTokens ? <Badge variant="outline">Create the administrator before revealing saved tokens</Badge> : null}
               {installation?.tokensSaved && canRevealTokens && tokensVisible && tokenInputReady ? <Button onClick={() => void saveReplacementTokens()} disabled={busy}>Save replacement token</Button> : null}

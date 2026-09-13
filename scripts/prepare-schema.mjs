@@ -145,6 +145,10 @@ async function main() {
       await client.query("set local statement_timeout = '10min'")
       await client.query(schema)
       await client.query("commit")
+      // This redundant index is already covered by the scan-object primary key.
+      // Run the removal outside the schema transaction to avoid blocking reads
+      // and writes while PostgreSQL releases it.
+      await client.query("drop index concurrently if exists public.drive_bucket_scan_objects_key_idx")
       console.log("[db:schema] schema is ready")
       return
     } catch (error) {

@@ -2,8 +2,8 @@ import { NextResponse } from "next/server"
 import {
   PublicUser,
   deleteUser,
+  hasActiveSuperAdmin,
   findUserById,
-  getAllUsers,
   hashPassword,
   toPublicUser,
   updateUser,
@@ -53,8 +53,7 @@ export async function PATCH(request: Request, { params }: RouteParams) {
 
     const { id: targetId } = await params
 
-    const allBefore = await getAllUsers()
-    const targetBefore = allBefore.find((u) => u.id === targetId)
+    const targetBefore = await findUserById(targetId)
     if (!targetBefore) {
       return NextResponse.json({ error: "User not found" }, { status: 404 })
     }
@@ -135,14 +134,10 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       )
     }
 
-    const activeSuperAdminsBefore = allBefore.filter(
-      (u) => u.role === "superadmin" && u.status === "active"
-    )
     const isLastActiveSuperAdmin =
       isTargetSuperAdmin &&
       targetBefore.status === "active" &&
-      activeSuperAdminsBefore.length === 1 &&
-      activeSuperAdminsBefore[0].id === targetId
+      !(await hasActiveSuperAdmin(targetId))
 
     // Users cannot modify admin or super admin accounts.
     if (isActorUser && !isSelf && (isTargetAdmin || isTargetSuperAdmin)) {
@@ -231,9 +226,7 @@ export async function PATCH(request: Request, { params }: RouteParams) {
     const updatedUser = await updateUser(targetId, updates)
 
     // Ensure at least one active super admin always exists.
-    const stillHasActiveSuperAdmin = (await getAllUsers()).some(
-      (u) => u.role === "superadmin" && u.status === "active"
-    )
+    const stillHasActiveSuperAdmin = await hasActiveSuperAdmin()
     if (!stillHasActiveSuperAdmin) {
       // Roll back to previous user state to maintain invariant.
       await updateUser(targetId, {
@@ -313,15 +306,10 @@ export async function DELETE(_: Request, { params }: RouteParams) {
     }
 
     // The last active super admin cannot be deleted.
-    const allBefore = await getAllUsers()
-    const activeSuperAdmins = allBefore.filter(
-      (u) => u.role === "superadmin" && u.status === "active"
-    )
     const isLastActiveSuperAdmin =
       target.role === "superadmin" &&
       target.status === "active" &&
-      activeSuperAdmins.length === 1 &&
-      activeSuperAdmins[0].id === id
+      !(await hasActiveSuperAdmin(id))
 
     if (isLastActiveSuperAdmin) {
       return NextResponse.json(

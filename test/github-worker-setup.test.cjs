@@ -264,7 +264,8 @@ test('migration worker workflow exposes the dispatch contract used by the panel'
   assert.match(workflowFile, /WORKER_INSTANCE_ID: \$\{\{ github\.event\.client_payload\.worker_instance_id \|\| github\.run_id \}\}/)
   assert.match(workflowFile, /SERVER_URL: \$\{\{ secrets\.DRIVE_MIGRATION_ORCHESTRATOR_URL \}\}/)
   assert.match(workflowFile, /TOKEN: \$\{\{ secrets\.DRIVE_WORKER_SHARED_SECRET \}\}/)
-  assert.doesNotMatch(workflowFile, /^\s+POSTGRES_URL:/m)
+  assert.match(workflowFile, /POSTGRES_URL: \$\{\{ secrets\.POSTGRES_URL \}\}/)
+  assert.match(workflowFile, /POSTGRES_SSL: \$\{\{ secrets\.POSTGRES_SSL \|\| 'true' \}\}/)
   assert.doesNotMatch(workflowFile, /^\s+inputs:/m)
 })
 
@@ -284,7 +285,7 @@ test('registered workflows dispatch only vacant independent worker capacity', ()
   assert.match(orchestrator, /worker_count.*active\.rows\[0\]\?\.count/)
   assert.match(orchestrator, /worker_instance_id: workerInstanceId/)
   assert.match(orchestrator, /maxDispatchesPerCycle, 100, 1, 100/)
-  assert.match(runtime, /claimedWorkerInstanceId: WORKER_INSTANCE_ID/)
+  assert.match(runtime, /jsonb_build_object\('claimedWorkerInstanceId',\$4::text\)/)
   const migrationPage = fs.readFileSync(path.resolve('src/app/dashboard/migrations/[id]/page.tsx'), 'utf8')
   assert.match(migrationPage, /workerIds\.slice\(0, 1\)/)
   assert.match(migrationPage, /poolAgentIds:/)
@@ -360,7 +361,8 @@ test('migration and file orchestrators operate through durable shared state with
   const orchestrator = migration
   const file = fs.readFileSync(path.resolve('workers/file-scanner/src/index.ts'), 'utf8')
   const worker = fs.readFileSync(path.resolve('workers/migration-worker/migration-worker.mjs'), 'utf8')
-  const liveState = fs.readFileSync(path.resolve('src/lib/migration-live-state.ts'), 'utf8')
+  const migrationRoute = fs.readFileSync(path.resolve('src/app/api/migrations/[id]/items/[itemId]/action/route.ts'), 'utf8')
+  const migrationOrchestrator = migration
   const panelSync = fs.readFileSync(path.resolve('src/app/api/migrations/[id]/sync/route.ts'), 'utf8')
   assert.match(migration, /POSTGRES_URL/)
   assert.match(migration, /drive_migration_verification_state/)
@@ -380,24 +382,19 @@ test('migration and file orchestrators operate through durable shared state with
   assert.match(orchestrator, /const hasRunnableFiles = shards\.shardCount > 0 \|\| shards\.created > 0/)
   assert.doesNotMatch(file, /m\.options->>'executionMode'='migration_workers'/)
   assert.doesNotMatch(file, /s\.migration_item_id is null/)
-  const sourceScanQueue = panelSync.slice(
-    panelSync.indexOf('const incompleteSourceScans'),
-    panelSync.indexOf('// Refresh progress for any created jobs.')
-  )
-  const workerVerificationQueue = panelSync.slice(
-    panelSync.indexOf('const workerVerifyEnabled'),
-    panelSync.indexOf('// Post-copy verification:')
-  )
-  assert.match(sourceScanQueue, /wakeFileScanner\(\)/)
-  assert.doesNotMatch(sourceScanQueue, /runBucketScanBatch/)
-  assert.match(workerVerificationQueue, /ensureFileVerification/)
-  assert.match(workerVerificationQueue, /wakeFileScanner\(\)/)
-  assert.doesNotMatch(workerVerificationQueue, /runBucketScanBatch|computeAndStoreVerifyDiffs/)
+  assert.match(panelSync, /\/wake/)
+  assert.doesNotMatch(panelSync, /runBucketScanBatch|slurperGetJobProgress/)
+  assert.match(orchestrator, /async function wakeFileScanner/)
+  assert.match(orchestrator, /refreshSuperSlurperProgress/)
+  assert.match(orchestrator, /const fileScanner = Number\(queue\.pending\) > 0 \? await wakeFileScanner\(db\)/)
   assert.match(worker, /claimJobDirect/)
   assert.match(worker, /for update skip locked/)
   assert.match(worker, /claim_token=gen_random_uuid/)
   assert.match(worker, /loadRuntimeConfiguration/)
-  assert.match(liveState, /requireIndependentVerification !== false/)
+  assert.match(migrationOrchestrator, /async function refreshSuperSlurperProgress/)
+  assert.match(migrationOrchestrator, /insert into drive_migration_verification_state/)
+  assert.match(migrationRoute, /Progress is synchronized by Migration Orchestrator/)
+  assert.doesNotMatch(migrationRoute, /slurperGetJobProgress|progress_updated/)
 })
 
 test('lost fork response is reconciled using the stable destination without another POST', async () => {

@@ -1,7 +1,6 @@
 import crypto from "crypto"
-import { getSupabaseServerClient } from "./supabase"
 import { compactPreviousMigrationDetails } from "./database-maintenance"
-import { queryDb } from "./db"
+import { queryDb, withDbTransaction } from "./db"
 
 export type MigrationStatus = "draft" | "running" | "verifying" | "completed" | "failed" | "canceled"
 export type MigrationSyncStatus = "idle" | "syncing" | "ok" | "error"
@@ -158,45 +157,6 @@ function appendProgressEvent(
   return { ...progress, events: capped }
 }
 
-function normalizeSupabaseError(error: { message: string }): Error {
-  const message = String(error?.message ?? "Supabase error")
-  if (message.includes("Could not find the table") && message.includes(MIGRATIONS_TABLE)) {
-    return new Error(
-      `Supabase table '${MIGRATIONS_TABLE}' is missing. Create it by running 'supabase/drive_schema.sql' in the Supabase SQL editor for ${process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "your project"}.`
-    )
-  }
-  if (message.includes("Could not find the table") && message.includes(MIGRATION_ITEMS_TABLE)) {
-    return new Error(
-      `Supabase table '${MIGRATION_ITEMS_TABLE}' is missing. Create it by running 'supabase/drive_schema.sql' in the Supabase SQL editor for ${process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "your project"}.`
-    )
-  }
-  if (message.includes("column") && message.includes("drive_migration_items") && message.includes("slurper_status")) {
-    return new Error(
-      "Your Supabase schema is outdated: column 'drive_migration_items.slurper_status' is missing. " +
-        `Make sure you're running it for the same project this app is using (${process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? "your project"}).\n\n` +
-        "Run the latest `supabase/drive_schema.sql`, or apply this patch in Supabase SQL editor:\n\n" +
-        "alter table public.drive_migration_items add column if not exists slurper_status text;\n" +
-        "alter table public.drive_migration_items add column if not exists slurper_job_id text;\n" +
-        "alter table public.drive_migration_items add column if not exists last_progress_at timestamptz;\n" +
-        "alter table public.drive_migration_items add column if not exists progress jsonb not null default '{}'::jsonb;\n\n" +
-        "If you already added the columns and still see this, reload Supabase API schema cache:\n" +
-        "select pg_notify('pgrst', 'reload schema');\n"
-    )
-  }
-  return new Error(message)
-}
-
-function isSlurperStatusColumnError(error: unknown): boolean {
-  const message =
-    typeof error === "object" && error !== null && "message" in error
-      ? String((error as { message?: unknown }).message ?? "")
-      : String(error ?? "")
-  return (
-    message.includes("drive_migration_items.slurper_status") ||
-    (message.includes("drive_migration_items") && message.includes("slurper_status") && message.includes("column"))
-  )
-}
-
 function mapMigrationRow(row: DriveMigrationRow): DriveMigration {
   return {
     id: row.id,
@@ -239,91 +199,64 @@ function mapMigrationItemRow(row: DriveMigrationItemRow): DriveMigrationItem {
 }
 
 export async function listMigrations(limit = 50): Promise<DriveMigration[]> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(MIGRATIONS_TABLE)
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(limit)
-
-  if (error) throw normalizeSupabaseError(error)
-  return (data as DriveMigrationRow[]).map(mapMigrationRow)
+  const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)))
+  const { rows } = await queryDb<DriveMigrationRow>(
+    `select * from public.${MIGRATIONS_TABLE} order by created_at desc, id desc limit $1`,
+    [boundedLimit]
+  )
+  return rows.map(mapMigrationRow)
 }
 
 export async function listMigrationsByAccount(
   accountId: string,
   limit = 200
 ): Promise<DriveMigration[]> {
-  const supabase = getSupabaseServerClient()
-
-  const [sourceRes, targetRes] = await Promise.all([
-    supabase
-      .from(MIGRATIONS_TABLE)
-      .select("*")
-      .eq("source_account_id", accountId)
-      .order("created_at", { ascending: false })
-      .limit(limit),
-    supabase
-      .from(MIGRATIONS_TABLE)
-      .select("*")
-      .eq("target_account_id", accountId)
-      .order("created_at", { ascending: false })
-      .limit(limit),
-  ])
-
-  if (sourceRes.error) throw normalizeSupabaseError(sourceRes.error)
-  if (targetRes.error) throw normalizeSupabaseError(targetRes.error)
-
-  const combined = [
-    ...((sourceRes.data as DriveMigrationRow[]) ?? []),
-    ...((targetRes.data as DriveMigrationRow[]) ?? []),
-  ]
-
-  const unique = new Map<string, DriveMigrationRow>()
-  for (const row of combined) unique.set(row.id, row)
-
-  return Array.from(unique.values())
-    .sort((a, b) => {
-      const at = Date.parse(a.created_at || "")
-      const bt = Date.parse(b.created_at || "")
-      if (!Number.isNaN(at) && !Number.isNaN(bt)) return bt - at
-      return (b.created_at || "").localeCompare(a.created_at || "")
-    })
-    .map(mapMigrationRow)
+  const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)))
+  const { rows } = await queryDb<DriveMigrationRow>(
+    `select * from public.${MIGRATIONS_TABLE}
+     where source_account_id = $1 or target_account_id = $1
+     order by created_at desc, id desc limit $2`,
+    [accountId, boundedLimit]
+  )
+  return rows.map(mapMigrationRow)
 }
 
 export async function getMigration(id: string): Promise<DriveMigration | null> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(MIGRATIONS_TABLE)
-    .select("*")
-    .eq("id", id)
-    .limit(1)
-
-  if (error) throw normalizeSupabaseError(error)
-  const row = (data as DriveMigrationRow[])[0]
+  const { rows } = await queryDb<DriveMigrationRow>(
+    `select * from public.${MIGRATIONS_TABLE} where id = $1 limit 1`,
+    [id]
+  )
+  const row = rows[0]
   if (!row) return null
   const migration = mapMigrationRow(row)
   // Older completed migrations may have valid item rows but zero summary
   // columns because summaries were introduced after completion. Repair the
   // projection lazily so detail/history routes do not display false zeroes.
   if (migration.status === "completed" && migration.summaryItemCount === 0) {
-    const { data: summaryRows } = await supabase
-      .from(MIGRATION_ITEMS_TABLE)
-      .select("source_objects,source_bytes")
-      .eq("migration_id", id)
-    const rows = (summaryRows as Array<{ source_objects: number | string | null; source_bytes: number | string | null }> | null) ?? []
-    if (rows.length > 0) {
-      const numeric = (value: number | string | null) => {
-        const parsed = typeof value === "number" ? value : Number(value)
-        return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0
-      }
+    const { rows: summaries } = await queryDb<{
+      summary_item_count: string | number
+      summary_objects: string | number
+      summary_bytes: string | number
+    }>(
+      `select count(*) as summary_item_count,
+         coalesce(sum(source_objects), 0) as summary_objects,
+         coalesce(sum(source_bytes), 0) as summary_bytes
+       from public.${MIGRATION_ITEMS_TABLE} where migration_id = $1`,
+      [id]
+    )
+    const summaryRow = summaries[0]
+    if (Number(summaryRow?.summary_item_count ?? 0) > 0) {
       const summary = {
-        summary_item_count: rows.length,
-        summary_objects: rows.reduce((sum, item) => sum + numeric(item.source_objects), 0),
-        summary_bytes: rows.reduce((sum, item) => sum + numeric(item.source_bytes), 0),
+        summary_item_count: nonNegativeInteger(summaryRow.summary_item_count),
+        summary_objects: nonNegativeInteger(summaryRow.summary_objects),
+        summary_bytes: nonNegativeInteger(summaryRow.summary_bytes),
       }
-      await supabase.from(MIGRATIONS_TABLE).update(summary).eq("id", id)
+      await queryDb(
+        `update public.${MIGRATIONS_TABLE}
+         set summary_item_count = $2, summary_objects = $3, summary_bytes = $4
+         where id = $1 and summary_item_count = 0`,
+        [id, summary.summary_item_count, summary.summary_objects, summary.summary_bytes]
+      )
       return {
         ...migration,
         summaryItemCount: summary.summary_item_count,
@@ -336,22 +269,43 @@ export async function getMigration(id: string): Promise<DriveMigration | null> {
 }
 
 export async function listMigrationItems(migrationId: string): Promise<DriveMigrationItem[]> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(MIGRATION_ITEMS_TABLE)
-    .select("*")
-    .eq("migration_id", migrationId)
-    .order("source_bucket", { ascending: true })
+  const { rows } = await queryDb<DriveMigrationItemRow>(
+    `select * from public.${MIGRATION_ITEMS_TABLE}
+     where migration_id = $1 order by source_bucket asc, id asc`,
+    [migrationId]
+  )
+  return rows.map(mapMigrationItemRow)
+}
 
-  if (error) throw normalizeSupabaseError(error)
-  return (data as DriveMigrationItemRow[]).map(mapMigrationItemRow)
+export async function getMigrationItem(migrationId: string, itemId: string): Promise<DriveMigrationItem | null> {
+  const { rows } = await queryDb<DriveMigrationItemRow>(
+    `select * from public.${MIGRATION_ITEMS_TABLE} where migration_id=$1 and id=$2 limit 1`,
+    [migrationId, itemId]
+  )
+  return rows[0] ? mapMigrationItemRow(rows[0]) : null
+}
+
+export async function queueMigrationItemVerification(migrationId: string, itemId: string): Promise<void> {
+  const result = await queryDb(`
+    insert into public.drive_migration_verification_state
+      (migration_item_id,migration_id,generation,status,phase)
+    values($1,$2,1,'pending','source')
+    on conflict(migration_item_id) do update set
+      migration_id=excluded.migration_id,
+      generation=1,
+      source_scan_id=null,destination_scan_id=null,phase='source',status='pending',
+      source_cursor=null,destination_cursor=null,source_objects=0,source_bytes=0,
+      destination_objects=0,destination_bytes=0,missing_objects=0,mismatched_objects=0,
+      extra_objects=0,attempt_count=0,attempt_generation=null,last_error=null,
+      lease_owner=null,lease_expires_at=null,completed_at=null,updated_at=now()
+    where drive_migration_verification_state.status not in('pending','running')
+    returning migration_item_id
+  `, [itemId, migrationId])
+  if (result.rowCount !== 1) throw new Error("File verification is already queued or running for this bucket")
 }
 
 export async function deleteMigration(id: string): Promise<void> {
-  const supabase = getSupabaseServerClient()
-
-  const { error } = await supabase.from(MIGRATIONS_TABLE).delete().eq("id", id)
-  if (error) throw normalizeSupabaseError(error)
+  await queryDb(`delete from public.${MIGRATIONS_TABLE} where id = $1`, [id])
 }
 
 export async function createMigration(input: {
@@ -367,26 +321,8 @@ export async function createMigration(input: {
     sourceBytes?: number
   }>
 }): Promise<{ migration: DriveMigration; items: DriveMigrationItem[] }> {
-  const supabase = getSupabaseServerClient()
-
   const now = new Date().toISOString()
   const migrationId = crypto.randomUUID()
-
-  const { data: migrationRow, error: migrationError } = await supabase
-    .from(MIGRATIONS_TABLE)
-    .insert({
-      id: migrationId,
-      source_account_id: input.sourceAccountId,
-      target_account_id: input.targetAccountId,
-      status: "draft",
-      options: input.options ?? {},
-      created_at: now,
-      updated_at: now,
-    })
-    .select("*")
-    .single()
-
-  if (migrationError) throw normalizeSupabaseError(migrationError)
 
   const itemRows = input.items.map((item) => ({
     id: crypto.randomUUID(),
@@ -401,25 +337,37 @@ export async function createMigration(input: {
     created_at: now,
     updated_at: now,
   }))
-
-  if (itemRows.length === 0) {
-    return {
-      migration: mapMigrationRow(migrationRow as DriveMigrationRow),
-      items: [],
+  return withDbTransaction(async (client) => {
+    const createdMigration = await client.query<DriveMigrationRow>(
+      `insert into public.${MIGRATIONS_TABLE} (
+         id, source_account_id, target_account_id, status, options, created_at, updated_at
+       ) values ($1,$2,$3,'draft',$4::jsonb,$5,$5) returning *`,
+      [migrationId, input.sourceAccountId, input.targetAccountId, JSON.stringify(input.options ?? {}), now]
+    )
+    let createdItems: DriveMigrationItemRow[] = []
+    if (itemRows.length > 0) {
+      const values: unknown[] = []
+      const tuples = itemRows.map((item) => {
+        values.push(item.id, item.migration_id, item.source_bucket, item.target_bucket,
+          item.source_jurisdiction, item.source_storage_class, item.source_objects,
+          item.source_bytes, JSON.stringify(item.progress), item.created_at, item.updated_at)
+        const base = values.length - 11
+        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},$${base + 7},$${base + 8},$${base + 9}::jsonb,$${base + 10},$${base + 11})`
+      })
+      const inserted = await client.query<DriveMigrationItemRow>(
+        `insert into public.${MIGRATION_ITEMS_TABLE} (
+           id, migration_id, source_bucket, target_bucket, source_jurisdiction,
+           source_storage_class, source_objects, source_bytes, progress, created_at, updated_at
+         ) values ${tuples.join(", ")} returning *`,
+        values
+      )
+      createdItems = inserted.rows
     }
-  }
-
-  const { data: createdItems, error: itemsError } = await supabase
-    .from(MIGRATION_ITEMS_TABLE)
-    .insert(itemRows)
-    .select("*")
-
-  if (itemsError) throw normalizeSupabaseError(itemsError)
-
-  return {
-    migration: mapMigrationRow(migrationRow as DriveMigrationRow),
-    items: (createdItems as DriveMigrationItemRow[]).map(mapMigrationItemRow),
-  }
+    return {
+      migration: mapMigrationRow(createdMigration.rows[0]),
+      items: createdItems.map(mapMigrationItemRow),
+    }
+  })
 }
 
 export async function updateMigration(
@@ -430,8 +378,6 @@ export async function updateMigration(
     completedAt?: string | null
   }
 ): Promise<DriveMigration> {
-  const supabase = getSupabaseServerClient()
-
   const dbUpdates: Record<string, unknown> = { updated_at: new Date().toISOString() }
   if (updates.status !== undefined) dbUpdates.status = updates.status
   if (updates.startedAt !== undefined) dbUpdates.started_at = updates.startedAt ?? null
@@ -439,35 +385,45 @@ export async function updateMigration(
   if (updates.lastSyncedAt !== undefined) dbUpdates.last_synced_at = updates.lastSyncedAt ?? null
   if (updates.syncStatus !== undefined) dbUpdates.sync_status = updates.syncStatus ?? null
   if (updates.syncMessage !== undefined) dbUpdates.sync_message = updates.syncMessage ?? null
-  if (updates.options !== undefined) dbUpdates.options = updates.options ?? {}
-
-  const { data, error } = await supabase
-    .from(MIGRATIONS_TABLE)
-    .update(dbUpdates)
-    .eq("id", id)
-    .select("*")
-    .single()
-
-  if (error) throw normalizeSupabaseError(error)
-  const migration = mapMigrationRow(data as DriveMigrationRow)
+  if (updates.options !== undefined) dbUpdates.options = JSON.stringify(updates.options ?? {})
+  const values: unknown[] = [id]
+  const assignments = Object.entries(dbUpdates).map(([column, value], index) => {
+    values.push(value)
+    return `${column} = $${index + 2}${column === "options" ? "::jsonb" : ""}`
+  })
+  const { rows } = await queryDb<DriveMigrationRow>(
+    `update public.${MIGRATIONS_TABLE} set ${assignments.join(", ")} where id = $1 returning *`,
+    values
+  )
+  if (!rows[0]) throw new Error("Migration not found")
+  const migration = mapMigrationRow(rows[0])
   if (updates.status === "completed") {
-    const { data: summaryRows, error: summaryError } = await supabase
-      .from(MIGRATION_ITEMS_TABLE)
-      .select("source_objects,source_bytes")
-      .eq("migration_id", id)
-    if (!summaryError) {
-      const rows = (summaryRows as Array<{ source_objects: number | string | null; source_bytes: number | string | null }> | null) ?? []
-      const numeric = (value: number | string | null) => {
-        const parsed = typeof value === "number" ? value : Number(value)
-        return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0
-      }
-      const summary = {
-        summary_item_count: rows.length,
-        summary_objects: rows.reduce((sum, row) => sum + numeric(row.source_objects), 0),
-        summary_bytes: rows.reduce((sum, row) => sum + numeric(row.source_bytes), 0),
-      }
-      await supabase.from(MIGRATIONS_TABLE).update(summary).eq("id", id)
+    const { rows: summaryRows } = await queryDb<{
+      summary_item_count: string | number
+      summary_objects: string | number
+      summary_bytes: string | number
+    }>(
+      `select count(*) as summary_item_count,
+         coalesce(sum(source_objects), 0) as summary_objects,
+         coalesce(sum(source_bytes), 0) as summary_bytes
+       from public.${MIGRATION_ITEMS_TABLE} where migration_id = $1`,
+      [id]
+    )
+    const summaryRow = summaryRows[0]
+    const summary = {
+      summary_item_count: nonNegativeInteger(summaryRow?.summary_item_count),
+      summary_objects: nonNegativeInteger(summaryRow?.summary_objects),
+      summary_bytes: nonNegativeInteger(summaryRow?.summary_bytes),
     }
+    await queryDb(
+      `update public.${MIGRATIONS_TABLE}
+       set summary_item_count = $2, summary_objects = $3, summary_bytes = $4
+       where id = $1`,
+      [id, summary.summary_item_count, summary.summary_objects, summary.summary_bytes]
+    )
+    migration.summaryItemCount = summary.summary_item_count
+    migration.summaryObjects = summary.summary_objects
+    migration.summaryBytes = summary.summary_bytes
     await compactPreviousMigrationDetails(id).catch((cleanupError) => {
       console.error("Unable to compact previous migration details:", cleanupError)
     })
@@ -516,30 +472,20 @@ export async function claimMigrationSyncLock(input: {
   ttlMs?: number
   message?: string
 }): Promise<boolean> {
-  const supabase = getSupabaseServerClient()
   const now = new Date()
   const nowIso = now.toISOString()
   const ttlMs = typeof input.ttlMs === "number" && Number.isFinite(input.ttlMs) ? Math.max(500, input.ttlMs) : 12_000
-  const cutoffIso = new Date(Date.now() - ttlMs).toISOString()
-
-  // PostgREST requires quoting timestamps (they contain `:`) inside logic trees.
-  // Example: last_synced_at.lt."2026-01-31T12:34:56.789Z"
-  const cutoffQuoted = `"${cutoffIso}"`
-
-  const { data, error } = await supabase
-    .from(MIGRATIONS_TABLE)
-    .update({
-      sync_status: "syncing",
-      sync_message: input.message ?? "Syncing",
-      last_synced_at: nowIso,
-      updated_at: nowIso,
-    })
-    .eq("id", input.migrationId)
-    .or(`sync_status.is.null,sync_status.neq.syncing,last_synced_at.is.null,last_synced_at.lt.${cutoffQuoted}`)
-    .select("id")
-
-  if (error) throw normalizeSupabaseError(error)
-  return Array.isArray(data) && data.length > 0
+  const cutoff = new Date(now.getTime() - ttlMs).toISOString()
+  const { rowCount } = await queryDb(
+    `update public.${MIGRATIONS_TABLE}
+     set sync_status = 'syncing', sync_message = $3,
+         last_synced_at = $4, updated_at = $4
+     where id = $1
+       and (sync_status is null or sync_status <> 'syncing'
+            or last_synced_at is null or last_synced_at < $2)`,
+    [input.migrationId, cutoff, input.message ?? "Syncing", nowIso]
+  )
+  return (rowCount ?? 0) > 0
 }
 
 export async function updateMigrationItem(
@@ -550,75 +496,45 @@ export async function updateMigrationItem(
     slurperStatus?: string | null
   }
 ): Promise<DriveMigrationItem> {
-  const supabase = getSupabaseServerClient()
-
-  const dbUpdates: Record<string, unknown> = { updated_at: new Date().toISOString() }
-  if (updates.slurperJobId !== undefined) dbUpdates.slurper_job_id = updates.slurperJobId ?? null
-  if (updates.slurperStatus !== undefined) dbUpdates.slurper_status = updates.slurperStatus ?? null
-  if (updates.progress !== undefined) {
-    // Merge with latest stored progress to avoid stale writers dropping verify state/events.
-    const { data: currentRows, error: currentErr } = await supabase
-      .from(MIGRATION_ITEMS_TABLE)
-      .select("progress")
-      .eq("id", id)
-      .limit(1)
-    if (currentErr) throw normalizeSupabaseError(currentErr)
-    const currentRow = (currentRows as Array<{ progress: unknown }> | null)?.[0]
-    const currentProgress =
-      currentRow &&
-      typeof currentRow.progress === "object" &&
-      currentRow.progress !== null
-        ? (currentRow.progress as Record<string, unknown>)
-        : {}
-    const incomingProgress =
-      updates.progress && typeof updates.progress === "object"
-        ? (updates.progress as Record<string, unknown>)
-        : {}
-    const nextProgress: Record<string, unknown> = { ...currentProgress, ...incomingProgress }
-    if (updates.slurperStatus !== undefined) nextProgress.slurperStatus = updates.slurperStatus ?? null
-
-    const stage = typeof nextProgress.stage === "string" ? nextProgress.stage : undefined
-    const error = typeof nextProgress.error === "string" ? nextProgress.error : undefined
-    const lastError = typeof nextProgress.lastError === "string" ? nextProgress.lastError : undefined
-    const message = error ?? lastError
-    const status = updates.slurperStatus ?? null
-    if (stage || message || updates.slurperStatus !== undefined) {
-      dbUpdates.progress = appendProgressEvent(nextProgress, {
-        at: new Date().toISOString(),
-        stage,
-        status,
-        message,
-      })
-    } else {
-      dbUpdates.progress = nextProgress
+  return withDbTransaction(async (client) => {
+    const current = await client.query<DriveMigrationItemRow>(
+      `select * from public.${MIGRATION_ITEMS_TABLE} where id = $1 for update`, [id]
+    )
+    const currentRow = current.rows[0]
+    if (!currentRow) throw new Error("Migration item not found")
+    const dbUpdates: Record<string, unknown> = { updated_at: new Date().toISOString() }
+    if (updates.slurperJobId !== undefined) dbUpdates.slurper_job_id = updates.slurperJobId ?? null
+    if (updates.slurperStatus !== undefined) dbUpdates.slurper_status = updates.slurperStatus ?? null
+    if (updates.progress !== undefined) {
+      const currentProgress = currentRow.progress && typeof currentRow.progress === "object" ? currentRow.progress : {}
+      const incomingProgress = updates.progress && typeof updates.progress === "object" ? updates.progress : {}
+      const nextProgress: Record<string, unknown> = { ...currentProgress, ...incomingProgress }
+      if (updates.slurperStatus !== undefined) nextProgress.slurperStatus = updates.slurperStatus ?? null
+      const stage = typeof nextProgress.stage === "string" ? nextProgress.stage : undefined
+      const error = typeof nextProgress.error === "string" ? nextProgress.error : undefined
+      const lastError = typeof nextProgress.lastError === "string" ? nextProgress.lastError : undefined
+      const message = error ?? lastError
+      if (stage || message || updates.slurperStatus !== undefined) {
+        dbUpdates.progress = appendProgressEvent(nextProgress, {
+          at: new Date().toISOString(), stage,
+          status: updates.slurperStatus ?? null, message,
+        })
+      } else dbUpdates.progress = nextProgress
     }
-  }
-  if (updates.lastProgressAt !== undefined)
-    dbUpdates.last_progress_at = updates.lastProgressAt ?? null
-  if (updates.sourceObjects !== undefined) dbUpdates.source_objects = updates.sourceObjects ?? null
-  if (updates.sourceBytes !== undefined) dbUpdates.source_bytes = updates.sourceBytes ?? null
+    if (updates.lastProgressAt !== undefined) dbUpdates.last_progress_at = updates.lastProgressAt ?? null
+    if (updates.sourceObjects !== undefined) dbUpdates.source_objects = updates.sourceObjects ?? null
+    if (updates.sourceBytes !== undefined) dbUpdates.source_bytes = updates.sourceBytes ?? null
 
-  let { data, error } = await supabase
-    .from(MIGRATION_ITEMS_TABLE)
-    .update(dbUpdates)
-    .eq("id", id)
-    .select("*")
-    .single()
-
-  if (error && isSlurperStatusColumnError(error) && "slurper_status" in dbUpdates) {
-    // If PostgREST schema cache is stale (or the column truly doesn't exist),
-    // keep the system running by retrying without touching `slurper_status`.
-    delete dbUpdates.slurper_status
-    ;({ data, error } = await supabase
-      .from(MIGRATION_ITEMS_TABLE)
-      .update(dbUpdates)
-      .eq("id", id)
-      .select("*")
-      .single())
-  }
-
-  if (error) throw normalizeSupabaseError(error)
-  return mapMigrationItemRow(data as DriveMigrationItemRow)
+    const values: unknown[] = [id]
+    const assignments = Object.entries(dbUpdates).map(([column, value], index) => {
+      values.push(column === "progress" ? JSON.stringify(value) : value)
+      return `${column} = $${index + 2}${column === "progress" ? "::jsonb" : ""}`
+    })
+    const updated = await client.query<DriveMigrationItemRow>(
+      `update public.${MIGRATION_ITEMS_TABLE} set ${assignments.join(", ")} where id = $1 returning *`, values
+    )
+    return mapMigrationItemRow(updated.rows[0])
+  })
 }
 
 export async function mergeMigrationItemProgressState(
@@ -626,80 +542,41 @@ export async function mergeMigrationItemProgressState(
   patch: Record<string, unknown>,
   lastProgressAt?: string | null
 ): Promise<DriveMigrationItem> {
-  const supabase = getSupabaseServerClient()
-  const { data: currentRows, error: currentErr } = await supabase
-    .from(MIGRATION_ITEMS_TABLE)
-    .select("*")
-    .eq("id", id)
-    .limit(1)
-
-  if (currentErr) throw normalizeSupabaseError(currentErr)
-  const currentRow = Array.isArray(currentRows) ? (currentRows[0] as DriveMigrationItemRow | undefined) : undefined
-  if (!currentRow) throw new Error("Migration item not found")
-
-  const currentProgress =
-    currentRow.progress && typeof currentRow.progress === "object" ? (currentRow.progress as Record<string, unknown>) : {}
-  const nextProgress = { ...currentProgress, ...patch }
-  const now = new Date().toISOString()
-
-  const { data, error } = await supabase
-    .from(MIGRATION_ITEMS_TABLE)
-    .update({
-      progress: nextProgress,
-      updated_at: now,
-      ...(lastProgressAt !== undefined ? { last_progress_at: lastProgressAt ?? null } : {}),
-    })
-    .eq("id", id)
-    .select("*")
-    .single()
-
-  if (error) throw normalizeSupabaseError(error)
-  return mapMigrationItemRow(data as DriveMigrationItemRow)
+  return withDbTransaction(async (client) => {
+    const current = await client.query<DriveMigrationItemRow>(
+      `select * from public.${MIGRATION_ITEMS_TABLE} where id = $1 for update`, [id]
+    )
+    const currentRow = current.rows[0]
+    if (!currentRow) throw new Error("Migration item not found")
+    const currentProgress = currentRow.progress && typeof currentRow.progress === "object" ? currentRow.progress : {}
+    const nextProgress = { ...currentProgress, ...patch }
+    const updated = await client.query<DriveMigrationItemRow>(
+      `update public.${MIGRATION_ITEMS_TABLE}
+       set progress = $2::jsonb, updated_at = now(),
+           last_progress_at = case when $3::boolean then $4::timestamptz else last_progress_at end
+       where id = $1 returning *`,
+      [id, JSON.stringify(nextProgress), lastProgressAt !== undefined, lastProgressAt ?? null]
+    )
+    return mapMigrationItemRow(updated.rows[0])
+  })
 }
 
 export async function claimMigrationItemJobCreation(input: {
   itemId: string
   progress: Record<string, unknown>
 }): Promise<boolean> {
-  const supabase = getSupabaseServerClient()
-
-  const now = new Date().toISOString()
   const progress: Record<string, unknown> =
     input.progress && typeof input.progress === "object" ? (input.progress as Record<string, unknown>) : {}
   progress.slurperStatus = "creating_job"
-
-  // Primary path: use `slurper_status` to block concurrent creators.
-  let { data, error } = await supabase
-    .from(MIGRATION_ITEMS_TABLE)
-    .update({
-      slurper_status: "creating_job",
-      progress,
-      last_progress_at: now,
-      updated_at: now,
-    })
-    .eq("id", input.itemId)
-    .is("slurper_job_id", null)
-    // Allow NULL statuses, but block concurrent creators.
-    .or("slurper_status.is.null,slurper_status.neq.creating_job")
-    .or("slurper_status.is.null,slurper_status.neq.job_id_pending")
-    .select("id")
-
-  if (error && isSlurperStatusColumnError(error)) {
-    // Fallback: if `slurper_status` is not visible (stale schema cache),
-    // claim using a temporary job id marker instead.
-    ;({ data, error } = await supabase
-      .from(MIGRATION_ITEMS_TABLE)
-      .update({
-        slurper_job_id: "__creating_job__",
-        progress,
-        last_progress_at: now,
-        updated_at: now,
-      })
-      .eq("id", input.itemId)
-      .is("slurper_job_id", null)
-      .select("id"))
-  }
-
-  if (error) throw normalizeSupabaseError(error)
-  return Array.isArray(data) && data.length > 0
+  const { rowCount } = await queryDb(
+    `update public.${MIGRATION_ITEMS_TABLE}
+     set slurper_status = 'creating_job', progress = $2::jsonb,
+         last_progress_at = now(), updated_at = now()
+     where id = $1 and slurper_job_id is null
+       and (slurper_status is null or slurper_status <> 'creating_job')
+       and (slurper_status is null or slurper_status <> 'job_id_pending')
+     returning id`,
+    [input.itemId, JSON.stringify(progress)]
+  )
+  return (rowCount ?? 0) > 0
 }

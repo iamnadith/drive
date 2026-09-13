@@ -1,7 +1,19 @@
 import crypto from "crypto"
-import { getSupabaseServerClient } from "./supabase"
+import { queryDb, withDbTransaction } from "./db"
 
 const FAILURE_RECORDS_TABLE = "drive_migration_item_failure_records"
+
+type FailureRecordRow = {
+  object_key: string | null
+  message: string | null
+  occurred_at_text: string | null
+  raw_log: unknown
+  source_probe: unknown
+  destination_probe: unknown
+  diagnosis: unknown
+  download: unknown
+  fetched_at: string | null
+}
 
 export type MigrationFailureRecordInput = {
   migrationItemId: string
@@ -38,17 +50,7 @@ export async function replaceMigrationItemFailureRecords(
   migrationItemId: string,
   records: MigrationFailureRecordInput[]
 ): Promise<void> {
-  const supabase = getSupabaseServerClient()
   const now = new Date().toISOString()
-
-  const { error: deleteError } = await supabase
-    .from(FAILURE_RECORDS_TABLE)
-    .delete()
-    .eq("migration_item_id", migrationItemId)
-
-  if (deleteError) throw new Error(String(deleteError.message ?? "Unable to delete previous failure records"))
-  if (records.length === 0) return
-
   const rows = records.map((record) => ({
     id: crypto.randomUUID(),
     migration_item_id: migrationItemId,
@@ -65,25 +67,57 @@ export async function replaceMigrationItemFailureRecords(
     updated_at: now,
   }))
 
-  const { error: insertError } = await supabase.from(FAILURE_RECORDS_TABLE).insert(rows)
-  if (insertError) throw new Error(String(insertError.message ?? "Unable to store failure records"))
+  await withDbTransaction(async (client) => {
+    await client.query(`delete from public.${FAILURE_RECORDS_TABLE} where migration_item_id = $1`, [migrationItemId])
+    if (rows.length === 0) return
+
+    const values: unknown[] = []
+    const tuples = rows.map((row) => {
+      values.push(
+        row.id,
+        row.migration_item_id,
+        row.object_key,
+        row.message,
+        row.occurred_at_text,
+        row.occurred_at,
+        row.raw_log,
+        row.source_probe,
+        row.destination_probe,
+        row.diagnosis,
+        row.download,
+        row.fetched_at,
+        row.updated_at
+      )
+      const base = values.length - 12
+      return `(${Array.from({ length: 13 }, (_, index) => `$${base + index + 1}`).join(", ")})`
+    })
+    await client.query(
+      `insert into public.${FAILURE_RECORDS_TABLE} (
+         id, migration_item_id, object_key, message, occurred_at_text,
+         occurred_at, raw_log, source_probe, destination_probe, diagnosis,
+         download, fetched_at, updated_at
+       ) values ${tuples.join(", ")}`,
+      values
+    )
+  })
 }
 
 export async function listMigrationItemFailureRecords(
   migrationItemId: string,
   limit = 500
 ): Promise<MigrationFailureRecord[]> {
-  const supabase = getSupabaseServerClient()
-  const { data, error } = await supabase
-    .from(FAILURE_RECORDS_TABLE)
-    .select("*")
-    .eq("migration_item_id", migrationItemId)
-    .order("occurred_at", { ascending: false, nullsFirst: false })
-    .limit(Math.max(1, Math.min(1000, limit)))
+  const boundedLimit = Math.max(1, Math.min(1000, Math.floor(limit)))
+  const { rows } = await queryDb<FailureRecordRow>(
+    `select object_key, message, occurred_at_text, raw_log, source_probe,
+            destination_probe, diagnosis, download, fetched_at
+     from public.${FAILURE_RECORDS_TABLE}
+     where migration_item_id = $1
+     order by occurred_at desc nulls last, fetched_at desc, id desc
+     limit $2`,
+    [migrationItemId, boundedLimit]
+  )
 
-  if (error) throw new Error(String(error.message ?? "Unable to load failure records"))
-
-  return (Array.isArray(data) ? data : []).map((row: any) => ({
+  return rows.map((row) => ({
     objectKey: typeof row.object_key === "string" ? row.object_key : "",
     message: typeof row.message === "string" ? row.message : "",
     occurredAtText: typeof row.occurred_at_text === "string" ? row.occurred_at_text : null,
