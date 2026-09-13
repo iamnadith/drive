@@ -91,29 +91,20 @@ export default function ProjectBucketsPage() {
     if (!projectId) return
     setLoading(true)
     try {
-      const [projectRes, projectBucketsRes, availableBucketsRes] = await Promise.all([
-        fetch(`/api/projects/${encodeURIComponent(projectId)}`),
-        fetch(`/api/projects/${encodeURIComponent(projectId)}/buckets`),
-        fetch("/api/storage/buckets"),
-      ])
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/buckets`, { cache: "no-store" })
+      const data = await readJson(response)
+      if (!response.ok) throw new Error(String(data.error ?? "Unable to load project bucket management"))
 
-      const [projectData, projectBucketsData, availableBucketsData] = await Promise.all([
-        readJson(projectRes),
-        readJson(projectBucketsRes),
-        readJson(availableBucketsRes),
-      ])
-
-      if (!projectRes.ok) throw new Error(String(projectData.error ?? "Unable to load project"))
-      if (!projectBucketsRes.ok) throw new Error(String(projectBucketsData.error ?? "Unable to load project buckets"))
-      if (!availableBucketsRes.ok) throw new Error(String(availableBucketsData.error ?? "Unable to load buckets"))
-
-      setProject((projectData.project as Project) ?? null)
-      setLastSyncedAt(new Date().toISOString())
-      const nextProjectBuckets = Array.isArray(projectBucketsData.buckets)
-        ? (projectBucketsData.buckets as ProjectBucket[])
+      setProject((data.project as Project) ?? null)
+      const account = data.activeAccount && typeof data.activeAccount === "object"
+        ? data.activeAccount as { lastSyncedAt?: string | null }
+        : null
+      setLastSyncedAt(account?.lastSyncedAt ?? null)
+      const nextProjectBuckets = Array.isArray(data.buckets)
+        ? (data.buckets as ProjectBucket[])
         : []
       setProjectBuckets(nextProjectBuckets)
-      setAvailableBuckets(Array.isArray(availableBucketsData.buckets) ? (availableBucketsData.buckets as Bucket[]) : [])
+      setAvailableBuckets(Array.isArray(data.availableBuckets) ? (data.availableBuckets as Bucket[]) : [])
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to load bucket management")
     } finally {

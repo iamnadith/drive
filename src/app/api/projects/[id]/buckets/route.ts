@@ -10,6 +10,7 @@ import { r2CreateBucketViaApi, r2ListBuckets } from "@/lib/cloudflare-r2-buckets
 import { resolveProjectBucketCandidate } from "@/lib/project-bucket-name"
 import {
   assignProjectBucket,
+  getProjectBucketManagementData,
   getProjectBucketAssignment,
   getProjectByIdentifier,
   listProjectBuckets,
@@ -26,6 +27,10 @@ function errorMessage(error: unknown, fallback: string) {
       ? String((error as { message?: unknown }).message ?? fallback)
       : fallback
   return message
+}
+
+async function serializeProjectBuckets(projectIdentifier: string) {
+  return listProjectBuckets(projectIdentifier)
 }
 
 async function listActiveBuckets() {
@@ -84,10 +89,6 @@ async function createBucket(bucketName: string) {
   }
 }
 
-async function serializeProjectBuckets(projectIdentifier: string) {
-  return listProjectBuckets(projectIdentifier)
-}
-
 export async function GET(
   _request: Request,
   context: { params: Promise<{ id: string }> }
@@ -97,8 +98,12 @@ export async function GET(
     if (!auth.ok) return auth.response
 
     const { id } = await context.params
-    const buckets = await serializeProjectBuckets(id)
-    return NextResponse.json({ buckets })
+    const data = await getProjectBucketManagementData(id)
+    if (!data) return NextResponse.json({ error: "Project not found" }, { status: 404 })
+    if (!data.activeAccount?.cloudflareAccountId) {
+      return NextResponse.json({ error: "Active Cloudflare account is not synced. Sync the account first to list buckets." }, { status: 409 })
+    }
+    return NextResponse.json(data)
   } catch (error: unknown) {
     return NextResponse.json(
       { error: errorMessage(error, "Unable to load project buckets") },

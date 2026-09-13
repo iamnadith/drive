@@ -1,10 +1,5 @@
 import { NextResponse } from "next/server"
-import {
-  PublicUser,
-  createUser,
-  searchUsers,
-  toPublicUser,
-} from "@/lib/users-store"
+import { createUser, listUsersPage, toPublicUser } from "@/lib/users-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import { requireAdmin } from "@/lib/server-auth"
 
@@ -28,26 +23,23 @@ export async function GET(request: Request) {
       roleParam === "superadmin"
         ? (roleParam as "superadmin" | "admin" | "user")
         : undefined
-    const users = await searchUsers(q, role)
-    const publicUsers: PublicUser[] = users.map(toPublicUser)
-
-    // Keep the signed-in admin in an unfiltered listing even if the database
-    // result was truncated or temporarily omitted that account.
-    const currentUserMatchesQuery = !q?.trim() || [
-      auth.user.name,
-      auth.user.email,
-      auth.user.role,
-      auth.user.status,
-    ].some((value) => value.toLowerCase().includes(q.trim().toLowerCase()))
-    if (
-      (!role || auth.user.role === role) &&
-      currentUserMatchesQuery &&
-      !publicUsers.some((user) => user.id === auth.user.id)
-    ) {
-      publicUsers.unshift(toPublicUser(auth.user))
-    }
-
-    return NextResponse.json({ users: publicUsers })
+    const statusParam = searchParams.get("status") ?? undefined
+    const status = statusParam === "active" || statusParam === "disabled" ? statusParam : undefined
+    const pageRaw = Number(searchParams.get("page") ?? 0)
+    const limitRaw = Number(searchParams.get("limit") ?? 10)
+    const result = await listUsersPage({
+      query: q,
+      role,
+      status,
+      page: Number.isFinite(pageRaw) ? pageRaw : 0,
+      limit: Number.isFinite(limitRaw) ? limitRaw : 10,
+      currentUserId: auth.user.id,
+    })
+    return NextResponse.json({
+      users: result.users,
+      stats: { total: result.allUsers, active: result.active, disabled: result.disabled, privileged: result.privileged, activeSuperadmins: result.activeSuperadmins },
+      pagination: { page: result.page, limit: result.limit, pageCount: Math.max(1, Math.ceil(result.total / result.limit)) },
+    }, { headers: { "Cache-Control": "no-store" } })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to load users")
     return NextResponse.json({ error: message }, { status: 400 })

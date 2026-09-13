@@ -63,18 +63,9 @@ function connectionConfig() {
   const port = Number(value("POSTGRES_PORT") ?? 5432)
 
   if (url) {
-    let preferHostConfig = false
-    try {
-      const parsed = new URL(url)
-      const prefersDirectSupabase =
-        parsed.hostname.toLowerCase().startsWith("db.") &&
-        parsed.hostname.toLowerCase().includes(".supabase.co")
-      preferHostConfig =
-        booleanValue("POSTGRES_USE_HOST_CONFIG", undefined) ??
-        Boolean(host && user && password && database && !prefersDirectSupabase)
-    } catch {
-      preferHostConfig = false
-    }
+    const hasHostConfig = Boolean(host && user && password && database)
+    const preferHostConfig =
+      booleanValue("POSTGRES_USE_HOST_CONFIG", undefined) ?? !hasHostConfig
 
     if (!preferHostConfig) return { connectionString: url }
   }

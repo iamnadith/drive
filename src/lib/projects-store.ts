@@ -1,5 +1,5 @@
 import crypto from "crypto"
-import { isPostgresConfigured, queryDb, withDbTransaction } from "./db"
+import { ensureDriveSchema, isPostgresConfigured, queryDb, withDbTransaction } from "./db"
 
 declare global {
   var __driveProjectAuthCache:
@@ -372,280 +372,9 @@ export function sanitizeBucketName(name: string) {
   return base || "project"
 }
 
-let projectSchemaReady: Promise<void> | undefined;
-
 export async function ensureProjectSchema() {
-  if (!isPostgresConfigured()) return
-
-  projectSchemaReady ??= (async () => {
-
-  await queryDb(`create extension if not exists pgcrypto;`)
-  await queryDb(`
-    create table if not exists drive_projects (
-      id uuid primary key default gen_random_uuid(),
-      project_id text not null,
-      name text not null,
-      bucket_name text not null,
-      status text not null default 'active',
-      created_account_id uuid references drive_accounts(id) on delete set null,
-      created_account_label text,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now()
-    );
-  `)
-  await queryDb(`alter table public.drive_projects add column if not exists created_account_id uuid references drive_accounts(id) on delete set null;`)
-  await queryDb(`alter table public.drive_projects add column if not exists created_account_label text;`)
-  await queryDb(`alter table public.drive_projects alter column bucket_name drop not null;`)
-  await queryDb(`update public.drive_projects set bucket_name = '' where bucket_name is null;`)
-  await queryDb(`alter table public.drive_projects alter column bucket_name set default '';`)
-  await queryDb(`alter table public.drive_projects alter column bucket_name set not null;`)
-  await queryDb(`
-    do $$
-    declare
-      id_data_type text;
-      pk_name text;
-    begin
-      select c.data_type
-      into id_data_type
-      from information_schema.columns c
-      where c.table_schema = 'public'
-        and c.table_name = 'drive_projects'
-        and c.column_name = 'id';
-
-      if id_data_type is not null and id_data_type <> 'uuid' then
-        alter table public.drive_projects add column if not exists legacy_id text;
-
-        update public.drive_projects
-        set legacy_id = id::text
-        where legacy_id is null;
-
-        select conname
-        into pk_name
-        from pg_constraint
-        where conrelid = 'public.drive_projects'::regclass
-          and contype = 'p'
-        limit 1;
-
-        if pk_name is not null then
-          execute format('alter table public.drive_projects drop constraint %I', pk_name);
-        end if;
-
-        alter table public.drive_projects rename column id to old_text_id;
-        alter table public.drive_projects alter column old_text_id drop not null;
-        alter table public.drive_projects add column id uuid default gen_random_uuid();
-
-        update public.drive_projects
-        set id = case
-          when old_text_id::text ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-            then old_text_id::text::uuid
-          else gen_random_uuid()
-        end;
-
-        alter table public.drive_projects alter column id set not null;
-        alter table public.drive_projects add primary key (id);
-      end if;
-    end $$;
-  `)
-  await queryDb(`
-    do $$
-    begin
-      if exists (
-        select 1
-        from information_schema.columns
-        where table_schema = 'public'
-          and table_name = 'drive_projects'
-          and column_name = 'active_account_id'
-      ) then
-        update public.drive_projects
-        set created_account_id = active_account_id
-        where created_account_id is null
-          and active_account_id is not null;
-
-        if exists (
-          select 1
-          from information_schema.columns
-          where table_schema = 'public'
-            and table_name = 'drive_projects'
-            and column_name = 'active_account_id'
-            and is_nullable = 'NO'
-        ) then
-          alter table public.drive_projects alter column active_account_id drop not null;
-        end if;
-      end if;
-    end $$;
-  `)
-  await queryDb(`
-    do $$
-    begin
-      if exists (
-        select 1
-        from information_schema.columns
-        where table_schema = 'public'
-          and table_name = 'drive_projects'
-          and column_name = 'old_text_id'
-          and is_nullable = 'NO'
-      ) then
-        alter table public.drive_projects alter column old_text_id drop not null;
-      end if;
-    end $$;
-  `)
-  await queryDb(`
-    do $$
-    declare
-      legacy_column text;
-    begin
-      foreach legacy_column in array array['api_key_hash', 'api_key_prefix', 'api_key_name', 'api_key', 'bucket_id']
-      loop
-        if exists (
-          select 1
-          from information_schema.columns
-          where table_schema = 'public'
-            and table_name = 'drive_projects'
-            and column_name = legacy_column
-            and is_nullable = 'NO'
-        ) then
-          execute format(
-            'alter table public.drive_projects alter column %I drop not null',
-            legacy_column
-          );
-        end if;
-      end loop;
-    end $$;
-  `)
-  await queryDb(`alter table if exists drive_projects drop constraint if exists drive_projects_bucket_name_key;`)
-  await queryDb(`drop index if exists drive_projects_bucket_name_key;`)
-  await queryDb(`create unique index if not exists drive_projects_project_id_key on drive_projects (project_id);`)
-  await queryDb(`create index if not exists drive_projects_bucket_name_idx on drive_projects (bucket_name) where bucket_name <> '';`)
-  await queryDb(`create index if not exists drive_projects_status_idx on drive_projects (status);`)
-  await queryDb(`
-    create table if not exists drive_project_bucket_assignments (
-      project_id uuid not null references drive_projects(id) on delete cascade,
-      account_id uuid references drive_accounts(id) on delete cascade,
-      bucket_name text not null,
-      is_primary boolean not null default false,
-      created_at timestamptz not null default now(),
-      primary key (project_id, bucket_name)
-    );
-  `)
-  await queryDb(`alter table public.drive_project_bucket_assignments add column if not exists account_id uuid references public.drive_accounts(id) on delete cascade;`)
-  await queryDb(`
-    update drive_project_bucket_assignments assignment
-    set account_id = project.created_account_id
-    from drive_projects project
-    where assignment.project_id = project.id
-      and assignment.account_id is null
-      and project.created_account_id is not null;
-  `)
-  await queryDb(`
-    update drive_project_bucket_assignments assignment
-    set account_id = active.id
-    from (select id from drive_accounts where status = 'active' order by updated_at desc limit 1) active
-    where assignment.account_id is null;
-  `)
-  await queryDb(`alter table public.drive_project_bucket_assignments drop column if exists media_allowed_origins;`)
-  await queryDb(`alter table public.drive_project_bucket_assignments drop column if exists public_access_enabled;`)
-  await queryDb(`alter table if exists drive_project_bucket_assignments drop constraint if exists drive_project_bucket_assignments_bucket_key;`)
-  await queryDb(`drop index if exists drive_project_bucket_assignments_bucket_key;`)
-  await queryDb(`drop index if exists drive_project_bucket_assignments_bucket_idx;`)
-  await queryDb(`create index if not exists drive_project_bucket_assignments_account_bucket_idx on drive_project_bucket_assignments (account_id, bucket_name);`)
-  await queryDb(`create unique index if not exists drive_project_bucket_assignments_primary_idx on drive_project_bucket_assignments (project_id) where is_primary = true;`)
-  await queryDb(`
-    insert into drive_project_bucket_assignments (project_id, account_id, bucket_name, is_primary)
-    select p.id, coalesce(p.created_account_id, (select id from drive_accounts where status = 'active' order by updated_at desc limit 1)), p.bucket_name, true
-    from drive_projects p
-    where p.bucket_name <> ''
-      and not exists (
-        select 1
-        from drive_project_bucket_assignments a
-        where a.project_id = p.id
-          and a.bucket_name = p.bucket_name
-      );
-  `)
-  await queryDb(`
-    do $$
-    begin
-      update drive_project_bucket_assignments a
-      set is_primary = true
-      where a.bucket_name in (
-        select p.bucket_name
-        from drive_projects p
-        where p.bucket_name <> ''
-      )
-      and a.project_id in (
-        select p.id
-        from drive_projects p
-        where p.bucket_name = a.bucket_name
-      );
-    end $$;
-  `)
-
-  await queryDb(`
-    create table if not exists drive_project_api_keys (
-      id uuid primary key default gen_random_uuid(),
-      name text not null,
-      key_prefix text not null,
-      key_hash text not null,
-      status text not null default 'active',
-      expires_at timestamptz,
-      last_used_at timestamptz,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now()
-    );
-  `)
-  await queryDb(`create unique index if not exists drive_project_api_keys_hash_key on drive_project_api_keys (key_hash);`)
-  await queryDb(`create index if not exists drive_project_api_keys_status_idx on drive_project_api_keys (status);`)
-
-  await queryDb(`
-    create table if not exists drive_project_api_key_assignments (
-      id uuid primary key default gen_random_uuid(),
-      project_id uuid not null references drive_projects(id) on delete cascade,
-      api_key_id uuid not null references drive_project_api_keys(id) on delete cascade,
-      permissions jsonb not null default '{}'::jsonb,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now()
-    );
-  `)
-  await queryDb(`
-    create unique index if not exists drive_project_api_key_assignments_unique
-      on drive_project_api_key_assignments (project_id, api_key_id);
-  `)
-  await queryDb(`create index if not exists drive_project_api_key_assignments_key_idx on drive_project_api_key_assignments (api_key_id);`)
-
-  await queryDb(`
-    create table if not exists drive_project_file_links (
-      id uuid primary key default gen_random_uuid(),
-      project_id uuid not null references drive_projects(id) on delete cascade,
-      file_id text,
-      object_key text not null,
-      bucket_name text,
-      token_hash text not null,
-      mode text not null,
-      expires_at timestamptz,
-      revoked_at timestamptz,
-      created_at timestamptz not null default now()
-    );
-  `)
-  await queryDb(`alter table public.drive_project_file_links add column if not exists file_id text;`)
-  await queryDb(`alter table public.drive_project_file_links add column if not exists bucket_name text;`)
-  await queryDb(`
-    update drive_project_file_links l
-    set bucket_name = p.bucket_name
-    from drive_projects p
-    where l.project_id = p.id
-      and l.bucket_name is null;
-  `)
-  await queryDb(`create unique index if not exists drive_project_file_links_token_hash_key on drive_project_file_links (token_hash);`)
-  await queryDb(`create index if not exists drive_project_file_links_file_idx on drive_project_file_links (file_id);`)
-  await queryDb(`create index if not exists drive_project_file_links_project_idx on drive_project_file_links (project_id, object_key);`)
-  await queryDb(`create index if not exists drive_project_file_links_active_idx on drive_project_file_links (mode, revoked_at, expires_at);`)
-  })().catch((error) => {
-    projectSchemaReady = undefined
-    throw error
-  })
-
-  return projectSchemaReady
+  await ensureDriveSchema()
 }
-
 export async function listProjects(): Promise<Project[]> {
   await ensureProjectSchema()
   const { rows } = await queryDb<ProjectRow>(`
@@ -739,6 +468,11 @@ export async function listProjectBuckets(projectIdentifier: string) {
   await ensureProjectSchema()
   const project = await getProjectByIdentifier(projectIdentifier)
   if (!project) throw new Error("Project not found")
+  return listProjectBucketsById(project.id)
+}
+
+export async function listProjectBucketsById(projectId: string) {
+  await ensureProjectSchema()
   const { rows } = await queryDb<ProjectBucketAssignmentRow>(
     `
       select a.account_id, a.bucket_name, a.is_primary, a.created_at,
@@ -747,9 +481,85 @@ export async function listProjectBuckets(projectIdentifier: string) {
       where a.project_id = $1
       order by a.is_primary desc, a.created_at asc, a.bucket_name asc;
     `,
-    [project.id]
+    [projectId]
   )
   return rows.map(mapProjectBucketAssignment)
+}
+
+export async function getProjectBucketManagementData(identifier: string) {
+  await ensureProjectSchema()
+  const { rows } = await queryDb<ProjectRow & {
+    active_account_id: string | null
+    active_account_cloudflare_id: string | null
+    active_account_last_synced_at: string | null
+    assigned_buckets: unknown
+    available_buckets: unknown
+  }>(`
+    select p.*,
+      active.id active_account_id,
+      active.cloudflare_account_id active_account_cloudflare_id,
+      active.last_synced_at active_account_last_synced_at,
+      coalesce(assigned.buckets, '[]'::jsonb) assigned_buckets,
+      coalesce(available.buckets, '[]'::jsonb) available_buckets
+    from drive_projects p
+    left join lateral (
+      select id,cloudflare_account_id,last_synced_at
+      from drive_accounts
+      where status='active'
+      order by updated_at desc nulls last,created_at desc,id desc
+      limit 1
+    ) active on true
+    left join lateral (
+      select jsonb_agg(jsonb_build_object(
+        'accountId',a.account_id,
+        'bucketName',a.bucket_name,
+        'isPrimary',a.is_primary,
+        'createdAt',a.created_at,
+        'projectCount',(
+          select count(*)::int from drive_project_bucket_assignments shared
+          where shared.account_id=a.account_id and shared.bucket_name=a.bucket_name
+        )
+      ) order by a.is_primary desc,a.created_at asc,a.bucket_name asc) buckets
+      from drive_project_bucket_assignments a
+      where a.project_id=p.id
+    ) assigned on true
+    left join lateral (
+      select jsonb_agg(jsonb_build_object('id',s.bucket_name,'name',s.bucket_name) order by s.bucket_name) buckets
+      from drive_bucket_stats s
+      where s.account_id=active.id
+    ) available on true
+    where p.id::text=$1 or p.project_id=$1
+    limit 1
+  `, [identifier])
+  const row = rows[0]
+  if (!row) return null
+  return {
+    project: mapProject(row),
+    buckets: Array.isArray(row.assigned_buckets)
+      ? row.assigned_buckets.map((bucket) => mapProjectBucketAssignment({
+          account_id: typeof bucket.accountId === "string" ? bucket.accountId : null,
+          bucket_name: String(bucket.bucketName ?? ""),
+          is_primary: bucket.isPrimary === true,
+          created_at: String(bucket.createdAt ?? ""),
+          project_count: Number(bucket.projectCount ?? 1),
+        }))
+      : [],
+    availableBuckets: Array.isArray(row.available_buckets)
+      ? row.available_buckets.flatMap((bucket) => {
+          if (!bucket || typeof bucket !== "object") return []
+          const name = (bucket as Record<string, unknown>).name
+          if (typeof name !== "string") return []
+          return [{ id: name, name }]
+        })
+      : [],
+    activeAccount: row.active_account_id
+      ? {
+          id: row.active_account_id,
+          cloudflareAccountId: row.active_account_cloudflare_id,
+          lastSyncedAt: row.active_account_last_synced_at,
+        }
+      : null,
+  }
 }
 
 export async function getProjectBucketAssignment(

@@ -63,12 +63,16 @@ type UserRow = {
 }
 
 const PAGE_SIZE = 10
+type UserStats = { total: number; active: number; disabled: number; privileged: number; activeSuperadmins: number }
 
 export default function UsersPage() {
   const [mounted, setMounted] = React.useState(false)
   const [usersLoading, setUsersLoading] = React.useState(true)
   const [lastSyncedAt, setLastSyncedAt] = React.useState<string | null>(null)
   const [users, setUsers] = React.useState<UserRow[]>([])
+  const [userStats, setUserStats] = React.useState<UserStats>({ total: 0, active: 0, disabled: 0, privileged: 0, activeSuperadmins: 0 })
+  const [pageIndex, setPageIndex] = React.useState(0)
+  const [pageCount, setPageCount] = React.useState(1)
   const [search, setSearch] = React.useState("")
   const [roleFilter, setRoleFilter] = React.useState<
     "" | "superadmin" | "admin" | "user"
@@ -80,29 +84,34 @@ export default function UsersPage() {
   const [isQuotaOnly, setIsQuotaOnly] = React.useState(false)
   const { user: currentUser } = useAuth()
 
-  const activeSuperAdminCount = React.useMemo(
-    () =>
-      users.filter(
-        (u) => u.role === "superadmin" && u.status === "active"
-      ).length,
-    [users]
-  )
-
-  const reloadUsers = React.useCallback(async () => {
+  const reloadUsers = React.useCallback(async (signal?: AbortSignal) => {
     setUsersLoading(true)
     try {
-      const res = await fetch("/api/users")
-      if (!res.ok) return
-      const data = await res.json()
-      const nextUsers = Array.isArray(data.users) ? [...data.users as UserRow[]] : []
-      setUsers(nextUsers)
+      const params = new URLSearchParams({ page: String(pageIndex), limit: String(PAGE_SIZE) })
+      if (search.trim()) params.set("q", search.trim())
+      if (roleFilter) params.set("role", roleFilter)
+      if (statusFilter) params.set("status", statusFilter)
+      const res = await fetch(`/api/users?${params.toString()}`, { cache: "no-store", signal })
+      const data = await res.json().catch(() => ({})) as {
+        users?: UserRow[]
+        stats?: UserStats
+        pagination?: { pageCount?: number }
+        error?: string
+      }
+      if (!res.ok) throw new Error(data.error || "Unable to load users")
+      const nextPageCount = Math.max(1, Number(data.pagination?.pageCount) || 1)
+      setUsers(Array.isArray(data.users) ? data.users : [])
+      setUserStats(data.stats ?? { total: 0, active: 0, disabled: 0, privileged: 0, activeSuperadmins: 0 })
+      setPageCount(nextPageCount)
+      if (pageIndex >= nextPageCount) setPageIndex(nextPageCount - 1)
       setLastSyncedAt(new Date().toISOString())
-    } catch {
-      // ignore for now
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return
+      toast.error(error instanceof Error ? error.message : "Unable to load users")
     } finally {
-      setUsersLoading(false)
+      if (!signal?.aborted) setUsersLoading(false)
     }
-  }, [])
+  }, [pageIndex, roleFilter, search, statusFilter])
 
   React.useEffect(() => {
     setMounted(true)
@@ -110,7 +119,12 @@ export default function UsersPage() {
 
   React.useEffect(() => {
     if (!mounted) return
-    void reloadUsers()
+    const controller = new AbortController()
+    const debounce = window.setTimeout(() => void reloadUsers(controller.signal), 250)
+    return () => {
+      window.clearTimeout(debounce)
+      controller.abort()
+    }
   }, [mounted, reloadUsers])
 
   const [formState, setFormState] = React.useState<{
@@ -468,33 +482,7 @@ export default function UsersPage() {
     setIsDialogOpen(true)
   }, [])
 
-  const filteredUsers = React.useMemo(() => {
-    let result = users
-
-    if (search.trim()) {
-      const q = search.toLowerCase()
-      result = result.filter(
-        (u) =>
-          u.name.toLowerCase().includes(q) ||
-          u.email.toLowerCase().includes(q) ||
-          (u.username ?? "").toLowerCase().includes(q)
-      )
-    }
-
-    if (roleFilter) {
-      result = result.filter((u) => u.role === roleFilter)
-    }
-
-    if (statusFilter) {
-      result = result.filter((u) => u.status === statusFilter)
-    }
-
-    return [...result].sort((a, b) => Number(b.id === currentUser?.id) - Number(a.id === currentUser?.id))
-  }, [users, search, roleFilter, statusFilter, currentUser?.id])
-
-  const activeUserCount = users.filter((user) => user.status === "active").length
-  const disabledUserCount = users.length - activeUserCount
-  const privilegedUserCount = users.filter((user) => user.role === "admin" || user.role === "superadmin").length
+  const activeSuperAdminCount = userStats.activeSuperadmins
   const userFilters: SearchFilterOption[] = [
     { key: "role", label: "Role", type: "select", defaultValue: "all", options: [
       { value: "all", label: "All roles" },
@@ -930,7 +918,7 @@ export default function UsersPage() {
           actions={
             <DashboardSearchFilterToolbar
               searchValue={search}
-              onSearchChange={setSearch}
+              onSearchChange={(value) => { setSearch(value); setPageIndex(0) }}
               searchPlaceholder="Search users..."
               searchWidthClassName="sm:w-[220px]"
               onRefresh={() => void reloadUsers()}
@@ -940,6 +928,7 @@ export default function UsersPage() {
               filters={userFilters}
               filterValues={{ role: roleFilter || "all", status: statusFilter || "all" }}
               onFilterChange={(key, value) => {
+                setPageIndex(0)
                 if (key === "role") setRoleFilter(value === "all" ? "" : value as typeof roleFilter)
                 else if (key === "status") setStatusFilter(value === "all" ? "" : value as typeof statusFilter)
               }}
@@ -947,6 +936,7 @@ export default function UsersPage() {
                 setSearch("")
                 setRoleFilter("")
                 setStatusFilter("")
+                setPageIndex(0)
               }}
               title="Filter users"
               description="Filter by account role and status."
@@ -960,10 +950,10 @@ export default function UsersPage() {
 
       <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-4">
         {[
-          { title: "Total Users", value: users.length, detail: "Accounts in this organization" },
-          { title: "Active", value: activeUserCount, detail: "Enabled accounts" },
-          { title: "Administrators", value: privilegedUserCount, detail: "Admins and super admins" },
-          { title: "Disabled", value: disabledUserCount, detail: "Access currently disabled" },
+          { title: "Total Users", value: userStats.total, detail: "Accounts in this organization" },
+          { title: "Active", value: userStats.active, detail: "Enabled accounts" },
+          { title: "Administrators", value: userStats.privileged, detail: "Admins and super admins" },
+          { title: "Disabled", value: userStats.disabled, detail: "Access currently disabled" },
         ].map(({ title, value, detail }) => (
           <Card key={title} className="gap-0 py-0">
             <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
@@ -979,11 +969,12 @@ export default function UsersPage() {
 
       <div className="dashboard-motion-item dashboard-motion-delay-3">
       <DashboardDataTable
-        data={filteredUsers}
+        data={users}
         columns={columns}
         pageSize={PAGE_SIZE}
         minWidth="950px"
-        resetKey={`${search}:${roleFilter}:${statusFilter}`}
+        resetKey={`${search}:${roleFilter}:${statusFilter}:${pageIndex}`}
+        serverPagination={{ pageIndex, pageCount, onPageChange: setPageIndex }}
         emptyState="No users found."
       />
       </div>

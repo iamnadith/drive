@@ -326,6 +326,7 @@ export function ensureProjectOperationsSchema(): Promise<void> {
   await queryDb(`create index if not exists drive_project_api_events_project_time_idx on drive_project_api_events (project_id, occurred_at desc);`)
   await queryDb(`create index if not exists drive_project_api_events_key_time_idx on drive_project_api_events (api_key_id, occurred_at desc);`)
   await queryDb(`create index if not exists drive_project_api_events_action_time_idx on drive_project_api_events (action, occurred_at desc);`)
+  await queryDb(`create index if not exists drive_project_api_events_occurred_id_idx on drive_project_api_events (occurred_at desc, id desc);`)
   await queryDb(`
     create index if not exists drive_project_api_events_recent_objects_idx
       on drive_project_api_events (project_id, action, occurred_at desc, object_key)
@@ -974,136 +975,122 @@ export async function getProjectApiUsage(input: {
   await ensureProjectOperationsSchema()
   const limit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 50)))
   const params: unknown[] = []
-  const clauses: string[] = []
+  const filterClauses: string[] = []
   const add = (value: unknown) => {
     params.push(value)
     return `$${params.length}`
   }
 
-  if (input.projectId) clauses.push(`p.project_id = ${add(input.projectId)}`)
-  if (input.action) clauses.push(`e.action = ${add(input.action)}`)
-  if (input.outcome) clauses.push(`e.outcome = ${add(input.outcome)}`)
-  if (input.from) clauses.push(`e.occurred_at >= ${add(input.from)}::timestamptz`)
-  if (input.to) clauses.push(`e.occurred_at <= ${add(input.to)}::timestamptz`)
-  if (input.cursor) clauses.push(`(e.occurred_at, e.id) < (${add(input.cursor.split("|")[0])}::timestamptz, ${add(input.cursor.split("|")[1])}::uuid)`)
-  const where = clauses.length ? `where ${clauses.join(" and ")}` : ""
+  if (input.projectId) filterClauses.push(`p.project_id = ${add(input.projectId)}`)
+  if (input.action) filterClauses.push(`e.action = ${add(input.action)}`)
+  if (input.outcome) filterClauses.push(`e.outcome = ${add(input.outcome)}`)
+  if (input.from) filterClauses.push(`e.occurred_at >= ${add(input.from)}::timestamptz`)
+  if (input.to) filterClauses.push(`e.occurred_at <= ${add(input.to)}::timestamptz`)
+  const filterWhere = filterClauses.length ? `where ${filterClauses.join(" and ")}` : ""
+  const pageClauses = [...filterClauses]
+  if (input.cursor) {
+    const [timestamp, id, ...rest] = input.cursor.split("|")
+    if (rest.length || !timestamp || !id || !Number.isFinite(Date.parse(timestamp)) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      throw new Error("Invalid API usage pagination cursor")
+    }
+    pageClauses.push(`(e.occurred_at, e.id) < (${add(timestamp)}::timestamptz, ${add(id)}::uuid)`)
+  }
+  const pageWhere = pageClauses.length ? `where ${pageClauses.join(" and ")}` : ""
+  const limitParam = add(limit + 1)
 
-  const summary = await queryDb<{
+  const { rows } = await queryDb<{
     total: string
     success: string
     failed: string
     rate_limited: string
     unique_keys: string
     unique_projects: string
-  }>(
-    `
-      select
-        count(*)::bigint as total,
-        count(*) filter (where e.outcome = 'success')::bigint as success,
-        count(*) filter (where e.outcome = 'failed')::bigint as failed,
-        count(*) filter (where e.status = 429)::bigint as rate_limited,
-        count(distinct e.api_key_id)::bigint as unique_keys,
-        count(distinct e.project_id)::bigint as unique_projects
+    by_action: Array<{ action: string; count: string }>
+    by_project: Array<{ projectId: string | null; name: string | null; count: string }>
+    has_more: boolean
+    events: Array<{
+      id: string
+      occurredAt: string
+      action: string
+      objectKey: string | null
+      status: number | null
+      outcome: string
+      ipAddress: string | null
+      userAgent: string | null
+      requestId: string | null
+      metadata: Record<string, unknown> | null
+      projectId: string | null
+      projectName: string | null
+      keyName: string | null
+      keyPrefix: string | null
+    }>
+  }>(`
+    with filtered_events as materialized (
+      select e.action,e.outcome,e.status,e.api_key_id,e.project_id,p.project_id as project_identifier,p.name as project_name
       from drive_project_api_events e
-      left join drive_projects p on p.id = e.project_id
-      ${where};
-    `,
-    params
-  )
-
-  const byAction = await queryDb<{ action: string; count: string }>(
-    `
-      select e.action, count(*)::bigint as count
+      left join drive_projects p on p.id=e.project_id
+      ${filterWhere}
+    ),
+    summary as (
+      select count(*)::bigint as total,
+        count(*) filter (where outcome='success')::bigint as success,
+        count(*) filter (where outcome='failed')::bigint as failed,
+        count(*) filter (where status=429)::bigint as rate_limited,
+        count(distinct api_key_id)::bigint as unique_keys,
+        count(distinct project_id)::bigint as unique_projects
+      from filtered_events
+    ),
+    action_totals as (
+      select action,count(*)::bigint as count from filtered_events group by action order by count(*) desc limit 20
+    ),
+    project_totals as (
+      select project_identifier as "projectId",project_name as name,count(*)::bigint as count
+      from filtered_events group by project_identifier,project_name order by count(*) desc limit 20
+    ),
+    event_rows as (
+      select e.id,e.occurred_at,e.action,e.object_key,e.status,e.outcome,e.ip_address,e.user_agent,e.request_id,e.metadata,
+        p.project_id,p.name as project_name,k.name as key_name,k.key_prefix,
+        row_number() over (order by e.occurred_at desc,e.id desc) as page_rank
       from drive_project_api_events e
-      left join drive_projects p on p.id = e.project_id
-      ${where}
-      group by e.action
-      order by count(*) desc
-      limit 20;
-    `,
-    params
-  )
+      left join drive_projects p on p.id=e.project_id
+      left join drive_project_api_keys k on k.id=e.api_key_id
+      ${pageWhere}
+      order by e.occurred_at desc,e.id desc
+      limit ${limitParam}
+    )
+    select summary.total::text,summary.success::text,summary.failed::text,summary.rate_limited::text,
+      summary.unique_keys::text,summary.unique_projects::text,
+      coalesce((select jsonb_agg(jsonb_build_object('action',action,'count',count) order by count desc) from action_totals),'[]'::jsonb) as by_action,
+      coalesce((select jsonb_agg(jsonb_build_object('projectId',"projectId",'name',name,'count',count) order by count desc) from project_totals),'[]'::jsonb) as by_project,
+      coalesce((select jsonb_agg(jsonb_build_object(
+        'id',id,'occurredAt',occurred_at,'action',action,'objectKey',object_key,'status',status,'outcome',outcome,
+        'ipAddress',ip_address,'userAgent',user_agent,'requestId',request_id,'metadata',metadata,
+        'projectId',project_id,'projectName',project_name,'keyName',key_name,'keyPrefix',key_prefix
+      ) order by occurred_at desc,id desc) from event_rows where page_rank <= ${limit}),'[]'::jsonb) as events,
+      ((select count(*) from event_rows) > ${limit}) as has_more
+    from summary
+  `, params)
 
-  const byProject = await queryDb<{ project_id: string | null; name: string | null; count: string }>(
-    `
-      select p.project_id, p.name, count(*)::bigint as count
-      from drive_project_api_events e
-      left join drive_projects p on p.id = e.project_id
-      ${where}
-      group by p.project_id, p.name
-      order by count(*) desc
-      limit 20;
-    `,
-    params
-  )
-
-  const eventParams = [...params, limit + 1]
-  const events = await queryDb<{
-    id: string
-    occurred_at: string
-    action: string
-    object_key: string | null
-    status: number | null
-    outcome: string
-    ip_address: string | null
-    user_agent: string | null
-    request_id: string | null
-    metadata: Record<string, unknown> | null
-    project_id: string | null
-    project_name: string | null
-    key_name: string | null
-    key_prefix: string | null
-  }>(
-    `
-      select
-        e.id, e.occurred_at, e.action, e.object_key, e.status, e.outcome,
-        e.ip_address, e.user_agent, e.request_id, e.metadata,
-        p.project_id, p.name as project_name,
-        k.name as key_name, k.key_prefix
-      from drive_project_api_events e
-      left join drive_projects p on p.id = e.project_id
-      left join drive_project_api_keys k on k.id = e.api_key_id
-      ${where}
-      order by e.occurred_at desc, e.id desc
-      limit $${eventParams.length};
-    `,
-    eventParams
-  )
-
-  const pageRows = events.rows.slice(0, limit)
+  const row = rows[0]
+  const pageRows = row?.events ?? []
   const last = pageRows[pageRows.length - 1]
   return {
     summary: {
-      total: Number(summary.rows[0]?.total ?? 0),
-      success: Number(summary.rows[0]?.success ?? 0),
-      failed: Number(summary.rows[0]?.failed ?? 0),
-      rateLimited: Number(summary.rows[0]?.rate_limited ?? 0),
-      uniqueKeys: Number(summary.rows[0]?.unique_keys ?? 0),
-      uniqueProjects: Number(summary.rows[0]?.unique_projects ?? 0),
+      total: Number(row?.total ?? 0),
+      success: Number(row?.success ?? 0),
+      failed: Number(row?.failed ?? 0),
+      rateLimited: Number(row?.rate_limited ?? 0),
+      uniqueKeys: Number(row?.unique_keys ?? 0),
+      uniqueProjects: Number(row?.unique_projects ?? 0),
     },
-    byAction: byAction.rows.map((row) => ({ action: row.action, count: Number(row.count) })),
-    byProject: byProject.rows.map((row) => ({
-      projectId: row.project_id ?? "unknown",
-      name: row.name ?? "Unknown project",
-      count: Number(row.count),
+    byAction: (row?.by_action ?? []).map((item) => ({ action: item.action, count: Number(item.count) })),
+    byProject: (row?.by_project ?? []).map((item) => ({
+      projectId: item.projectId ?? "unknown",
+      name: item.name ?? "Unknown project",
+      count: Number(item.count),
     })),
-    events: pageRows.map((row) => ({
-      id: row.id,
-      occurredAt: row.occurred_at,
-      action: row.action,
-      objectKey: row.object_key ?? undefined,
-      status: row.status ?? undefined,
-      outcome: row.outcome,
-      ipAddress: row.ip_address ?? undefined,
-      userAgent: row.user_agent ?? undefined,
-      requestId: row.request_id ?? undefined,
-      metadata: row.metadata ?? undefined,
-      projectId: row.project_id ?? undefined,
-      projectName: row.project_name ?? undefined,
-      keyName: row.key_name ?? undefined,
-      keyPrefix: row.key_prefix ?? undefined,
-    })),
-    nextCursor: events.rows.length > limit && last ? `${last.occurred_at}|${last.id}` : null,
+    events: pageRows,
+    nextCursor: row?.has_more && last ? `${last.occurredAt}|${last.id}` : null,
     generatedAt: new Date().toISOString(),
   }
 }

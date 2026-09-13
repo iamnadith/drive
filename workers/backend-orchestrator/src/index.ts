@@ -113,13 +113,9 @@ function runtimeConfig(env: Env): RuntimeConfig {
 }
 
 function dbClient(connectionString: string, disablePostgresSsl: boolean) {
-  const host = (() => {
-    try { return new URL(connectionString).hostname.toLowerCase() } catch { return "" }
-  })()
-  const isSupabase = host.endsWith(".supabase.com")
   return new Client({
     connectionString,
-    ssl: isSupabase || disablePostgresSsl ? false : { rejectUnauthorized: false },
+    ssl: disablePostgresSsl ? false : { rejectUnauthorized: false },
     connectionTimeoutMillis: 10_000,
     query_timeout: 20_000,
     statement_timeout: 20_000,

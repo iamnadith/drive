@@ -210,9 +210,116 @@ export function toPublicUser(user: User): PublicUser {
   return rest
 }
 
-export async function getAllUsers(): Promise<User[]> {
-  const { rows } = await queryDb<DriveUserRow>(`select * from public.drive_users order by created_at asc, id asc`)
-  return rows.map(mapRow)
+export async function listUsersPage(input: {
+  query?: string
+  role?: UserRole
+  status?: UserStatus
+  page?: number
+  limit?: number
+  currentUserId?: string
+}) {
+  const limit = Math.max(1, Math.min(100, Math.floor(input.limit ?? 10)))
+  const requestedPage = Number.isFinite(input.page) ? Math.floor(input.page!) : 0
+  const page = Math.max(0, Math.min(1_000_000_000, requestedPage))
+  const offset = page * limit
+  const values: unknown[] = []
+  const conditions: string[] = []
+  const add = (value: unknown) => {
+    values.push(value)
+    return `$${values.length}`
+  }
+  const term = input.query?.trim()
+  if (term) {
+    const pattern = add(`%${term}%`)
+    conditions.push(`(name ilike ${pattern} or email ilike ${pattern} or coalesce(username, '') ilike ${pattern})`)
+  }
+  if (input.role) conditions.push(`role = ${add(input.role)}`)
+  if (input.status) conditions.push(`status = ${add(input.status)}`)
+  const predicate = conditions.length ? conditions.join(" and ") : "true"
+  const where = `where ${predicate}`
+  const limitParam = add(limit)
+  add(input.currentUserId ?? null)
+  const currentUserIndex = values.length
+
+  const { rows } = await queryDb<{
+    total: string
+    filtered_total: string
+    active: string
+    disabled: string
+    privileged: string
+    active_superadmins: string
+    users: PublicUser[]
+  }>(`
+    with current_match as materialized (
+      select id
+      from public.drive_users
+      where id=$${currentUserIndex}::uuid and ${predicate}
+      limit 1
+    ),
+    stats as (
+      select count(*)::bigint as total,
+        count(*) filter (where ${predicate})::bigint as filtered_total,
+        count(*) filter (where status='active')::bigint as active,
+        count(*) filter (where status='disabled')::bigint as disabled,
+        count(*) filter (where role in ('admin','superadmin'))::bigint as privileged,
+        count(*) filter (where role='superadmin' and status='active')::bigint as active_superadmins
+      from public.drive_users
+    ),
+    pinned_rows as (
+      select u.id,u.name,u.first_name,u.last_name,u.username,u.email,u.role,u.status,
+        u.quota_limit_mb,u.quota_used_mb,u.profile_image_url,u.google_linked,u.email_verified,
+        u.email_verified_at,u.mobile_number,u.mobile_verified,u.mobile_verified_at,
+        u.password_source,u.two_factor_enabled,u.totp_enabled,u.created_at as page_created_at
+      from public.drive_users u
+      join current_match using (id)
+      where ${page} = 0
+    ),
+    regular_rows as (
+      select u.id,u.name,u.first_name,u.last_name,u.username,u.email,u.role,u.status,
+        u.quota_limit_mb,u.quota_used_mb,u.profile_image_url,u.google_linked,u.email_verified,
+        u.email_verified_at,u.mobile_number,u.mobile_verified,u.mobile_verified_at,
+        u.password_source,u.two_factor_enabled,u.totp_enabled,u.created_at as page_created_at
+      from public.drive_users u
+      ${where}
+        and not exists (select 1 from current_match where current_match.id=u.id)
+      order by u.created_at asc,u.id asc
+      limit greatest(0,${limitParam} - case when ${page} = 0 then (select count(*) from current_match) else 0 end)
+      offset greatest(0,${offset} - case when exists(select 1 from current_match) then 1 else 0 end)
+    ),
+    page_rows as (
+      select * from pinned_rows
+      union all
+      select * from regular_rows
+    )
+    select stats.total::text,stats.filtered_total::text,stats.active::text,stats.disabled::text,stats.privileged::text,stats.active_superadmins::text,
+      coalesce(jsonb_agg(jsonb_build_object(
+        'id',page_rows.id,'name',page_rows.name,'firstName',page_rows.first_name,
+        'lastName',page_rows.last_name,'username',page_rows.username,'email',page_rows.email,
+        'role',page_rows.role,'status',page_rows.status,'quotaLimitMb',page_rows.quota_limit_mb,
+        'quotaUsedMb',page_rows.quota_used_mb,'profileImageUrl',page_rows.profile_image_url,
+        'googleLinked',page_rows.google_linked,'emailVerified',page_rows.email_verified,
+        'emailVerifiedAt',page_rows.email_verified_at,'mobileNumber',page_rows.mobile_number,
+        'mobileVerified',page_rows.mobile_verified,'mobileVerifiedAt',page_rows.mobile_verified_at,
+        'passwordSource',page_rows.password_source,'twoFactorEnabled',page_rows.two_factor_enabled,
+        'totpEnabled',page_rows.totp_enabled
+      ) order by (page_rows.id=$${currentUserIndex}::uuid) desc,page_rows.page_created_at asc,page_rows.id asc)
+      filter (where page_rows.id is not null),'[]'::jsonb) as users
+    from stats left join page_rows on true
+    group by stats.total,stats.filtered_total,stats.active,stats.disabled,stats.privileged,stats.active_superadmins
+  `, values)
+
+  const row = rows[0]
+  return {
+    users: row?.users ?? [],
+    total: Number(row?.filtered_total ?? 0),
+    allUsers: Number(row?.total ?? 0),
+    active: Number(row?.active ?? 0),
+    disabled: Number(row?.disabled ?? 0),
+    privileged: Number(row?.privileged ?? 0),
+    activeSuperadmins: Number(row?.active_superadmins ?? 0),
+    page,
+    limit,
+  }
 }
 
 export async function hasAnyUsers(): Promise<boolean> {
@@ -474,26 +581,11 @@ export async function deleteUser(id: string): Promise<void> {
   await queryDb(`delete from public.drive_users where id = $1`, [id])
 }
 
-export async function searchUsers(
-  query?: string,
-  role?: UserRole
-): Promise<User[]> {
-  const values: unknown[] = []
-  const conditions: string[] = []
-  if (role) {
-    values.push(role)
-    conditions.push(`role = $${values.length}`)
-  }
-  const term = query?.trim()
-  if (term) {
-    values.push(`%${term}%`)
-    const parameter = `$${values.length}`
-    conditions.push(`(name ilike ${parameter} or email ilike ${parameter} or coalesce(username, '') ilike ${parameter} or role ilike ${parameter} or status ilike ${parameter})`)
-  }
-  const where = conditions.length ? `where ${conditions.join(" and ")}` : ""
-  const { rows } = await queryDb<DriveUserRow>(
-    `select * from public.drive_users ${where} order by created_at asc, id asc`,
-    values
-  )
-  return rows.map(mapRow)
+export async function getUserSummary() {
+  const { rows } = await queryDb<{ total: string; active: string }>(`
+    select count(*)::text as total,
+      count(*) filter (where status='active')::text as active
+    from public.drive_users
+  `)
+  return { total: Number(rows[0]?.total ?? 0), active: Number(rows[0]?.active ?? 0) }
 }

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
 const assert = require("node:assert/strict")
 const fs = require("node:fs")
 const path = require("node:path")
@@ -7,7 +8,7 @@ const root = path.join(__dirname, "..")
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8")
 
 test("bucket assignments allow the same bucket across multiple projects", () => {
-  for (const relativePath of ["src/lib/projects-store.ts", "src/lib/db.ts", "supabase/drive_schema.sql"]) {
+  for (const relativePath of ["src/lib/db.ts", "supabase/drive_schema.sql"]) {
     const source = read(relativePath)
     assert.match(source, /drop index if exists drive_project_bucket_assignments_bucket_key/i)
     assert.doesNotMatch(
@@ -16,6 +17,7 @@ test("bucket assignments allow the same bucket across multiple projects", () => 
     )
     assert.doesNotMatch(source, /create unique index[^;]*drive_projects_bucket_name_key/i)
   }
+  assert.match(read("src/lib/projects-store.ts"), /export async function ensureProjectSchema\(\) \{\s+await ensureDriveSchema\(\)/)
 })
 
 test("shared bucket policy resolution considers every assigned project", () => {
@@ -76,8 +78,9 @@ test("background reconciliation is durable and skips provider writes when the ma
 
 test("shared bucket access and delivery rules are isolated by Cloudflare account", () => {
   const projectsStore = read("src/lib/projects-store.ts")
+  const db = read("src/lib/db.ts")
   const storageRoute = read("src/app/storage/[bucket]/[...key]/route.ts")
-  assert.match(projectsStore, /account_id uuid references drive_accounts\(id\)/i)
+  assert.match(db, /account_id uuid references drive_accounts\(id\)/i)
   assert.match(projectsStore, /where assignment\.account_id = \$1 and assignment\.bucket_name = \$2/i)
   assert.match(projectsStore, /where a\.account_id = \$1 and a\.bucket_name = \$2/i)
   assert.match(storageRoute, /listProjectsUsingBucket\(active\.id, bucket\)/)

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import type { QueryResultRow } from "pg"
 
-import { getAllAccounts } from "@/lib/accounts-store"
+import { listDashboardAccountSummaries } from "@/lib/accounts-store"
 import { listAgents, type DriveAgent, type DriveAgentRun } from "@/lib/agents-store"
 import {
   listMigrations,
@@ -11,7 +11,7 @@ import {
 import { getMergedBucketSnapshot } from "@/lib/migration-bucket-state"
 import { type DriveRepairJob } from "@/lib/repair-jobs-store"
 import { queryDb } from "@/lib/db"
-import { getAllUsers, type User } from "@/lib/users-store"
+import { getUserSummary } from "@/lib/users-store"
 import { requireAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
@@ -111,15 +111,17 @@ function dateKey(value: string | Date): string {
 }
 
 function earliestDate(values: Array<string | undefined | null>): Date {
-  const times = values
-    .map((value) => (value ? Date.parse(value) : Number.NaN))
-    .filter(Number.isFinite)
-  if (times.length === 0) {
+  let earliest = Number.POSITIVE_INFINITY
+  for (const value of values) {
+    const time = value ? Date.parse(value) : Number.NaN
+    if (Number.isFinite(time) && time < earliest) earliest = time
+  }
+  if (!Number.isFinite(earliest)) {
     const today = new Date()
     today.setUTCHours(0, 0, 0, 0)
     return today
   }
-  const date = new Date(Math.min(...times))
+  const date = new Date(earliest)
   date.setUTCHours(0, 0, 0, 0)
   return date
 }
@@ -259,9 +261,8 @@ async function buildAnalyticsPayload(range: RangeKey) {
 
   const warnings: string[] = []
 
-  const migrations = await capture("migrations", warnings, () => listMigrations(100), [] as DriveMigration[])
-
   const [
+    migrations,
     accounts,
     users,
     agents,
@@ -273,11 +274,12 @@ async function buildAnalyticsPayload(range: RangeKey) {
     verifyDiffCount,
   ] =
     await Promise.all([
+      capture("migrations", warnings, () => listMigrations(100), [] as DriveMigration[]),
       // Current-account identity and bucket totals are critical. If either
       // read fails, reject the refresh so the client retains its last known
       // payload instead of replacing current KPIs with misleading zeros.
-      getAllAccounts(),
-      capture("users", warnings, getAllUsers, [] as User[]),
+      listDashboardAccountSummaries(),
+      capture("users", warnings, getUserSummary, { total: 0, active: 0 }),
       capture("workers", warnings, listAgents, [] as Array<DriveAgent & { latestRun: DriveAgentRun | null }>),
       capture(
         "repair jobs",
@@ -457,9 +459,41 @@ async function buildAnalyticsPayload(range: RangeKey) {
   // marked unknown so fixed chart ranges can render them as zero without
   // confusing them with a real zero-value snapshot.
   const logicalStorageByDay = new Map<string, (typeof activeAccountSeries)[number] | undefined>()
+  const createdMigrationsByDay = new Map<string, number>()
+  const completedMigrationsByDay = new Map<string, number>()
+  const itemMetricsByDay = new Map<string, { transferred: number; failed: number; verifyIssues: number }>()
+  const activeRepairsByDay = new Map<string, number>()
+  for (const migration of migrations) {
+    const createdDay = dateKey(migration.createdAt)
+    createdMigrationsByDay.set(createdDay, (createdMigrationsByDay.get(createdDay) ?? 0) + 1)
+    if (migration.completedAt) {
+      const completedDay = dateKey(migration.completedAt)
+      completedMigrationsByDay.set(completedDay, (completedMigrationsByDay.get(completedDay) ?? 0) + 1)
+    }
+  }
+  for (const item of itemRowsAsItems) {
+    const anchor = item.lastProgressAt || item.updatedAt || item.createdAt
+    const timestamp = anchor ? Date.parse(anchor) : Number.NaN
+    if (!Number.isFinite(timestamp)) continue
+    const key = dateKey(anchor!)
+    const metrics = itemMetrics(item)
+    const daily = itemMetricsByDay.get(key) ?? { transferred: 0, failed: 0, verifyIssues: 0 }
+    itemMetricsByDay.set(key, {
+      transferred: daily.transferred + metrics.transferred,
+      failed: daily.failed + metrics.failed,
+      verifyIssues: daily.verifyIssues + metrics.verifyIssues,
+    })
+  }
+  for (const job of repairJobs) {
+    if (!["pending", "claimed", "running"].includes(job.status)) continue
+    const anchor = job.updatedAt || job.createdAt
+    if (!anchor || !Number.isFinite(Date.parse(anchor))) continue
+    const key = dateKey(anchor)
+    activeRepairsByDay.set(key, (activeRepairsByDay.get(key) ?? 0) + 1)
+  }
+  let cumulativeTransfer = { transferred: 0, failed: 0, verifyIssues: 0 }
   let logicalStorageIndex = -1
   const series = dayKeys.map((day) => {
-    const dayEnd = Date.parse(`${day}T23:59:59.999Z`)
     while (
       logicalStorageIndex + 1 < activeAccountSeries.length &&
       activeAccountSeries[logicalStorageIndex + 1].date <= day
@@ -471,38 +505,24 @@ async function buildAnalyticsPayload(range: RangeKey) {
     logicalStorageByDay.set(day, logicalStoragePoint)
     const storageBytes = logicalStoragePoint?.storageBytes ?? 0
     const objects = logicalStoragePoint?.objects ?? 0
-    const createdMigrations = migrations.filter((m) => dateKey(m.createdAt) === day).length
-    const completedMigrations = migrations.filter((m) => m.completedAt && dateKey(m.completedAt) === day).length
-    const knownItems = itemRowsAsItems.filter((item) => {
-      const anchor = item.lastProgressAt || item.updatedAt || item.createdAt
-      const updatedAt = anchor ? Date.parse(anchor) : Number.NaN
-      return Number.isFinite(updatedAt) && updatedAt <= dayEnd
-    })
-    const transfer = knownItems.reduce(
-      (sum, item) => {
-        const metrics = itemMetrics(item)
-        return {
-          transferred: sum.transferred + metrics.transferred,
-          failed: sum.failed + metrics.failed,
-          verifyIssues: sum.verifyIssues + metrics.verifyIssues,
-        }
-      },
-      { transferred: 0, failed: 0, verifyIssues: 0 }
-    )
-    const activeRepairs = repairJobs.filter((job) => {
-      const anchor = job.updatedAt || job.createdAt
-      return anchor && dateKey(anchor) === day && ["pending", "claimed", "running"].includes(job.status)
-    }).length
+    const delta = itemMetricsByDay.get(day)
+    if (delta) {
+      cumulativeTransfer = {
+        transferred: cumulativeTransfer.transferred + delta.transferred,
+        failed: cumulativeTransfer.failed + delta.failed,
+        verifyIssues: cumulativeTransfer.verifyIssues + delta.verifyIssues,
+      }
+    }
     return {
       date: day,
       storageBytes,
       objects,
-      createdMigrations,
-      completedMigrations,
-      transferredObjects: transfer.transferred,
-      failedObjects: transfer.failed,
-      verifyIssues: transfer.verifyIssues,
-      activeRepairs,
+      createdMigrations: createdMigrationsByDay.get(day) ?? 0,
+      completedMigrations: completedMigrationsByDay.get(day) ?? 0,
+      transferredObjects: cumulativeTransfer.transferred,
+      failedObjects: cumulativeTransfer.failed,
+      verifyIssues: cumulativeTransfer.verifyIssues,
+      activeRepairs: activeRepairsByDay.get(day) ?? 0,
     }
   })
   const dailyStorageSeries = series.map((point) => {
@@ -646,8 +666,8 @@ async function buildAnalyticsPayload(range: RangeKey) {
       buckets: totalBuckets,
       accounts: accounts.length,
       activeAccounts: accounts.filter((account) => account.status === "active").length,
-      users: users.length,
-      activeUsers: users.filter((user) => user.status === "active").length,
+      users: users.total,
+      activeUsers: users.active,
       migrations: migrations.length,
       activeMigrations: activeMigrationCount,
       failedMigrations: failedMigrationCount,

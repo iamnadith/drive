@@ -180,6 +180,39 @@ export async function getActiveAccount(): Promise<CloudflareAccount | null> {
   return row ? mapRow(row) : null
 }
 
+export async function getActiveAccountId(): Promise<string | null> {
+  const { rows } = await queryDb<{ id: string }>(`select id from public.${ACCOUNTS_TABLE} where status='active' limit 1`)
+  return rows[0]?.id ?? null
+}
+
+export type DashboardAccountSummary = Pick<CloudflareAccount,
+  "id" | "label" | "email" | "createdAt" | "cloudflareAccountId" | "status" | "totalBuckets" | "totalObjects" | "totalBytes" | "lastSyncedAt" | "syncStatus" | "syncMessage"
+>
+
+export async function listDashboardAccountSummaries(): Promise<DashboardAccountSummary[]> {
+  const { rows } = await queryDb<Pick<DriveAccountRow,
+    "id" | "label" | "email" | "created_at" | "cloudflare_account_id" | "status" | "total_buckets" | "total_objects" | "total_bytes" | "last_synced_at" | "sync_status" | "sync_message"
+  >>(`
+    select id,label,email,created_at,cloudflare_account_id,status,total_buckets,total_objects,total_bytes,last_synced_at,sync_status,sync_message
+    from public.${ACCOUNTS_TABLE}
+    order by created_at asc,id asc
+  `)
+  return rows.map((row) => ({
+    id: row.id,
+    label: row.label,
+    email: row.email,
+    status: row.status,
+    createdAt: row.created_at,
+    cloudflareAccountId: row.cloudflare_account_id ?? undefined,
+    totalBuckets: Math.max(0, Number(row.total_buckets) || 0),
+    totalObjects: Math.max(0, Number(row.total_objects) || 0),
+    totalBytes: Math.max(0, Number(row.total_bytes) || 0),
+    lastSyncedAt: row.last_synced_at ?? undefined,
+    syncStatus: row.sync_status ?? undefined,
+    syncMessage: row.sync_message ?? undefined,
+  }))
+}
+
 export async function createAccount(input: {
   label: string
   email: string

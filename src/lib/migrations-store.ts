@@ -223,49 +223,30 @@ export async function listMigrationsByAccount(
 
 export async function getMigration(id: string): Promise<DriveMigration | null> {
   const { rows } = await queryDb<DriveMigrationRow>(
-    `select * from public.${MIGRATIONS_TABLE} where id = $1 limit 1`,
+    `
+      select migration.*,
+        case when migration.status='completed' and migration.summary_item_count=0
+          then coalesce(legacy_summary.item_count,0)::integer else migration.summary_item_count end as summary_item_count,
+        case when migration.status='completed' and migration.summary_item_count=0
+          then coalesce(legacy_summary.summary_objects,0)::bigint else migration.summary_objects end as summary_objects,
+        case when migration.status='completed' and migration.summary_item_count=0
+          then coalesce(legacy_summary.summary_bytes,0)::bigint else migration.summary_bytes end as summary_bytes
+      from public.${MIGRATIONS_TABLE} migration
+      left join lateral (
+        select count(*) as item_count,
+          coalesce(sum(source_objects),0) as summary_objects,
+          coalesce(sum(source_bytes),0) as summary_bytes
+        from public.${MIGRATION_ITEMS_TABLE}
+        where migration_id=migration.id
+      ) legacy_summary on migration.status='completed' and migration.summary_item_count=0
+      where migration.id=$1
+      limit 1
+    `,
     [id]
   )
   const row = rows[0]
   if (!row) return null
-  const migration = mapMigrationRow(row)
-  // Older completed migrations may have valid item rows but zero summary
-  // columns because summaries were introduced after completion. Repair the
-  // projection lazily so detail/history routes do not display false zeroes.
-  if (migration.status === "completed" && migration.summaryItemCount === 0) {
-    const { rows: summaries } = await queryDb<{
-      summary_item_count: string | number
-      summary_objects: string | number
-      summary_bytes: string | number
-    }>(
-      `select count(*) as summary_item_count,
-         coalesce(sum(source_objects), 0) as summary_objects,
-         coalesce(sum(source_bytes), 0) as summary_bytes
-       from public.${MIGRATION_ITEMS_TABLE} where migration_id = $1`,
-      [id]
-    )
-    const summaryRow = summaries[0]
-    if (Number(summaryRow?.summary_item_count ?? 0) > 0) {
-      const summary = {
-        summary_item_count: nonNegativeInteger(summaryRow.summary_item_count),
-        summary_objects: nonNegativeInteger(summaryRow.summary_objects),
-        summary_bytes: nonNegativeInteger(summaryRow.summary_bytes),
-      }
-      await queryDb(
-        `update public.${MIGRATIONS_TABLE}
-         set summary_item_count = $2, summary_objects = $3, summary_bytes = $4
-         where id = $1 and summary_item_count = 0`,
-        [id, summary.summary_item_count, summary.summary_objects, summary.summary_bytes]
-      )
-      return {
-        ...migration,
-        summaryItemCount: summary.summary_item_count,
-        summaryObjects: summary.summary_objects,
-        summaryBytes: summary.summary_bytes,
-      }
-    }
-  }
-  return migration
+  return mapMigrationRow(row)
 }
 
 export async function listMigrationItems(migrationId: string): Promise<DriveMigrationItem[]> {

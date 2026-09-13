@@ -15,7 +15,7 @@ function disablePostgresSsl() {
 export async function GET(request: Request) {
   const auth = await authenticateMigrationOrchestrator(request, "file")
   if (!auth.ok) return NextResponse.json({ error: "Invalid File Scanner secret" }, { status: 401 })
-  const postgresUrl = (process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL || "").trim()
+  const postgresUrl = (process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL || process.env.POSTGRES_URL_NON_POOLING || "").trim()
   if (!postgresUrl) return NextResponse.json({ error: "Panel PostgreSQL URL is not configured" }, { status: 503 })
   const panelOrigin = (process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL || new URL(request.url).origin).replace(/\/+$/, "")
   await queryDb(`insert into drive_app_settings(key,value,updated_at) values('orchestration-panel-origin',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`, [JSON.stringify({ panelOrigin })])

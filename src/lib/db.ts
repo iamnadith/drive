@@ -1,7 +1,7 @@
 import { Pool } from "pg"
 import type { PoolClient, QueryResultRow } from "pg"
 
-const DRIVE_SCHEMA_VERSION = 2026091303
+const DRIVE_SCHEMA_VERSION = 2026091402
 
 declare global {
   var __drivePgPool: Pool | undefined
@@ -281,6 +281,7 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(
         `create unique index if not exists drive_users_username_key on drive_users (username) where username is not null;`
       )
+      await queryDb(`create index if not exists drive_users_created_id_idx on drive_users (created_at, id);`)
       await queryDb(`alter table if exists drive_users add column if not exists email_verified boolean not null default true;`)
       await queryDb(`alter table if exists drive_users add column if not exists email_verified_at timestamptz;`)
       await queryDb(`alter table if exists drive_users add column if not exists two_factor_enabled boolean not null default false;`)
@@ -745,6 +746,7 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(`create index if not exists drive_project_api_events_project_time_idx on drive_project_api_events (project_id, occurred_at desc);`)
       await queryDb(`create index if not exists drive_project_api_events_key_time_idx on drive_project_api_events (api_key_id, occurred_at desc);`)
       await queryDb(`create index if not exists drive_project_api_events_action_time_idx on drive_project_api_events (action, occurred_at desc);`)
+      await queryDb(`create index if not exists drive_project_api_events_occurred_id_idx on drive_project_api_events (occurred_at desc, id desc);`)
 
       await queryDb(`
         create table if not exists drive_project_object_inventory (
