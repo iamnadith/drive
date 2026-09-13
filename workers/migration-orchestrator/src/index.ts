@@ -636,8 +636,8 @@ async function ensureSuperSlurperInventory(db: Client, migration: Row) {
     await db.query(`
       update drive_migration_items set
         slurper_status=case when $2 then case when slurper_status='scanning' then 'queued' else coalesce(slurper_status,'queued') end else 'scanning' end,
-        source_objects=case when $2 then $3 else source_objects end,
-        source_bytes=case when $2 then $4 else source_bytes end,
+        source_objects=$3,
+        source_bytes=$4,
         progress=$5::jsonb,last_progress_at=now(),updated_at=now()
       where id=$1
     `, [item.id, completed, scan.objects || 0, scan.bytes || 0, JSON.stringify({
@@ -645,6 +645,8 @@ async function ensureSuperSlurperInventory(db: Client, migration: Row) {
       stage: completed ? "scan_completed" : "scanning_source",
       sourceScanId: scan.id,
       sourceScanStatus: scanStatus,
+      sourceScanObjects: Number(scan.objects || 0),
+      sourceScanBytes: Number(scan.bytes || 0),
       ...(completed ? { error: null, lastError: null } : {}),
       events: appendMigrationEvent(progress, "source_scan", completed ? "completed" : "running", completed ? `File Scanner indexed ${Number(scan.objects || 0).toLocaleString()} source objects` : `File Scanner is scanning ${item.source_bucket}`),
     })])

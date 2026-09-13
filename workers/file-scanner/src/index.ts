@@ -242,12 +242,12 @@ async function processTask(db: Client, env: Env, task: Row) {
   const bytesColumn = phase === "source" ? "source_bytes" : "destination_bytes"
   if (page.truncated) {
     if (!page.cursor || page.cursor === cursor) throw new Error("R2 returned a truncated page without a forward cursor")
-    await db.query(`update drive_bucket_scans set objects=(select count(*) from drive_bucket_scan_objects where scan_id=$1),bytes=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$1),last_key=$2,updated_at=now() where id=$1`, [scanId, page.objects.at(-1)?.key || null])
+    await db.query(`update drive_bucket_scans set objects=(select count(*) from drive_bucket_scan_objects where scan_id=$1 and not is_dir_marker),bytes=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$1 and not is_dir_marker),last_key=$2,updated_at=now() where id=$1`, [scanId, page.objects.at(-1)?.key || null])
     const advanced = await db.query(`update drive_migration_verification_state set ${cursorColumn}=$2,${objectsColumn}=(select count(*) from drive_bucket_scan_objects where scan_id=$3 and not is_dir_marker),${bytesColumn}=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$3 and not is_dir_marker),status='pending',lease_owner=null,lease_expires_at=null,updated_at=now() where migration_item_id=$1 and generation=$4 and lease_owner=$5`, [task.migration_item_id, page.cursor, scanId, task.generation, task.lease_owner])
     if (!advanced.rowCount) throw new Error("File Scanner task lease was lost")
     return { itemId: task.migration_item_id, phase, pageObjects: objects, continued: true }
   }
-  await db.query(`update drive_bucket_scans set status='completed',objects=(select count(*) from drive_bucket_scan_objects where scan_id=$1),bytes=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$1),last_key=$2,completed_at=now(),updated_at=now() where id=$1`, [scanId, page.objects.at(-1)?.key || null])
+  await db.query(`update drive_bucket_scans set status='completed',objects=(select count(*) from drive_bucket_scan_objects where scan_id=$1 and not is_dir_marker),bytes=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$1 and not is_dir_marker),last_key=$2,completed_at=now(),updated_at=now() where id=$1`, [scanId, page.objects.at(-1)?.key || null])
   const advanced = await db.query(`update drive_migration_verification_state set ${cursorColumn}=null,${objectsColumn}=(select count(*) from drive_bucket_scan_objects where scan_id=$2 and not is_dir_marker),${bytesColumn}=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$2 and not is_dir_marker),phase=$3,status='pending',lease_owner=null,lease_expires_at=null,updated_at=now() where migration_item_id=$1 and generation=$4 and lease_owner=$5`, [task.migration_item_id, scanId, phase === "source" ? "destination" : "compare", task.generation, task.lease_owner])
   if (!advanced.rowCount) throw new Error("File Scanner task lease was lost")
   if (phase === "source") return { itemId: task.migration_item_id, phase, pageObjects: objects, continued: false }
@@ -260,13 +260,24 @@ async function processGenericScan(db: Client, env: Env, task: Row) {
   await storePage(db, task.id, page.objects)
   if (page.truncated && (!page.cursor || page.cursor === task.cursor)) throw new Error("R2 returned a truncated page without a forward cursor")
   const updated = await db.query(`
-    update drive_bucket_scans set cursor=$2,status=$3,objects=(select count(*) from drive_bucket_scan_objects where scan_id=$1),
-      bytes=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$1),last_key=$4,
+    update drive_bucket_scans set cursor=$2,status=$3,objects=(select count(*) from drive_bucket_scan_objects where scan_id=$1 and not is_dir_marker),
+      bytes=(select coalesce(sum(size),0) from drive_bucket_scan_objects where scan_id=$1 and not is_dir_marker),last_key=$4,
       lease_owner=null,lease_expires_at=null,completed_at=case when $3='completed' then now() else completed_at end,updated_at=now()
-    where id=$1 and lease_owner=$5 returning objects,bytes,status
+    where id=$1 and lease_owner=$5 returning id,migration_id,migration_item_id,kind,objects,bytes,status
   `, [task.id, page.truncated ? page.cursor : null, page.truncated ? "pending" : "completed", page.objects.at(-1)?.key || task.last_key || null, task.lease_owner])
   if (!updated.rowCount) throw new Error("File Scanner generic scan lease was lost")
-  return { scanId: task.id, phase: "inventory", pageObjects: page.objects.length, continued: page.truncated, ...updated.rows[0] }
+  const scan = updated.rows[0]
+  if (scan.kind === "source" && scan.migration_id && scan.migration_item_id) {
+    await db.query(`
+      update drive_migration_items set source_objects=$2,source_bytes=$3,
+        progress=coalesce(progress,'{}'::jsonb)||jsonb_build_object(
+          'sourceScanId',$4,'sourceScanStatus',$5,'sourceScanObjects',$2,'sourceScanBytes',$3,
+          'stage',case when $5='completed' then 'scan_completed' else 'scanning_source' end
+        ),last_progress_at=now(),updated_at=now()
+      where id=$1 and migration_id=$6
+    `, [scan.migration_item_id, scan.objects, scan.bytes, scan.id, scan.status === "completed" ? "completed" : "running", scan.migration_id])
+  }
+  return { scanId: task.id, phase: "inventory", pageObjects: page.objects.length, continued: page.truncated, ...scan }
 }
 async function finishState(db: Client, owner: string, result: Row, error?: string) {
   await db.query(`update drive_file_scanner_state set status=$1,lease_owner=null,last_completed_at=now(),last_error=$2,last_result=$3::jsonb,cycle_count=cycle_count+1,updated_at=now() where id=true and lease_owner=$4`, [error ? "error" : "idle", error || null, JSON.stringify(result), owner])

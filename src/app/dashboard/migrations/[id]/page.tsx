@@ -1764,6 +1764,7 @@ export default function MigrationDetailsPage() {
         const item = row.original
         const progress = isRecord(item.progress) ? item.progress : {}
         const scanComplete = progress.sourceScanStatus === "completed"
+        const scanInProgress = progress.sourceScanStatus === "running" || progress.sourceScanStatus === "pending"
         const snapshot = getBucketSnapshot(item)
         const repairState = readRepairWorkerState(progress)
         const repairItem = latestRepairItemsById.get(item.id)
@@ -1775,15 +1776,18 @@ export default function MigrationDetailsPage() {
             : snapshot.displayStatus
         const hasKnownEmpty = typeof item.sourceObjects === "number" && item.sourceObjects === 0 &&
           getEffectiveSourceBytes(item, repairItem, repairState) === 0
+        const scannedObjects = typeof progress.sourceScanObjects === "number" ? progress.sourceScanObjects : undefined
         const total = displayStatus === "no_files" || hasKnownEmpty
           ? 0
-          : snapshot.total > 0 || scanComplete
+          : scanInProgress && scannedObjects !== undefined
+            ? scannedObjects
+            : snapshot.total > 0 || scanComplete
             ? snapshot.total
             : undefined
         return (
           <span
             className="font-mono text-xs"
-            title={scanComplete ? "Total from Supabase bucket scan (authoritative)" : displayStatus === "scanning" ? "Scanning source bucket… totals will appear when scan completes" : "Total"}
+            title={scanComplete ? "Total from File Scanner (authoritative)" : scanInProgress ? "Live partial count from File Scanner; updates as pages are scanned" : "Total"}
           >
             {typeof total === "number" ? formatNumber(total) : "—"}
           </span>
@@ -1798,8 +1802,12 @@ export default function MigrationDetailsPage() {
         const item = row.original
         const progress = isRecord(item.progress) ? item.progress : {}
         const scanComplete = progress.sourceScanStatus === "completed"
+        const scanInProgress = progress.sourceScanStatus === "running" || progress.sourceScanStatus === "pending"
         const repairState = readRepairWorkerState(progress)
-        const sourceBytes = getEffectiveSourceBytes(item, latestRepairItemsById.get(item.id), repairState)
+        const scannedBytes = typeof progress.sourceScanBytes === "number" ? progress.sourceScanBytes : undefined
+        const sourceBytes = scanInProgress && scannedBytes !== undefined
+          ? scannedBytes
+          : getEffectiveSourceBytes(item, latestRepairItemsById.get(item.id), repairState)
         const snapshot = getBucketSnapshot(item)
         const settingsSync = isRecord(progress.settingsSync) ? progress.settingsSync : null
         const displayStatus = settingsSync?.status === "syncing"
@@ -1807,7 +1815,7 @@ export default function MigrationDetailsPage() {
           : settingsSync?.status === "failed"
             ? "settings_failed"
             : snapshot.displayStatus
-        return <span className="font-mono text-xs">{displayStatus === "no_files" ? "0 B" : scanComplete || sourceBytes > 0 ? formatBytes(sourceBytes) : "—"}</span>
+        return <span className="font-mono text-xs" title={scanInProgress ? "Live partial size from File Scanner; updates as pages are scanned" : undefined}>{displayStatus === "no_files" ? "0 B" : scanComplete || scanInProgress || sourceBytes > 0 ? formatBytes(sourceBytes) : "—"}</span>
       },
     },
     {
