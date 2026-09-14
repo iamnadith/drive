@@ -270,7 +270,7 @@ export async function getMigrationDashboardBootstrap(limit = 50): Promise<Migrat
       order by created_at desc,id desc
       limit $1
     ), current_migration as (
-      select id from limited_migrations
+      select * from limited_migrations
       order by case status when 'running' then 0 when 'verifying' then 1 when 'draft' then 2 else 3 end,
         created_at desc,id desc
       limit 1
@@ -335,7 +335,7 @@ export async function getMigrationDashboardBootstrap(limit = 50): Promise<Migrat
           ) order by item.source_bucket asc,item.id asc
         )
         from public.drive_migration_items item
-        join current_migration chosen_migration on chosen_migration.id=item.migration_id
+        join current_migration migration on migration.id=item.migration_id
       ),'[]'::jsonb) as active_items
   `, [boundedLimit])
   const row = rows[0]

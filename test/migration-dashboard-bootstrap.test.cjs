@@ -81,6 +81,8 @@ test("migration list bootstrap reads safe account, migration, bucket and current
   assert.deepEqual(store.calls[0].params, [50])
   assert.match(store.calls[0].sql, /jsonb_agg/)
   assert.match(store.calls[0].sql, /current_migration/)
+  assert.match(store.calls[0].sql, /current_migration as \([\s\S]*?select \* from limited_migrations/)
+  assert.match(store.calls[0].sql, /join current_migration migration on migration\.id=item\.migration_id/)
   assert.match(store.calls[0].sql, /drive_bucket_stats/)
   assert.match(store.calls[0].sql, /drive_migration_items/)
   assert.doesNotMatch(store.calls[0].sql, /api_token|r2_secret_access_key|password/)
