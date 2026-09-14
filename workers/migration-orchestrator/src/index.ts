@@ -241,12 +241,77 @@ async function refreshSuperSlurperProgress(db: Client, migration: Row) {
     where id=$1 and status in('running','verifying')`, [migration.id, nextStatus])
   return { refreshed, scannerTasksQueued: verification.rowCount || 0, ...state }
 }
+async function ensureWorkerTargetBuckets(db: Client, migration: Row, generation: number) {
+  const accounts = await db.query(`select id,cloudflare_account_id,api_token from drive_accounts where id=$1 limit 1`, [migration.target_account_id])
+  const target = accounts.rows[0]
+  if (!target?.cloudflare_account_id || !target.api_token) throw new Error("Destination Cloudflare account or API token is missing")
+  const items = await db.query(`select id,target_bucket,source_jurisdiction,source_storage_class,slurper_status,progress
+    from drive_migration_items where migration_id=$1 order by created_at`, [migration.id])
+  const pending = items.rows.filter((item) =>
+    Number(item.progress?.workerTargetBucketGeneration) !== generation || item.slurper_status === "worker_bucket_create_failed"
+  )
+  if (!pending.length) return { checked: 0, failed: 0 }
+
+  const listBuckets = async () => {
+    const payload = await cloudflare(target, "/r2/buckets")
+    const buckets = Array.isArray(payload) ? payload : Array.isArray(payload?.buckets) ? payload.buckets : []
+    return new Set(buckets.map((bucket: Row) => String(bucket.name || "")))
+  }
+  const bucketNames = await listBuckets()
+  let failed = 0
+  for (const item of pending) {
+    if (!(await migrationIsActive(db, migration.id))) break
+    let errorMessage: string | null = null
+    if (!bucketNames.has(item.target_bucket)) {
+      try {
+        await cloudflare(target, "/r2/buckets", "POST", {
+          name: item.target_bucket,
+          ...( ["default", "eu", "fedramp"].includes(String(item.source_jurisdiction)) ? { jurisdiction: item.source_jurisdiction } : {}),
+          ...(item.source_storage_class ? { storageClass: item.source_storage_class } : {}),
+        })
+        bucketNames.add(item.target_bucket)
+      } catch (error) {
+        // Re-list after a create conflict so concurrent orchestrator cycles converge.
+        try {
+          const refreshed = await listBuckets()
+          if (refreshed.has(item.target_bucket)) bucketNames.add(item.target_bucket)
+          else errorMessage = error instanceof Error ? error.message : String(error)
+        } catch (refreshError) {
+          errorMessage = refreshError instanceof Error ? refreshError.message : String(refreshError)
+        }
+      }
+    }
+
+    if (errorMessage) {
+      failed += 1
+      await db.query(`update drive_migration_items set slurper_status='worker_bucket_create_failed',
+        progress=(coalesce(progress,'{}'::jsonb)||jsonb_build_object('stage','worker_bucket_create_failed','error',$3::text,'lastError',$3::text)),
+        last_progress_at=now(),updated_at=now()
+        where id=$1 and migration_id=$2 and exists(select 1 from drive_migrations where id=$2 and status in('running','verifying'))`,
+      [item.id, migration.id, errorMessage])
+      continue
+    }
+
+    await db.query(`update drive_migration_items set
+      slurper_status=case when slurper_status='worker_bucket_create_failed' then 'scanning' else slurper_status end,
+      progress=(coalesce(progress,'{}'::jsonb)-'error'-'lastError')||jsonb_build_object('workerTargetBucketGeneration',$3::int),
+      last_progress_at=now(),updated_at=now()
+      where id=$1 and migration_id=$2 and exists(select 1 from drive_migrations where id=$2 and status in('running','verifying'))`,
+    [item.id, migration.id, generation])
+  }
+  return { checked: pending.length, failed }
+}
+
 async function ensureShards(db: Client, migration: Row) {
   const generation = integer(opts(migration).workerGeneration, 1, 1, 1000000)
+  const targetBuckets = await ensureWorkerTargetBuckets(db, migration, generation)
+  if (targetBuckets.failed > 0) {
+    return { generation, shardCount: 0, created: 0, inventoryPending: 0, queuePending: 1, terminalFailure: false, targetBuckets }
+  }
   const items = await db.query(`select id,source_bucket,target_bucket,progress from drive_migration_items where migration_id=$1 and coalesce(slurper_status,'')<>'worker_bucket_create_failed' order by created_at`, [migration.id])
   if (!items.rowCount) {
     await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message='No migration buckets are available for worker processing',last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
-    return { generation, shardCount: 0, created: 0, inventoryPending: 0, terminalFailure: true }
+    return { generation, shardCount: 0, created: 0, inventoryPending: 0, terminalFailure: true, targetBuckets }
   }
   let inventoryPending = 0
   const scansByItem = new Map<string, Row>()
@@ -333,7 +398,7 @@ async function ensureShards(db: Client, migration: Row) {
   if (!shardCount) {
     await db.query(`update drive_migration_items set slurper_status='completed',source_objects=0,source_bytes=00,updated_at=now() where migration_id=$1`, [migration.id])
   }
-  return { generation, shardCount, created, inventoryPending: 0, queuePending: 0 }
+  return { generation, shardCount, created, inventoryPending: 0, queuePending: 0, targetBuckets }
 }
 
 async function migrationLiveState(db: Client, migrationId: string) {
@@ -1128,7 +1193,10 @@ async function cycle(env: Env) {
       // This message is intentionally independent of the worker fleet: a
       // queued job is not runnable until materialization has finished.
       if (shards.inventoryPending || shards.queuePending) {
-        await db.query(`update drive_migrations set sync_status='running',sync_message='Scanning source buckets and creating migration queue',last_synced_at=now(),updated_at=now() where id=$1 and status='running'`, [migration.id])
+        const syncMessage = shards.targetBuckets?.failed
+          ? "Waiting for Migration Orchestrator to prepare destination buckets"
+          : "Scanning source buckets and creating migration queue"
+        await db.query(`update drive_migrations set sync_status='running',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status='running'`, [migration.id, syncMessage])
       }
       await refreshWorkerItemProgress(db, migration, shards.generation)
       await ensureBucketVerification(db, migration, shards.generation)

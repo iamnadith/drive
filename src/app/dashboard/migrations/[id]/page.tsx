@@ -33,9 +33,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { DashboardDataTable } from "@/components/dashboard/data-table"
@@ -89,7 +87,7 @@ type Migration = {
   summaryItemCount: number
   summaryObjects: number
   summaryBytes: number
-  workerSummary: { workerRuns?: unknown[]; repairJobs?: unknown[] }
+  workerSummary: { workerRuns?: unknown[] }
   detailsCompactedAt?: string
 }
 
@@ -161,86 +159,6 @@ type FailedDiagnosticsBucket = {
   failures: FailedObjectDiagnostic[]
 }
 
-type WorkerOption = {
-  id: string
-  name: string
-  provider: "github_actions" | "self_hosted" | "local"
-  status: string
-  capabilities: string[]
-}
-
-type RepairJob = {
-  id: string
-  migrationId: string
-  requestedByAgentId?: string
-  claimedByAgentId?: string
-  status: "pending" | "claimed" | "running" | "completed" | "failed" | "canceled"
-  mode: "verify_only" | "repair_and_verify" | "migration"
-  payload: Record<string, unknown>
-  progress: Record<string, unknown>
-  result: Record<string, unknown>
-  summary?: string
-  error?: string
-  claimedAt?: string
-  startedAt?: string
-  completedAt?: string
-  lastHeartbeatAt?: string
-  createdAt: string
-  updatedAt: string
-}
-
-function readRepairTotals(job: RepairJob | null | undefined): {
-  transferred: number
-  failed: number
-  skipped: number
-  missing: number
-  mismatched: number
-} {
-  const resultTotals = job && isRecord(job.result) && isRecord(job.result.totals) ? (job.result.totals as Record<string, unknown>) : null
-  const progressTotals = job && isRecord(job.progress) && isRecord(job.progress.totals) ? (job.progress.totals as Record<string, unknown>) : null
-  const totals = resultTotals ?? progressTotals
-  const base = {
-    transferred: totals && typeof totals.transferred === "number" ? totals.transferred : 0,
-    failed: totals && typeof totals.failed === "number" ? totals.failed : 0,
-    skipped: totals && typeof totals.skipped === "number" ? totals.skipped : 0,
-    missing: totals && typeof totals.missing === "number" ? totals.missing : 0,
-    mismatched: totals && typeof totals.mismatched === "number" ? totals.mismatched : 0,
-  }
-
-  const itemTotals = readRepairItems(job).reduce<{
-    transferred: number
-    failed: number
-    skipped: number
-    missing: number
-    mismatched: number
-  }>(
-    (sum, item) => ({
-      transferred: sum.transferred + (typeof item.transferred === "number" ? item.transferred : 0),
-      failed: sum.failed + (typeof item.failed === "number" ? item.failed : 0),
-      skipped: sum.skipped + (typeof item.skipped === "number" ? item.skipped : 0),
-      missing: sum.missing + (typeof item.finalMissing === "number" ? item.finalMissing : 0),
-      mismatched: sum.mismatched + (typeof item.finalMismatched === "number" ? item.finalMismatched : 0),
-    }),
-    { transferred: 0, failed: 0, skipped: 0, missing: 0, mismatched: 0 }
-  )
-
-  return {
-    transferred: Math.max(base.transferred, itemTotals.transferred),
-    failed: Math.max(base.failed, itemTotals.failed),
-    skipped: Math.max(base.skipped, itemTotals.skipped),
-    missing: Math.max(base.missing, itemTotals.missing),
-    mismatched: Math.max(base.mismatched, itemTotals.mismatched),
-  }
-}
-
-function readRepairItems(job: RepairJob | null | undefined): Array<Record<string, unknown>> {
-  if (!job) return []
-  if (isRecord(job.result) && Array.isArray(job.result.items)) return job.result.items.filter(isRecord)
-  if (isRecord(job.progress) && Array.isArray(job.progress.itemProgress)) return job.progress.itemProgress.filter(isRecord)
-  if (isRecord(job.result) && Array.isArray(job.result.itemProgress)) return job.result.itemProgress.filter(isRecord)
-  return []
-}
-
 type MigrationWorkerRun = {
   id: string
   jobId?: string
@@ -261,10 +179,8 @@ type MigrationWorkerRun = {
 
 function getEffectiveSourceBytes(
   item: MigrationItem,
-  repairResultItem?: Record<string, unknown>,
   repairState?: ReturnType<typeof readRepairWorkerState> | null
 ): number {
-  if (repairResultItem && typeof repairResultItem.sourceBytes === "number") return repairResultItem.sourceBytes
   if (repairState?.details && typeof repairState.details.sourceBytes === "number") return Number(repairState.details.sourceBytes)
   return typeof item.sourceBytes === "number" ? item.sourceBytes : 0
 }
@@ -328,16 +244,6 @@ function statusBadge(
   return <Badge variant="outline">{s}</Badge>
 }
 
-function repairJobBadge(status: RepairJob["status"] | undefined) {
-  if (status === "completed") return <Badge className="bg-green-600">Worker completed</Badge>
-  if (status === "running") return <Badge className="bg-primary text-primary-foreground">Worker running</Badge>
-  if (status === "claimed") return <Badge className="bg-sky-600">Worker claimed</Badge>
-  if (status === "pending") return <Badge variant="secondary">Worker queued</Badge>
-  if (status === "failed") return <Badge className="bg-red-600">Worker failed</Badge>
-  if (status === "canceled") return <Badge variant="outline">Worker aborted</Badge>
-  return <Badge variant="outline">No worker run</Badge>
-}
-
 function migrationWorkerBadge(status: string | undefined) {
   const value = String(status || "").toLowerCase()
   if (value === "completed") return <Badge className="bg-green-600">Worker completed</Badge>
@@ -347,20 +253,6 @@ function migrationWorkerBadge(status: string | undefined) {
   if (value === "failed") return <Badge className="bg-red-600">Worker failed</Badge>
   if (value === "canceled" || value === "aborted") return <Badge variant="outline">Worker stopped</Badge>
   return <Badge variant="outline">{value || "Worker idle"}</Badge>
-}
-
-function formatRepairMode(mode: RepairJob["mode"] | string | undefined): string {
-  if (mode === "migration") return "Migration"
-  if (mode === "repair_and_verify") return "Repair and verify"
-  if (mode === "verify_only") return "Verify only"
-  if (mode === "repair_only") return "Repair only"
-  return String(mode || "-").replace(/_/g, " ")
-}
-
-function formatRepairStage(stage: string | undefined): string {
-  const value = String(stage || "").trim()
-  if (!value) return "-"
-  return value.replace(/_/g, " ")
 }
 
 function mergeIncomingItem(prev: MigrationItem | undefined, next: MigrationItem): MigrationItem {
@@ -780,16 +672,7 @@ export default function MigrationDetailsPage() {
   const [failedScope, setFailedScope] = React.useState<"single" | "all">("single")
   const [failedLoading, setFailedLoading] = React.useState(false)
   const [failedData, setFailedData] = React.useState<FailedDiagnosticsBucket[]>([])
-  const [workersOpen, setWorkersOpen] = React.useState(false)
-  const [workersLoading, setWorkersLoading] = React.useState(false)
-  const [workers, setWorkers] = React.useState<WorkerOption[]>([])
-  const [repairJobs, setRepairJobs] = React.useState<RepairJob[]>([])
   const [workerRuns, setWorkerRuns] = React.useState<MigrationWorkerRun[]>([])
-  const [selectedWorkerId, setSelectedWorkerId] = React.useState("")
-  const [selectedWorkerIds, setSelectedWorkerIds] = React.useState<string[]>([])
-  const [workerMode, setWorkerMode] = React.useState<"verify_only" | "repair_and_verify">("repair_and_verify")
-  const [dispatchingWorkerId, setDispatchingWorkerId] = React.useState<string | null>(null)
-  const [abortingRepairJobId, setAbortingRepairJobId] = React.useState<string | null>(null)
 
   const migrationLogsRef = React.useRef<HTMLDivElement | null>(null)
   const bucketLogsRef = React.useRef<HTMLDivElement | null>(null)
@@ -949,57 +832,7 @@ export default function MigrationDetailsPage() {
     el.scrollTop = el.scrollHeight
   }, [bucketLogLines.length, logsOpen])
 
-  const latestRepairJob = React.useMemo(() => {
-    if (repairJobs.length === 0) return null
-
-    const byUpdatedDesc = [...repairJobs].sort((a, b) => {
-      const at = Date.parse(a.updatedAt || a.createdAt || "")
-      const bt = Date.parse(b.updatedAt || b.createdAt || "")
-      if (Number.isFinite(at) && Number.isFinite(bt)) return bt - at
-      return String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || ""))
-    })
-
-    const active = byUpdatedDesc.find((job) =>
-      job.status === "running" || job.status === "claimed" || job.status === "pending"
-    )
-
-    return active ?? byUpdatedDesc[0] ?? null
-  }, [repairJobs])
-
-  const latestRepairItemsById = React.useMemo(() => {
-    const map = new Map<string, Record<string, unknown>>()
-    for (const item of readRepairItems(latestRepairJob)) {
-      const itemId = typeof item.itemId === "string" ? item.itemId : ""
-      if (!itemId) continue
-      map.set(itemId, item)
-    }
-    return map
-  }, [latestRepairJob])
-
-  const latestRepairItemIds = React.useMemo(() => {
-    const ids = new Set<string>()
-    const payloadItems =
-      isRecord(latestRepairJob?.payload) && Array.isArray(latestRepairJob.payload.items) ? latestRepairJob.payload.items : []
-    for (const raw of payloadItems) {
-      if (!isRecord(raw)) continue
-      const itemId = typeof raw.id === "string" ? raw.id : typeof raw.itemId === "string" ? raw.itemId : ""
-      if (itemId) ids.add(itemId)
-    }
-    for (const itemId of latestRepairItemsById.keys()) ids.add(itemId)
-    return ids
-  }, [latestRepairItemsById, latestRepairJob])
-
-  const getBucketSnapshot = React.useCallback(
-    (item: MigrationItem) =>
-      getMergedBucketSnapshot(item, latestRepairItemsById.get(item.id), {
-        latestRepairJobId: latestRepairJob?.id,
-        latestRepairJobStatus: latestRepairJob?.status,
-        repairAppliesToItem: latestRepairItemIds.has(item.id),
-        latestRepairJobExists: Boolean(latestRepairJob),
-        latestRepairItemCount: latestRepairItemIds.size,
-      }),
-    [latestRepairItemIds, latestRepairItemsById, latestRepairJob]
-  )
+  const getBucketSnapshot = React.useCallback((item: MigrationItem) => getMergedBucketSnapshot(item), [])
 
   const readBucketSettingsStatus = (item: MigrationItem): "syncing" | "synced" | "failed" | null => {
     const progress = isRecord(item.progress) ? item.progress : {}
@@ -1058,14 +891,13 @@ export default function MigrationDetailsPage() {
       const snapshot = getBucketSnapshot(item)
       const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
       const repairState = readRepairWorkerState(progress)
-      const repairResultItem = latestRepairItemsById.get(item.id)
       totalObjects += snapshot.total
       transferred += snapshot.transferred
       skipped += snapshot.skipped
       copyFailed += snapshot.failed
       rawUnaccounted += snapshot.unaccounted
       verifyIssues += snapshot.verifyIssues
-      totalBytes += getEffectiveSourceBytes(item, repairResultItem, repairState)
+      totalBytes += getEffectiveSourceBytes(item, repairState)
     }
 
     const resolvedTransferred = totalObjects > 0 ? Math.min(totalObjects, transferred) : transferred
@@ -1103,7 +935,7 @@ export default function MigrationDetailsPage() {
       unaccountedPct,
       totalBytes,
     }
-  }, [getBucketSnapshot, items, latestRepairItemsById, migration?.options?.manualCompleted, migration?.status])
+  }, [getBucketSnapshot, items, migration?.options?.manualCompleted, migration?.status])
 
   const overviewProgress = totals
   const hasActiveSuperSlurper = React.useMemo(
@@ -1180,13 +1012,10 @@ export default function MigrationDetailsPage() {
         isRecord(detailsJson) && isRecord(detailsJson.migration) ? (detailsJson.migration as Migration) : null
       const nextItems =
         isRecord(detailsJson) && Array.isArray(detailsJson.items) ? (detailsJson.items as MigrationItem[]) : []
-      const nextRepairJobs =
-        isRecord(detailsJson) && Array.isArray(detailsJson.repairJobs) ? (detailsJson.repairJobs as RepairJob[]) : []
       const nextWorkerRuns =
         isRecord(detailsJson) && Array.isArray(detailsJson.workerRuns) ? (detailsJson.workerRuns as MigrationWorkerRun[]) : []
       setMigration(nextMigration)
       setItems((prev) => mergeIncomingItems(prev, nextItems))
-      setRepairJobs(nextRepairJobs)
       setWorkerRuns(nextWorkerRuns)
     } catch (e: unknown) {
       const message =
@@ -1218,8 +1047,9 @@ export default function MigrationDetailsPage() {
         const json: unknown = await res.json().catch(() => ({}))
         const errorMessage = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to run action"
         if (!res.ok) throw new Error(errorMessage)
-        // Do not block UI on follow-up fetches; SSE snapshot will update state.
-        void fetch(`/api/migrations/${encodeURIComponent(id)}/sync`, { method: "POST" }).catch(() => {})
+        // The orchestrator owns worker execution; the panel only reloads the
+        // persisted projection after recording the requested action.
+        void loadInitial()
       } catch (e: unknown) {
         const message =
           typeof e === "object" && e !== null && "name" in e && String((e as { name?: unknown }).name) === "AbortError"
@@ -1232,7 +1062,7 @@ export default function MigrationDetailsPage() {
         setBusyAction(null)
       }
     },
-    [busyAction, id]
+    [busyAction, id, loadInitial]
   )
 
   React.useEffect(() => {
@@ -1262,7 +1092,6 @@ export default function MigrationDetailsPage() {
             const nextItems = data.items as MigrationItem[]
             setItems((prev) => mergeIncomingItems(prev, nextItems))
           }
-          if (isRecord(data) && Array.isArray(data.repairJobs)) setRepairJobs(data.repairJobs as RepairJob[])
           if (isRecord(data) && Array.isArray(data.workerRuns)) setWorkerRuns(data.workerRuns as MigrationWorkerRun[])
         } catch {
           // ignore
@@ -1532,129 +1361,6 @@ export default function MigrationDetailsPage() {
     [fetchFailedDiagnosticsForItem]
   )
 
-  const openWorkerDispatch = React.useCallback(async () => {
-    setWorkersLoading(true)
-    setError(null)
-    try {
-      const res = await fetch("/api/workers", { cache: "no-store" })
-      const json: unknown = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        const message = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to load workers"
-        throw new Error(message)
-      }
-      const rows =
-        isRecord(json) && Array.isArray(json.agents)
-          ? (json.agents as WorkerOption[]).filter(
-              (worker) =>
-                (migration?.options.executionMode === "migration_workers"
-                  ? worker.provider === "github_actions"
-                  : worker.provider === "github_actions" || worker.provider === "self_hosted" || worker.provider === "local") &&
-                Array.isArray(worker.capabilities) &&
-                worker.capabilities.includes(migration?.options.executionMode === "migration_workers" ? "bulk_migrate" : "repair")
-            )
-          : []
-      setWorkers(rows)
-      setSelectedWorkerId(rows[0]?.id ?? "")
-      setSelectedWorkerIds(rows.map((worker) => worker.id))
-      if (migration?.options.executionMode === "migration_workers") {
-        if (!migration.id || rows.length === 0) throw new Error("No registered migration workflows are available")
-        setDispatchingWorkerId(rows[0].id)
-        const res = await fetch(`/api/workers/${encodeURIComponent(rows[0].id)}/dispatch`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ migrationId: migration.id, mode: "migration", pool: true, poolAgentIds: rows.map((worker) => worker.id) }),
-        })
-        const result: unknown = await res.json().catch(() => ({}))
-        if (!res.ok) throw new Error(isRecord(result) && typeof result.error === "string" ? result.error : "Unable to dispatch migration workflows")
-        await loadInitial()
-      } else {
-        setWorkersOpen(true)
-      }
-    } catch (e: unknown) {
-      const message =
-        typeof e === "object" && e !== null && "message" in e
-          ? String((e as { message?: unknown }).message ?? "Unable to load workers")
-          : "Unable to load workers"
-      setError(message)
-      setWorkers([])
-      setSelectedWorkerId("")
-      setSelectedWorkerIds([])
-    } finally {
-      setWorkersLoading(false)
-      setDispatchingWorkerId(null)
-    }
-  }, [loadInitial, migration])
-
-  const dispatchMigrationWorker = React.useCallback(async () => {
-    const workerIds = migration?.options.executionMode === "migration_workers"
-      ? selectedWorkerIds
-      : selectedWorkerId
-        ? [selectedWorkerId]
-        : []
-    if (!migration?.id || workerIds.length === 0) return
-    setDispatchingWorkerId(workerIds[0] ?? null)
-    setError(null)
-    try {
-      const dispatchIds = migration.options.executionMode === "migration_workers" ? workerIds.slice(0, 1) : workerIds
-      await Promise.all(dispatchIds.map(async (workerId) => {
-        const res = await fetch(`/api/workers/${encodeURIComponent(workerId)}/dispatch`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            migrationId: migration.id,
-            mode: migration.options.executionMode === "migration_workers" ? "migration" : workerMode,
-            pool: migration.options.executionMode === "migration_workers",
-            poolAgentIds: migration.options.executionMode === "migration_workers" ? workerIds : undefined,
-          }),
-        })
-        const json: unknown = await res.json().catch(() => ({}))
-        if (!res.ok) {
-          const message = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to dispatch worker"
-          throw new Error(message)
-        }
-      }))
-      setWorkersOpen(false)
-      await loadInitial()
-    } catch (e: unknown) {
-      const message =
-        typeof e === "object" && e !== null && "message" in e
-          ? String((e as { message?: unknown }).message ?? "Unable to dispatch worker")
-          : "Unable to dispatch worker"
-      setError(message)
-    } finally {
-      setDispatchingWorkerId(null)
-    }
-  }, [loadInitial, migration?.id, migration?.options.executionMode, selectedWorkerId, selectedWorkerIds, workerMode])
-
-  const abortRepairJob = React.useCallback(
-    async (jobId: string) => {
-      setAbortingRepairJobId(jobId)
-      setError(null)
-      try {
-        const res = await fetch(`/api/repair-jobs/${encodeURIComponent(jobId)}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "abort" }),
-        })
-        const json: unknown = await res.json().catch(() => ({}))
-        if (!res.ok) {
-          const message = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to abort worker job"
-          throw new Error(message)
-        }
-        await loadInitial()
-      } catch (e: unknown) {
-        const message =
-          typeof e === "object" && e !== null && "message" in e
-            ? String((e as { message?: unknown }).message ?? "Unable to abort worker job")
-            : "Unable to abort worker job"
-        setError(message)
-      } finally {
-        setAbortingRepairJobId(null)
-      }
-    },
-    [loadInitial]
-  )
-
   if (initialLoading) {
     return (
       <div className="space-y-6">
@@ -1683,7 +1389,7 @@ export default function MigrationDetailsPage() {
   }
 
   const historyReadOnly = getMigrationReadOnlyState(migration)
-  const missingHistoricalDetails = historyReadOnly.readOnly && items.length === 0 && repairJobs.length === 0
+  const missingHistoricalDetails = historyReadOnly.readOnly && items.length === 0
 
   const sourceLabel = accountLabelById.get(migration.sourceAccountId) ?? migration.sourceAccountId
   const targetLabel = accountLabelById.get(migration.targetAccountId) ?? migration.targetAccountId
@@ -1739,7 +1445,6 @@ export default function MigrationDetailsPage() {
         const scanInProgress = progress.sourceScanStatus === "running" || progress.sourceScanStatus === "pending"
         const snapshot = getBucketSnapshot(item)
         const repairState = readRepairWorkerState(progress)
-        const repairItem = latestRepairItemsById.get(item.id)
         const settingsSync = isRecord(progress.settingsSync) ? progress.settingsSync : null
         const displayStatus = settingsSync?.status === "syncing"
           ? "settings_syncing"
@@ -1747,7 +1452,7 @@ export default function MigrationDetailsPage() {
             ? "settings_failed"
             : snapshot.displayStatus
         const hasKnownEmpty = typeof item.sourceObjects === "number" && item.sourceObjects === 0 &&
-          getEffectiveSourceBytes(item, repairItem, repairState) === 0
+          getEffectiveSourceBytes(item, repairState) === 0
         const scannedObjects = typeof progress.sourceScanObjects === "number" ? progress.sourceScanObjects : undefined
         const total = displayStatus === "no_files" || hasKnownEmpty
           ? 0
@@ -1779,7 +1484,7 @@ export default function MigrationDetailsPage() {
         const scannedBytes = typeof progress.sourceScanBytes === "number" ? progress.sourceScanBytes : undefined
         const sourceBytes = scanInProgress && scannedBytes !== undefined
           ? scannedBytes
-          : getEffectiveSourceBytes(item, latestRepairItemsById.get(item.id), repairState)
+          : getEffectiveSourceBytes(item, repairState)
         const snapshot = getBucketSnapshot(item)
         const settingsSync = isRecord(progress.settingsSync) ? progress.settingsSync : null
         const displayStatus = settingsSync?.status === "syncing"
@@ -2034,7 +1739,7 @@ export default function MigrationDetailsPage() {
                     </Button>
                   ) : null}
 
-                  {workerPoolMigration && (hasVerificationFailure || allBucketsTerminal || ["completed", "failed"].includes(String(effectiveMigrationStatus))) ? (
+                  {workerPoolMigration && effectiveMigrationStatus !== "completed" && (hasVerificationFailure || overviewProgress.verifyIssues > 0) ? (
                     <Button
                       onClick={() => void runMigrationAction("verify_all")}
                       loading={busyAction === "verify_all"}
@@ -2046,7 +1751,9 @@ export default function MigrationDetailsPage() {
                     </Button>
                   ) : null}
 
-                  {workerPoolMigration && (failedBuckets.length > 0 || overviewProgress.verifyIssues > 0 || effectiveMigrationStatus === "failed") ? (
+                  {(workerPoolMigration
+                    ? failedBuckets.length > 0 || overviewProgress.verifyIssues > 0 || effectiveMigrationStatus === "failed"
+                    : items.length > 0 && migration.status !== "draft" && (migration.status !== "completed" || failedBuckets.length > 0 || overviewProgress.verifyIssues > 0) && !hasActiveSuperSlurper) ? (
                     <Button
                       onClick={() => void runMigrationAction("repair_migration")}
                       loading={busyAction === "repair_migration"}
@@ -2054,19 +1761,9 @@ export default function MigrationDetailsPage() {
                       variant="outline"
                     >
                       {busyAction !== "repair_migration" ? <RefreshCw className="h-4 w-4 mr-0" /> : null}
-                      Repair
+                      {workerPoolMigration ? "Repair" : "Repair with worker pool"}
                     </Button>
                   ) : null}
-
-                  <Button
-                    onClick={() => void openWorkerDispatch()}
-                    disabled={Boolean(busyAction) || hasActiveSuperSlurper}
-                    variant="outline"
-                    title={hasActiveSuperSlurper ? "Wait for Super Slurper to finish before running a worker" : "Run with worker"}
-                  >
-                    <Play className="h-4 w-4 mr-0" />
-                    {workerPoolMigration ? "Dispatch workers" : "Run with worker"}
-                  </Button>
 
                   {!workerPoolMigration && !allBucketsTerminal && anyRunning ? (
                     <Button
@@ -2190,91 +1887,6 @@ export default function MigrationDetailsPage() {
         })()
       ) : null}
 
-      {latestRepairJob ? (
-        <Card className="gap-2">
-          <CardHeader className="pb-1">
-            <div className="space-y-1">
-                <CardTitle>Worker Overview</CardTitle>
-              <CardDescription>Latest worker reconciliation run for this migration.</CardDescription>
-            </div>
-          </CardHeader>
-          <CardContent className="pt-0">
-            {(() => {
-              const job = latestRepairJob
-              const progress = isRecord(job.progress) ? job.progress : {}
-              const currentBucket = typeof progress.currentBucket === "string" ? progress.currentBucket : ""
-              const stage = typeof progress.stage === "string" ? progress.stage : ""
-              const isActive = job.status === "running" || job.status === "claimed" || job.status === "pending"
-              const summaryText = job.error || job.summary || "Open the job details page for item progress, logs, and repair results."
-
-              return (
-                <div
-                  className={cn(
-                    "overflow-hidden rounded-2xl border text-sm",
-                    isActive ? "border-primary/30 bg-primary/[0.04]" : "bg-muted/15"
-                  )}
-                >
-                  <div className="flex flex-col gap-4 border-b px-4 py-4 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="min-w-0 flex-1 space-y-3">
-                      <div className="flex flex-wrap items-center gap-2">
-                        {repairJobBadge(job.status)}
-                        <Badge variant="outline">{formatRepairMode(job.mode)}</Badge>
-                        <span className="text-xs text-muted-foreground">Updated {formatDate(job.lastHeartbeatAt || job.updatedAt)}</span>
-                      </div>
-                      <div className="space-y-1">
-                        <div className="font-mono text-[11px] text-muted-foreground">{job.id}</div>
-                        <div className={cn("text-sm leading-relaxed", job.error ? "text-red-200" : "text-muted-foreground")}>{summaryText}</div>
-                      </div>
-                    </div>
-
-                    <div className="flex w-full items-start justify-end lg:w-auto">
-                      <div className="flex flex-wrap gap-2">
-                        {!["completed", "failed", "canceled"].includes(job.status) ? (
-                          <Button
-                            variant="outline"
-                            loading={abortingRepairJobId === job.id}
-                            disabled={abortingRepairJobId === job.id}
-                            onClick={() => void abortRepairJob(job.id)}
-                          >
-                            {abortingRepairJobId !== job.id ? <Square className="h-4 w-4 mr-0" /> : null}
-                            Abort
-                          </Button>
-                        ) : null}
-                        <Button
-                          variant="outline"
-                          onClick={() => router.push(`/dashboard/migrations/${encodeURIComponent(id)}/jobs/${encodeURIComponent(job.id)}`)}
-                        >
-                          Details
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-px bg-border sm:grid-cols-3 lg:grid-cols-4">
-                    <div className="bg-background/80 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Worker</div>
-                      <div className="mt-1 truncate font-medium">{job.claimedByAgentId || job.requestedByAgentId || "-"}</div>
-                    </div>
-                    <div className="bg-background/80 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Stage</div>
-                      <div className="mt-1 font-medium">{formatRepairStage(stage)}</div>
-                    </div>
-                    <div className="bg-background/80 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Bucket</div>
-                      <div className="mt-1 truncate font-medium">{currentBucket || "-"}</div>
-                    </div>
-                    <div className="bg-background/80 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Started</div>
-                      <div className="mt-1 font-medium">{formatDate(job.startedAt || job.createdAt)}</div>
-                    </div>
-                  </div>
-                </div>
-              )
-            })()}
-          </CardContent>
-        </Card>
-      ) : null}
-
       <DashboardDataTable
         data={items}
         columns={bucketColumns}
@@ -2282,7 +1894,7 @@ export default function MigrationDetailsPage() {
         minWidth="980px"
         emptyState={
           migration.detailsCompactedAt
-            ? `Detailed records were compacted. Summary retained: ${migration.summaryObjects.toLocaleString()} objects, ${formatBytes(migration.summaryBytes)}, ${migration.workerSummary?.workerRuns?.length ?? 0} worker runs, and ${migration.workerSummary?.repairJobs?.length ?? 0} repair jobs.`
+            ? `Detailed records were compacted. Summary retained: ${migration.summaryObjects.toLocaleString()} objects, ${formatBytes(migration.summaryBytes)}, and ${migration.workerSummary?.workerRuns?.length ?? 0} worker runs.`
             : "No bucket data stored for this migration."
         }
         resetKey={migration.id}
@@ -2813,70 +2425,6 @@ export default function MigrationDetailsPage() {
                 </div>
               )}
             </ScrollArea>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={workersOpen} onOpenChange={setWorkersOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{migration.options.executionMode === "migration_workers" ? "Dispatch migration workers" : "Run with worker"}</DialogTitle>
-            <DialogDescription>
-              {migration.options.executionMode === "migration_workers"
-                ? "Dispatch the selected workflow capacity. Each worker claims independent files from the scanner-built migration queue."
-                : "Run a worker across all buckets. It scans every bucket, repairs what it can, then verifies destination against source bucket-by-bucket before completion."}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label>{migration.options.executionMode === "migration_workers" ? "Workers" : "Worker"}</Label>
-              {migration.options.executionMode === "migration_workers" ? (
-                <div className="max-h-48 space-y-2 overflow-auto rounded-md border p-3">
-                  {workers.map((worker) => {
-                    const checked = selectedWorkerIds.includes(worker.id)
-                    return (
-                      <label key={worker.id} className="flex cursor-pointer items-center gap-3 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => setSelectedWorkerIds((prev) => checked ? prev.filter((id) => id !== worker.id) : [...prev, worker.id])}
-                        />
-                        <span className="min-w-0 flex-1 truncate">{worker.name}</span>
-                        <span className="text-xs text-muted-foreground">{worker.provider.replace("_", " ")}</span>
-                      </label>
-                    )
-                  })}
-                  {workers.length === 0 && !workersLoading ? <p className="text-xs text-muted-foreground">No compatible workers are configured.</p> : null}
-                </div>
-              ) : (
-                <Select value={selectedWorkerId} onValueChange={setSelectedWorkerId} disabled={workersLoading || workers.length === 0}>
-                  <SelectTrigger>
-                    <SelectValue placeholder={workersLoading ? "Loading workers..." : "Select worker"} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {workers.map((worker) => (
-                      <SelectItem key={worker.id} value={worker.id}>{worker.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-            </div>
-            {migration.options.executionMode !== "migration_workers" ? <div className="space-y-2">
-              <Label>Mode</Label>
-              <Select value={workerMode} onValueChange={(value) => setWorkerMode(value as typeof workerMode)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="repair_and_verify">Repair and verify</SelectItem>
-                  <SelectItem value="verify_only">Verify only</SelectItem>
-                </SelectContent>
-              </Select>
-            </div> : null}
-            <Button className="w-full" loading={Boolean(dispatchingWorkerId)} disabled={workersLoading || (migration.options.executionMode === "migration_workers" ? selectedWorkerIds.length === 0 : !selectedWorkerId) || Boolean(dispatchingWorkerId)} onClick={() => void dispatchMigrationWorker()}>
-              {!dispatchingWorkerId ? <Play className="h-4 w-4 mr-0" /> : null}
-              {migration.options.executionMode === "migration_workers" ? `Dispatch ${selectedWorkerIds.length || ""} worker${selectedWorkerIds.length === 1 ? "" : "s"}` : "Dispatch worker"}
-            </Button>
           </div>
         </DialogContent>
       </Dialog>

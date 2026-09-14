@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server"
 import { deleteMigration, getMigration, listMigrationItems } from "@/lib/migrations-store"
-import { listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
 import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
 import { listMigrationWorkerRuns } from "@/lib/migration-worker-runs"
@@ -22,15 +21,13 @@ export async function GET(
     // Read the persisted migration projection. Synchronization is owned by the
     // orchestrator and must not delay every page/detail read.
     const readOnly = getMigrationReadOnlyState(migration)
-    const usesLegacyProjection = migration.options.executionMode !== "migration_workers"
-    const [items, repairJobs, workerRuns, accountSummaries] = await Promise.all([
+    const [items, workerRuns, accountSummaries] = await Promise.all([
       listMigrationItems(id),
-      usesLegacyProjection ? listRepairJobsByMigration(id, 20).catch(() => []) : Promise.resolve([]),
-      usesLegacyProjection ? Promise.resolve([]) : listMigrationWorkerRuns(id).catch(() => []),
+      migration.options.executionMode === "migration_workers" ? listMigrationWorkerRuns(id).catch(() => []) : Promise.resolve([]),
       listDashboardAccountSummaries().catch(() => []),
     ])
     const accounts = accountSummaries.map(({ id: accountId, label, email, status }) => ({ id: accountId, label, email, status }))
-    return NextResponse.json({ migration, items, repairJobs: repairJobs.filter((job) => job.mode !== "migration"), workerRuns, accounts, historyReadOnly: readOnly }, { status: 200 })
+    return NextResponse.json({ migration, items, workerRuns, accounts, historyReadOnly: readOnly }, { status: 200 })
   } catch (error: unknown) {
     const message =
       typeof error === "object" && error !== null && "message" in error

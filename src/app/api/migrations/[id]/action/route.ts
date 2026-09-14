@@ -27,6 +27,10 @@ function isTerminalSlurperStatus(value: string | undefined): boolean {
   return ["completed", "complete", "finished", "success", "succeeded", "failed", "aborted", "verification_failed", "copy_completed", "copy_failed", "copy_aborted", "no_files", "bucket_create_failed", "precheck_failed"].includes(normalizeStatus(value))
 }
 
+function isActiveSlurperStatus(value: string | undefined): boolean {
+  return ["queued", "pending", "creating_job", "job_id_pending", "running", "scanning", "verifying"].includes(normalizeStatus(value))
+}
+
 function abortedProgress(item: { progress: Record<string, unknown> }, stage: string, status: "requested" | "confirmed" | "unconfirmed", at: string, error?: string) {
   const live = isRecord(item.progress.live) ? item.progress.live : {}
   return {
@@ -82,6 +86,19 @@ async function wakeMigrationService(kind: "scanner" | "orchestrator"): Promise<v
     signal: AbortSignal.timeout(10_000),
   })
   if (!response.ok) throw new Error(`${kind === "scanner" ? "File Scanner" : "Migration Orchestrator"} wake-up returned HTTP ${response.status}`)
+}
+
+async function waitForOrchestratorCycleToRelease(migrationId: string): Promise<boolean> {
+  const deadline = Date.now() + 5_000
+  while (Date.now() < deadline) {
+    const result = await queryDb<{ lease_owner: string | null; lease_expires_at: string | null; last_migration_id: string | null }>(
+      `select lease_owner,lease_expires_at,last_migration_id from drive_migration_orchestrator_state where id=true limit 1`
+    )
+    const state = result.rows[0]
+    if (!state?.lease_owner || state.last_migration_id !== migrationId || !state.lease_expires_at || Date.parse(state.lease_expires_at) <= Date.now()) return true
+    await sleep(400)
+  }
+  return false
 }
 
 function normalizeGitHubRunTerminalStatus(status: string, conclusion: string): "completed" | "failed" | "canceled" | "running" {
@@ -289,8 +306,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
     const readOnly = getMigrationReadOnlyState(migration)
     const workerMaintenanceAction =
-      migration.options.executionMode === "migration_workers" &&
-      (action === "verify_all" || action === "repair_migration")
+      (migration.options.executionMode === "migration_workers" && action === "verify_all") || action === "repair_migration"
     if (readOnly.readOnly && !workerMaintenanceAction) {
       return NextResponse.json({ error: `Migration history is read-only: ${readOnly.reason}` }, { status: 409 })
     }
@@ -620,41 +636,70 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     if (action === "repair_migration") {
-      if (migration.options.executionMode !== "migration_workers") {
-        return NextResponse.json({ error: "Fleet repair is only available for worker-pool migrations" }, { status: 409 })
+      if (migration.status === "draft") return NextResponse.json({ error: "Start the migration before repairing it with the worker pool" }, { status: 409 })
+      if (migration.options.executionMode !== "migration_workers" && items.some((item) => isActiveSlurperStatus(item.slurperStatus))) {
+        return NextResponse.json({ error: "Wait for the active Cloudflare Super Slurper jobs to finish or abort before starting worker-pool repair" }, { status: 409 })
+      }
+      const orchestratorSettings = await getMigrationOrchestratorSettings()
+      if (!orchestratorSettings.migrationEnabled || !orchestratorSettings.orchestratorUrl || orchestratorSettings.sharedSecret.length < 24) {
+        return NextResponse.json({ error: "Migration Orchestrator must be configured and enabled before worker-pool repair" }, { status: 409 })
+      }
+      if (!orchestratorSettings.fileScannerEnabled || !orchestratorSettings.fileScannerUrl || orchestratorSettings.fileScannerSecret.length < 24) {
+        return NextResponse.json({ error: "File Scanner must be configured and enabled before worker-pool repair" }, { status: 409 })
       }
       const activeWorkerJobs = (await listRepairJobsByMigration(id, 500).catch(() => []))
         .filter((job) => ["pending", "claimed", "running"].includes(job.status))
       await Promise.all(activeWorkerJobs.map((job) => abortRepairJob(job.id).catch(() => undefined)))
-      const nextGeneration =
-        (typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
-          ? Math.max(1, Math.floor(migration.options.workerGeneration))
-          : 1) + 1
-      for (const item of items) {
-        const progress = isRecord(item.progress) ? item.progress : {}
-        await updateMigrationItem(item.id, {
-          slurperStatus: "scanning",
-          progress: {
-            ...progress,
-            stage: "scanning_source",
-            migrationInventory: { generation: nextGeneration, status: "pending" },
-            repairWorker: null,
-            live: null,
-            lastAction: { action, at: now },
-          },
-          lastProgressAt: now,
+      if (migration.options.executionMode !== "migration_workers" && ["running", "verifying"].includes(migration.status)) {
+        await updateMigration(id, {
+          status: "failed",
+          completedAt: null,
+          syncStatus: "syncing",
+          syncMessage: "Fencing the Super Slurper cycle before worker-pool repair",
+          lastSyncedAt: now,
         })
+        if (!(await waitForOrchestratorCycleToRelease(id))) {
+          return NextResponse.json({ error: "Migration Orchestrator is still finishing the previous Super Slurper cycle. Retry worker-pool repair shortly." }, { status: 409 })
+        }
       }
+      const previousGeneration = migration.options.executionMode === "migration_workers"
+        ? (typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
+          ? Math.max(1, Math.floor(migration.options.workerGeneration))
+          : 1)
+        : 0
+      const nextGeneration = previousGeneration + 1
+      await queryDb(`
+        update drive_migration_items
+        set slurper_job_id=null,
+            slurper_status='scanning',
+            progress=(coalesce(progress,'{}'::jsonb)||jsonb_build_object(
+              'stage','scanning_source',
+              'migrationInventory',jsonb_build_object('generation',$2::int,'status','pending'),
+              'repairWorker',null,
+              'live',null,
+              'lastAction',jsonb_build_object('action','repair_migration','at',$3::text)
+            )),
+            last_progress_at=$3::timestamptz,
+            updated_at=now()
+        where migration_id=$1
+      `, [id, nextGeneration, now])
       await updateMigration(id, {
         status: "running",
         completedAt: null,
         syncStatus: "syncing",
-        syncMessage: "Fleet repair requested; File Scanner inventory pending",
+        syncMessage: "Worker-pool repair requested; File Scanner inventory pending",
         lastSyncedAt: now,
-        options: { ...migration.options, workerGeneration: nextGeneration, manualCompleted: false, targetActivatedAt: undefined },
+        options: {
+          ...migration.options,
+          executionMode: "migration_workers",
+          workerGeneration: nextGeneration,
+          workerRepairMismatchedObjects: true,
+          manualCompleted: false,
+          targetActivatedAt: undefined,
+        },
       })
       await wakeMigrationService("orchestrator")
-      return NextResponse.json({ ok: true, repairing: items.length, generation: nextGeneration }, { status: 200 })
+      return NextResponse.json({ ok: true, repairing: items.length, generation: nextGeneration, executionMode: "migration_workers" }, { status: 200 })
     }
 
     if (action === "retry_migration") {

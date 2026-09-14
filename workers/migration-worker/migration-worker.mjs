@@ -1225,11 +1225,10 @@ async function copyObject(sourceClient, targetClient, sourceBucket, targetBucket
 
 async function processItem(jobId, payload, item, completedResults, state) {
   const prefix = payload.migration?.pathPrefix || null
-  // Match the migration setting used by the Super Slurper lane. Missing
-  // objects are always safe to copy; an existing size mismatch is copied only
-  // when overwrite is enabled. With overwrite disabled it remains a verified
-  // mismatch and the job reports failure instead of silently replacing data.
-  const overwrite = payload.migration?.options?.overwrite !== false
+  // Repair generations only replace objects that the source/destination hash
+  // comparison has proven are mismatched. Correct destination objects are
+  // never rewritten, regardless of the original migration overwrite setting.
+  const overwrite = payload.migration?.options?.overwrite !== false || payload.migration?.options?.workerRepairMismatchedObjects === true
   const workerShard = normalizeWorkerShard(payload.workerShard)
   const isSharded = Boolean(workerShard && workerShard.count > 1)
   const shardLabel = isSharded ? ` shard ${workerShard.index + 1}/${workerShard.count}` : ""
@@ -1239,6 +1238,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
   let transferred = 0
   let failed = 0
   let skipped = 0
+  let alreadyPresent = 0
   let initialMissing = 0
   let initialMismatched = 0
   const failureSamples = []
@@ -1430,20 +1430,26 @@ async function processItem(jobId, payload, item, completedResults, state) {
     initialMismatched = initialDiff.mismatched.length
 
     const toRepair = [...initialDiff.missing, ...initialDiff.mismatched]
+    // This SHA-256 reconciliation runs for every inventory job, regardless of
+    // overwrite mode. Exact matches count as already transferred and are never
+    // rewritten; overwrite only governs proven mismatches below.
+    alreadyPresent = Math.max(0, sourceObjects.length - toRepair.length)
     state.stats.repairCandidates += toRepair.length
     upsertItemProgress(state, {
       itemId: item.id,
       stage,
       status: "running",
+      alreadyPresent,
       initialMissing,
       initialMismatched,
       totalFiles: toRepair.length,
       processedFiles: 0,
-      summary: `Scan complete for ${item.sourceBucket}${shardLabel}: ${initialMissing} missing, ${initialMismatched} mismatched`,
+      summary: `Scan complete for ${item.sourceBucket}${shardLabel}: ${alreadyPresent} already verified, ${initialMissing} missing, ${initialMismatched} mismatched`,
     })
     pushLog(state, `Scan complete for ${item.sourceBucket}`, {
       itemId: item.id,
       stage,
+      alreadyPresent,
       initialMissing,
       initialMismatched,
       sourceCount: sourceObjectCount,
@@ -1956,6 +1962,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
             details: {
               initialMissing,
               initialMismatched,
+              alreadyPresent,
               sourceObjectCount,
               shardObjectCount,
               ...(isSharded
@@ -2004,6 +2011,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
       targetBucket: item.targetBucket,
       initialMissing,
       initialMismatched,
+      alreadyPresent,
       sourceObjectCount,
       shardObjectCount,
       sourceBytes,

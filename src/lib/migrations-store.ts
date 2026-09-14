@@ -16,6 +16,8 @@ export type MigrationOptions = {
   workerAgentIds?: string[]
   /** Automatic repair generations started after independent verification finds drift. */
   workerVerificationRepairAttempts?: number
+  /** Permit worker repair generations to replace only files proven hash-mismatched; correct target objects stay untouched. */
+  workerRepairMismatchedObjects?: boolean
   /** Require the independent Cloudflare verifier before account activation. */
   requireIndependentVerification?: boolean
   overwrite?: boolean

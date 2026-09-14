@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server"
 import { getMigration, listMigrationItems } from "@/lib/migrations-store"
-import { listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
 import { listMigrationWorkerRuns } from "@/lib/migration-worker-runs"
 
@@ -65,12 +64,11 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
               send("error", { error: "Migration not found" })
               break
             }
-            const [items, repairJobs, workerRuns] = await Promise.all([
+            const [items, workerRuns] = await Promise.all([
               listMigrationItems(id),
-              migration.options.executionMode === "migration_workers" ? Promise.resolve([]) : listRepairJobsByMigration(id, 20).catch(() => []),
               migration.options.executionMode === "migration_workers" ? listMigrationWorkerRuns(id).catch(() => []) : Promise.resolve([]),
             ])
-            const snapshot = { migration, items, repairJobs: repairJobs.filter((job) => job.mode !== "migration"), workerRuns }
+            const snapshot = { migration, items, workerRuns }
             const serialized = JSON.stringify(snapshot)
             const now = Date.now()
             if (serialized !== lastSnapshot || now - lastSentAt >= 15_000) {
