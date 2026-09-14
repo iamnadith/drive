@@ -1,4 +1,4 @@
-import { isPostgresConfigured, queryDb } from "./db"
+import { ensureDriveSchema, isPostgresConfigured, queryDb } from "./db"
 
 const API_EVENT_RETENTION_DAYS = 7
 const OBJECT_CHANGE_RETENTION_DAYS = 7
@@ -12,46 +12,6 @@ type MaintenanceResult = {
   ran: boolean
   deleted: Record<string, number>
   compactedMigrations: number
-}
-
-async function ensureMaintenanceSchema() {
-  await queryDb(`do $$ begin
-    if to_regclass('public.drive_bucket_stat_history') is not null
-       and to_regclass('public.drive_storage_stats_history') is null then
-      alter table public.drive_bucket_stat_history rename to drive_storage_stats_history;
-    end if;
-  end $$`)
-  await queryDb(`
-    create table if not exists drive_maintenance_state (
-      task_name text primary key,
-      last_run_at timestamptz not null default now(),
-      last_result jsonb not null default '{}'::jsonb
-    )
-  `)
-  await queryDb(`
-    create table if not exists drive_storage_stats_history (
-      id bigint generated always as identity primary key,
-      account_id uuid not null,
-      account_label text,
-      account_email text,
-      bucket_name text not null,
-      previous_objects bigint,
-      objects bigint not null default 0,
-      object_delta bigint not null default 0,
-      previous_bytes bigint,
-      bytes bigint not null default 0,
-      byte_delta bigint not null default 0,
-      change_type text not null,
-      changed_at timestamptz not null default now()
-    )
-  `)
-  await queryDb(`create index if not exists drive_storage_stats_history_bucket_time_idx on drive_storage_stats_history (account_id, bucket_name, changed_at desc)`)
-  await queryDb(`create index if not exists drive_storage_stats_history_time_idx on drive_storage_stats_history (changed_at desc)`)
-  await queryDb(`alter table if exists drive_migrations add column if not exists summary_item_count integer not null default 0`)
-  await queryDb(`alter table if exists drive_migrations add column if not exists summary_objects bigint not null default 0`)
-  await queryDb(`alter table if exists drive_migrations add column if not exists summary_bytes bigint not null default 0`)
-  await queryDb(`alter table if exists drive_migrations add column if not exists worker_summary jsonb not null default '{}'::jsonb`)
-  await queryDb(`alter table if exists drive_migrations add column if not exists details_compacted_at timestamptz`)
 }
 
 async function claimMaintenance(force: boolean): Promise<boolean> {
@@ -135,7 +95,7 @@ async function backfillBucketHistory() {
 
 export async function compactPreviousMigrationDetails(completedMigrationId?: string): Promise<number> {
   if (!isPostgresConfigured()) return 0
-  await ensureMaintenanceSchema()
+  await ensureDriveSchema()
 
   const { rows } = await queryDb<{ id: string }>(
     `
@@ -245,7 +205,7 @@ export async function runDatabaseMaintenance(options?: {
   exhaustive?: boolean
 }): Promise<MaintenanceResult> {
   if (!isPostgresConfigured()) return { ran: false, deleted: {}, compactedMigrations: 0 }
-  await ensureMaintenanceSchema()
+  await ensureDriveSchema()
   if (!(await claimMaintenance(options?.force === true))) {
     return { ran: false, deleted: {}, compactedMigrations: 0 }
   }
@@ -323,10 +283,4 @@ export async function runDatabaseMaintenance(options?: {
     ["retention", JSON.stringify({ deleted, compactedMigrations, completedAt: new Date().toISOString() })]
   )
   return { ran: true, deleted, compactedMigrations }
-}
-
-export function scheduleDatabaseMaintenance() {
-  void runDatabaseMaintenance().catch((error) => {
-    console.error("Database maintenance failed:", error)
-  })
 }

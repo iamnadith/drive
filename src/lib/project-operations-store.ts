@@ -1,6 +1,5 @@
 import crypto from "crypto"
-import { queryDb } from "./db"
-import { scheduleDatabaseMaintenance } from "./database-maintenance"
+import { ensureDriveSchema, queryDb } from "./db"
 import { getActiveProjectBucketR2Config } from "./project-api-auth"
 import { getProjectByIdentifier, hashProjectSecret, type Project } from "./projects-store"
 import { ProjectObjectLockedError } from "./project-object-lock"
@@ -12,10 +11,6 @@ import {
   r2ListObjectsPage,
   type R2ClientConfig,
 } from "./r2-s3"
-
-declare global {
-  var __driveProjectOperationsSchema: Promise<void> | undefined
-}
 
 export type ProjectOperationType =
   | "recursive_delete"
@@ -227,40 +222,6 @@ async function selectProjectObjectLock(
   }
 }
 
-async function isProjectOperationsSchemaReady() {
-  const { rows } = await queryDb<{ ready: boolean }>(`
-    select (
-      to_regclass('public.drive_project_operation_jobs') is not null
-      and to_regclass('public.drive_project_api_events') is not null
-      and to_regclass('public.drive_project_object_inventory') is not null
-      and to_regclass('public.drive_project_object_locks') is not null
-      and to_regclass('public.drive_project_webhooks') is not null
-      and exists (
-        select 1
-        from information_schema.columns
-        where table_schema = 'public'
-          and table_name = 'drive_project_object_inventory'
-          and column_name = 'bucket_name'
-      )
-      and exists (
-        select 1
-        from information_schema.columns
-        where table_schema = 'public'
-          and table_name = 'drive_project_object_inventory'
-          and column_name = 'file_id'
-      )
-      and exists (
-        select 1
-        from information_schema.columns
-        where table_schema = 'public'
-          and table_name = 'drive_project_object_locks'
-          and column_name = 'bucket_name'
-      )
-    ) as ready;
-  `)
-  return rows[0]?.ready === true
-}
-
 async function findProjectIdsForTrackedBucket(bucketName: string) {
   await ensureProjectOperationsSchema()
   const { rows } = await queryDb<{ project_id: string }>(
@@ -275,147 +236,7 @@ async function findProjectIdsForTrackedBucket(bucketName: string) {
 }
 
 export function ensureProjectOperationsSchema(): Promise<void> {
-  if (!global.__driveProjectOperationsSchema) {
-    global.__driveProjectOperationsSchema = (async () => {
-      // Builds provision the canonical schema. Keep this read-only fast path
-      // so a cold runtime does not repeat DDL or race another instance.
-      if (await isProjectOperationsSchemaReady()) return
-
-      await queryDb(`create extension if not exists pgcrypto;`)
-  await queryDb(`
-    create table if not exists drive_project_operation_jobs (
-      id uuid primary key default gen_random_uuid(),
-      project_id uuid not null references drive_projects(id) on delete cascade,
-      type text not null,
-      status text not null default 'queued',
-      payload jsonb not null default '{}'::jsonb,
-      progress jsonb not null default '{}'::jsonb,
-      result jsonb not null default '{}'::jsonb,
-      error text,
-      idempotency_key text,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now(),
-      started_at timestamptz,
-      completed_at timestamptz
-    );
-  `)
-  await queryDb(`create index if not exists drive_project_operation_jobs_project_idx on drive_project_operation_jobs (project_id, created_at desc);`)
-  await queryDb(`create index if not exists drive_project_operation_jobs_status_idx on drive_project_operation_jobs (status, created_at);`)
-  await queryDb(`
-    create unique index if not exists drive_project_operation_jobs_idempotency_key
-      on drive_project_operation_jobs (project_id, idempotency_key)
-      where idempotency_key is not null;
-  `)
-
-  await queryDb(`
-    create table if not exists drive_project_api_events (
-      id uuid primary key default gen_random_uuid(),
-      occurred_at timestamptz not null default now(),
-      project_id uuid references drive_projects(id) on delete cascade,
-      api_key_id uuid references drive_project_api_keys(id) on delete set null,
-      action text not null,
-      object_key text,
-      status integer,
-      outcome text not null default 'success',
-      ip_address text,
-      user_agent text,
-      request_id text,
-      metadata jsonb not null default '{}'::jsonb
-    );
-  `)
-  await queryDb(`create index if not exists drive_project_api_events_project_time_idx on drive_project_api_events (project_id, occurred_at desc);`)
-  await queryDb(`create index if not exists drive_project_api_events_key_time_idx on drive_project_api_events (api_key_id, occurred_at desc);`)
-  await queryDb(`create index if not exists drive_project_api_events_action_time_idx on drive_project_api_events (action, occurred_at desc);`)
-  await queryDb(`create index if not exists drive_project_api_events_occurred_id_idx on drive_project_api_events (occurred_at desc, id desc);`)
-  await queryDb(`
-    create index if not exists drive_project_api_events_recent_objects_idx
-      on drive_project_api_events (project_id, action, occurred_at desc, object_key)
-      where outcome = 'success' and object_key is not null;
-  `)
-
-  await queryDb(`
-    create table if not exists drive_project_object_inventory (
-      project_id uuid not null references drive_projects(id) on delete cascade,
-      bucket_name text not null,
-      object_key text not null,
-      size bigint not null default 0,
-      etag text,
-      content_type text,
-      metadata jsonb not null default '{}'::jsonb,
-      last_modified timestamptz,
-      deleted_at timestamptz,
-      updated_at timestamptz not null default now(),
-      primary key (project_id, bucket_name, object_key)
-    );
-  `)
-  await queryDb(`alter table public.drive_project_object_inventory add column if not exists bucket_name text;`)
-  await queryDb(`alter table public.drive_project_object_inventory add column if not exists file_id text;`)
-  await queryDb(`
-    update drive_project_object_inventory i
-    set bucket_name = coalesce(nullif(p.bucket_name, ''), '')
-    from drive_projects p
-    where p.id = i.project_id
-      and i.bucket_name is null;
-  `)
-  await queryDb(`update public.drive_project_object_inventory set bucket_name = '' where bucket_name is null;`)
-  await queryDb(`update public.drive_project_object_inventory set file_id = encode(gen_random_bytes(12), 'hex') where file_id is null or file_id = '';`)
-  await queryDb(`alter table public.drive_project_object_inventory alter column bucket_name set default '';`)
-  await queryDb(`alter table public.drive_project_object_inventory alter column bucket_name set not null;`)
-  await queryDb(`alter table public.drive_project_object_inventory alter column file_id set default encode(gen_random_bytes(12), 'hex');`)
-  await queryDb(`alter table public.drive_project_object_inventory alter column file_id set not null;`)
-  await queryDb(`alter table public.drive_project_object_inventory drop constraint if exists drive_project_object_inventory_pkey;`)
-  await queryDb(`alter table public.drive_project_object_inventory add constraint drive_project_object_inventory_pkey primary key (project_id, bucket_name, object_key);`)
-  await queryDb(`create unique index if not exists drive_project_object_inventory_file_id_key on drive_project_object_inventory (file_id);`)
-  await queryDb(`drop index if exists drive_project_object_inventory_search_idx;`)
-  await queryDb(`drop index if exists drive_project_object_inventory_updated_idx;`)
-  await queryDb(`create index if not exists drive_project_object_inventory_search_idx on drive_project_object_inventory (project_id, bucket_name, object_key text_pattern_ops) where deleted_at is null;`)
-  await queryDb(`create index if not exists drive_project_object_inventory_updated_idx on drive_project_object_inventory (project_id, bucket_name, updated_at desc);`)
-  await queryDb(`create index if not exists drive_project_object_inventory_project_file_id_idx on drive_project_object_inventory (project_id, file_id) where deleted_at is null;`)
-
-  await queryDb(`
-    create table if not exists drive_project_object_locks (
-      project_id uuid not null references drive_projects(id) on delete cascade,
-      bucket_name text not null,
-      object_key text not null,
-      lock_token_hash text not null,
-      reason text,
-      expires_at timestamptz,
-      created_at timestamptz not null default now(),
-      primary key (project_id, bucket_name, object_key)
-    );
-  `)
-  await queryDb(`alter table public.drive_project_object_locks add column if not exists bucket_name text;`)
-  await queryDb(`
-    update drive_project_object_locks l
-    set bucket_name = coalesce(nullif(p.bucket_name, ''), '')
-    from drive_projects p
-    where p.id = l.project_id
-      and l.bucket_name is null;
-  `)
-  await queryDb(`update public.drive_project_object_locks set bucket_name = '' where bucket_name is null;`)
-  await queryDb(`alter table public.drive_project_object_locks alter column bucket_name set default '';`)
-  await queryDb(`alter table public.drive_project_object_locks alter column bucket_name set not null;`)
-  await queryDb(`alter table public.drive_project_object_locks drop constraint if exists drive_project_object_locks_pkey;`)
-  await queryDb(`alter table public.drive_project_object_locks add constraint drive_project_object_locks_pkey primary key (project_id, bucket_name, object_key);`)
-
-      await queryDb(`
-        create table if not exists drive_project_webhooks (
-          id uuid primary key default gen_random_uuid(),
-          project_id uuid not null references drive_projects(id) on delete cascade,
-          target_url text not null,
-          events jsonb not null default '[]'::jsonb,
-          secret text,
-          status text not null default 'active',
-          created_at timestamptz not null default now(),
-          updated_at timestamptz not null default now()
-        );
-      `)
-    })().catch((error) => {
-      global.__driveProjectOperationsSchema = undefined
-      throw error
-    })
-  }
-  return global.__driveProjectOperationsSchema
+  return ensureDriveSchema()
 }
 
 export function getRequestApiContext(request: Request) {
@@ -461,7 +282,6 @@ export async function recordProjectApiEvent(input: {
         input.metadata ? JSON.stringify(input.metadata) : null,
       ]
     )
-    scheduleDatabaseMaintenance()
   } catch (error) {
     console.error("Unable to record project API event:", error)
   }
@@ -971,6 +791,7 @@ export async function getProjectApiUsage(input: {
   to?: string
   cursor?: string
   limit?: number
+  includeSummary?: boolean
 }) {
   await ensureProjectOperationsSchema()
   const limit = Math.max(1, Math.min(200, Math.floor(input.limit ?? 50)))
@@ -997,6 +818,50 @@ export async function getProjectApiUsage(input: {
   }
   const pageWhere = pageClauses.length ? `where ${pageClauses.join(" and ")}` : ""
   const limitParam = add(limit + 1)
+
+  // Exact all-time totals and rankings are useful on the first page and after
+  // filter/manual refreshes, but are invariant while traversing a cursor. Do
+  // not rescan the entire event history for every subsequent table page.
+  if (input.cursor && input.includeSummary === false) {
+    const { rows } = await queryDb<{
+      id: string
+      occurredAt: string | Date
+      action: string
+      objectKey: string | null
+      status: number | null
+      outcome: string
+      ipAddress: string | null
+      userAgent: string | null
+      requestId: string | null
+      metadata: Record<string, unknown> | null
+      projectId: string | null
+      projectName: string | null
+      keyName: string | null
+      keyPrefix: string | null
+    }>(`
+      select e.id,e.occurred_at as "occurredAt",e.action,e.object_key as "objectKey",
+        e.status,e.outcome,e.ip_address as "ipAddress",e.user_agent as "userAgent",
+        e.request_id as "requestId",e.metadata,p.project_id as "projectId",
+        p.name as "projectName",k.name as "keyName",k.key_prefix as "keyPrefix"
+      from drive_project_api_events e
+      left join drive_projects p on p.id=e.project_id
+      left join drive_project_api_keys k on k.id=e.api_key_id
+      ${pageWhere}
+      order by e.occurred_at desc,e.id desc
+      limit ${limitParam}
+    `, params)
+    const hasMore = rows.length > limit
+    const events = rows.slice(0, limit)
+    const last = events[events.length - 1]
+    const lastTimestamp = last?.occurredAt instanceof Date
+      ? last.occurredAt.toISOString()
+      : last?.occurredAt
+    return {
+      events,
+      nextCursor: hasMore && last && lastTimestamp ? `${lastTimestamp}|${last.id}` : null,
+      generatedAt: new Date().toISOString(),
+    }
+  }
 
   const { rows } = await queryDb<{
     total: string

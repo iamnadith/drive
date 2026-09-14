@@ -41,8 +41,7 @@ function postgresEncryptionMaterial() {
 function encryptionMaterials() {
   const configured = [process.env.CLOUDFLARE_TOKEN_ENCRYPTION_KEY, process.env.AUTH_SECRET, process.env.NEXTAUTH_SECRET]
   const database = postgresEncryptionMaterial()
-  const legacy = [process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.SUPABASE_SECRET_KEY, process.env.SUPABASE_SERVICE_KEY]
-  return [...configured, database, ...legacy]
+  return [...configured, database]
     .map((value) => String(value || "").trim())
     .filter((value, index, values) => value.length >= 24 && values.indexOf(value) === index)
 }

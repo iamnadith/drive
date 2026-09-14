@@ -71,6 +71,7 @@ export type ListActivityInput = {
   to?: string
   cursor?: string
   limit?: number
+  includeTotal?: boolean
 }
 
 type CountRow = {
@@ -310,21 +311,25 @@ export async function listActivity(input: ListActivityInput) {
 
   const baseWhere = baseClauses.length ? `where ${baseClauses.join(" and ")}` : ""
   const where = pageClauses.length ? `where ${pageClauses.join(" and ")}` : ""
+  const totalQuery = input.includeTotal === false
+    ? Promise.resolve({ rows: [] as CountRow[] })
+    : queryDb<CountRow>(`select count(*)::bigint as total from ${TABLE} ${baseWhere}`, countParams)
   const [{ rows: countRows }, { rows }] = await Promise.all([
-    queryDb<CountRow>(`select count(*)::bigint as total from ${TABLE} ${baseWhere}`, countParams),
+    totalQuery,
     queryDb<ActivityRow>(
       `select * from ${TABLE} ${where} order by occurred_at desc, id desc limit ${add(limit + 1)}`,
       params
     ),
   ])
   const pageRows = rows.slice(0, limit)
-  const totalCount = Number(countRows[0]?.total ?? 0)
+  const totalCount = input.includeTotal === false ? undefined : Number(countRows[0]?.total ?? 0)
   return {
     events: pageRows.map(mapRow),
     nextCursor: rows.length > limit && pageRows.length > 0 ? encodeCursor(pageRows[pageRows.length - 1]) : null,
     hasMore: rows.length > limit,
-    totalCount,
-    totalPages: Math.max(1, Math.ceil(totalCount / limit)),
+    ...(typeof totalCount === "number"
+      ? { totalCount, totalPages: Math.max(1, Math.ceil(totalCount / limit)) }
+      : {}),
     generatedAt: new Date().toISOString(),
   }
 }

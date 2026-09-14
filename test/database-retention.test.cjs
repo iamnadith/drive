@@ -12,7 +12,11 @@ function read(relativePath) {
 
 test("retention policy keeps compact summaries and bounds temporary records", () => {
   const source = read("src/lib/database-maintenance.ts")
+  const eventStore = read("src/lib/project-operations-store.ts")
 
+  assert.match(source, /ensureDriveSchema\(\)/)
+  assert.doesNotMatch(source, /function ensureMaintenanceSchema|create table if not exists drive_maintenance_state/)
+  assert.doesNotMatch(eventStore, /scheduleDatabaseMaintenance/)
   assert.match(source, /API_EVENT_RETENTION_DAYS = 7/)
   assert.match(source, /OBJECT_CHANGE_RETENTION_DAYS = 7/)
   assert.match(source, /SCAN_DETAIL_RETENTION_DAYS = 7/)

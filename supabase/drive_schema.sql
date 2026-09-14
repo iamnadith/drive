@@ -259,6 +259,9 @@ alter table if exists drive_projects drop constraint if exists drive_projects_bu
 drop index if exists drive_projects_bucket_name_key;
 create index if not exists drive_projects_bucket_name_idx on drive_projects (bucket_name) where bucket_name <> '';
 create index if not exists drive_projects_status_idx on drive_projects (status);
+create index if not exists drive_projects_name_trgm_idx on drive_projects using gin (lower(name) gin_trgm_ops);
+create index if not exists drive_projects_project_id_trgm_idx on drive_projects using gin (lower(project_id) gin_trgm_ops);
+create index if not exists drive_projects_bucket_name_trgm_idx on drive_projects using gin (lower(coalesce(bucket_name,'')) gin_trgm_ops);
 
 -- Buckets can be assigned to multiple projects. The pair remains unique so the
 -- same project cannot receive a duplicate assignment.
@@ -480,6 +483,9 @@ create index if not exists drive_project_api_events_action_time_idx
   on drive_project_api_events (action, occurred_at desc);
 create index if not exists drive_project_api_events_occurred_id_idx
   on drive_project_api_events (occurred_at desc, id desc);
+create index if not exists drive_project_api_events_recent_objects_idx
+  on drive_project_api_events (project_id, action, occurred_at desc, object_key)
+  where outcome = 'success' and object_key is not null;
 
 create table if not exists drive_project_object_inventory (
   project_id uuid not null references drive_projects(id) on delete cascade,
@@ -781,6 +787,8 @@ create unique index if not exists drive_migration_items_unique_bucket
 
 create index if not exists drive_migration_items_migration_idx on drive_migration_items (migration_id);
 create index if not exists drive_migration_items_job_idx on drive_migration_items (slurper_job_id);
+create index if not exists drive_migration_items_progress_time_idx
+  on drive_migration_items (coalesce(last_progress_at, updated_at, created_at));
 
 create table if not exists drive_migration_item_failure_records (
   id uuid primary key,
@@ -916,6 +924,7 @@ create table if not exists drive_agent_runs (
 );
 
 create index if not exists drive_agent_runs_agent_idx on drive_agent_runs (agent_id, created_at desc);
+create index if not exists drive_agent_runs_job_reference_created_idx on drive_agent_runs (job_reference, created_at desc, id desc);
 create index if not exists drive_agent_runs_migration_idx
   on drive_agent_runs ((payload->>'migrationId'), status)
   where run_type = 'github_dispatch';
@@ -1201,5 +1210,5 @@ create table if not exists public.drive_schema_meta (
   updated_at timestamptz not null default now()
 );
 insert into public.drive_schema_meta(id, version, updated_at)
-values (true, 2026091405, now())
+values (true, 2026091409, now())
 on conflict (id) do update set version = excluded.version, updated_at = now();

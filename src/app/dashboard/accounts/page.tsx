@@ -410,7 +410,16 @@ export default function AccountsPage() {
   };
 
   React.useEffect(() => {
-    const refresh = () => void loadAccounts({ silent: true });
+    let lastRefreshAt = 0;
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      // Focus and visibilitychange commonly fire together; avoid two identical
+      // account-summary requests when a dashboard tab becomes active.
+      if (now - lastRefreshAt < 1_000) return;
+      lastRefreshAt = now;
+      void loadAccounts({ silent: true });
+    };
     const interval = window.setInterval(refresh, 15_000);
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible") refresh();

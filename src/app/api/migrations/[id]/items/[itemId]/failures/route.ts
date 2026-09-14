@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server"
 
-import { listMigrationItemFailureRecords } from "@/lib/migration-failure-records-store"
-import { getMigration, listMigrationItems } from "@/lib/migrations-store"
+import { getMigrationFailureBootstrap } from "@/lib/migrations-store"
 import { requireAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
@@ -25,17 +24,10 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     const url = new URL(request.url)
     const rawLimit = Number(url.searchParams.get("limit") ?? "150")
     const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(500, Math.floor(rawLimit))) : 150
-    const migration = await getMigration(id)
-    if (!migration) return NextResponse.json({ error: "Migration not found" }, { status: 404 })
-
-    const items = await listMigrationItems(id)
-    const item = items.find((entry) => entry.id === itemId)
+    const bootstrap = await getMigrationFailureBootstrap(id, itemId, limit)
+    if (!bootstrap.migration) return NextResponse.json({ error: "Migration not found" }, { status: 404 })
+    const { item, failures: records, migration } = bootstrap
     if (!item) return NextResponse.json({ error: "Migration bucket not found" }, { status: 404 })
-
-    const [records, latestMigration] = await Promise.all([
-      listMigrationItemFailureRecords(itemId, limit),
-      getMigration(id),
-    ])
     const progress = isRecord(item.progress) ? item.progress : {}
     const snapshot = isRecord(progress.failedDiagnosticsSnapshot) ? progress.failedDiagnosticsSnapshot : {}
     const savedSummary = isRecord(snapshot.summary) ? snapshot.summary : {}
@@ -72,7 +64,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     }
     return NextResponse.json({
       ok: true,
-      migration: latestMigration ?? migration,
+      migration,
       item: { id: item.id, sourceBucket: item.sourceBucket, targetBucket: item.targetBucket, jobId: item.slurperJobId ?? null, status: item.slurperStatus ?? null },
       summary,
       failures,

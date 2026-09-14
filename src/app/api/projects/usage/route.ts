@@ -25,6 +25,7 @@ export async function GET(request: Request) {
       to: searchParams.get("to") ?? undefined,
       cursor: searchParams.get("cursor") ?? undefined,
       limit: Number.isFinite(limitRaw) ? limitRaw : 50,
+      includeSummary: searchParams.get("summary") !== "0",
     })
     return NextResponse.json(result)
   } catch (error: unknown) {

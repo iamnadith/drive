@@ -95,7 +95,7 @@ async function main() {
 
   const schemaPath = resolve(projectRoot, "supabase", "drive_schema.sql")
   const schema = await readFile(schemaPath, "utf8")
-  const concurrentUserIndexes = [
+  const concurrentIndexes = [
     {
       name: "drive_users_status_role_idx",
       create: "create index concurrently if not exists drive_users_status_role_idx on public.drive_users (status, role)",
@@ -112,9 +112,33 @@ async function main() {
       name: "drive_users_username_trgm_idx",
       create: "create index concurrently if not exists drive_users_username_trgm_idx on public.drive_users using gin (username gin_trgm_ops)",
     },
+    {
+      name: "drive_projects_name_trgm_idx",
+      create: "create index concurrently if not exists drive_projects_name_trgm_idx on public.drive_projects using gin (lower(name) gin_trgm_ops)",
+    },
+    {
+      name: "drive_projects_project_id_trgm_idx",
+      create: "create index concurrently if not exists drive_projects_project_id_trgm_idx on public.drive_projects using gin (lower(project_id) gin_trgm_ops)",
+    },
+    {
+      name: "drive_projects_bucket_name_trgm_idx",
+      create: "create index concurrently if not exists drive_projects_bucket_name_trgm_idx on public.drive_projects using gin (lower(coalesce(bucket_name,'')) gin_trgm_ops)",
+    },
+    {
+      name: "drive_agent_runs_job_reference_created_idx",
+      create: "create index concurrently if not exists drive_agent_runs_job_reference_created_idx on public.drive_agent_runs (job_reference, created_at desc, id desc)",
+    },
+    {
+      name: "drive_migration_items_progress_time_idx",
+      create: "create index concurrently if not exists drive_migration_items_progress_time_idx on public.drive_migration_items (coalesce(last_progress_at, updated_at, created_at))",
+    },
+    {
+      name: "drive_project_api_events_recent_objects_idx",
+      create: "create index concurrently if not exists drive_project_api_events_recent_objects_idx on public.drive_project_api_events (project_id, action, occurred_at desc, object_key) where outcome = 'success' and object_key is not null",
+    },
   ]
   let transactionalSchema = schema
-  for (const index of concurrentUserIndexes) {
+  for (const index of concurrentIndexes) {
     const pattern = new RegExp(`create index if not exists ${index.name}[^;]*;`, "i")
     if (!pattern.test(transactionalSchema)) throw new Error(`The canonical schema is missing ${index.name}`)
     transactionalSchema = transactionalSchema.replace(pattern, "")
@@ -154,7 +178,7 @@ async function main() {
       await client.query("set local statement_timeout = '10min'")
       await client.query(transactionalSchema)
       await client.query("commit")
-      for (const index of concurrentUserIndexes) {
+      for (const index of concurrentIndexes) {
         const existing = await client.query(`
           select i.indisvalid as valid
           from pg_index i

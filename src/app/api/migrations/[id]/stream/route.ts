@@ -4,6 +4,45 @@ import { requireAdmin } from "@/lib/server-auth"
 
 export const runtime = "nodejs"
 
+const STREAM_SNAPSHOT_CACHE_TTL_MS = 3_000
+const STREAM_SNAPSHOT_CACHE_MAX = 128
+
+type StreamSnapshot = Awaited<ReturnType<typeof getMigrationDetailBootstrap>>
+type StreamSnapshotEntry = { expiresAt: number; promise: Promise<StreamSnapshot> }
+
+declare global {
+  var __driveMigrationStreamSnapshotCache: Map<string, StreamSnapshotEntry> | undefined
+}
+
+function getCachedStreamSnapshot(migrationId: string): Promise<StreamSnapshot> {
+  const cache = (global.__driveMigrationStreamSnapshotCache ??= new Map())
+  const now = Date.now()
+  const cached = cache.get(migrationId)
+  if (cached && cached.expiresAt > now) return cached.promise
+
+  for (const [id, entry] of cache) {
+    if (entry.expiresAt <= now) cache.delete(id)
+  }
+  if (cache.size >= STREAM_SNAPSHOT_CACHE_MAX) {
+    const oldestId = cache.keys().next().value
+    if (oldestId) cache.delete(oldestId)
+  }
+
+  const entry: StreamSnapshotEntry = { expiresAt: Number.POSITIVE_INFINITY, promise: Promise.resolve(null) }
+  entry.promise = getMigrationDetailBootstrap(migrationId, { includeAccounts: false })
+    .then((snapshot) => {
+      if (snapshot) entry.expiresAt = Date.now() + STREAM_SNAPSHOT_CACHE_TTL_MS
+      else if (cache.get(migrationId) === entry) cache.delete(migrationId)
+      return snapshot
+    })
+    .catch((error) => {
+      if (cache.get(migrationId) === entry) cache.delete(migrationId)
+      throw error
+    })
+  cache.set(migrationId, entry)
+  return entry.promise
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -58,7 +97,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
         while (!closed && !request.signal.aborted) {
           let nextDelay = 10_000
           try {
-            const bootstrap = await getMigrationDetailBootstrap(id, { includeAccounts: false })
+            const bootstrap = await getCachedStreamSnapshot(id)
             if (!bootstrap) {
               send("error", { error: "Migration not found" })
               break

@@ -1204,7 +1204,7 @@ export default function OverviewPage() {
     refreshIntervalMs: 15_000,
     staleTimeMs: 8_000,
     fetcher: async ({ signal }) => {
-      const res = await fetch("/api/activity?limit=4", {
+      const res = await fetch("/api/activity?limit=4&includeTotal=false", {
         cache: "no-store",
         signal,
       })
@@ -1230,6 +1230,7 @@ export default function OverviewPage() {
   })
 
   const recentActivity = recentActivityData ?? []
+  const hasOrphanLastActivity = recentActivity.length % 2 === 1
   const isRefreshing = refreshing || activityRefreshing
 
   if (loading && !data) {
@@ -1372,7 +1373,9 @@ export default function OverviewPage() {
                     {recentActivity.map((activity) => (
                       <li
                         key={activity.id}
-                        className="lg:border-b lg:odd:border-r lg:[&:nth-last-child(-n+2)]:border-b-0"
+                        className={`lg:border-b lg:odd:border-r ${hasOrphanLastActivity
+                          ? "lg:[&:nth-child(2)]:border-b lg:last:border-r-0 lg:last:border-b-0"
+                          : "lg:[&:nth-last-child(-n+2)]:border-b-0"}`}
                       >
                         <Link
                           href="/dashboard/activity"

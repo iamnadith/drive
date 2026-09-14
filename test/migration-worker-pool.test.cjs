@@ -157,10 +157,17 @@ test('active worker migrations cannot be frozen by historical read-only markers'
 
 test('migration detail SSE snapshots reuse the one-query database bootstrap', () => {
   const stream = read('src/app/api/migrations/[id]/stream/route.ts')
-  assert.match(stream, /getMigrationDetailBootstrap\(id, \{ includeAccounts: false \}\)/)
+  const migrationsStore = read('src/lib/migrations-store.ts')
+  assert.match(stream, /getCachedStreamSnapshot\(id\)/)
+  assert.match(stream, /getMigrationDetailBootstrap\(migrationId, \{ includeAccounts: false \}\)/)
+  assert.match(stream, /STREAM_SNAPSHOT_CACHE_TTL_MS = 3_000/)
+  assert.match(stream, /STREAM_SNAPSHOT_CACHE_MAX = 128/)
   assert.match(stream, /const \{ migration, items, workerRuns \} = bootstrap/)
   assert.doesNotMatch(stream, /getMigration\(|listMigrationItems\(|listMigrationWorkerRuns\(/)
   assert.match(stream, /nextDelay = \["running", "verifying", "queued"\]\.includes\(migration\.status\) \? 4_000 : 15_000/)
+  const bootstrap = migrationsStore.match(/export async function getMigrationDetailBootstrap\([\s\S]*?\n}\n/)
+  assert.ok(bootstrap, 'expected the consolidated migration detail bootstrap')
+  assert.equal((bootstrap[0].match(/queryDb</g) ?? []).length, 1)
 })
 
 test('migration orchestrator projects durable per-file completion into live bucket counts', () => {

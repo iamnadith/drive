@@ -85,7 +85,7 @@ type DriveAgentRow = {
   updated_at: string
 }
 
-type DriveAgentRunRow = {
+export type DriveAgentRunRow = {
   id: string
   agent_id: string
   run_type: string
@@ -163,7 +163,7 @@ function mapAgentRow(row: DriveAgentRow): DriveAgent {
   }
 }
 
-function mapRunRow(row: DriveAgentRunRow): DriveAgentRun {
+export function mapAgentRunRow(row: DriveAgentRunRow): DriveAgentRun {
   return {
     id: row.id,
     agentId: row.agent_id,
@@ -219,7 +219,7 @@ export async function listAgents(): Promise<Array<DriveAgent & { latestRun: Driv
      order by a.created_at desc, a.id desc`
   )
   return rows.map((row) => {
-    const runs = Array.isArray(row.recent_runs) ? row.recent_runs.map(mapRunRow) : []
+    const runs = Array.isArray(row.recent_runs) ? row.recent_runs.map(mapAgentRunRow) : []
     return { ...mapAgentRow(row), latestRun: runs[0] ?? null, runs }
   })
 }
@@ -339,7 +339,7 @@ export async function createAgentRun(input: {
       input.externalRunId ?? null, input.jobReference ?? null, input.summary ?? null,
       JSON.stringify(input.payload ?? {}), input.status === "running" ? now : null, now, now]
   )
-  return mapRunRow(rows[0])
+  return mapAgentRunRow(rows[0])
 }
 
 export async function updateAgentRun(
@@ -370,7 +370,7 @@ export async function updateAgentRun(
     values
   )
   if (!rows[0]) throw new Error("Agent run not found")
-  return mapRunRow(rows[0])
+  return mapAgentRunRow(rows[0])
 }
 
 export async function getLatestAgentRunByJobReference(jobReference: string): Promise<DriveAgentRun | null> {
@@ -379,7 +379,7 @@ export async function getLatestAgentRunByJobReference(jobReference: string): Pro
     [jobReference]
   )
   const row = rows[0]
-  return row ? mapRunRow(row) : null
+  return row ? mapAgentRunRow(row) : null
 }
 
 export async function listAgentRunsByAgentId(agentId: string, limit = 20): Promise<DriveAgentRun[]> {
@@ -388,7 +388,7 @@ export async function listAgentRunsByAgentId(agentId: string, limit = 20): Promi
     `select * from public.${AGENT_RUNS_TABLE} where agent_id = $1 order by created_at desc, id desc limit $2`,
     [agentId, boundedLimit]
   )
-  return rows.map(mapRunRow)
+  return rows.map(mapAgentRunRow)
 }
 
 export async function updateAgent(

@@ -1,6 +1,4 @@
 import { NextResponse } from "next/server"
-import type { QueryResultRow } from "pg"
-
 import type { DashboardAccountSummary } from "@/lib/accounts-store"
 import type { DriveMigrationItem } from "@/lib/migrations-store"
 import { getMergedBucketSnapshot } from "@/lib/migration-bucket-state"
@@ -143,6 +141,10 @@ const ANALYTICS_ITEM_PROGRESS_SQL = `jsonb_strip_nulls(jsonb_build_object(
 ))`
 
 type AnalyticsSqlSummaryRow = {
+  user_summary: { total: string | number; active: string | number }
+  migrations: AnalyticsMigration[]
+  repair_jobs: AnalyticsRepairJobRow[]
+  active_account_snapshots: ActiveAccountSnapshotRow[]
   account_summaries: DashboardAccountSummary[]
   bucket_status_breakdown: Record<string, string | number>
   worker_status_breakdown: Record<string, string | number>
@@ -161,12 +163,6 @@ type AnalyticsSqlSummaryRow = {
   recent_diffs: VerifyDiffRow[]
   failure_record_count: string | number
   verification_diff_count: string | number
-}
-
-type AnalyticsCatalogRow = QueryResultRow & {
-  user_summary: { total: string | number; active: string | number }
-  migrations: AnalyticsMigration[]
-  repair_jobs: AnalyticsRepairJobRow[]
 }
 
 function asRange(value: string | null): RangeKey {
@@ -265,48 +261,6 @@ async function listAnalyticsMigrationItems(start: Date, rangeIsAll: boolean): Pr
   return rows
 }
 
-async function getAnalyticsCatalogSummary() {
-  const { rows } = await queryDb<AnalyticsCatalogRow>(`
-    select
-      (select jsonb_build_object(
-        'total',count(*)::text,
-        'active',count(*) filter(where status='active')::text
-      ) from public.drive_users) user_summary,
-      coalesce((
-        select jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
-          'id',m.id,'status',m.status,'syncStatus',m.sync_status,'syncMessage',m.sync_message,
-          'createdAt',m.created_at::text,'completedAt',m.completed_at::text,'updatedAt',m.updated_at::text
-        )) order by m.created_at desc,m.id desc)
-        from (
-          select id,status,sync_status,sync_message,created_at,completed_at,updated_at
-          from public.drive_migrations
-          order by created_at desc,id desc
-          limit 100
-        ) m
-      ),'[]'::jsonb) migrations,
-      coalesce((
-        select jsonb_agg(jsonb_build_object(
-          'id',j.id,'migration_id',j.migration_id,'status',j.status,'summary',j.summary,
-          'error',j.error,'completed_at',j.completed_at::text,'created_at',j.created_at::text,
-          'updated_at',j.updated_at::text
-        ) order by j.created_at desc,j.id desc)
-        from (
-          select id,migration_id,status,summary,error,completed_at,created_at,updated_at
-          from public.drive_repair_jobs
-          order by created_at desc,id desc
-          limit 100
-        ) j
-      ),'[]'::jsonb) repair_jobs
-  `)
-  const row = rows[0]
-  if (!row) throw new Error("Analytics catalog query returned no row")
-  return {
-    users: { total: toNumber(row.user_summary?.total), active: toNumber(row.user_summary?.active) },
-    migrations: row.migrations ?? [],
-    repairJobs: (row.repair_jobs ?? []).map(mapRepairJobRow),
-  }
-}
-
 async function getAnalyticsSqlSummary(): Promise<AnalyticsSqlSummaryRow> {
   const { rows } = await queryDb<AnalyticsSqlSummaryRow>(`
     with active_account as materialized (
@@ -356,6 +310,44 @@ async function getAnalyticsSqlSummary(): Promise<AnalyticsSqlSummaryRow> {
       group by effective_status
     )
     select
+      (select jsonb_build_object(
+        'total',count(*)::text,
+        'active',count(*) filter(where status='active')::text
+      ) from public.drive_users) user_summary,
+      coalesce((
+        select jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+          'id',m.id,'status',m.status,'syncStatus',m.sync_status,'syncMessage',m.sync_message,
+          'createdAt',m.created_at::text,'completedAt',m.completed_at::text,'updatedAt',m.updated_at::text
+        )) order by m.created_at desc,m.id desc)
+        from (
+          select id,status,sync_status,sync_message,created_at,completed_at,updated_at
+          from public.drive_migrations
+          order by created_at desc,id desc
+          limit 100
+        ) m
+      ),'[]'::jsonb) migrations,
+      coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'id',j.id,'migration_id',j.migration_id,'status',j.status,'summary',j.summary,
+          'error',j.error,'completed_at',j.completed_at::text,'created_at',j.created_at::text,
+          'updated_at',j.updated_at::text
+        ) order by j.created_at desc,j.id desc)
+        from (
+          select id,migration_id,status,summary,error,completed_at,created_at,updated_at
+          from public.drive_repair_jobs
+          order by created_at desc,id desc
+          limit 100
+        ) j
+      ),'[]'::jsonb) repair_jobs,
+      coalesce((
+        select jsonb_agg(to_jsonb(daily) order by daily.captured_day asc)
+        from (
+          select captured_day::text as captured_day,account_id,account_label,account_email,buckets,objects,bytes,captured_at
+          from public.drive_analytics_active_account_snapshots
+          order by captured_day desc
+          limit 730
+        ) daily
+      ),'[]'::jsonb) active_account_snapshots,
       coalesce((
         select jsonb_agg(jsonb_build_object(
           'id',account.id,'label',account.label,'email',account.email,'createdAt',account.created_at::text,
@@ -387,28 +379,6 @@ async function getAnalyticsSqlSummary(): Promise<AnalyticsSqlSummaryRow> {
   `)
   if (!rows[0]) throw new Error("Analytics database summary query returned no row")
   return rows[0]
-}
-
-async function listActiveAccountSnapshots(): Promise<ActiveAccountSnapshotRow[]> {
-  const { rows } = await queryDb<ActiveAccountSnapshotRow>(`
-    select captured_day, account_id, account_label, account_email, buckets, objects, bytes, captured_at
-    from (
-      select
-        captured_day::text as captured_day,
-        account_id,
-        account_label,
-        account_email,
-        buckets,
-        objects,
-        bytes,
-        captured_at
-      from drive_analytics_active_account_snapshots
-      order by captured_day desc
-      limit 730
-    ) daily
-    order by captured_day asc
-  `)
-  return rows
 }
 
 const ANALYTICS_CACHE_TTL_MS = 20_000
@@ -446,17 +416,10 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const warnings: string[] = []
 
   const [
-    catalog,
     sqlSummary,
     migrationItemRows,
-    activeAccountSnapshotRows,
   ] =
     await Promise.all([
-      capture("analytics catalog", warnings, getAnalyticsCatalogSummary, {
-        users: { total: 0, active: 0 },
-        migrations: [] as AnalyticsMigration[],
-        repairJobs: [] as AnalyticsRepairJob[],
-      }),
       getAnalyticsSqlSummary(),
       capture(
         "migration items",
@@ -464,15 +427,15 @@ async function buildAnalyticsPayload(range: RangeKey) {
         () => listAnalyticsMigrationItems(start, days === null),
         [] as MigrationItemRow[]
       ),
-      capture(
-        "active account snapshots",
-        warnings,
-        listActiveAccountSnapshots,
-        [] as ActiveAccountSnapshotRow[]
-      ),
     ])
 
-  const { migrations, users, repairJobs } = catalog
+  const migrations = sqlSummary.migrations ?? []
+  const users = {
+    total: toNumber(sqlSummary.user_summary?.total),
+    active: toNumber(sqlSummary.user_summary?.active),
+  }
+  const repairJobs = (sqlSummary.repair_jobs ?? []).map(mapRepairJobRow)
+  const activeAccountSnapshotRows = sqlSummary.active_account_snapshots ?? []
 
   // Account summaries and all bucket/worker aggregates come from the same
   // PostgreSQL statement snapshot, avoiding a second query and mixed freshness.

@@ -363,6 +363,84 @@ export async function getMigration(id: string): Promise<DriveMigration | null> {
   return mapMigrationRow(row)
 }
 
+/** One bounded query for a migration, its selected bucket, and saved failures. */
+export async function getMigrationFailureBootstrap(
+  migrationId: string,
+  itemId: string,
+  limit = 150
+) {
+  const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)))
+  const { rows } = await queryDb<{
+    migration: DriveMigrationRow | null
+    item: DriveMigrationItemRow | null
+    failures: Array<{
+      objectKey: string | null
+      message: string | null
+      occurredAtText: string | null
+      rawLog: unknown
+      sourceProbe: unknown
+      destinationProbe: unknown
+      diagnosis: unknown
+      download: unknown
+      fetchedAt: string | null
+    }> | null
+  }>(`
+    with selected_migration as (
+      select migration.*,
+        case when migration.status='completed' and migration.summary_item_count=0
+          then coalesce(legacy_summary.item_count,0)::integer else migration.summary_item_count end as resolved_summary_item_count,
+        case when migration.status='completed' and migration.summary_item_count=0
+          then coalesce(legacy_summary.summary_objects,0)::bigint else migration.summary_objects end as resolved_summary_objects,
+        case when migration.status='completed' and migration.summary_item_count=0
+          then coalesce(legacy_summary.summary_bytes,0)::bigint else migration.summary_bytes end as resolved_summary_bytes
+      from public.drive_migrations migration
+      left join lateral (
+        select count(*) as item_count,
+          coalesce(sum(source_objects),0) as summary_objects,
+          coalesce(sum(source_bytes),0) as summary_bytes
+        from public.drive_migration_items
+        where migration_id=migration.id
+      ) legacy_summary on migration.status='completed' and migration.summary_item_count=0
+      where migration.id=$1
+      limit 1
+    ), selected_item as (
+      select item.* from public.drive_migration_items item
+      join selected_migration migration on migration.id=item.migration_id
+      where item.id=$2
+      limit 1
+    ), failure_rows as (
+      select failure.object_key,failure.message,failure.occurred_at_text,failure.raw_log,
+        failure.source_probe,failure.destination_probe,failure.diagnosis,failure.download,failure.fetched_at
+      from public.drive_migration_item_failure_records failure
+      join selected_item item on item.id=failure.migration_item_id
+      order by failure.occurred_at desc nulls last,failure.fetched_at desc,failure.id desc
+      limit $3
+    )
+    select
+      (select (to_jsonb(migration) - 'resolved_summary_item_count' - 'resolved_summary_objects' - 'resolved_summary_bytes') || jsonb_build_object(
+        'summary_item_count',migration.resolved_summary_item_count::text,
+        'summary_objects',migration.resolved_summary_objects::text,
+        'summary_bytes',migration.resolved_summary_bytes::text
+      ) from selected_migration migration) as migration,
+      (select to_jsonb(item) || jsonb_build_object(
+        'source_objects',item.source_objects::text,
+        'source_bytes',item.source_bytes::text
+      ) from selected_item item) as item,
+      coalesce((select jsonb_agg(jsonb_build_object(
+        'objectKey',failure.object_key,'message',failure.message,'occurredAtText',failure.occurred_at_text,
+        'rawLog',failure.raw_log,'sourceProbe',failure.source_probe,'destinationProbe',failure.destination_probe,
+        'diagnosis',failure.diagnosis,'download',failure.download,'fetchedAt',failure.fetched_at
+      ) order by failure.occurred_at desc nulls last,failure.fetched_at desc)
+      from failure_rows failure),'[]'::jsonb) as failures
+  `, [migrationId, itemId, boundedLimit])
+  const row = rows[0]
+  return {
+    migration: row?.migration ? mapMigrationRow(row.migration) : null,
+    item: row?.item ? mapMigrationItemRow(row.item) : null,
+    failures: row?.failures ?? [],
+  }
+}
+
 /** One round trip for migration details, account choices, items, and worker-run telemetry. */
 export async function getMigrationDetailBootstrap(
   id: string,

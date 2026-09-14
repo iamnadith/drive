@@ -30,6 +30,7 @@ export async function GET(request: Request) {
       to: searchParams.get("to") ?? undefined,
       cursor: searchParams.get("cursor") ?? undefined,
       limit: Number.isFinite(limitRaw) ? limitRaw : 25,
+      includeTotal: searchParams.get("includeTotal") !== "false",
     })
     return NextResponse.json(result)
   } catch (error: unknown) {

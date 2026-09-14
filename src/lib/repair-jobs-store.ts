@@ -2,8 +2,10 @@ import crypto from "crypto"
 import {
   getAgentGithubToken,
   listAgents,
+  mapAgentRunRow,
   updateAgent,
   updateAgentRun,
+  type DriveAgentRunRow,
 } from "./agents-store"
 import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflowRun, listGitHubWorkflowRunJobs, listGitHubWorkflowRuns } from "./github-oauth"
 import { getMigration, listMigrationItems, updateMigration, updateMigrationItem, type DriveMigrationItem } from "./migrations-store"
@@ -591,6 +593,31 @@ export async function claimRepairJob(
 
 export async function getRepairJob(id: string): Promise<DriveRepairJob | null> {
   return getRepairJobRaw(id)
+}
+
+export async function getRepairJobDetail(id: string) {
+  const { rows } = await queryDb<{
+    job: DriveRepairJobRow | null
+    linked_run: DriveAgentRunRow | null
+  }>(`
+    select to_jsonb(job) as job,
+      (
+        select to_jsonb(run)
+        from public.drive_agent_runs run
+        where run.job_reference=$1
+        order by run.created_at desc,run.id desc
+        limit 1
+      ) as linked_run
+    from public.${REPAIR_JOBS_TABLE} job
+    where job.id=$1
+    limit 1
+  `, [id])
+  const row = rows[0]
+  if (!row?.job) return null
+  return {
+    job: mapJobRow(row.job),
+    linkedRun: row.linked_run ? mapAgentRunRow(row.linked_run) : null,
+  }
 }
 
 export async function deleteRepairJob(id: string): Promise<void> {

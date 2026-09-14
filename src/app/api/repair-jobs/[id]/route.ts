@@ -7,7 +7,7 @@ import {
   getGitHubWorkflowRun,
   GITHUB_TOKEN_COOKIE,
 } from "@/lib/github-oauth"
-import { abortRepairJob, deleteRepairJob, getRepairJob } from "@/lib/repair-jobs-store"
+import { abortRepairJob, deleteRepairJob, getRepairJob, getRepairJobDetail } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
@@ -126,10 +126,9 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     if (!auth.ok) return auth.response
 
     const { id } = await context.params
-    const job = await getRepairJob(id)
-    if (!job) return NextResponse.json({ error: "Repair job not found" }, { status: 404 })
-    const linkedRun = await getLatestAgentRunByJobReference(id).catch(() => null)
-    return NextResponse.json({ job: { ...job, linkedRun } })
+    const detail = await getRepairJobDetail(id)
+    if (!detail) return NextResponse.json({ error: "Repair job not found" }, { status: 404 })
+    return NextResponse.json({ job: { ...detail.job, linkedRun: detail.linkedRun } })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to load repair job") }, { status: 500 })
   }

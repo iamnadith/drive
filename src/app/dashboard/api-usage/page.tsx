@@ -15,7 +15,6 @@ import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart"
 import { DashboardDataTable } from "@/components/dashboard/data-table"
@@ -44,7 +43,7 @@ type UsageEvent = {
 }
 
 type UsageResponse = {
-  summary: {
+  summary?: {
     total: number
     success: number
     failed: number
@@ -52,8 +51,8 @@ type UsageResponse = {
     uniqueKeys: number
     uniqueProjects: number
   }
-  byAction: Array<{ action: string; count: number }>
-  byProject: Array<{ projectId: string; name: string; count: number }>
+  byAction?: Array<{ action: string; count: number }>
+  byProject?: Array<{ projectId: string; name: string; count: number }>
   events: UsageEvent[]
   nextCursor: string | null
   generatedAt: string
@@ -129,19 +128,6 @@ function formatDateTime(value: string) {
   }).format(date)
 }
 
-function formatRelative(value?: string | null) {
-  if (!value) return "Never"
-  const time = Date.parse(value)
-  if (!Number.isFinite(time)) return "Unknown"
-  const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000))
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  return `${Math.floor(hours / 24)}d ago`
-}
-
 function outcomeVariant(outcome: string, status?: number): "default" | "secondary" | "destructive" | "outline" {
   if (outcome === "failed" || (status && status >= 500)) return "destructive"
   if (status === 429) return "secondary"
@@ -206,11 +192,14 @@ export default function ApiUsagePage() {
     return params
   }, [cursor, filters])
 
-  const loadUsage = React.useCallback(async (quiet = false, signal?: AbortSignal) => {
+  const loadUsage = React.useCallback(async (quiet = false, signal?: AbortSignal, refreshSummary = false) => {
     if (quiet) setRefreshing(true)
     else setLoading(true)
     try {
-      const res = await fetch(`/api/projects/usage?${buildParams().toString()}`, {
+      const params = buildParams()
+      if (cursor && !refreshSummary) params.set("summary", "0")
+      else params.set("summary", "1")
+      const res = await fetch(`/api/projects/usage?${params.toString()}`, {
         cache: "no-store",
         signal,
       })
@@ -220,7 +209,15 @@ export default function ApiUsagePage() {
           isRecord(json) && typeof json.error === "string" ? json.error : "Unable to load API usage"
         throw new Error(message)
       }
-      setData(json as UsageResponse)
+      const nextData = json as UsageResponse
+      setData((current) => ({
+        ...current,
+        ...nextData,
+        summary: nextData.summary ?? current?.summary,
+        byAction: nextData.byAction ?? current?.byAction,
+        byProject: nextData.byProject ?? current?.byProject,
+        generatedAt: nextData.generatedAt ?? current?.generatedAt ?? new Date().toISOString(),
+      }))
       setError(null)
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return
@@ -232,7 +229,7 @@ export default function ApiUsagePage() {
       setLoading(false)
       setRefreshing(false)
     }
-  }, [buildParams])
+  }, [buildParams, cursor])
 
   React.useEffect(() => {
     const controller = new AbortController()
@@ -262,7 +259,7 @@ export default function ApiUsagePage() {
     setFilters((current) => ({ ...current, [key]: value }))
   }
 
-  const actions = data?.byAction.map((item) => item.action) ?? []
+  const actions = data?.byAction?.map((item) => item.action) ?? []
   const usageFilters: SearchFilterOption[] = [
     {
       key: "action",
@@ -356,7 +353,7 @@ export default function ApiUsagePage() {
             searchPlaceholder="Search project ID..."
             countSearch
             searchWidthClassName="sm:w-[220px]"
-            onRefresh={() => void loadUsage(true)}
+            onRefresh={() => void loadUsage(true, undefined, true)}
             refreshing={refreshing}
             refreshLabel="Sync API usage"
             onSearchChange={(value) => updateFilter("projectId", value)}

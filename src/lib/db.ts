@@ -2,13 +2,31 @@ import { createHash } from "node:crypto"
 import { Pool } from "pg"
 import type { PoolClient, QueryResultRow } from "pg"
 
-const DRIVE_SCHEMA_VERSION = 2026091405
+const DRIVE_SCHEMA_VERSION = 2026091409
 
 const DRIVE_USER_INDEXES = [
   { name: "drive_users_status_role_idx", sql: "create index concurrently if not exists drive_users_status_role_idx on public.drive_users (status, role)" },
   { name: "drive_users_name_trgm_idx", sql: "create index concurrently if not exists drive_users_name_trgm_idx on public.drive_users using gin (name gin_trgm_ops)" },
   { name: "drive_users_email_trgm_idx", sql: "create index concurrently if not exists drive_users_email_trgm_idx on public.drive_users using gin (email gin_trgm_ops)" },
   { name: "drive_users_username_trgm_idx", sql: "create index concurrently if not exists drive_users_username_trgm_idx on public.drive_users using gin (username gin_trgm_ops)" },
+] as const
+
+const DRIVE_PROJECT_SEARCH_INDEXES = [
+  { name: "drive_projects_name_trgm_idx", sql: "create index concurrently if not exists drive_projects_name_trgm_idx on public.drive_projects using gin (lower(name) gin_trgm_ops)" },
+  { name: "drive_projects_project_id_trgm_idx", sql: "create index concurrently if not exists drive_projects_project_id_trgm_idx on public.drive_projects using gin (lower(project_id) gin_trgm_ops)" },
+  { name: "drive_projects_bucket_name_trgm_idx", sql: "create index concurrently if not exists drive_projects_bucket_name_trgm_idx on public.drive_projects using gin (lower(coalesce(bucket_name,'')) gin_trgm_ops)" },
+] as const
+
+const DRIVE_AGENT_RUN_INDEXES = [
+  { name: "drive_agent_runs_job_reference_created_idx", sql: "create index concurrently if not exists drive_agent_runs_job_reference_created_idx on public.drive_agent_runs (job_reference, created_at desc, id desc)" },
+] as const
+
+const DRIVE_MIGRATION_ANALYTICS_INDEXES = [
+  { name: "drive_migration_items_progress_time_idx", sql: "create index concurrently if not exists drive_migration_items_progress_time_idx on public.drive_migration_items (coalesce(last_progress_at, updated_at, created_at))" },
+] as const
+
+const DRIVE_PROJECT_API_EVENT_INDEXES = [
+  { name: "drive_project_api_events_recent_objects_idx", sql: "create index concurrently if not exists drive_project_api_events_recent_objects_idx on public.drive_project_api_events (project_id, action, occurred_at desc, object_key) where outcome = 'success' and object_key is not null" },
 ] as const
 
 declare global {
@@ -257,12 +275,12 @@ export function getDbPool(): Pool {
   return global.__drivePgPool
 }
 
-async function ensureDriveUserIndexes() {
-  await withDbAdvisoryLock("drive-schema-index", "users", async () => {
+async function ensureConcurrentIndexes(resource: string, indexes: readonly { name: string; sql: string }[]) {
+  await withDbAdvisoryLock("drive-schema-index", resource, async () => {
     const client = await getDbPool().connect()
     try {
       await client.query("set search_path to public, extensions")
-      for (const index of DRIVE_USER_INDEXES) {
+      for (const index of indexes) {
         const existing = await client.query<{ valid: boolean }>(`
           select i.indisvalid as valid
           from pg_index i
@@ -328,7 +346,7 @@ export async function ensureDriveSchema(): Promise<void> {
         `create unique index if not exists drive_users_username_key on drive_users (username) where username is not null;`
       )
       await queryDb(`create index if not exists drive_users_created_id_idx on drive_users (created_at, id);`)
-      await ensureDriveUserIndexes()
+      await ensureConcurrentIndexes("users", DRIVE_USER_INDEXES)
       await queryDb(`alter table if exists drive_users add column if not exists email_verified boolean not null default true;`)
       await queryDb(`alter table if exists drive_users add column if not exists email_verified_at timestamptz;`)
       await queryDb(`alter table if exists drive_users add column if not exists two_factor_enabled boolean not null default false;`)
@@ -605,6 +623,7 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(`create unique index if not exists drive_projects_project_id_key on drive_projects (project_id);`)
       await queryDb(`create index if not exists drive_projects_bucket_name_idx on drive_projects (bucket_name) where bucket_name <> '';`)
       await queryDb(`create index if not exists drive_projects_status_idx on drive_projects (status);`)
+      await ensureConcurrentIndexes("projects", DRIVE_PROJECT_SEARCH_INDEXES)
       await queryDb(`
         create table if not exists drive_project_bucket_assignments (
           project_id uuid not null references drive_projects(id) on delete cascade,
@@ -794,6 +813,7 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(`create index if not exists drive_project_api_events_key_time_idx on drive_project_api_events (api_key_id, occurred_at desc);`)
       await queryDb(`create index if not exists drive_project_api_events_action_time_idx on drive_project_api_events (action, occurred_at desc);`)
       await queryDb(`create index if not exists drive_project_api_events_occurred_id_idx on drive_project_api_events (occurred_at desc, id desc);`)
+      await ensureConcurrentIndexes("project-api-events", DRIVE_PROJECT_API_EVENT_INDEXES)
 
       await queryDb(`
         create table if not exists drive_project_object_inventory (
@@ -988,6 +1008,7 @@ export async function ensureDriveSchema(): Promise<void> {
           updated_at timestamptz not null default now()
         );
       `)
+      await queryDb(`alter table public.drive_migration_items add column if not exists last_progress_at timestamptz;`)
 
       await queryDb(
         `create unique index if not exists drive_migration_items_unique_bucket on drive_migration_items (migration_id, source_bucket);`
@@ -998,6 +1019,7 @@ export async function ensureDriveSchema(): Promise<void> {
       await queryDb(
         `create index if not exists drive_migration_items_job_idx on drive_migration_items (slurper_job_id);`
       )
+      await ensureConcurrentIndexes("migration-analytics", DRIVE_MIGRATION_ANALYTICS_INDEXES)
 
       await queryDb(`
         create table if not exists drive_migration_item_failure_records (
@@ -1090,8 +1112,10 @@ export async function ensureDriveSchema(): Promise<void> {
         );
       `)
 
+      await queryDb(`alter table if exists public.drive_agent_runs add column if not exists job_reference text;`)
       await queryDb(`create index if not exists drive_agent_runs_agent_idx on drive_agent_runs (agent_id, created_at desc);`)
       await queryDb(`create index if not exists drive_agent_runs_migration_idx on drive_agent_runs ((payload->>'migrationId'), status) where run_type='github_dispatch';`)
+      await ensureConcurrentIndexes("agent-runs", DRIVE_AGENT_RUN_INDEXES)
 
       await queryDb(`
         create table if not exists drive_repair_jobs (
