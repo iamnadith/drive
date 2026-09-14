@@ -8,7 +8,6 @@ import {
   type DriveMigrationItem,
 } from "@/lib/migrations-store"
 import { getMergedBucketSnapshot } from "@/lib/migration-bucket-state"
-import { type DriveRepairJob } from "@/lib/repair-jobs-store"
 import { queryDb } from "@/lib/db"
 import { getUserSummary } from "@/lib/users-store"
 import { requireAdmin } from "@/lib/server-auth"
@@ -51,24 +50,26 @@ type VerifyDiffRow = {
   created_at: string
 }
 
-type RepairJobRow = {
+type AnalyticsRepairJobRow = {
   id: string
   migration_id: string
-  requested_by_agent_id: string | null
-  claimed_by_agent_id: string | null
   status: string
-  mode: string
-  payload: Record<string, unknown> | null
-  progress: Record<string, unknown> | null
-  result: Record<string, unknown> | null
   summary: string | null
   error: string | null
-  claimed_at: string | null
-  started_at: string | null
   completed_at: string | null
-  last_heartbeat_at: string | null
   created_at: string
   updated_at: string
+}
+
+type AnalyticsRepairJob = {
+  id: string
+  migrationId: string
+  status: "pending" | "claimed" | "running" | "completed" | "failed" | "canceled"
+  summary?: string
+  error?: string
+  completedAt?: string
+  createdAt: string
+  updatedAt: string
 }
 
 type ActiveAccountSnapshotRow = {
@@ -358,27 +359,17 @@ const ANALYTICS_CACHE_TTL_MS = 20_000
 const analyticsCache = new Map<RangeKey, { expiresAt: number; payload: unknown }>()
 const analyticsInFlight = new Map<RangeKey, Promise<unknown>>()
 
-function mapRepairJobRow(row: RepairJobRow): DriveRepairJob {
+function mapRepairJobRow(row: AnalyticsRepairJobRow): AnalyticsRepairJob {
   const status = ["pending", "claimed", "running", "completed", "failed", "canceled"].includes(row.status)
     ? row.status
     : "pending"
-  const mode = ["verify_only", "repair_only", "repair_and_verify", "migration"].includes(row.mode) ? row.mode : "repair_and_verify"
   return {
     id: row.id,
     migrationId: row.migration_id,
-    requestedByAgentId: row.requested_by_agent_id ?? undefined,
-    claimedByAgentId: row.claimed_by_agent_id ?? undefined,
-    status: status as DriveRepairJob["status"],
-    mode: mode as DriveRepairJob["mode"],
-    payload: row.payload ?? {},
-    progress: row.progress ?? {},
-    result: row.result ?? {},
+    status: status as AnalyticsRepairJob["status"],
     summary: row.summary ?? undefined,
     error: row.error ?? undefined,
-    claimedAt: row.claimed_at ?? undefined,
-    startedAt: row.started_at ?? undefined,
     completedAt: row.completed_at ?? undefined,
-    lastHeartbeatAt: row.last_heartbeat_at ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
@@ -416,15 +407,15 @@ async function buildAnalyticsPayload(range: RangeKey) {
         "repair jobs",
         warnings,
         async () => {
-          const rows = await selectRows<RepairJobRow>(
+          const rows = await selectRows<AnalyticsRepairJobRow>(
             "drive_repair_jobs",
-            "id,migration_id,requested_by_agent_id,claimed_by_agent_id,status,mode,payload,progress,result,summary,error,claimed_at,started_at,completed_at,last_heartbeat_at,created_at,updated_at",
+            "id,migration_id,status,summary,error,completed_at,created_at,updated_at",
             { column: "created_at", ascending: false },
             100
           )
           return rows.map(mapRepairJobRow)
         },
-        [] as DriveRepairJob[]
+        [] as AnalyticsRepairJob[]
       ),
       getAnalyticsSqlSummary(),
       capture(

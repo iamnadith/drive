@@ -153,6 +153,14 @@ test('active worker migrations cannot be frozen by historical read-only markers'
   assert.match(detailsPage, /executionMode === "migration_workers"\) return/)
 })
 
+test('migration detail SSE snapshots reuse the one-query database bootstrap', () => {
+  const stream = read('src/app/api/migrations/[id]/stream/route.ts')
+  assert.match(stream, /getMigrationDetailBootstrap\(id, \{ includeAccounts: false \}\)/)
+  assert.match(stream, /const \{ migration, items, workerRuns \} = bootstrap/)
+  assert.doesNotMatch(stream, /getMigration\(|listMigrationItems\(|listMigrationWorkerRuns\(/)
+  assert.match(stream, /nextDelay = \["running", "verifying", "queued"\]\.includes\(migration\.status\) \? 4_000 : 15_000/)
+})
+
 test('migration orchestrator projects durable per-file completion into live bucket counts', () => {
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   assert.match(orchestrator, /async function refreshWorkerItemProgress/)

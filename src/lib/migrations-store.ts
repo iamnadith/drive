@@ -364,7 +364,10 @@ export async function getMigration(id: string): Promise<DriveMigration | null> {
 }
 
 /** One round trip for migration details, account choices, items, and worker-run telemetry. */
-export async function getMigrationDetailBootstrap(id: string): Promise<MigrationDetailBootstrap | null> {
+export async function getMigrationDetailBootstrap(
+  id: string,
+  options: { includeAccounts?: boolean } = {}
+): Promise<MigrationDetailBootstrap | null> {
   const { rows } = await queryDb<{
     migration: DriveMigrationRow | null
     items: DriveMigrationItemRow[] | null
@@ -374,11 +377,11 @@ export async function getMigrationDetailBootstrap(id: string): Promise<Migration
     with selected_migration as (
       select migration.*,
         case when migration.status='completed' and migration.summary_item_count=0
-          then coalesce(legacy_summary.item_count,0)::integer else migration.summary_item_count end as summary_item_count,
+          then coalesce(legacy_summary.item_count,0)::integer else migration.summary_item_count end as resolved_summary_item_count,
         case when migration.status='completed' and migration.summary_item_count=0
-          then coalesce(legacy_summary.summary_objects,0)::bigint else migration.summary_objects end as summary_objects,
+          then coalesce(legacy_summary.summary_objects,0)::bigint else migration.summary_objects end as resolved_summary_objects,
         case when migration.status='completed' and migration.summary_item_count=0
-          then coalesce(legacy_summary.summary_bytes,0)::bigint else migration.summary_bytes end as summary_bytes
+          then coalesce(legacy_summary.summary_bytes,0)::bigint else migration.summary_bytes end as resolved_summary_bytes
       from public.drive_migrations migration
       left join lateral (
         select count(*) as item_count,
@@ -406,11 +409,11 @@ export async function getMigrationDetailBootstrap(id: string): Promise<Migration
         from public.drive_migration_items item
         join selected_migration migration on migration.id=item.migration_id
       ),'[]'::jsonb) as items,
-      coalesce((
+      case when $2::boolean then coalesce((
         select jsonb_agg(jsonb_build_object('id',account.id,'label',account.label,'email',account.email,'status',account.status)
           order by account.updated_at desc nulls last,account.created_at desc,account.id desc)
         from public.drive_accounts account
-      ),'[]'::jsonb) as accounts,
+      ),'[]'::jsonb) else '[]'::jsonb end as accounts,
       coalesce((
         select jsonb_agg(jsonb_build_object(
           'id',run.id,
@@ -445,7 +448,7 @@ export async function getMigrationDetailBootstrap(id: string): Promise<Migration
         ) run
         left join public.drive_repair_jobs job on job.id::text=run.job_reference
       ),'[]'::jsonb) as worker_runs
-  `, [id])
+  `, [id, options.includeAccounts !== false])
   const row = rows[0]
   if (!row?.migration) return null
   return {

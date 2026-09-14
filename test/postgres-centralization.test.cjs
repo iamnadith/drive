@@ -56,6 +56,14 @@ test("runtime PostgreSQL uses only POSTGRES_URL and keeps the process pool bound
   assert.match(source, /process\.env\.NODE_ENV === "production" \? 2 : 1/)
   assert.match(source, /getEnv\("POSTGRES_SSL"\).*\?\? true/)
   assert.match(source, /getEnv\("DISABLE_POSTGRES_SSL"\).*\?\? false/)
+  assert.match(source, /getEnv\("POSTGRES_SLOW_QUERY_MS"\)/)
+  assert.match(source, /SLOW_QUERY_LOG_WINDOW_MS = 30_000/)
+  assert.match(source, /pool\.waitingCount/)
+  assert.match(source, /console\.warn\("\[postgres\] slow query summary"/)
+  assert.match(source, /suppressedSlowQueries: suppressedSlowQueryCount/)
+  const slowLog = source.match(/console\.warn\("\[postgres\] slow query summary",\s*\{[\s\S]*?\n\s*\}\)/)
+  assert.ok(slowLog, "expected structured slow-query pool diagnostics")
+  assert.doesNotMatch(slowLog[0], /\b(text|params):/)
   for (const route of [
     "src/app/api/internal/backend-orchestrator/config/route.ts",
     "src/app/api/internal/file-scanner/config/route.ts",
@@ -93,6 +101,10 @@ test("users page is server-paginated with safe columns and analytics reads only 
   assert.match(analytics, /listDashboardAccountSummaries/)
   assert.doesNotMatch(analytics, /getAllAccounts/)
   assert.doesNotMatch(analytics, /getAllUsers|type User from ["']@\/lib\/users-store/)
+  const repairProjection = analytics.match(/selectRows<AnalyticsRepairJobRow>\([\s\S]*?\n\s*100\n\s*\)/)
+  assert.ok(repairProjection, "expected a bounded repair-job analytics projection")
+  assert.match(repairProjection[0], /id,migration_id,status,summary,error,completed_at,created_at,updated_at/)
+  assert.doesNotMatch(repairProjection[0], /payload|progress|result/)
   assert.match(analytics, /itemMetricsByDay/)
   assert.doesNotMatch(analytics, /itemRowsAsItems\.filter\(|migrations\.filter\(\(m\) => dateKey/)
   assert.doesNotMatch(analytics, /Math\.min\(\.\.\.times\)/)
@@ -249,6 +261,10 @@ test("migration detail bootstrap loads safe account options with its initial pay
   assert.match(detailBootstrap, /drive_accounts/)
   assert.match(detailBootstrap, /job\.id::text=run\.job_reference/)
   assert.match(detailBootstrap, /'current_file'/)
+  assert.match(detailBootstrap, /as resolved_summary_item_count/i)
+  assert.match(detailBootstrap, /as resolved_summary_objects/i)
+  assert.match(detailBootstrap, /as resolved_summary_bytes/i)
+  assert.match(detailBootstrap, /case when \$2::boolean then coalesce/i)
   assert.doesNotMatch(detailBootstrap, /'job_payload'|'job_progress'/)
 
   const page = read("src/app/dashboard/migrations/[id]/page.tsx")

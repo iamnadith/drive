@@ -59,6 +59,37 @@ function getPoolMax(): number {
   return process.env.NODE_ENV === "production" ? 2 : 1
 }
 
+function getSlowQueryThresholdMs(): number {
+  const parsed = Number(getEnv("POSTGRES_SLOW_QUERY_MS"))
+  return Number.isFinite(parsed) && parsed > 0 ? Math.max(50, Math.floor(parsed)) : 1_000
+}
+
+const SLOW_QUERY_LOG_WINDOW_MS = 30_000
+let slowQueryWindowStartedAt = 0
+let suppressedSlowQueryCount = 0
+
+function reportSlowQuery(durationMs: number, pool: Pool, waitingAtStart: number) {
+  if (durationMs < getSlowQueryThresholdMs()) return
+  const now = Date.now()
+  if (now - slowQueryWindowStartedAt < SLOW_QUERY_LOG_WINDOW_MS) {
+    suppressedSlowQueryCount += 1
+    return
+  }
+
+  console.warn("[postgres] slow query summary", {
+    durationMs: Math.round(durationMs),
+    suppressedSlowQueries: suppressedSlowQueryCount,
+    pool: {
+      total: pool.totalCount,
+      idle: pool.idleCount,
+      waitingAtStart,
+      waiting: pool.waitingCount,
+    },
+  })
+  slowQueryWindowStartedAt = now
+  suppressedSlowQueryCount = 0
+}
+
 function attachPoolErrorHandler(pool: Pool) {
   // Prevent process crashes from idle client errors (e.g. server terminating connections).
   pool.on("error", (error) => {
@@ -96,7 +127,13 @@ export async function queryDb<T extends QueryResultRow = QueryResultRow>(
 ) {
   const attempt = async () => {
     const pool = getDbPool()
-    return pool.query<T>(text, params as unknown[] | undefined)
+    const startedAt = performance.now()
+    const waitingAtStart = pool.waitingCount
+    try {
+      return await pool.query<T>(text, params as unknown[] | undefined)
+    } finally {
+      reportSlowQuery(performance.now() - startedAt, pool, waitingAtStart)
+    }
   }
 
   try {

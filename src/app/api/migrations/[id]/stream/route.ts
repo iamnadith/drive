@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server"
-import { getMigration, listMigrationItems } from "@/lib/migrations-store"
+import { getMigrationDetailBootstrap } from "@/lib/migrations-store"
 import { requireAdmin } from "@/lib/server-auth"
-import { listMigrationWorkerRuns } from "@/lib/migration-worker-runs"
 
 export const runtime = "nodejs"
 
@@ -59,15 +58,12 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
         while (!closed && !request.signal.aborted) {
           let nextDelay = 10_000
           try {
-            const migration = await getMigration(id)
-            if (!migration) {
+            const bootstrap = await getMigrationDetailBootstrap(id, { includeAccounts: false })
+            if (!bootstrap) {
               send("error", { error: "Migration not found" })
               break
             }
-            const [items, workerRuns] = await Promise.all([
-              listMigrationItems(id),
-              migration.options.executionMode === "migration_workers" ? listMigrationWorkerRuns(id).catch(() => []) : Promise.resolve([]),
-            ])
+            const { migration, items, workerRuns } = bootstrap
             const snapshot = { migration, items, workerRuns }
             const serialized = JSON.stringify(snapshot)
             const now = Date.now()
