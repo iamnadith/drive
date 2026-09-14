@@ -303,6 +303,15 @@ test('worker-pool scanner resumes transient failed inventories and fences API cl
   assert.match(worker, /!\["running", "verifying"\]\.includes\(migration\.migration_status\)/)
 })
 
+test('Migration Orchestrator migration selector binds its transient-error pattern to the only supplied parameter', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const selector = orchestrator.slice(orchestrator.indexOf('async function selectMigration'), orchestrator.indexOf('async function mapWithConcurrency'))
+  assert.match(selector, /s\.error ~\* \$1/)
+  assert.match(selector, /v\.last_error ~\* \$1/)
+  assert.match(selector, /\[TRANSIENT_SCAN_SQL_PATTERN\]/)
+  assert.doesNotMatch(selector, /~\* \$2/)
+})
+
 test('Super Slurper repair re-enters the shared worker-pool scan, queue, copy, and verification lifecycle', () => {
   const action = read('src/app/api/migrations/[id]/action/route.ts')
   const details = read('src/app/dashboard/migrations/[id]/page.tsx')

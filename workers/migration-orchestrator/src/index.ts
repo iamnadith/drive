@@ -98,7 +98,7 @@ async function selectMigration(db: Client): Promise<Row | null> {
         m.status='failed' and coalesce(m.options->>'executionMode','super_slurper')='super_slurper' and exists(
           select 1 from drive_migration_items i join drive_bucket_scans s on s.id::text=i.progress->>'sourceScanId'
           where i.migration_id=m.id and i.slurper_job_id is null and i.slurper_status='precheck_failed'
-            and s.status='failed' and s.error ~* $2
+            and s.status='failed' and s.error ~* $1
         )
       ) or (
         m.status='failed' and coalesce(m.options->>'executionMode','super_slurper')='super_slurper'
@@ -108,7 +108,7 @@ async function selectMigration(db: Client): Promise<Row | null> {
         m.status='verification_failed' and exists(
           select 1 from drive_migration_verification_state v
           where v.migration_id=m.id and v.status='failed'
-            and v.last_error ~* $2
+            and v.last_error ~* $1
         )
       )
     ) and coalesce(m.options->>'executionMode','super_slurper') in ('migration_workers','super_slurper')
