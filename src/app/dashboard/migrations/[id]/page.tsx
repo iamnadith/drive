@@ -66,7 +66,7 @@ type Migration = {
   id: string
   sourceAccountId: string
   targetAccountId: string
-  status: "draft" | "running" | "verifying" | "completed" | "failed" | "canceled"
+  status: "draft" | "running" | "verifying" | "completed" | "failed" | "verification_failed" | "canceled"
   options: {
     executionMode?: "super_slurper" | "migration_workers"
     workerShardCount?: number
@@ -260,6 +260,14 @@ function mergeIncomingItem(prev: MigrationItem | undefined, next: MigrationItem)
 
   const prevProgress = isRecord(prev.progress) ? (prev.progress as Record<string, unknown>) : {}
   const nextProgress = isRecord(next.progress) ? (next.progress as Record<string, unknown>) : {}
+  const prevFileVerification = isRecord(prevProgress.fileVerification) ? prevProgress.fileVerification : null
+  const nextFileVerification = isRecord(nextProgress.fileVerification) ? nextProgress.fileVerification : null
+  const verificationWasExplicitlyRequeued =
+    nextFileVerification?.status === "pending" &&
+    typeof nextFileVerification.requestedAt === "string" &&
+    nextFileVerification.requestedAt !== prevFileVerification?.requestedAt
+  if (verificationWasExplicitlyRequeued) return next
+
   const prevLive = readLiveBucketState(prevProgress)
   const nextLive = readLiveBucketState(nextProgress)
 
@@ -461,7 +469,10 @@ function collectLogLines(items: MigrationItem[], workerRuns: MigrationWorkerRun[
       if (!Number.isFinite(at)) continue
       const stage = typeof event.stage === "string" ? event.stage : ""
       const status = typeof event.status === "string" ? event.status : String(event.status ?? "")
-      const message = typeof event.message === "string" ? event.message : ""
+      const rawMessage = typeof event.message === "string" ? event.message : ""
+      const message = stage === "super_slurper_completed" && rawMessage === "Bucket migration completed"
+        ? "Super Slurper transfer completed; File Scanner verification pending"
+        : rawMessage
       const signature = JSON.stringify([stage, status, message])
       if (signature === previousEventSignature) continue
       previousEventSignature = signature
@@ -850,6 +861,7 @@ export default function MigrationDetailsPage() {
   const bucketCounts = React.useMemo(() => {
     let completed = 0
     let failed = 0
+    let verificationFailed = 0
     let aborted = 0
     let running = 0
     let scanning = 0
@@ -859,13 +871,14 @@ export default function MigrationDetailsPage() {
       const s = getBucketSnapshot(item).displayStatus
       if (normalizeStatus(s) === "scanning") scanning += 1
       else if (normalizeStatus(s) === "verifying") verifying += 1
+      else if (normalizeStatus(s) === "verification_failed") verificationFailed += 1
       else if (isCompletedStatus(s)) completed += 1
       else if (isAbortedStatus(s)) aborted += 1
       else if (isFailedLikeStatus(s)) failed += 1
       else if (normalizeStatus(s)) running += 1
     }
 
-    return { completed, failed, aborted, running, scanning, verifying, total: items.length }
+    return { completed, failed, verificationFailed, aborted, running, scanning, verifying, total: items.length }
   }, [getBucketSnapshot, items])
 
   const failedBuckets = React.useMemo(
@@ -972,12 +985,13 @@ export default function MigrationDetailsPage() {
   )
 
   const overviewBadgeStatus = React.useMemo(() => {
-    if (migration && ["completed", "failed", "canceled"].includes(migration.status)) return migration.status
+    if (migration && ["completed", "failed", "verification_failed", "canceled"].includes(migration.status)) return migration.status
     if (migration?.status === "verifying" && migration.syncMessage?.toLowerCase().includes("settings")) return "verifying"
     if (bucketCounts.scanning > 0) return "scanning"
     if (bucketCounts.running > 0) return "running"
     if (bucketCounts.verifying > 0) return "verifying"
     if (bucketCounts.failed > 0) return "failed"
+    if (bucketCounts.verificationFailed > 0) return "verification_failed"
     if (bucketCounts.aborted > 0 && bucketCounts.completed + bucketCounts.failed + bucketCounts.aborted === bucketCounts.total && bucketCounts.failed === 0)
       return "aborted"
     if (bucketCounts.completed === bucketCounts.total && bucketCounts.total > 0) return "completed"
@@ -1521,9 +1535,9 @@ export default function MigrationDetailsPage() {
         const canResume = !workerPoolMigration && Boolean(item.slurperJobId) && status === "paused"
         const verifyState = readVerifyState(item.progress)
         const verifyStatus = verifyState?.status ?? null
-        const canRetry = !workerPoolMigration && (verifyStatus === "error" || normalizedDisplayStatus === "queued" || normalizedDisplayStatus === "job_id_pending" || normalizedDisplayStatus.endsWith("_failed") || normalizedDisplayStatus.includes("failed") || normalizedDisplayStatus.includes("error"))
+        const canRetry = !workerPoolMigration && normalizedDisplayStatus !== "verification_failed" && (verifyStatus === "error" || normalizedDisplayStatus === "queued" || normalizedDisplayStatus === "job_id_pending" || normalizedDisplayStatus.endsWith("_failed") || normalizedDisplayStatus.includes("failed") || normalizedDisplayStatus.includes("error"))
         const canAbort = !["canceled", "completed"].includes(migration?.status ?? "") && !workerPoolMigration && (Boolean(item.slurperJobId) || canRetry) && !["completed", "aborted", "failed", "verification_failed", "no_files"].includes(normalizedDisplayStatus)
-        const canVerify = !workerPoolMigration && isCompletedStatus(displayStatus) && verifyStatus !== "pending" && verifyStatus !== "running"
+        const canVerify = !workerPoolMigration && (normalizedDisplayStatus === "verification_failed" || (isCompletedStatus(displayStatus) && verifyStatus !== "pending" && verifyStatus !== "running"))
         const canInspectFailures = snapshot.failed > 0 || snapshot.verifyIssues > 0 || normalizedDisplayStatus.includes("failed") || normalizedDisplayStatus.includes("error")
         const lifecycleAction: "pause" | "resume" | "retry" | null = canPause ? "pause" : canRetry ? "retry" : canResume ? "resume" : null
         const lifecycleBusy = itemBusy === "pause" || itemBusy === "resume" || itemBusy === "retry"
@@ -1683,10 +1697,11 @@ export default function MigrationDetailsPage() {
                   return settingsSync?.status === "failed"
                 })
               const showMarkCompleted =
-                allBucketsTerminal && String(effectiveMigrationStatus) !== "completed" && !settingsSyncFailed
+                allBucketsTerminal && !["completed", "failed", "verification_failed"].includes(String(effectiveMigrationStatus)) && !settingsSyncFailed
 
               return (
                 <>
+                  {effectiveMigrationStatus !== "verification_failed" ? (
                   <Button
                     onClick={() => {
                       if (effectiveMigrationStatus === "failed") {
@@ -1704,6 +1719,7 @@ export default function MigrationDetailsPage() {
                     ) : null}
                     {effectiveMigrationStatus === "failed" ? "Retry" : "Start"}
                   </Button>
+                  ) : null}
 
                   <Button onClick={syncNow} loading={busyAction === "sync"} disabled={Boolean(busyAction)} variant="outline">
                     {busyAction !== "sync" ? <RefreshCw className="h-4 w-4 mr-0" /> : null}

@@ -39,7 +39,7 @@ export function getMigrationReadOnlyState(migration: MigrationLike): {
   readOnly: boolean
   reason: string | null
 } {
-  const terminal = ["completed", "failed", "canceled"].includes(String(migration.status ?? "").toLowerCase())
+  const terminal = ["completed", "failed", "verification_failed", "canceled"].includes(String(migration.status ?? "").toLowerCase())
   // A transient provider/network error must never freeze active work.
   if (terminal && migration.options?.historyReadOnlyAt) {
     return {

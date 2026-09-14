@@ -229,7 +229,8 @@ async function persistMigrationPage(db: Client, scanId: string, task: Row, phase
           ${cursorColumn}=$8::text,
           ${objectsColumn}=greatest(0,coalesce(v.${objectsColumn},0)+d.object_delta),
           ${bytesColumn}=greatest(0,coalesce(v.${bytesColumn},0)+d.byte_delta),
-          phase=$9::text,status='pending',lease_owner=null,lease_expires_at=null,updated_at=now()
+          phase=$9::text,status='pending',attempt_count=0,last_error=null,
+          lease_owner=null,lease_expires_at=null,updated_at=now()
         from delta d,saved_scan s
         where v.migration_item_id=$2::uuid and v.generation=$3::int and v.lease_owner=$4::text
         returning v.migration_item_id
@@ -290,7 +291,8 @@ async function compare(db: Client, task: Row) {
         from (select kind from source_diffs union all select kind from extra_diffs) all_diffs
       ), state_done as (
         update drive_migration_verification_state v set status='completed',phase='complete',missing_objects=c.missing,
-          mismatched_objects=c.mismatched,extra_objects=c.extra,lease_owner=null,lease_expires_at=null,completed_at=now(),updated_at=now()
+          mismatched_objects=c.mismatched,extra_objects=c.extra,attempt_count=0,last_error=null,
+          lease_owner=null,lease_expires_at=null,completed_at=now(),updated_at=now()
         from counts c where v.migration_item_id=$1::uuid and v.generation=$4::int and v.lease_owner=$5::text
         returning c.missing,c.mismatched,c.extra
       ), item_done as (

@@ -35,7 +35,8 @@ function isCompletedStatus(value: string | undefined): boolean {
     s === "complete" ||
     s === "finished" ||
     s === "success" ||
-    s === "succeeded"
+    s === "succeeded" ||
+    s === "verification_failed"
   )
 }
 
@@ -116,25 +117,30 @@ export async function POST(
       }
       if (action === "verify") {
         if (!isCompletedStatus(item.slurperStatus)) {
-          return NextResponse.json({ error: "Bucket must be completed before verification" }, { status: 400 })
+          return NextResponse.json({ error: "Bucket transfer must be completed before verification" }, { status: 400 })
         }
 
         await queueMigrationItemVerification(id, item.id)
+        const requestedAt = new Date().toISOString()
+        const events = Array.isArray(item.progress.events) ? item.progress.events : []
         await updateMigrationItem(item.id, {
+          slurperStatus: "verifying",
           progress: {
             ...item.progress,
             stage: "verification_queued",
-            fileVerification: { status: "pending", requestedAt: new Date().toISOString() },
+            fileVerification: { status: "pending", requestedAt },
+            live: { ...(isRecord(item.progress.live) ? item.progress.live : {}), status: "verifying", updatedAt: requestedAt },
+            events: [...events, { at: requestedAt, stage: "file_verification", status: "running", message: "Manual File Scanner verification requested" }],
           },
-          lastProgressAt: new Date().toISOString(),
+          lastProgressAt: requestedAt,
         })
 
         await updateMigration(id, {
           status: "verifying",
           completedAt: null,
-          syncStatus: "ok",
+          syncStatus: "syncing",
           syncMessage: `Verification started for ${item.sourceBucket}`,
-          lastSyncedAt: new Date().toISOString(),
+          lastSyncedAt: requestedAt,
         })
         await wakeMigrationOrchestrator()
 
@@ -289,25 +295,30 @@ export async function POST(
 
     if (action === "verify") {
       if (!isCompletedStatus(item.slurperStatus)) {
-        return NextResponse.json({ error: "Bucket must be completed before verification" }, { status: 400 })
+        return NextResponse.json({ error: "Bucket transfer must be completed before verification" }, { status: 400 })
       }
 
       await queueMigrationItemVerification(id, item.id)
+      const requestedAt = new Date().toISOString()
+      const events = Array.isArray(item.progress.events) ? item.progress.events : []
       await updateMigrationItem(item.id, {
+        slurperStatus: "verifying",
         progress: {
           ...item.progress,
           stage: "verification_queued",
-          fileVerification: { status: "pending", requestedAt: new Date().toISOString() },
+          fileVerification: { status: "pending", requestedAt },
+          live: { ...(isRecord(item.progress.live) ? item.progress.live : {}), status: "verifying", updatedAt: requestedAt },
+          events: [...events, { at: requestedAt, stage: "file_verification", status: "running", message: "Manual File Scanner verification requested" }],
         },
-        lastProgressAt: new Date().toISOString(),
+        lastProgressAt: requestedAt,
       })
 
       await updateMigration(id, {
         status: "verifying",
         completedAt: null,
-        syncStatus: "ok",
+        syncStatus: "syncing",
         syncMessage: `Verification started for ${item.sourceBucket}`,
-        lastSyncedAt: new Date().toISOString(),
+        lastSyncedAt: requestedAt,
       })
       await wakeMigrationOrchestrator()
 

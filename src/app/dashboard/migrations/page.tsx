@@ -66,7 +66,7 @@ type Migration = {
   id: string
   sourceAccountId: string
   targetAccountId: string
-  status: "draft" | "running" | "verifying" | "completed" | "failed" | "canceled"
+  status: "draft" | "running" | "verifying" | "completed" | "failed" | "verification_failed" | "canceled"
   options: {
     executionMode?: "super_slurper" | "migration_workers"
     workerShardCount?: number
@@ -231,6 +231,7 @@ function statusBadge(status: string | undefined, syncStatus?: string, syncMessag
   if (s === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
   if (s === "paused") return <Badge className="bg-yellow-600">Paused</Badge>
   if (s === "failed") return <Badge className="bg-red-600">Failed</Badge>
+  if (s === "verification_failed") return <Badge className="bg-red-600">Verification failed</Badge>
   if (s === "canceled" || s === "aborted") return <Badge variant="secondary">Canceled</Badge>
   if (s === "draft") return <Badge variant="outline">Draft</Badge>
   if (s === "creating_job") return <Badge className="bg-primary text-primary-foreground">Creating job</Badge>
@@ -405,7 +406,7 @@ export default function MigrationsPage() {
 
   const activeCount = migrations.filter((migration) => migration.status === "running" || migration.status === "verifying").length
   const completedCount = migrations.filter((migration) => migration.status === "completed").length
-  const attentionCount = migrations.filter((migration) => migration.status === "failed" || (migration.status === "verifying" && migration.syncStatus === "error")).length
+  const attentionCount = migrations.filter((migration) => migration.status === "failed" || migration.status === "verification_failed" || (migration.status === "verifying" && migration.syncStatus === "error")).length
 
   const [createOpen, setCreateOpen] = React.useState(false)
   const [targetAccountId, setTargetAccountId] = React.useState<string>("")
