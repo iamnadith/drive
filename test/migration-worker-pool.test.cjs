@@ -212,7 +212,7 @@ test('migration details never regress worker counters on refresh or reconnect', 
   assert.match(migrationOrchestrator, /drive_migration_verification_state/)
   assert.doesNotMatch(backendReconciler, /syncMigrationLiveState|listMigrations/)
   assert.doesNotMatch(detailsPage, /syncMigrationLiveState/)
-  assert.match(itemActionRoute, /queueMigrationItemVerification\(id, item\.id\)/)
+  assert.match(itemActionRoute, /queueMigrationItemVerification\(id, item\.id, verificationGeneration\)/)
   assert.doesNotMatch(itemActionRoute, /runBucketScanBatch|r2ListAllObjects|r2HeadObject|createInitialBucketVerifyState/)
 })
 
@@ -255,6 +255,7 @@ test('verification failure stays distinct from transfer failure and is recoverab
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   const scanner = read('workers/file-scanner/src/index.ts')
   const action = read('src/app/api/migrations/[id]/items/[itemId]/action/route.ts')
+  const store = read('src/lib/migrations-store.ts')
   const details = read('src/app/dashboard/migrations/[id]/page.tsx')
   const migrations = read('src/app/dashboard/migrations/page.tsx')
   const readOnly = read('src/lib/migration-read-only.ts')
@@ -268,8 +269,8 @@ test('verification failure stays distinct from transfer failure and is recoverab
   assert.match(scanner, /phase=\$9::text,status='pending',attempt_count=0,last_error=null/)
   assert.match(scanner, /mismatched_objects=c\.mismatched,extra_objects=c\.extra,attempt_count=0,last_error=null/)
   assert.match(action, /s === "verification_failed"/)
-  assert.match(action, /slurperStatus: "verifying"/)
-  assert.match(action, /Manual File Scanner verification requested/)
+  assert.match(store, /slurper_status='verifying'/)
+  assert.match(store, /Manual File Scanner verification requested/)
   assert.match(details, /normalizedDisplayStatus === "verification_failed"/)
   assert.match(details, /verificationWasExplicitlyRequeued/)
   assert.match(details, /normalizedDisplayStatus !== "verification_failed" && \(verifyStatus === "error"/)
@@ -278,6 +279,28 @@ test('verification failure stays distinct from transfer failure and is recoverab
   assert.match(details, /rawMessage === "Bucket migration completed"[\s\S]*File Scanner verification pending/)
   assert.match(migrations, /s === "verification_failed".*Verification failed/)
   assert.match(readOnly, /"completed", "failed", "verification_failed", "canceled"/)
+})
+
+test('Super Slurper roll-up distinguishes transfer failures from completed transfers awaiting or failing verification', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(orchestrator, /count\(\*\) filter\(where slurper_status in\('completed','verifying','verification_failed','no_files'\)\)::int completed/)
+  assert.match(orchestrator, /count\(\*\) filter\(where slurper_status in\('failed','aborted','precheck_failed','bucket_create_failed'\)\)::int failed/)
+  assert.match(orchestrator, /const verification = Number\(slurper\.total\) > 0 && Number\(slurper\.completed\) === Number\(slurper\.total\)[\s\S]*?await finishOrRepair\(db, migration, 1\)/)
+  assert.match(orchestrator, /'stage',case when \$2='completed' then 'super_slurper_transfer'/)
+})
+
+test('worker-pool scanner resumes transient failed inventories and fences API claims to active generation', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const worker = read('workers/migration-worker/migration-worker.mjs')
+  assert.match(orchestrator, /function isTransientWorkerError/)
+  assert.match(orchestrator, /if \(scan\?\.status === "failed"\)[\s\S]*?isTransientWorkerError\(message\)[\s\S]*?status='pending',lease_owner=null,lease_expires_at=null/)
+  assert.match(orchestrator, /File Scanner source inventory failed for/)
+  assert.match(orchestrator, /select options,status from drive_migrations where id=\$1 and coalesce\(options->>'executionMode',''\)='migration_workers' for update/)
+  assert.match(orchestrator, /migration:\$\{migrationId\}:generation:\$\{generation\}:inventory:%/)
+  assert.match(orchestrator, /claim_token=\$8::uuid/)
+  assert.match(worker, /claimToken: jobClaimTokens\.get\(jobId\)/)
+  assert.match(worker, /claimed\?\.job\?\.id && typeof claimed\.job\.claimToken === "string"/)
+  assert.match(worker, /!\["running", "verifying"\]\.includes\(migration\.migration_status\)/)
 })
 
 test('Super Slurper repair re-enters the shared worker-pool scan, queue, copy, and verification lifecycle', () => {
@@ -319,4 +342,15 @@ test('worker-pool repair reconciles destinations before copy and bucket preparat
   assert.match(runtime, /if \(!isMismatch && latestTargetSize === objectSize\)/)
   assert.match(orchestrator, /'transferredObjects',coalesce\(a\.completed_objects,0\)/)
   assert.match(orchestrator, /await ensureBucketVerification\(db, migration, shards\.generation\)/)
+})
+
+test('verification lifecycle logs use the durable scanner state and bind events to a verification attempt', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const store = read('src/lib/migrations-store.ts')
+  const details = read('src/app/dashboard/migrations/[id]/page.tsx')
+  assert.match(orchestrator, /when v\.status in\('pending','running'\) then 'verifying'[\s\S]*?when v\.status='completed' then 'completed'/)
+  assert.match(orchestrator, /'generation',p\.verification_generation,'attemptId',p\.verification_attempt_id/)
+  assert.match(orchestrator, /workerEventAttemptId/)
+  assert.match(store, /returning i\.id,a\.attempt_id/)
+  assert.match(details, /eventAttemptId !== undefined && currentVerificationAttemptId !== undefined && eventAttemptId !== currentVerificationAttemptId/)
 })

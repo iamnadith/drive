@@ -10,11 +10,20 @@ type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: st
 type Row = Record<string, any>
 type ClaimedTask = { kind: "migration" | "generic"; task: Row }
 type ClaimedCycle = { ok: true; owner: string; tasks: ClaimedTask[] } | { ok: true; skipped: string } | { ok: true; idle: true }
-const BUILD = 14
+const BUILD = 16
 const MAX_SECRET_LENGTH = 512
 // Keep database connections and R2 list requests bounded while allowing
 // independent bucket scans to make progress during the same cron/queue run.
 const SCAN_CONCURRENCY = 4
+function isTransientScanError(error: unknown) {
+  const value = error && typeof error === "object" ? error as { message?: unknown; name?: unknown; code?: unknown; status?: unknown; $metadata?: { httpStatusCode?: unknown } } : {}
+  const message = `${String(value.name || "")} ${String(value.message || error || "")}`
+  const code = String(value.code || "").toUpperCase()
+  const status = Number(value.$metadata?.httpStatusCode || value.status || 0)
+  return /connection terminated unexpectedly|connection reset|connection closed|server closed the connection unexpectedly|socket hang up|econn(?:reset|refused)|etimedout|eai_again|enotfound|enetunreach|epipe|fetch failed|time(?:out|d out)|temporar(?:y|ily) unavailable|too many (?:requests|connections|clients)|slow down|throttl|\bHTTP (?:408|425|429|500|502|503|504)\b|\b(?:57P01|57P03|53300|08000|08001|08003|08004|08006|08007|40001|40P01)\b/i.test(message)
+    || /^(?:57P01|57P03|53300|08000|08001|08003|08004|08006|08007|40001|40P01)$/.test(code)
+    || [408, 425, 429].includes(status) || status >= 500
+}
 let authCache: { value: string[]; expiresAt: number } | null = null
 let schemaReady: Promise<void> | null = null
 
@@ -97,7 +106,8 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
       -- Verification may run per bucket while the migration worker fleet is
       -- still copying other buckets. Keep the task eligible in both states.
       where m.status in('running','verifying')
-        and v.status in('pending','running') and (v.lease_expires_at is null or v.lease_expires_at<now())
+        and ((v.status='pending' and (v.attempt_count=0 or v.updated_at<=now()-make_interval(mins=>least(30,power(2,least(v.attempt_count,5))::int))))
+          or (v.status='running' and (v.lease_expires_at is null or v.lease_expires_at<now())))
       order by v.updated_at for update of v skip locked limit 1
     )
     update drive_migration_verification_state v set status='running',lease_owner=$1,lease_expires_at=now()+interval '90 seconds',
@@ -118,8 +128,10 @@ async function claimGenericScan(db: Client, owner: string): Promise<Row | null> 
       select s.id,s.account_id,s.bucket_name,s.prefix,s.cursor,a.cloudflare_account_id,a.r2_access_key_id,a.r2_secret_access_key,coalesce(bs.jurisdiction,'default') jurisdiction
       from drive_bucket_scans s join drive_accounts a on a.id=s.account_id
       left join drive_bucket_settings_snapshots bs on bs.account_id=s.account_id and bs.bucket_name=s.bucket_name
-      where s.status in('pending','running')
-        and (s.lease_expires_at is null or s.lease_expires_at<now())
+      where (
+          (s.status='pending' and (s.attempt_count=0 or s.updated_at<=now()-make_interval(mins=>least(30,power(2,least(s.attempt_count,5))::int))))
+          or (s.status='running' and (s.lease_expires_at is null or s.lease_expires_at<now()))
+        )
         and (s.migration_id is null or exists(select 1 from drive_migrations m where m.id=s.migration_id and m.status in('running','verifying')))
         and not exists (
           select 1 from drive_migration_verification_state v
@@ -431,9 +443,9 @@ async function cycle(env: Env) {
       const message = error instanceof Error ? error.message : String(error)
       await database(env, async (db) => {
         if (kind === "migration") {
-          await db.query(`update drive_migration_verification_state set status=case when attempt_count>=4 then 'failed' else 'pending' end,attempt_count=attempt_count+1,last_error=$2,lease_owner=null,lease_expires_at=null,updated_at=now() where migration_item_id=$1 and generation=$3 and lease_owner=$4`, [task.migration_item_id, message, task.generation, task.lease_owner])
+          await db.query(`update drive_migration_verification_state set status=case when $5::boolean then 'pending' else 'failed' end,attempt_count=attempt_count+1,last_error=$2,lease_owner=null,lease_expires_at=null,updated_at=now() where migration_item_id=$1 and generation=$3 and lease_owner=$4`, [task.migration_item_id, message, task.generation, task.lease_owner, isTransientScanError(error)])
         } else {
-          await db.query(`update drive_bucket_scans set status=case when attempt_count>=4 then 'failed' else 'pending' end,attempt_count=attempt_count+1,error=$2,lease_owner=null,lease_expires_at=null,updated_at=now() where id=$1 and lease_owner=$3`, [task.id, message, task.lease_owner])
+          await db.query(`update drive_bucket_scans set status=case when $4::boolean then 'pending' else 'failed' end,attempt_count=attempt_count+1,error=$2,lease_owner=null,lease_expires_at=null,updated_at=now() where id=$1 and lease_owner=$3`, [task.id, message, task.lease_owner, isTransientScanError(error)])
         }
       }).catch(() => undefined)
       console.error("File Scanner task failed", { kind, taskId: task.migration_item_id || task.id, error: message })

@@ -4,6 +4,14 @@ export type BucketLikeItem = {
   targetBucket: string
   slurperJobId?: string
   slurperStatus?: string
+  verificationState?: {
+    generation: number
+    status: string
+    missingObjects: number
+    mismatchedObjects: number
+    extraObjects: number
+    strictDestination: boolean
+  }
   progress: Record<string, unknown>
   sourceObjects?: number
   sourceBytes?: number
@@ -271,6 +279,22 @@ export function getItemStatus(item: BucketLikeItem): string | undefined {
   return readSlurperResult(progress)?.status
 }
 
+function getPersistedVerificationDisplayStatus(item: BucketLikeItem, durableItemStatus: string): string | undefined {
+  const verification = item.verificationState
+  if (!verification || isAbortedStatus(durableItemStatus)) return undefined
+  if (isFailedLikeStatus(durableItemStatus) && durableItemStatus !== "verification_failed") return undefined
+  const status = normalizeStatus(verification.status)
+  if (status === "pending" || status === "running") return "verifying"
+  if (status === "failed") return "verification_failed"
+  if (status === "completed") {
+    return verification.missingObjects > 0 || verification.mismatchedObjects > 0 ||
+      (verification.strictDestination && verification.extraObjects > 0)
+      ? "verification_failed"
+      : "completed"
+  }
+  return undefined
+}
+
 export function getItemDisplayStatus(
   item: BucketLikeItem,
   repairResultItem?: Record<string, unknown>,
@@ -340,6 +364,7 @@ export function getMergedBucketSnapshot(
   const live = readLiveBucketState(progress)
   const repairState = readRepairWorkerState(progress)
   const durableItemStatus = normalizeStatus(getItemStatus(item))
+  const persistedVerificationStatus = getPersistedVerificationDisplayStatus(item, durableItemStatus)
   const latestRepairJobStatus = normalizeStatus(options?.latestRepairJobStatus)
   const canceledRepairWithoutResult =
     latestRepairJobStatus === "canceled" &&
@@ -355,6 +380,8 @@ export function getMergedBucketSnapshot(
             ? durableItemStatus
           : durableItemStatus === "verification_failed"
             ? "verification_failed"
+          : persistedVerificationStatus
+            ? persistedVerificationStatus
           : stableLive.status ?? getItemDisplayStatus(item, repairResultItem, stableLive.workerStatus ?? undefined),
       total: stableLive.totalObjects,
       transferred: stableLive.transferredObjects,
@@ -383,7 +410,7 @@ export function getMergedBucketSnapshot(
     latestRepairJobExists: options?.latestRepairJobExists,
     latestRepairItemCount: options?.latestRepairItemCount,
   })
-  const displayStatus = getItemDisplayStatus(item, repairResultItem, effectiveRepairStatus)
+  const displayStatus = persistedVerificationStatus ?? getItemDisplayStatus(item, repairResultItem, effectiveRepairStatus)
 
   const sourceScanStatus = typeof progress.sourceScanStatus === "string" ? progress.sourceScanStatus : ""
   const scanComplete = sourceScanStatus === "completed"

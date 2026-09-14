@@ -97,6 +97,16 @@ type MigrationItem = {
   targetBucket: string
   slurperJobId?: string
   slurperStatus?: string
+  verificationState?: {
+    generation: number
+    status: string
+    missingObjects: number
+    mismatchedObjects: number
+    extraObjects: number
+    attemptId?: string
+    strictDestination: boolean
+    updatedAt?: string
+  }
   progress: Record<string, unknown>
   sourceObjects?: number
   sourceBytes?: number
@@ -451,6 +461,9 @@ type LogLine = {
   stage: string
   status: string
   message: string
+  verificationGeneration?: number
+  verificationAttemptUnknown?: boolean
+  verificationHistorical?: boolean
 }
 
 function collectLogLines(items: MigrationItem[], workerRuns: MigrationWorkerRun[] = []): LogLine[] {
@@ -470,13 +483,27 @@ function collectLogLines(items: MigrationItem[], workerRuns: MigrationWorkerRun[
       const stage = typeof event.stage === "string" ? event.stage : ""
       const status = typeof event.status === "string" ? event.status : String(event.status ?? "")
       const rawMessage = typeof event.message === "string" ? event.message : ""
+      const eventGeneration = typeof event.generation === "number" && Number.isInteger(event.generation) && event.generation > 0
+        ? event.generation
+        : undefined
+      const eventAttemptId = typeof event.attemptId === "string" && event.attemptId.trim() ? event.attemptId : undefined
+      const isVerificationEvent = stage.startsWith("file_verification")
+      const currentVerificationGeneration = item.verificationState?.generation
+      const currentVerificationAttemptId = item.verificationState?.attemptId
       const message = stage === "super_slurper_completed" && rawMessage === "Bucket migration completed"
         ? "Super Slurper transfer completed; File Scanner verification pending"
         : rawMessage
-      const signature = JSON.stringify([stage, status, message])
+      const signature = JSON.stringify([stage, status, message, eventGeneration, eventAttemptId])
       if (signature === previousEventSignature) continue
       previousEventSignature = signature
-      lines.push({ at, atIso, bucket, stage, status, message })
+      lines.push({ at, atIso, bucket, stage, status, message,
+        ...(isVerificationEvent ? {
+          verificationGeneration: eventGeneration,
+          verificationAttemptUnknown: eventAttemptId === undefined,
+          verificationHistorical:
+            (eventGeneration !== undefined && currentVerificationGeneration !== undefined && eventGeneration !== currentVerificationGeneration) ||
+            (eventAttemptId !== undefined && currentVerificationAttemptId !== undefined && eventAttemptId !== currentVerificationAttemptId),
+        } : {}) })
     }
 
     if (events.length === 0) {
@@ -2015,7 +2042,7 @@ export default function MigrationDetailsPage() {
                         <div className="truncate text-muted-foreground">{formatLogTime(line.atIso)}</div>
                         <div className="truncate">{line.bucket}</div>
                         <div className="truncate text-muted-foreground">
-                          {line.stage ? line.stage : "-"}
+                          {line.stage ? `${line.stage}${line.verificationGeneration ? ` · generation ${line.verificationGeneration}${line.verificationHistorical ? " (not current)" : ""}` : line.verificationAttemptUnknown ? " · attempt unknown (legacy event)" : ""}` : "-"}
                           {line.status ? ` - ${line.status}` : ""}
                         </div>
                         <div className="whitespace-pre-wrap break-words">{line.message || "-"}</div>
@@ -2422,7 +2449,7 @@ export default function MigrationDetailsPage() {
                       >
                         <div className="truncate text-muted-foreground">{formatLogTime(line.atIso)}</div>
                         <div className="truncate text-muted-foreground">
-                          {line.stage ? line.stage : "-"}
+                          {line.stage ? `${line.stage}${line.verificationGeneration ? ` · generation ${line.verificationGeneration}${line.verificationHistorical ? " (not current)" : ""}` : line.verificationAttemptUnknown ? " · attempt unknown (legacy event)" : ""}` : "-"}
                           {line.status ? ` - ${line.status}` : ""}
                         </div>
                         <div className="whitespace-pre-wrap break-words">{line.message || "-"}</div>

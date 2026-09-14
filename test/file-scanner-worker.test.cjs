@@ -28,7 +28,8 @@ test('scanner cron and queue drain up to four separately leased tasks concurrent
   assert.match(cycle, /Promise\.all\(claimed\.tasks\.map\(async \(\{ kind, task \}\) => \{[\s\S]*?return await database\(env/)
   assert.match(scanner, /lease_owner=\$1,lease_expires_at=now\(\)\+interval '90 seconds'/)
   assert.match(scanner, /where migration_item_id=\$2::uuid and generation=\$3::int and lease_owner=\$4::text[\s\S]*?for update/)
-  assert.match(scanner, /where s\.status in\('pending','running'\)[\s\S]*?for update of s skip locked limit 1/)
+  assert.match(scanner, /s\.status='pending'[\s\S]*?s\.status='running'[\s\S]*?for update of s skip locked limit 1/)
+  assert.match(scanner, /make_interval\(mins=>least\(30,power\(2,least\(s\.attempt_count,5\)\)::int\)\)/)
 })
 
 test('failed concurrent scans use queue backoff instead of immediate continuation loops', () => {
@@ -39,6 +40,26 @@ test('failed concurrent scans use queue backoff instead of immediate continuatio
   assert.match(continuation, /if \(!idle && !skipped && !failed\).*FILE_SCAN_QUEUE\.send/)
   assert.match(queue, /if \("ok" in result && result\.ok === false\) throw new Error/)
   assert.match(queue, /message\.retry\(\{ delaySeconds: Math\.min\(15 \* \(2 \*\* Math\.min\(message\.attempts, 8\)\), 900\) \}\)/)
+})
+
+test('transient scanner failures retry without an attempt ceiling and keep the durable scan cursor', () => {
+  const scanner = read('workers/file-scanner/src/index.ts')
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(scanner, /function isTransientScanError/)
+  assert.match(scanner, /status=case when \$4::boolean then 'pending' else 'failed' end,attempt_count=attempt_count\+1/)
+  assert.match(scanner, /status=case when \$5::boolean then 'pending' else 'failed' end,attempt_count=attempt_count\+1/)
+  assert.doesNotMatch(scanner, /attempt_count\s*>=\s*4/)
+  assert.match(orchestrator, /m\.status='failed'[\s\S]*?s\.error ~\*/)
+  assert.match(orchestrator, /Resuming durable migration state/)
+  assert.match(orchestrator, /Transient File Scanner error; retry[\s\S]*?saved cursor/)
+})
+
+test('Super Slurper no-overwrite progress counts skipped existing objects and only finalizes them after clean verification', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(orchestrator, /const alreadyPresent = opts\(migration\)\.overwrite === false \? Math\.min\(objects, skipped\) : 0/)
+  assert.match(orchestrator, /transferredObjects: countedTransferred, copiedObjects:/)
+  assert.match(orchestrator, /alreadyPresentObjects: alreadyPresent/)
+  assert.match(orchestrator, /if \(opts\(migration\)\.executionMode !== "migration_workers" && opts\(migration\)\.overwrite === false\)[\s\S]*?v\.missing_objects=0 and v\.mismatched_objects=0/)
 })
 
 test('scanner page commits are atomic, idempotent, and avoid per-page database round-trips', () => {

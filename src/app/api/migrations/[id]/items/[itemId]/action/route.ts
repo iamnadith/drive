@@ -120,31 +120,13 @@ export async function POST(
           return NextResponse.json({ error: "Bucket transfer must be completed before verification" }, { status: 400 })
         }
 
-        await queueMigrationItemVerification(id, item.id)
-        const requestedAt = new Date().toISOString()
-        const events = Array.isArray(item.progress.events) ? item.progress.events : []
-        await updateMigrationItem(item.id, {
-          slurperStatus: "verifying",
-          progress: {
-            ...item.progress,
-            stage: "verification_queued",
-            fileVerification: { status: "pending", requestedAt },
-            live: { ...(isRecord(item.progress.live) ? item.progress.live : {}), status: "verifying", updatedAt: requestedAt },
-            events: [...events, { at: requestedAt, stage: "file_verification", status: "running", message: "Manual File Scanner verification requested" }],
-          },
-          lastProgressAt: requestedAt,
-        })
-
-        await updateMigration(id, {
-          status: "verifying",
-          completedAt: null,
-          syncStatus: "syncing",
-          syncMessage: `Verification started for ${item.sourceBucket}`,
-          lastSyncedAt: requestedAt,
-        })
+        const verificationGeneration = migration.options.executionMode === "migration_workers"
+          ? Math.max(1, Math.trunc(Number(migration.options.workerGeneration) || 1))
+          : 1
+        const verificationAttemptId = await queueMigrationItemVerification(id, item.id, verificationGeneration)
         await wakeMigrationOrchestrator()
 
-        return NextResponse.json({ ok: true }, { status: 200 })
+        return NextResponse.json({ ok: true, attemptId: verificationAttemptId }, { status: 200 })
       }
       if (action === "abort") {
         const abortedAt = new Date().toISOString()
@@ -298,31 +280,13 @@ export async function POST(
         return NextResponse.json({ error: "Bucket transfer must be completed before verification" }, { status: 400 })
       }
 
-      await queueMigrationItemVerification(id, item.id)
-      const requestedAt = new Date().toISOString()
-      const events = Array.isArray(item.progress.events) ? item.progress.events : []
-      await updateMigrationItem(item.id, {
-        slurperStatus: "verifying",
-        progress: {
-          ...item.progress,
-          stage: "verification_queued",
-          fileVerification: { status: "pending", requestedAt },
-          live: { ...(isRecord(item.progress.live) ? item.progress.live : {}), status: "verifying", updatedAt: requestedAt },
-          events: [...events, { at: requestedAt, stage: "file_verification", status: "running", message: "Manual File Scanner verification requested" }],
-        },
-        lastProgressAt: requestedAt,
-      })
-
-      await updateMigration(id, {
-        status: "verifying",
-        completedAt: null,
-        syncStatus: "syncing",
-        syncMessage: `Verification started for ${item.sourceBucket}`,
-        lastSyncedAt: requestedAt,
-      })
+      const verificationGeneration = migration.options.executionMode === "migration_workers"
+        ? Math.max(1, Math.trunc(Number(migration.options.workerGeneration) || 1))
+        : 1
+      const verificationAttemptId = await queueMigrationItemVerification(id, item.id, verificationGeneration)
       await wakeMigrationOrchestrator()
 
-      return NextResponse.json({ ok: true }, { status: 200 })
+      return NextResponse.json({ ok: true, attemptId: verificationAttemptId }, { status: 200 })
     }
 
     return NextResponse.json({ error: "Unsupported action" }, { status: 400 })

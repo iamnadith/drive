@@ -371,7 +371,7 @@ async function heartbeat(extra = {}) {
 async function claimJob() {
   await loadRuntimeConfiguration()
   if (!REPAIR_JOB_ID) return claimJobDirectPostgres()
-  return api(`/workers/${encodeURIComponent(AGENT_ID)}/claim-job`, {
+  const claimed = await api(`/workers/${encodeURIComponent(AGENT_ID)}/claim-job`, {
     token: AGENT_TOKEN,
     ...(MIGRATION_ID ? { migrationId: MIGRATION_ID } : {}),
     ...(POOL_MODE ? { pool: true } : {}),
@@ -379,6 +379,8 @@ async function claimJob() {
     ...(GITHUB_RUN_ID ? { githubRunId: GITHUB_RUN_ID } : {}),
     ...(WORKER_INSTANCE_ID ? { workerInstanceId: WORKER_INSTANCE_ID } : {}),
   })
+  if (claimed?.job?.id && typeof claimed.job.claimToken === "string") jobClaimTokens.set(claimed.job.id, claimed.job.claimToken)
+  return claimed
 }
 
 async function claimJobDirectPostgres() {
@@ -397,7 +399,8 @@ async function claimJobDirectPostgres() {
     if (!migration || migration.agent_status === "disabled" || migration.worker_secret !== AGENT_TOKEN) throw new Error("Worker is missing, disabled, or has an invalid shared secret")
     if (!Array.isArray(migration.capabilities) || !migration.capabilities.includes("bulk_migrate")) throw new Error("Worker is not registered for bulk migrations")
     if (migration.options?.executionMode !== "migration_workers") throw new Error("Direct claim requires a migration worker migration")
-    if (["completed", "failed", "canceled"].includes(migration.migration_status)) return { ok: true, job: null, poolComplete: true, poolStatus: migration.migration_status }
+    if (["completed", "failed", "verification_failed", "canceled"].includes(migration.migration_status)) return { ok: true, job: null, poolComplete: true, poolStatus: migration.migration_status }
+    if (!["running", "verifying"].includes(migration.migration_status)) return { ok: true, job: null, poolComplete: true, poolStatus: migration.migration_status }
     const generation = Math.max(1, Math.trunc(Number(migration.options?.workerGeneration) || 1))
     const claimed = await db.query(`
       with candidate as (
@@ -643,6 +646,7 @@ async function updateJob(jobId, body, options = {}) {
     response = await api(`/workers/${encodeURIComponent(AGENT_ID)}/jobs/${encodeURIComponent(jobId)}`, {
       token: AGENT_TOKEN,
       ...body,
+      claimToken: jobClaimTokens.get(jobId),
     })
   } catch (error) {
     if (allowOffline && !(error instanceof JobAbortedError) && isRetryableError(error)) {
@@ -654,6 +658,7 @@ async function updateJob(jobId, body, options = {}) {
   if (response?.canceled || response?.job?.status === "canceled") {
     throw new JobAbortedError()
   }
+  if (["completed", "failed", "canceled"].includes(String(body.status || ""))) jobClaimTokens.delete(jobId)
   return response
 }
 

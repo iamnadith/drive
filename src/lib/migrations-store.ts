@@ -3,7 +3,7 @@ import { compactPreviousMigrationDetails } from "./database-maintenance"
 import { queryDb, withDbTransaction } from "./db"
 import { mapMigrationWorkerRun, type MigrationWorkerRun, type MigrationWorkerRunRow } from "./migration-worker-runs"
 
-export type MigrationStatus = "draft" | "running" | "verifying" | "completed" | "failed" | "canceled"
+export type MigrationStatus = "draft" | "running" | "verifying" | "completed" | "failed" | "verification_failed" | "canceled"
 export type MigrationSyncStatus = "idle" | "syncing" | "ok" | "error"
 
 export type MigrationOptions = {
@@ -78,6 +78,16 @@ export interface DriveMigrationItem {
   sourceBytes?: number
   slurperJobId?: string
   slurperStatus?: string
+  verificationState?: {
+    generation: number
+    status: string
+    missingObjects: number
+    mismatchedObjects: number
+    extraObjects: number
+    attemptId?: string
+    strictDestination: boolean
+    updatedAt?: string
+  }
   progress: Record<string, unknown>
   lastProgressAt?: string
   createdAt: string
@@ -130,6 +140,16 @@ type DriveMigrationItemRow = {
   source_bytes: number | string | null
   slurper_job_id: string | null
   slurper_status: string | null
+  verification_state: {
+    generation?: number | string
+    status?: string
+    missing_objects?: number | string
+    mismatched_objects?: number | string
+    extra_objects?: number | string
+    attempt_id?: string
+    strict_destination?: boolean
+    updated_at?: string
+  } | null
   progress: Record<string, unknown> | null
   last_progress_at: string | null
   created_at: string
@@ -209,6 +229,16 @@ function mapMigrationItemRow(row: DriveMigrationItemRow): DriveMigrationItem {
     sourceBytes: row.source_bytes === null ? undefined : nonNegativeInteger(row.source_bytes),
     slurperJobId: row.slurper_job_id ?? undefined,
     slurperStatus: row.slurper_status ?? undefined,
+    verificationState: row.verification_state ? {
+      generation: nonNegativeInteger(row.verification_state.generation),
+      status: String(row.verification_state.status || ""),
+      attemptId: row.verification_state.attempt_id ?? undefined,
+      missingObjects: nonNegativeInteger(row.verification_state.missing_objects),
+      mismatchedObjects: nonNegativeInteger(row.verification_state.mismatched_objects),
+      extraObjects: nonNegativeInteger(row.verification_state.extra_objects),
+      strictDestination: row.verification_state.strict_destination === true,
+      updatedAt: row.verification_state.updated_at ?? undefined,
+    } : undefined,
     progress: row.progress ?? {},
     lastProgressAt: row.last_progress_at ?? undefined,
     createdAt: row.created_at,
@@ -285,7 +315,23 @@ export async function getMigrationDashboardBootstrap(limit = 50): Promise<Migrat
         select jsonb_agg(
           to_jsonb(item) || jsonb_build_object(
             'source_objects',item.source_objects::text,
-            'source_bytes',item.source_bytes::text
+            'source_bytes',item.source_bytes::text,
+            'verification_state',(
+              select jsonb_build_object(
+                'generation',verification.generation,
+                'status',verification.status,
+                'missing_objects',verification.missing_objects,
+                'mismatched_objects',verification.mismatched_objects,
+                'extra_objects',verification.extra_objects,
+                'attempt_id',item.progress->>'verificationAttemptId',
+                'strict_destination',migration.options->>'verifyStrictDestination'='true',
+                'updated_at',verification.updated_at
+              )
+              from public.drive_migration_verification_state verification
+              where verification.migration_item_id=item.id
+              order by verification.generation desc,verification.updated_at desc
+              limit 1
+            )
           ) order by item.source_bucket asc,item.id asc
         )
         from public.drive_migration_items item
@@ -481,7 +527,23 @@ export async function getMigrationDetailBootstrap(
         select jsonb_agg(
           to_jsonb(item) || jsonb_build_object(
             'source_objects',item.source_objects::text,
-            'source_bytes',item.source_bytes::text
+            'source_bytes',item.source_bytes::text,
+            'verification_state',(
+              select jsonb_build_object(
+                'generation',verification.generation,
+                'status',verification.status,
+                'missing_objects',verification.missing_objects,
+                'mismatched_objects',verification.mismatched_objects,
+                'extra_objects',verification.extra_objects,
+                'attempt_id',item.progress->>'verificationAttemptId',
+                'strict_destination',migration.options->>'verifyStrictDestination'='true',
+                'updated_at',verification.updated_at
+              )
+              from public.drive_migration_verification_state verification
+              where verification.migration_item_id=item.id
+              order by verification.generation desc,verification.updated_at desc
+              limit 1
+            )
           ) order by item.source_bucket asc,item.id asc
         )
         from public.drive_migration_items item
@@ -554,23 +616,50 @@ export async function getMigrationItem(migrationId: string, itemId: string): Pro
   return rows[0] ? mapMigrationItemRow(rows[0]) : null
 }
 
-export async function queueMigrationItemVerification(migrationId: string, itemId: string): Promise<void> {
+export async function queueMigrationItemVerification(migrationId: string, itemId: string, generation = 1): Promise<string> {
   const result = await queryDb(`
-    insert into public.drive_migration_verification_state
+    with active_migration as (
+      update public.drive_migrations set status='verifying',completed_at=null,sync_status='syncing',
+        sync_message='File Scanner verification requested',last_synced_at=now(),updated_at=now()
+      where id=$2 and status in('running','verifying','verification_failed') returning id
+    ), queued as (
+      insert into public.drive_migration_verification_state
       (migration_item_id,migration_id,generation,status,phase)
-    values($1,$2,1,'pending','source')
-    on conflict(migration_item_id) do update set
-      migration_id=excluded.migration_id,
-      generation=1,
-      source_scan_id=null,destination_scan_id=null,phase='source',status='pending',
-      source_cursor=null,destination_cursor=null,source_objects=0,source_bytes=0,
-      destination_objects=0,destination_bytes=0,missing_objects=0,mismatched_objects=0,
-      extra_objects=0,attempt_count=0,attempt_generation=null,last_error=null,
-      lease_owner=null,lease_expires_at=null,completed_at=null,updated_at=now()
-    where drive_migration_verification_state.status not in('pending','running')
-    returning migration_item_id
-  `, [itemId, migrationId])
+      select $1,m.id,$3,'pending','source' from active_migration m
+      on conflict(migration_item_id) do update set
+        migration_id=excluded.migration_id,
+        generation=excluded.generation,
+        source_scan_id=null,destination_scan_id=null,phase='source',status='pending',
+        source_cursor=null,destination_cursor=null,source_objects=0,source_bytes=0,
+        destination_objects=0,destination_bytes=0,missing_objects=0,mismatched_objects=0,
+        extra_objects=0,attempt_count=0,attempt_generation=null,last_error=null,
+        lease_owner=null,lease_expires_at=null,completed_at=null,updated_at=now()
+      where drive_migration_verification_state.status not in('pending','running')
+      returning migration_item_id
+    ), attempts as (
+      select migration_item_id,gen_random_uuid()::text attempt_id from queued
+    ), tagged as (
+      update public.drive_migration_items i set slurper_status='verifying',
+        progress=jsonb_set(
+          jsonb_set(
+            jsonb_set(
+              jsonb_set(coalesce(i.progress,'{}'::jsonb),'{verificationAttemptId}',to_jsonb(a.attempt_id),true),
+              '{verificationGeneration}',to_jsonb($3::int),true),
+            '{stage}','"verification_queued"'::jsonb,true),
+          '{live}',coalesce(i.progress->'live','{}'::jsonb)||jsonb_build_object('status','verifying','updatedAt',now()),true)
+          || jsonb_build_object('fileVerification',jsonb_build_object('status','pending','requestedAt',now()),
+            'events',(case when jsonb_typeof(i.progress->'events')='array' then i.progress->'events' else '[]'::jsonb end)
+              || jsonb_build_array(jsonb_build_object('at',now(),'stage','file_verification','status','running',
+                'generation',$3::int,'attemptId',a.attempt_id,'message','Manual File Scanner verification requested'))),
+        last_progress_at=now(),updated_at=now()
+      from attempts a where i.id=a.migration_item_id and i.migration_id=$2
+      returning i.id,a.attempt_id
+    ) select id,attempt_id from tagged
+  `, [itemId, migrationId, generation])
   if (result.rowCount !== 1) throw new Error("File verification is already queued or running for this bucket")
+  const attemptId = String((result.rows[0] as { attempt_id?: string } | undefined)?.attempt_id || "")
+  if (!attemptId) throw new Error("Unable to persist the File Scanner verification attempt")
+  return attemptId
 }
 
 export async function deleteMigration(id: string): Promise<void> {
