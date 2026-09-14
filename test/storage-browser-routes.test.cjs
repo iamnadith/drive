@@ -40,7 +40,12 @@ function handler(file, overrides = {}) {
       NextResponse: { json: (body, init) => Response.json(body, init) },
     },
     "@/lib/server-auth": { requireAdmin: async () => ({ ok: true }) },
-    "@/lib/accounts-store": { getAllAccounts: async () => [account] },
+    "@/lib/accounts-store": {
+      getAllAccounts: async () => [account],
+      getActiveAccount: async () => account,
+      getActiveAccountR2Credentials: async () => account,
+      getActiveDashboardAccountSummary: async () => ({ ...account, r2AccessKeyId: undefined, r2SecretAccessKey: undefined }),
+    },
     "@/lib/bucket-stats-store": {
       listBucketStats: async (id) => {
         calls.push(["stats", id])

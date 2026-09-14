@@ -190,18 +190,13 @@ export default function ProjectKeysPage() {
     if (!projectId) return
     setLoading(true)
     try {
-      const [projectRes, keysRes] = await Promise.all([
-        fetch(`/api/projects/${encodeURIComponent(projectId)}`),
-        fetch(`/api/projects/${encodeURIComponent(projectId)}/keys`),
-      ])
+      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/keys`, { cache: "no-store" })
+      const data = await readJson(response)
+      if (!response.ok) throw new Error(String(data.error ?? "Unable to load project access"))
 
-      const [projectData, keysData] = await Promise.all([readJson(projectRes), readJson(keysRes)])
-      if (!projectRes.ok) throw new Error(String(projectData.error ?? "Unable to load project"))
-      if (!keysRes.ok) throw new Error(String(keysData.error ?? "Unable to load API keys"))
-
-      setProject((projectData.project as Project) ?? null)
+      setProject((data.project as Project) ?? null)
       setLastSyncedAt(new Date().toISOString())
-      setKeys(Array.isArray(keysData.keys) ? (keysData.keys as ApiKey[]) : [])
+      setKeys(Array.isArray(data.keys) ? (data.keys as ApiKey[]) : [])
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to load project access")
     } finally {

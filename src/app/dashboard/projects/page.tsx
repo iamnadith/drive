@@ -114,6 +114,9 @@ export default function ProjectsPage() {
   const [loading, setLoading] = React.useState(false)
   const [lastSyncedAt, setLastSyncedAt] = React.useState<string | null>(null)
   const [search, setSearch] = React.useState("")
+  const [pageIndex, setPageIndex] = React.useState(0)
+  const [pageCount, setPageCount] = React.useState(1)
+  const [projectStats, setProjectStats] = React.useState({ total: 0, active: 0, disabled: 0, withBuckets: 0 })
 
   const [createOpen, setCreateOpen] = React.useState(false)
   const [projectName, setProjectName] = React.useState("")
@@ -134,41 +137,41 @@ export default function ProjectsPage() {
   const [deleteBucket, setDeleteBucket] = React.useState(false)
   const [deletingProject, setDeletingProject] = React.useState(false)
 
-  const loadProjects = React.useCallback(async () => {
+  const loadProjects = React.useCallback(async (page: number, query: string, signal?: AbortSignal) => {
     setLoading(true)
     try {
-      const res = await fetch("/api/projects")
+      const params = new URLSearchParams({ page: String(page), limit: "25", q: query.trim() })
+      const res = await fetch(`/api/projects?${params}`, { cache: "no-store", signal })
       const data = await readJson(res)
       if (!res.ok) throw new Error(String(data.error ?? "Unable to load projects"))
       setProjects(Array.isArray(data.projects) ? (data.projects as Project[]) : [])
+      const stats = data.stats && typeof data.stats === "object" ? data.stats as Record<string, unknown> : {}
+      const pagination = data.pagination && typeof data.pagination === "object" ? data.pagination as Record<string, unknown> : {}
+      setProjectStats({
+        total: Number(stats.total ?? 0),
+        active: Number(stats.active ?? 0),
+        disabled: Number(stats.disabled ?? 0),
+        withBuckets: Number(stats.withBuckets ?? 0),
+      })
+      const nextPageCount = Math.max(1, Number(pagination.pageCount ?? 1))
+      setPageCount(nextPageCount)
+      if (page >= nextPageCount) setPageIndex(Math.max(0, nextPageCount - 1))
       setLastSyncedAt(new Date().toISOString())
     } catch (error: unknown) {
-      toast.error(error instanceof Error ? error.message : "Unable to load projects")
+      if (!signal?.aborted) toast.error(error instanceof Error ? error.message : "Unable to load projects")
     } finally {
-      setLoading(false)
+      if (!signal?.aborted) setLoading(false)
     }
   }, [])
 
   React.useEffect(() => {
-    void loadProjects()
-  }, [loadProjects])
-
-  const filteredProjects = React.useMemo(() => {
-    const query = search.trim().toLowerCase()
-    if (!query) return projects
-
-    return projects.filter((project) => {
-      return (
-        project.name.toLowerCase().includes(query) ||
-        project.projectId.toLowerCase().includes(query) ||
-        project.bucketName.toLowerCase().includes(query)
-      )
-    })
-  }, [projects, search])
-
-  const activeProjectCount = projects.filter((project) => project.status === "active").length
-  const disabledProjectCount = projects.length - activeProjectCount
-  const projectsWithBuckets = projects.filter((project) => Boolean(project.bucketName)).length
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => void loadProjects(pageIndex, search, controller.signal), 220)
+    return () => {
+      window.clearTimeout(timeout)
+      controller.abort()
+    }
+  }, [loadProjects, pageIndex, search])
 
 
   const openCreateDialog = () => {
@@ -242,7 +245,8 @@ export default function ProjectsPage() {
       if (!res.ok) throw new Error(String(data.error ?? "Unable to create project"))
       setCreateOpen(false)
       toast.success("Project created")
-      await loadProjects()
+      setPageIndex(0)
+      await loadProjects(0, search)
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to create project")
     } finally {
@@ -274,7 +278,7 @@ export default function ProjectsPage() {
       toast.success(data.deliverySyncPending
         ? "Project policy saved; the worker will finish provider synchronization"
         : "Project delivery policy saved and synchronized")
-      await loadProjects()
+      await loadProjects(pageIndex, search)
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to update project")
     } finally {
@@ -321,7 +325,7 @@ export default function ProjectsPage() {
           ? `Project deleted${keptShared ? `; ${keptShared} shared bucket${keptShared === 1 ? " was" : "s were"} kept` : " with its unshared buckets"}`
           : "Project deleted"
       )
-      await loadProjects()
+      await loadProjects(pageIndex, search)
     } catch (error: unknown) {
       toast.error(error instanceof Error ? error.message : "Unable to delete project")
     } finally {
@@ -411,9 +415,9 @@ export default function ProjectsPage() {
           actions={
             <DashboardSearchFilterToolbar
               searchValue={search}
-              onSearchChange={setSearch}
+              onSearchChange={(value) => { setSearch(value); setPageIndex(0) }}
               searchPlaceholder="Search projects..."
-              onRefresh={() => void loadProjects()}
+              onRefresh={() => void loadProjects(pageIndex, search)}
               refreshing={loading}
               refreshLabel="Sync projects"
               actions={<Button size="icon" className={DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS} onClick={openCreateDialog}>
@@ -429,40 +433,41 @@ export default function ProjectsPage() {
         <Card className="gap-0 py-0">
           <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
             <CardDescription className="text-[13px] leading-4">Total Projects</CardDescription>
-            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{projects.length}</CardTitle>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{projectStats.total}</CardTitle>
           </CardHeader>
           <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Connected to this account</p></CardContent>
         </Card>
         <Card className="gap-0 py-0">
           <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
             <CardDescription className="text-[13px] leading-4">Active</CardDescription>
-            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{activeProjectCount}</CardTitle>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{projectStats.active}</CardTitle>
           </CardHeader>
           <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Available to use</p></CardContent>
         </Card>
         <Card className="gap-0 py-0">
           <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
             <CardDescription className="text-[13px] leading-4">Disabled</CardDescription>
-            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{disabledProjectCount}</CardTitle>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{projectStats.disabled}</CardTitle>
           </CardHeader>
           <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Inactive projects</p></CardContent>
         </Card>
         <Card className="gap-0 py-0">
           <CardHeader className="px-4 py-3 pb-1.5 lg:px-4 lg:py-3 lg:pb-1.5">
             <CardDescription className="text-[13px] leading-4">Buckets Assigned</CardDescription>
-            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{projectsWithBuckets}</CardTitle>
+            <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{projectStats.withBuckets}</CardTitle>
           </CardHeader>
           <CardContent className="px-4 pb-3 pt-0 lg:px-4 lg:pb-3"><p className="text-[11px] leading-4 text-muted-foreground">Projects with a primary bucket</p></CardContent>
         </Card>
       </div>
 
       <DashboardDataTable
-        data={filteredProjects}
+        data={projects}
         columns={columns}
-        pageSize={8}
+        pageSize={25}
+        serverPagination={{ pageIndex, pageCount, onPageChange: setPageIndex }}
         minWidth="1090px"
-        loading={loading && projects.length === 0}
-        emptyState={projects.length === 0 ? "No projects yet." : "No projects match your search."}
+        loading={loading}
+        emptyState={projectStats.total === 0 ? "No projects yet." : "No projects match your search."}
         resetKey={search}
         className="dashboard-motion-delay-2"
       />

@@ -1,6 +1,7 @@
 import crypto from "crypto"
 import { compactPreviousMigrationDetails } from "./database-maintenance"
 import { queryDb, withDbTransaction } from "./db"
+import { mapMigrationWorkerRun, type MigrationWorkerRun, type MigrationWorkerRunRow } from "./migration-worker-runs"
 
 export type MigrationStatus = "draft" | "running" | "verifying" | "completed" | "failed" | "canceled"
 export type MigrationSyncStatus = "idle" | "syncing" | "ok" | "error"
@@ -81,6 +82,21 @@ export interface DriveMigrationItem {
   lastProgressAt?: string
   createdAt: string
   updatedAt?: string
+}
+
+export type MigrationDashboardBootstrap = {
+  migrations: DriveMigration[]
+  accounts: Array<{ id: string; label: string; email: string; status: string; cloudflareAccountId?: string }>
+  activeAccount: { id: string; cloudflareAccountId?: string } | null
+  bucketStats: Array<{ bucketName: string; objects: number; bytes: number; status: string; error?: string; updatedAt?: string }>
+  activeItems: DriveMigrationItem[]
+}
+
+export type MigrationDetailBootstrap = {
+  migration: DriveMigration
+  items: DriveMigrationItem[]
+  accounts: Array<{ id: string; label: string; email: string; status: string }>
+  workerRuns: MigrationWorkerRun[]
 }
 
 type DriveMigrationRow = {
@@ -209,6 +225,102 @@ export async function listMigrations(limit = 50): Promise<DriveMigration[]> {
   return rows.map(mapMigrationRow)
 }
 
+/** One database round trip for the migrations page's initial database snapshot. */
+export async function getMigrationDashboardBootstrap(limit = 50): Promise<MigrationDashboardBootstrap> {
+  const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)))
+  const { rows } = await queryDb<{
+    migrations: DriveMigrationRow[] | null
+    accounts: Array<{ id: string; label: string; email: string; status: string; cloudflare_account_id: string | null }> | null
+    active_account: { id: string; cloudflare_account_id: string | null } | null
+    bucket_stats: Array<{ bucket_name: string; objects: number | string; bytes: number | string; status: string; error: string | null; updated_at: string | null }> | null
+    active_items: DriveMigrationItemRow[] | null
+  }>(`
+    with limited_migrations as (
+      select * from public.drive_migrations
+      order by created_at desc,id desc
+      limit $1
+    ), current_migration as (
+      select id from limited_migrations
+      order by case status when 'running' then 0 when 'verifying' then 1 when 'draft' then 2 else 3 end,
+        created_at desc,id desc
+      limit 1
+    ), active_account as (
+      select id,cloudflare_account_id
+      from public.drive_accounts
+      where status='active'
+      order by updated_at desc nulls last,created_at desc,id desc
+      limit 1
+    )
+    select
+      coalesce((
+        select jsonb_agg(
+          to_jsonb(m) || jsonb_build_object(
+            'summary_item_count',m.summary_item_count::text,
+            'summary_objects',m.summary_objects::text,
+            'summary_bytes',m.summary_bytes::text
+          ) order by m.created_at desc,m.id desc
+        ) from limited_migrations m
+      ),'[]'::jsonb) as migrations,
+      coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'id',account.id,'label',account.label,'email',account.email,'status',account.status,
+          'cloudflare_account_id',account.cloudflare_account_id
+        ) order by account.updated_at desc nulls last,account.created_at desc,account.id desc)
+        from public.drive_accounts account
+      ),'[]'::jsonb) as accounts,
+      (select to_jsonb(account) from active_account account) as active_account,
+      coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'bucket_name',stats.bucket_name,
+          'objects',stats.objects::text,
+          'bytes',stats.bytes::text,
+          'status',stats.status,
+          'error',stats.error,
+          'updated_at',stats.updated_at
+        ) order by stats.bucket_name asc)
+        from public.drive_bucket_stats stats
+        join active_account account on account.id=stats.account_id
+      ),'[]'::jsonb) as bucket_stats,
+      coalesce((
+        select jsonb_agg(
+          to_jsonb(item) || jsonb_build_object(
+            'source_objects',item.source_objects::text,
+            'source_bytes',item.source_bytes::text
+          ) order by item.source_bucket asc,item.id asc
+        )
+        from public.drive_migration_items item
+        join current_migration chosen_migration on chosen_migration.id=item.migration_id
+      ),'[]'::jsonb) as active_items
+  `, [boundedLimit])
+  const row = rows[0]
+  if (!row) throw new Error("Unable to load migration dashboard snapshot")
+  const accountRows = Array.isArray(row.accounts) ? row.accounts : []
+  const activeAccount = row.active_account ?? null
+  return {
+    migrations: (Array.isArray(row.migrations) ? row.migrations : []).map(mapMigrationRow),
+    accounts: accountRows.map((account) => ({
+      id: account.id,
+      label: account.label,
+      email: account.email,
+      status: account.status,
+      cloudflareAccountId: account.cloudflare_account_id ?? undefined,
+    })),
+    activeAccount: activeAccount ? {
+      id: activeAccount.id,
+      cloudflareAccountId: activeAccount.cloudflare_account_id ?? undefined,
+    } : null,
+    bucketStats: (Array.isArray(row.bucket_stats) ? row.bucket_stats : []).map((stats) => ({
+      bucketName: stats.bucket_name,
+      objects: nonNegativeInteger(stats.objects),
+      bytes: nonNegativeInteger(stats.bytes),
+      status: stats.status,
+      error: stats.error ?? undefined,
+      updatedAt: stats.updated_at ?? undefined,
+    })),
+    activeItems: (Array.isArray(row.active_items) ? row.active_items : []).map(mapMigrationItemRow),
+  }
+}
+
 export async function listMigrationsByAccount(
   accountId: string,
   limit = 200
@@ -228,11 +340,11 @@ export async function getMigration(id: string): Promise<DriveMigration | null> {
     `
       select migration.*,
         case when migration.status='completed' and migration.summary_item_count=0
-          then coalesce(legacy_summary.item_count,0)::integer else migration.summary_item_count end as summary_item_count,
+          then coalesce(legacy_summary.item_count,0)::integer else migration.summary_item_count end as resolved_summary_item_count,
         case when migration.status='completed' and migration.summary_item_count=0
-          then coalesce(legacy_summary.summary_objects,0)::bigint else migration.summary_objects end as summary_objects,
+          then coalesce(legacy_summary.summary_objects,0)::bigint else migration.summary_objects end as resolved_summary_objects,
         case when migration.status='completed' and migration.summary_item_count=0
-          then coalesce(legacy_summary.summary_bytes,0)::bigint else migration.summary_bytes end as summary_bytes
+          then coalesce(legacy_summary.summary_bytes,0)::bigint else migration.summary_bytes end as resolved_summary_bytes
       from public.${MIGRATIONS_TABLE} migration
       left join lateral (
         select count(*) as item_count,
@@ -249,6 +361,99 @@ export async function getMigration(id: string): Promise<DriveMigration | null> {
   const row = rows[0]
   if (!row) return null
   return mapMigrationRow(row)
+}
+
+/** One round trip for migration details, account choices, items, and worker-run telemetry. */
+export async function getMigrationDetailBootstrap(id: string): Promise<MigrationDetailBootstrap | null> {
+  const { rows } = await queryDb<{
+    migration: DriveMigrationRow | null
+    items: DriveMigrationItemRow[] | null
+    accounts: Array<{ id: string; label: string; email: string; status: string }> | null
+    worker_runs: MigrationWorkerRunRow[] | null
+  }>(`
+    with selected_migration as (
+      select migration.*,
+        case when migration.status='completed' and migration.summary_item_count=0
+          then coalesce(legacy_summary.item_count,0)::integer else migration.summary_item_count end as summary_item_count,
+        case when migration.status='completed' and migration.summary_item_count=0
+          then coalesce(legacy_summary.summary_objects,0)::bigint else migration.summary_objects end as summary_objects,
+        case when migration.status='completed' and migration.summary_item_count=0
+          then coalesce(legacy_summary.summary_bytes,0)::bigint else migration.summary_bytes end as summary_bytes
+      from public.drive_migrations migration
+      left join lateral (
+        select count(*) as item_count,
+          coalesce(sum(source_objects),0) as summary_objects,
+          coalesce(sum(source_bytes),0) as summary_bytes
+        from public.drive_migration_items
+        where migration_id=migration.id
+      ) legacy_summary on migration.status='completed' and migration.summary_item_count=0
+      where migration.id=$1
+      limit 1
+    )
+    select
+      (select (to_jsonb(migration) - 'resolved_summary_item_count' - 'resolved_summary_objects' - 'resolved_summary_bytes') || jsonb_build_object(
+        'summary_item_count',migration.resolved_summary_item_count::text,
+        'summary_objects',migration.resolved_summary_objects::text,
+        'summary_bytes',migration.resolved_summary_bytes::text
+      ) from selected_migration migration) as migration,
+      coalesce((
+        select jsonb_agg(
+          to_jsonb(item) || jsonb_build_object(
+            'source_objects',item.source_objects::text,
+            'source_bytes',item.source_bytes::text
+          ) order by item.source_bucket asc,item.id asc
+        )
+        from public.drive_migration_items item
+        join selected_migration migration on migration.id=item.migration_id
+      ),'[]'::jsonb) as items,
+      coalesce((
+        select jsonb_agg(jsonb_build_object('id',account.id,'label',account.label,'email',account.email,'status',account.status)
+          order by account.updated_at desc nulls last,account.created_at desc,account.id desc)
+        from public.drive_accounts account
+      ),'[]'::jsonb) as accounts,
+      coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'id',run.id,
+          'job_reference',run.job_reference,
+          'agent_id',run.agent_id,
+          'status',run.status,
+          'online',(run.status='running' and run.agent_status='online' and run.agent_last_heartbeat>now()-interval '90 seconds'),
+          'external_run_id',run.external_run_id,
+          'instance_id',run.payload->>'workerInstanceId',
+          'job_status',job.status,
+          'job_heartbeat',job.last_heartbeat_at,
+          'current_file',case
+            when jsonb_typeof(job.progress->'currentFile')='object' then job.progress->'currentFile'
+            when jsonb_typeof(job.payload->'inventoryObjects'->0)='object' then job.payload->'inventoryObjects'->0
+            else null
+          end,
+          'completed_files',coalesce((run.payload->>'completedFiles')::bigint,0)::text,
+          'failed_files',coalesce((run.payload->>'failedFiles')::bigint,0)::text,
+          'completed_bytes',coalesce((run.payload->>'completedBytes')::bigint,0)::text,
+          'created_at',run.created_at,
+          'updated_at',run.updated_at
+        ) order by run.created_at asc)
+        from (
+          select run.*,agent.status as agent_status,agent.last_heartbeat_at as agent_last_heartbeat
+          from public.drive_agent_runs run
+          join selected_migration migration on migration.options->>'executionMode'='migration_workers'
+            and run.run_type='github_dispatch'
+            and run.payload->>'migrationId'=migration.id::text
+          left join public.drive_agents agent on agent.id=run.agent_id
+          order by run.created_at asc
+          limit 100
+        ) run
+        left join public.drive_repair_jobs job on job.id::text=run.job_reference
+      ),'[]'::jsonb) as worker_runs
+  `, [id])
+  const row = rows[0]
+  if (!row?.migration) return null
+  return {
+    migration: mapMigrationRow(row.migration),
+    items: (Array.isArray(row.items) ? row.items : []).map(mapMigrationItemRow),
+    accounts: Array.isArray(row.accounts) ? row.accounts : [],
+    workerRuns: (Array.isArray(row.worker_runs) ? row.worker_runs : []).map(mapMigrationWorkerRun),
+  }
 }
 
 export async function listMigrationItems(migrationId: string): Promise<DriveMigrationItem[]> {

@@ -1,7 +1,7 @@
 import { queryDb } from "./db"
 import type { BucketSettings } from "./r2-bucket-settings"
 
-type BucketSnapshotRow = {
+export type BucketSnapshotRow = {
   account_id: string
   bucket_name: string
   bucket_created_at: string | null
@@ -70,7 +70,7 @@ function settingsFromRow(row: BucketSnapshotRow): BucketSettings | null {
   }
 }
 
-function serialize(row: BucketSnapshotRow): BucketSettingsSnapshot {
+export function serializeBucketSettingsSnapshot(row: BucketSnapshotRow): BucketSettingsSnapshot {
   return {
     accountId: row.account_id,
     bucketName: row.bucket_name,
@@ -96,7 +96,7 @@ export async function listBucketSettingsSnapshots(accountId: string) {
     where account_id=$1
     order by bucket_name
   `, [accountId])
-  return result.rows.map(serialize)
+  return result.rows.map(serializeBucketSettingsSnapshot)
 }
 
 export async function upsertBucketSettingsSnapshot(

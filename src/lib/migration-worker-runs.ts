@@ -18,7 +18,7 @@ export type MigrationWorkerRun = {
   updatedAt: string
 }
 
-type RunRow = {
+export type MigrationWorkerRunRow = {
   id: string
   job_reference: string | null
   agent_id: string
@@ -27,8 +27,9 @@ type RunRow = {
   external_run_id: string | null
   instance_id: string | null
   job_status: string | null
-  job_payload: Record<string, unknown> | null
-  job_progress: Record<string, unknown> | null
+  job_payload?: Record<string, unknown> | null
+  job_progress?: Record<string, unknown> | null
+  current_file?: Record<string, unknown> | null
   job_heartbeat: string | null
   completed_files: string | number
   failed_files: string | number
@@ -37,8 +38,37 @@ type RunRow = {
   updated_at: string
 }
 
+export function mapMigrationWorkerRun(row: MigrationWorkerRunRow): MigrationWorkerRun {
+  const progress = row.job_progress && typeof row.job_progress === "object" ? row.job_progress : {}
+  const payload = row.job_payload && typeof row.job_payload === "object" ? row.job_payload : {}
+  const currentFile = row.current_file && typeof row.current_file === "object"
+    ? row.current_file
+    : progress.currentFile && typeof progress.currentFile === "object"
+    ? progress.currentFile as Record<string, unknown>
+    : Array.isArray(payload.inventoryObjects) && payload.inventoryObjects[0] && typeof payload.inventoryObjects[0] === "object"
+      ? payload.inventoryObjects[0] as Record<string, unknown>
+      : undefined
+  return {
+    id: row.id,
+    jobId: row.job_reference ?? undefined,
+    agentId: row.agent_id,
+    status: row.status,
+    online: row.online === true,
+    externalRunId: row.external_run_id ?? undefined,
+    instanceId: row.instance_id ?? undefined,
+    currentFile,
+    currentStatus: row.job_status ?? undefined,
+    lastHeartbeatAt: row.job_heartbeat ?? undefined,
+    completedFiles: Number(row.completed_files) || 0,
+    failedFiles: Number(row.failed_files) || 0,
+    completedBytes: Number(row.completed_bytes) || 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
 export async function listMigrationWorkerRuns(migrationId: string): Promise<MigrationWorkerRun[]> {
-  const result = await queryDb<RunRow>(`
+  const result = await queryDb<MigrationWorkerRunRow>(`
     select r.id,r.job_reference,r.agent_id,r.status,r.external_run_id,r.payload->>'workerInstanceId' instance_id,
       (r.status='running' and a.status='online' and a.last_heartbeat_at>now()-interval '90 seconds') online,
       j.status job_status,j.payload job_payload,j.progress job_progress,j.last_heartbeat_at job_heartbeat,
@@ -56,30 +86,5 @@ export async function listMigrationWorkerRuns(migrationId: string): Promise<Migr
     order by r.created_at
     limit 100
   `, [migrationId])
-  return result.rows.map((row) => {
-    const progress = row.job_progress && typeof row.job_progress === "object" ? row.job_progress : {}
-    const payload = row.job_payload && typeof row.job_payload === "object" ? row.job_payload : {}
-    const currentFile = progress.currentFile && typeof progress.currentFile === "object"
-      ? progress.currentFile as Record<string, unknown>
-      : Array.isArray(payload.inventoryObjects) && payload.inventoryObjects[0] && typeof payload.inventoryObjects[0] === "object"
-        ? payload.inventoryObjects[0] as Record<string, unknown>
-        : undefined
-    return {
-      id: row.id,
-      jobId: row.job_reference ?? undefined,
-      agentId: row.agent_id,
-      status: row.status,
-      online: row.online === true,
-      externalRunId: row.external_run_id ?? undefined,
-      instanceId: row.instance_id ?? undefined,
-      currentFile,
-      currentStatus: row.job_status ?? undefined,
-      lastHeartbeatAt: row.job_heartbeat ?? undefined,
-      completedFiles: Number(row.completed_files) || 0,
-      failedFiles: Number(row.failed_files) || 0,
-      completedBytes: Number(row.completed_bytes) || 0,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }
-  })
+  return result.rows.map(mapMigrationWorkerRun)
 }

@@ -3,7 +3,7 @@ import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import {
   createProjectRecord,
   generateProjectId,
-  listProjects,
+  listProjectsPage,
 } from "@/lib/projects-store"
 import { requireAdmin } from "@/lib/server-auth"
 import { getActiveAccount } from "@/lib/accounts-store"
@@ -16,13 +16,34 @@ function errorMessage(error: unknown, fallback: string) {
   return message
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const auth = await requireAdmin()
     if (!auth.ok) return auth.response
 
-    const projects = await listProjects()
-    return NextResponse.json({ projects })
+    const { searchParams } = new URL(request.url)
+    const pageRaw = Number(searchParams.get("page") ?? 0)
+    const limitRaw = Number(searchParams.get("limit") ?? 25)
+    const result = await listProjectsPage({
+      query: searchParams.get("q") ?? "",
+      page: Number.isFinite(pageRaw) ? pageRaw : 0,
+      limit: Number.isFinite(limitRaw) ? limitRaw : 25,
+    })
+    return NextResponse.json({
+      projects: result.projects,
+      stats: {
+        total: result.totalProjects,
+        active: result.activeProjects,
+        disabled: result.disabledProjects,
+        withBuckets: result.projectsWithBuckets,
+      },
+      pagination: {
+        page: result.page,
+        limit: result.limit,
+        total: result.filteredCount,
+        pageCount: Math.max(1, Math.ceil(result.filteredCount / result.limit)),
+      },
+    })
   } catch (error: unknown) {
     return NextResponse.json(
       { error: errorMessage(error, "Unable to load projects") },

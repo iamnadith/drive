@@ -186,6 +186,15 @@ export async function POST(
           },
           lastProgressAt: new Date().toISOString(),
         })
+        await updateMigration(id, {
+          status: "running",
+          completedAt: null,
+          syncStatus: "syncing",
+          syncMessage: `Retry requested for ${item.sourceBucket}`,
+          lastSyncedAt: new Date().toISOString(),
+          options: { ...migration.options, manualCompleted: false, targetActivatedAt: undefined },
+        })
+        await wakeMigrationOrchestrator()
         return NextResponse.json({ ok: true }, { status: 200 })
       }
 
@@ -266,6 +275,15 @@ export async function POST(
         },
         lastProgressAt: new Date().toISOString(),
       })
+      await updateMigration(id, {
+        status: "running",
+        completedAt: null,
+        syncStatus: "syncing",
+        syncMessage: `Retry requested for ${item.sourceBucket}`,
+        lastSyncedAt: new Date().toISOString(),
+        options: { ...migration.options, manualCompleted: false, targetActivatedAt: undefined },
+      })
+      await wakeMigrationOrchestrator()
       return NextResponse.json({ ok: true }, { status: 200 })
     }
 

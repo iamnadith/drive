@@ -59,7 +59,8 @@ import {
 import { DashboardSearchFilterToolbar, DASHBOARD_TOOLBAR_ACTION_BUTTON_CLASS } from "@/components/dashboard/search-filter-toolbar";
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-const ACCOUNTS_CACHE_KEY = "dashboard:accounts:v1";
+const ACCOUNTS_CACHE_KEY = "dashboard:accounts:v2";
+const LEGACY_ACCOUNTS_CACHE_KEY = "dashboard:accounts:v1";
 
 function base32ToBytes(secret: string): Uint8Array {
   const cleaned = secret.replace(/[^A-Z2-7]/gi, "").toUpperCase();
@@ -214,6 +215,7 @@ function mergeAccounts(current: Account[], next: Account[]) {
 function readAccountsCache(): Account[] | null {
   if (typeof window === "undefined") return null;
   try {
+    window.sessionStorage.removeItem(LEGACY_ACCOUNTS_CACHE_KEY);
     const raw = window.sessionStorage.getItem(ACCOUNTS_CACHE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as unknown;
@@ -227,7 +229,15 @@ function readAccountsCache(): Account[] | null {
 function writeAccountsCache(accounts: Account[]) {
   if (typeof window === "undefined") return;
   try {
-    window.sessionStorage.setItem(ACCOUNTS_CACHE_KEY, JSON.stringify(accounts));
+    const safeAccounts = accounts.map((account) => ({
+      ...account,
+      password: "",
+      twoFactorSecret: "",
+      apiToken: "",
+      r2AccessKeyId: "",
+      r2SecretAccessKey: "",
+    }));
+    window.sessionStorage.setItem(ACCOUNTS_CACHE_KEY, JSON.stringify(safeAccounts));
   } catch {
     // Ignore cache write errors.
   }
@@ -249,6 +259,7 @@ export default function AccountsPage() {
 
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [viewAccount, setViewAccount] = React.useState<Account | null>(null);
+  const [loadingAccountDetails, setLoadingAccountDetails] = React.useState(false);
   const [settingsAccount, setSettingsAccount] = React.useState<Account | null>(
     null,
   );
@@ -361,6 +372,42 @@ export default function AccountsPage() {
 
     void loadAccounts({ useSkeleton: !readAccountsCache()?.length, silent: true });
   }, [loadAccounts]);
+
+  const loadAccountDetails = React.useCallback(async (account: Account) => {
+    const res = await fetch(`/api/accounts/${encodeURIComponent(account.id)}`, { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Unable to load account credentials");
+    const details = mapAccount(data.account as AccountApiRecord);
+    const merged = { ...account, ...details };
+    setAccounts((current) => {
+      const next = current.map((candidate) => candidate.id === account.id ? merged : candidate);
+      writeAccountsCache(next);
+      return next;
+    });
+    return merged;
+  }, []);
+
+  const openViewAccount = async (account: Account) => {
+    setLoadingAccountDetails(true);
+    try {
+      setViewAccount(await loadAccountDetails(account));
+    } catch (error: unknown) {
+      toast.error(error instanceof Error ? error.message : "Unable to load account credentials");
+    } finally {
+      setLoadingAccountDetails(false);
+    }
+  };
+
+  const openSettingsAccount = async (account: Account) => {
+    setLoadingAccountDetails(true);
+    try {
+      setSettingsAccount(await loadAccountDetails(account));
+    } catch (error: unknown) {
+      toast.error(error instanceof Error ? error.message : "Unable to load account credentials");
+    } finally {
+      setLoadingAccountDetails(false);
+    }
+  };
 
   React.useEffect(() => {
     const refresh = () => void loadAccounts({ silent: true });
@@ -544,11 +591,11 @@ export default function AccountsPage() {
         id: acc.id,
         name: acc.label,
         email: acc.email,
-        password: acc.password ?? "",
-        twoFactorSecret: acc.twoFactorSecret ?? "",
-        apiToken: acc.apiToken ?? "",
-        r2AccessKeyId: acc.r2AccessKeyId ?? "",
-        r2SecretAccessKey: acc.r2SecretAccessKey ?? "",
+        password,
+        twoFactorSecret,
+        apiToken,
+        r2AccessKeyId,
+        r2SecretAccessKey,
         accountId: acc.cloudflareAccountId ?? "-",
         status: acc.status ?? "available",
         createdAt: acc.createdAt ?? "-",
@@ -1023,8 +1070,9 @@ export default function AccountsPage() {
             <Button
               variant="ghost"
               size="icon"
+              loading={loadingAccountDetails}
               className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md"
-              onClick={() => setViewAccount(account)}
+              onClick={() => void openViewAccount(account)}
               aria-label="View account details"
             >
               <Eye className="h-3.5 w-3.5" />
@@ -1032,8 +1080,9 @@ export default function AccountsPage() {
             <Button
               variant="ghost"
               size="icon"
+              loading={loadingAccountDetails}
               className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md"
-              onClick={() => setSettingsAccount(account)}
+              onClick={() => void openSettingsAccount(account)}
               aria-label="Account settings"
             >
               <Settings className="h-3.5 w-3.5" />

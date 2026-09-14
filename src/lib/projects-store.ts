@@ -390,6 +390,64 @@ export async function listProjects(): Promise<Project[]> {
   return rows.map(mapProject)
 }
 
+export async function listProjectsPage(input: { query?: string; page?: number; limit?: number }) {
+  await ensureProjectSchema()
+  const query = String(input.query ?? "").trim().toLowerCase().replace(/[\\%_]/g, "\\$&")
+  const limit = Math.max(1, Math.min(100, Math.floor(input.limit ?? 25)))
+  const page = Math.max(0, Math.floor(input.page ?? 0))
+  const offset = page * limit
+  const { rows } = await queryDb<{
+    projects: ProjectRow[]
+    filtered_count: string | number
+    total_projects: string | number
+    active_projects: string | number
+    disabled_projects: string | number
+    projects_with_buckets: string | number
+  }>(`
+    with matched as (
+      select p.*
+      from drive_projects p
+      where $1 = '' or (
+        lower(p.name) like '%' || $1 || '%' escape E'\\\\'
+        or lower(p.project_id) like '%' || $1 || '%' escape E'\\\\'
+        or lower(coalesce(p.bucket_name,'')) like '%' || $1 || '%' escape E'\\\\'
+      )
+    ), page_rows as (
+      select matched.*,
+        (select count(*)::int from drive_project_api_key_assignments a where a.project_id=matched.id) as key_count,
+        (select count(*)::int from drive_project_bucket_assignments b where b.project_id=matched.id) as bucket_count
+      from matched
+      order by matched.created_at desc,matched.id desc
+      limit $2 offset $3
+    ), filtered_total as (
+      select count(*)::int total from matched
+    ), global_stats as (
+      select count(*)::int total_projects,
+        count(*) filter(where status='active')::int active_projects,
+        count(*) filter(where status='disabled')::int disabled_projects,
+        count(*) filter(where coalesce(bucket_name,'')<>'')::int projects_with_buckets
+      from drive_projects
+    )
+    select
+      coalesce((select jsonb_agg(to_jsonb(p) order by p.created_at desc,p.id desc) from page_rows p),'[]'::jsonb) as projects,
+      (select total from filtered_total) as filtered_count,
+      global_stats.total_projects,global_stats.active_projects,global_stats.disabled_projects,global_stats.projects_with_buckets
+    from global_stats
+  `, [query, limit, offset])
+  const result = rows[0]
+  const projects = Array.isArray(result?.projects) ? result.projects.map(mapProject) : []
+  return {
+    projects,
+    page,
+    limit,
+    filteredCount: Number(result?.filtered_count ?? 0),
+    totalProjects: Number(result?.total_projects ?? 0),
+    activeProjects: Number(result?.active_projects ?? 0),
+    disabledProjects: Number(result?.disabled_projects ?? 0),
+    projectsWithBuckets: Number(result?.projects_with_buckets ?? 0),
+  }
+}
+
 export async function getProjectByIdentifier(identifier: string): Promise<Project | null> {
   await ensureProjectSchema()
   const { rows } = await queryDb<ProjectRow>(
@@ -401,6 +459,111 @@ export async function getProjectByIdentifier(identifier: string): Promise<Projec
     [identifier]
   )
   return rows[0] ? mapProject(rows[0]) : null
+}
+
+export async function getProjectDetailBootstrap(identifier: string) {
+  await ensureProjectSchema()
+  const { rows } = await queryDb<ProjectRow & {
+    active_account_id: string | null
+    assigned_buckets: ProjectBucketAssignmentRow[] | null
+    delivery_origins: string[] | null
+    bucket_details: Array<{
+      bucketName: string
+      projectCount: number
+      publicAccessEnabled: boolean
+      manualMediaAllowedOrigins: string[] | null
+      corsRules: unknown
+      providerStatus: string
+      providerLastSyncedAt: string | null
+      providerError: string | null
+      projects: Array<{
+        id: string
+        name: string
+        status: ProjectStatus
+        mediaAllowedOrigins: string[] | null
+      }>
+    }> | null
+  }>(`
+    select p.*,
+      active.id as active_account_id,
+      coalesce(assigned.buckets, '[]'::jsonb) as assigned_buckets,
+      delivery.media_allowed_origins as delivery_origins,
+      coalesce(bucket_details.buckets, '[]'::jsonb) as bucket_details
+    from drive_projects p
+    left join lateral (
+      select id from drive_accounts
+      where status='active'
+      order by updated_at desc nulls last, created_at desc, id desc
+      limit 1
+    ) active on true
+    left join lateral (
+      select jsonb_agg(jsonb_build_object(
+        'account_id', a.account_id,
+        'bucket_name', a.bucket_name,
+        'is_primary', a.is_primary,
+        'created_at', a.created_at,
+        'project_count', (
+          select count(*)::int
+          from drive_project_bucket_assignments shared
+          where shared.account_id = a.account_id and shared.bucket_name = a.bucket_name
+        )
+      ) order by a.is_primary desc, a.created_at asc, a.bucket_name asc) as buckets
+      from drive_project_bucket_assignments a
+      where a.project_id = p.id
+    ) assigned on true
+    left join drive_project_delivery_settings delivery on delivery.project_id = p.id
+    left join lateral (
+      select jsonb_agg(jsonb_build_object(
+        'bucketName', a.bucket_name,
+        'projectCount', (
+          select count(*)::int from drive_project_bucket_assignments shared
+          where shared.account_id = a.account_id and shared.bucket_name = a.bucket_name
+        ),
+        'publicAccessEnabled', coalesce(bucket_delivery.public_access_enabled, true),
+        'manualMediaAllowedOrigins', bucket_delivery.media_allowed_origins,
+        'corsRules', case
+          when snapshot.settings_last_synced_at is not null then coalesce(snapshot.cors_rules, '[]'::jsonb)
+          else '[]'::jsonb
+        end,
+        'providerStatus', coalesce(snapshot.settings_status, 'unavailable'),
+        'providerLastSyncedAt', snapshot.settings_last_synced_at,
+        'providerError', snapshot.settings_error,
+        'projects', coalesce(related.projects, '[]'::jsonb)
+      ) order by a.is_primary desc, a.created_at asc, a.bucket_name asc) as buckets
+      from drive_project_bucket_assignments a
+      left join drive_bucket_delivery_settings bucket_delivery
+        on bucket_delivery.account_id = a.account_id and bucket_delivery.bucket_name = a.bucket_name
+      left join drive_bucket_settings_snapshots snapshot
+        on snapshot.account_id = a.account_id and snapshot.bucket_name = a.bucket_name
+      left join lateral (
+        select jsonb_agg(jsonb_build_object(
+          'id', related_project.id,
+          'name', related_project.name,
+          'status', related_project.status,
+          'mediaAllowedOrigins', related_policy.media_allowed_origins
+        )) as projects
+        from drive_project_bucket_assignments related_assignment
+        join drive_projects related_project on related_project.id = related_assignment.project_id
+        left join drive_project_delivery_settings related_policy on related_policy.project_id = related_project.id
+        where related_assignment.account_id = a.account_id
+          and related_assignment.bucket_name = a.bucket_name
+      ) related on true
+      where a.project_id = p.id and a.account_id = active.id
+    ) bucket_details on true
+    where p.id::text = $1 or p.project_id = $1
+    limit 1
+  `, [identifier])
+  const row = rows[0]
+  if (!row) return null
+  return {
+    project: mapProject(row),
+    activeAccountId: row.active_account_id,
+    buckets: Array.isArray(row.assigned_buckets)
+      ? row.assigned_buckets.map(mapProjectBucketAssignment)
+      : [],
+    deliveryMediaAllowedOrigins: row.delivery_origins,
+    bucketDetails: Array.isArray(row.bucket_details) ? row.bucket_details : [],
+  }
 }
 
 export async function createProjectRecord(input: {
@@ -737,6 +900,39 @@ export async function listProjectApiKeys(projectIdentifier: string) {
     [project.id]
   )
   return rows.map(mapApiKey)
+}
+
+export async function getProjectKeysBootstrap(identifier: string) {
+  await ensureProjectSchema()
+  const { rows } = await queryDb<ProjectRow & { api_keys: ApiKeyRow[] | null }>(`
+    select p.*,
+      coalesce(keys.items, '[]'::jsonb) as api_keys
+    from drive_projects p
+    left join lateral (
+      select jsonb_agg(jsonb_build_object(
+        'id', k.id,
+        'name', k.name,
+        'key_prefix', k.key_prefix,
+        'status', k.status,
+        'expires_at', k.expires_at,
+        'last_used_at', k.last_used_at,
+        'permissions', a.permissions,
+        'created_at', k.created_at,
+        'updated_at', k.updated_at
+      ) order by k.created_at desc) as items
+      from drive_project_api_key_assignments a
+      join drive_project_api_keys k on k.id = a.api_key_id
+      where a.project_id = p.id
+    ) keys on true
+    where p.id::text = $1 or p.project_id = $1
+    limit 1
+  `, [identifier])
+  const row = rows[0]
+  if (!row) return null
+  return {
+    project: mapProject(row),
+    keys: Array.isArray(row.api_keys) ? row.api_keys.map(mapApiKey) : [],
+  }
 }
 
 export async function createProjectApiKey(input: {

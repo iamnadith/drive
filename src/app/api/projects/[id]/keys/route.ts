@@ -4,7 +4,7 @@ import {
   PROJECT_PERMISSION_PRESETS,
   createProjectApiKey,
   getProjectByIdentifier,
-  listProjectApiKeys,
+  getProjectKeysBootstrap,
   normalizePermissions,
 } from "@/lib/projects-store"
 import { requireAdmin } from "@/lib/server-auth"
@@ -24,8 +24,9 @@ export async function GET(
     if (!auth.ok) return auth.response
 
     const { id } = await context.params
-    const keys = await listProjectApiKeys(id)
-    return NextResponse.json({ keys })
+    const data = await getProjectKeysBootstrap(id)
+    if (!data) return NextResponse.json({ error: "Project not found" }, { status: 404 })
+    return NextResponse.json(data)
   } catch (error: unknown) {
     return NextResponse.json(
       { error: errorMessage(error, "Unable to load API keys") },

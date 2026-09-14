@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
-import { getActiveAccount, getActiveAccountId } from "@/lib/accounts-store"
+import { getActiveAccount } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
-import { getProjectDeliverySettings, listProjectDeliverySettings, updateProjectDeliverySettings } from "@/lib/project-delivery-settings-store"
+import { getProjectDeliverySettings, updateProjectDeliverySettings } from "@/lib/project-delivery-settings-store"
 import {
   assertProjectDeliveryOriginsFitAssignedBuckets,
   deleteBucketDeliveryCorsReconciliation,
@@ -11,17 +11,15 @@ import {
 import {
   deleteProjectRecord,
   getProjectByIdentifier,
+  getProjectDetailBootstrap,
   listProjectBuckets,
-  listProjectBucketsById,
-  listAssignedProjectsForBuckets,
   listProjectsUsingBucket,
   updateProjectRecord,
-  type Project,
 } from "@/lib/projects-store"
 import { r2DeleteBucketAndContents } from "@/lib/r2-s3"
-import { deleteBucketDeliverySettings, getBucketDeliverySettings, listBucketDeliverySettings, type BucketDeliverySettings } from "@/lib/bucket-delivery-settings-store"
+import { deleteBucketDeliverySettings, getBucketDeliverySettings } from "@/lib/bucket-delivery-settings-store"
 import { syncBucketDeliveryCorsRule } from "@/lib/r2-bucket-settings"
-import { deleteBucketSettingsSnapshot, listBucketSettingsSnapshots, type BucketSettingsSnapshot } from "@/lib/bucket-settings-snapshot-store"
+import { deleteBucketSettingsSnapshot } from "@/lib/bucket-settings-snapshot-store"
 import { allowedStorageCorsOrigins } from "@/lib/storage-delivery.cjs"
 import { mergeManyMediaAllowedOrigins, resolveEffectiveMediaAllowedOrigins } from "@/lib/project-media-origins.cjs"
 import { requireAdmin } from "@/lib/server-auth"
@@ -43,62 +41,40 @@ export async function GET(
     if (!auth.ok) return auth.response
 
     const { id } = await context.params
-    const [project, activeAccountId] = await Promise.all([getProjectByIdentifier(id), getActiveAccountId()])
-    if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 })
-    const assignedBuckets = await listProjectBucketsById(project.id)
+    const bootstrap = await getProjectDetailBootstrap(id)
+    if (!bootstrap) return NextResponse.json({ error: "Project not found" }, { status: 404 })
+    const { project, activeAccountId, buckets: assignedBuckets } = bootstrap
     const scopedBuckets = activeAccountId
       ? assignedBuckets.filter((bucket) => !bucket.accountId || bucket.accountId === activeAccountId)
       : []
-    const bucketNames = scopedBuckets.map((bucket) => bucket.bucketName)
-    let snapshots: BucketSettingsSnapshot[] = []
-    let bucketSettingsByName = new Map<string, BucketDeliverySettings>()
-    let projectsByBucket = new Map<string, Project[]>()
-    if (activeAccountId) {
-      const [nextSnapshots, nextBucketSettings, nextProjectsByBucket] = await Promise.all([
-        listBucketSettingsSnapshots(activeAccountId),
-        listBucketDeliverySettings(activeAccountId, bucketNames),
-        listAssignedProjectsForBuckets(activeAccountId, bucketNames),
-      ])
-      snapshots = nextSnapshots
-      bucketSettingsByName = nextBucketSettings
-      projectsByBucket = nextProjectsByBucket
+    const deliverySettings = {
+      projectId: project.id,
+      mediaAllowedOrigins: bootstrap.deliveryMediaAllowedOrigins,
     }
-    const snapshotByBucket = new Map(snapshots.map((snapshot) => [snapshot.bucketName, snapshot]))
-    const relatedProjectIds = Array.from(new Set([
-      project.id,
-      ...Array.from(projectsByBucket.values()).flat().filter((assignedProject) => assignedProject.status === "active").map((assignedProject) => assignedProject.id),
-    ]))
-    const projectSettings = await listProjectDeliverySettings(relatedProjectIds)
-    const deliverySettings = projectSettings.get(project.id) ?? { projectId: project.id, mediaAllowedOrigins: null }
+    const bucketDetailsByName = new Map(bootstrap.bucketDetails.map((bucket) => [bucket.bucketName, bucket]))
     const fallbackOrigins = allowedStorageCorsOrigins().filter((origin): origin is string => typeof origin === "string")
     const bucketDeliveryRules = activeAccountId ? scopedBuckets.map((bucket) => {
-      const settings = bucketSettingsByName.get(bucket.bucketName) ?? {
-        accountId: activeAccountId,
-        bucketName: bucket.bucketName,
-        publicAccessEnabled: true,
-        mediaAllowedOrigins: null,
-      }
-      const activeProjects = (projectsByBucket.get(bucket.bucketName) ?? []).filter((assignedProject) => assignedProject.status === "active")
+      const settings = bucketDetailsByName.get(bucket.bucketName)
+      const activeProjects = (settings?.projects ?? []).filter((assignedProject) => assignedProject.status === "active")
       const inheritedPolicies = activeProjects
-        .map((assignedProject) => projectSettings.get(assignedProject.id)?.mediaAllowedOrigins ?? null)
+        .map((assignedProject) => assignedProject.mediaAllowedOrigins ?? null)
         .filter((origins): origins is string[] => Array.isArray(origins))
       const inherited = inheritedPolicies.length > 0 ? mergeManyMediaAllowedOrigins(inheritedPolicies) : null
       const effectiveMediaAllowedOrigins = resolveEffectiveMediaAllowedOrigins({
         inheritedPolicies,
-        manual: settings.mediaAllowedOrigins,
+        manual: settings?.manualMediaAllowedOrigins ?? null,
         fallback: fallbackOrigins,
       })
-      const snapshot = snapshotByBucket.get(bucket.bucketName)
       return {
         bucketName: bucket.bucketName,
         projectCount: bucket.projectCount,
-        manualMediaAllowedOrigins: settings.mediaAllowedOrigins,
+        manualMediaAllowedOrigins: settings?.manualMediaAllowedOrigins ?? null,
         inheritedMediaAllowedOrigins: inherited,
         effectiveMediaAllowedOrigins,
-        corsRules: snapshot?.settings?.corsRules ?? [],
-        providerStatus: snapshot?.settingsStatus ?? "unavailable",
-        providerLastSyncedAt: snapshot?.settingsLastSyncedAt ?? null,
-        providerError: snapshot?.settingsError ?? undefined,
+        corsRules: Array.isArray(settings?.corsRules) ? settings.corsRules : [],
+        providerStatus: settings?.providerStatus ?? "unavailable",
+        providerLastSyncedAt: settings?.providerLastSyncedAt ?? null,
+        providerError: settings?.providerError ?? undefined,
       }
     }) : []
     return NextResponse.json({ project, deliverySettings, bucketDeliveryRules })

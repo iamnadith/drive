@@ -2,7 +2,6 @@ import { NextResponse } from "next/server"
 import type { QueryResultRow } from "pg"
 
 import { listDashboardAccountSummaries } from "@/lib/accounts-store"
-import { listAgents, type DriveAgent, type DriveAgentRun } from "@/lib/agents-store"
 import {
   listMigrations,
   type DriveMigration,
@@ -139,6 +138,9 @@ const ANALYTICS_ITEM_PROGRESS_SQL = `jsonb_strip_nulls(jsonb_build_object(
 
 type AnalyticsSqlSummaryRow = {
   bucket_status_breakdown: Record<string, string | number>
+  worker_status_breakdown: Record<string, string | number>
+  worker_total_count: string | number
+  online_worker_count: string | number
   active_bucket_stats: BucketStatsRow[]
   active_bucket_summary: {
     bucket_count: string | number
@@ -197,27 +199,9 @@ function earliestDate(values: Array<string | undefined | null>): Date {
   return date
 }
 
-function isRecentIso(value: string | undefined, maxAgeMs: number): boolean {
-  if (!value) return false
-  const time = Date.parse(value)
-  return Number.isFinite(time) && Date.now() - time <= maxAgeMs
-}
-
 function increment(map: Record<string, number>, key: string | undefined | null, by = 1) {
   const normalized = String(key || "unknown")
   map[normalized] = (map[normalized] ?? 0) + by
-}
-
-function getEffectiveAgentStatus(agent: DriveAgent & { latestRun: DriveAgentRun | null }): string {
-  if (agent.provider === "github_actions") {
-    if (isRecentIso(agent.lastHeartbeatAt, 90_000)) return "online"
-    return agent.status === "online" || agent.status === "busy" ? "online" : "offline"
-  }
-  if (agent.status === "error") return "offline"
-  if ((agent.provider === "self_hosted" || agent.provider === "local") && agent.status === "online") {
-    if (!isRecentIso(agent.lastHeartbeatAt, 60_000)) return "offline"
-  }
-  return agent.status
 }
 
 function itemMetrics(item: DriveMigrationItem) {
@@ -261,6 +245,19 @@ async function selectRows<T extends QueryResultRow>(table: string, columns = "*"
   return rows
 }
 
+async function listAnalyticsMigrationItems(start: Date, rangeIsAll: boolean): Promise<MigrationItemRow[]> {
+  const rangeFilter = rangeIsAll
+    ? ""
+    : "where coalesce(last_progress_at,updated_at,created_at) >= $1"
+  const { rows } = await queryDb<MigrationItemRow>(`
+    select id,migration_id,source_bucket,target_bucket,source_objects,source_bytes,slurper_job_id,slurper_status,
+      ${ANALYTICS_ITEM_PROGRESS_SQL} as progress,last_progress_at,created_at,updated_at
+    from public.drive_migration_items
+    ${rangeFilter}
+  `, rangeIsAll ? undefined : [start.toISOString()])
+  return rows
+}
+
 async function getAnalyticsSqlSummary(): Promise<AnalyticsSqlSummaryRow> {
   const { rows } = await queryDb<AnalyticsSqlSummaryRow>(`
     with active_account as materialized (
@@ -291,9 +288,29 @@ async function getAnalyticsSqlSummary(): Promise<AnalyticsSqlSummaryRow> {
       from public.drive_bucket_verify_diffs
       order by created_at desc
       limit 25
+    ), effective_agents as materialized (
+      select case
+        when provider='github_actions' then case
+          when last_heartbeat_at >= now() - interval '90 seconds' then 'online'
+          when status in ('online','busy') then 'online'
+          else 'offline'
+        end
+        when status='error' then 'offline'
+        when provider in ('self_hosted','local') and status='online'
+          and (last_heartbeat_at is null or last_heartbeat_at < now() - interval '60 seconds') then 'offline'
+        else coalesce(nullif(status,''),'unknown')
+      end as effective_status
+      from public.drive_agents
+    ), worker_status_counts as (
+      select effective_status,count(*)::int as count
+      from effective_agents
+      group by effective_status
     )
     select
       coalesce((select jsonb_object_agg(status,count) from bucket_status_counts),'{}'::jsonb) bucket_status_breakdown,
+      coalesce((select jsonb_object_agg(effective_status,count) from worker_status_counts),'{}'::jsonb) worker_status_breakdown,
+      coalesce((select sum(count) from worker_status_counts),0)::text worker_total_count,
+      coalesce((select sum(count) from worker_status_counts where effective_status='online'),0)::text online_worker_count,
       coalesce((select jsonb_agg(jsonb_build_object(
         'id',id,'account_id',account_id,'bucket_name',bucket_name,
         'objects',objects::text,'bytes',bytes::text,'status',status,'error',error,'updated_at',updated_at::text
@@ -384,7 +401,6 @@ async function buildAnalyticsPayload(range: RangeKey) {
     migrations,
     accounts,
     users,
-    agents,
     repairJobs,
     sqlSummary,
     migrationItemRows,
@@ -396,7 +412,6 @@ async function buildAnalyticsPayload(range: RangeKey) {
       // payload instead of replacing current KPIs with misleading zeros.
       listDashboardAccountSummaries(),
       capture("users", warnings, getUserSummary, { total: 0, active: 0 }),
-      capture("workers", warnings, listAgents, [] as Array<DriveAgent & { latestRun: DriveAgentRun | null }>),
       capture(
         "repair jobs",
         warnings,
@@ -415,11 +430,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
       capture(
         "migration items",
         warnings,
-        () =>
-          selectRows<MigrationItemRow>(
-            "drive_migration_items",
-            `id,migration_id,source_bucket,target_bucket,source_objects,source_bytes,slurper_job_id,slurper_status,${ANALYTICS_ITEM_PROGRESS_SQL} as progress,last_progress_at,created_at,updated_at`
-          ),
+        () => listAnalyticsMigrationItems(start, days === null),
         [] as MigrationItemRow[]
       ),
     ])
@@ -452,8 +463,9 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const accountBreakdown: Record<string, number> = {}
   for (const account of accounts) increment(accountBreakdown, account.status)
 
-  const workerBreakdown: Record<string, number> = {}
-  for (const agent of agents) increment(workerBreakdown, getEffectiveAgentStatus(agent))
+  const workerBreakdown = Object.fromEntries(
+    Object.entries(sqlSummary.worker_status_breakdown).map(([status, count]) => [status, toNumber(count)])
+  )
 
   const repairBreakdown: Record<string, number> = {}
   for (const job of repairJobs) increment(repairBreakdown, job.status)
@@ -648,7 +660,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const failedRepairCount = repairJobs.filter((job) => job.status === "failed").length
   const activeRepairCount = repairJobs.filter((job) => ["pending", "claimed", "running"].includes(job.status)).length
   const failedBucketStats = toNumber(sqlSummary.failed_bucket_count)
-  const onlineWorkers = agents.filter((agent) => getEffectiveAgentStatus(agent) === "online").length
+  const onlineWorkers = toNumber(sqlSummary.online_worker_count)
   const topBuckets = activeAnalyticsBucketStats
     .map((row) => ({
       id: row.id,
@@ -749,7 +761,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
       migrations: migrations.length,
       activeMigrations: activeMigrationCount,
       failedMigrations: failedMigrationCount,
-      workers: agents.length,
+      workers: toNumber(sqlSummary.worker_total_count),
       onlineWorkers,
       repairJobs: repairJobs.length,
       activeRepairJobs: activeRepairCount,

@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server"
-import { getAllAccounts, getActiveAccount, listDashboardAccountSummaries } from "@/lib/accounts-store"
+import { getAllAccounts, getActiveAccount } from "@/lib/accounts-store"
 import { r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
-import { createMigration, listMigrationItems, listMigrations } from "@/lib/migrations-store"
-import { getBucketStatsMap, listActiveBucketStats } from "@/lib/bucket-stats-store"
+import { createMigration, getMigrationDashboardBootstrap } from "@/lib/migrations-store"
+import { getBucketStatsMap } from "@/lib/bucket-stats-store"
 import { requireAdmin } from "@/lib/server-auth"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -22,26 +22,11 @@ export async function GET() {
     const auth = await requireAdmin()
     if (!auth.ok) return auth.response
 
-    // Return only the account fields this page needs; never serialize account
-    // credentials into its bootstrap payload. Bucket and migration data are
-    // read from the worker/orchestrator-owned PostgreSQL projections.
-    const [migrations, accounts, bucketStats] = await Promise.all([
-      listMigrations(),
-      listDashboardAccountSummaries().catch(() => []),
-      listActiveBucketStats().then((rows) => ({ rows, error: null as string | null })).catch((error: unknown) => ({
-        rows: [],
-        error: error instanceof Error ? error.message : "Unable to load bucket statistics",
-      })),
-    ])
-    const current =
-      migrations.find((migration) => migration.status === "running") ??
-      migrations.find((migration) => migration.status === "verifying") ??
-      migrations.find((migration) => migration.status === "draft") ??
-      migrations[0] ??
-      null
-    const activeItems = current ? await listMigrationItems(current.id).catch(() => []) : []
-    const activeAccount = accounts.find((account) => account.status === "active")
-    const bucketError = bucketStats.error ?? (
+    // This page receives one bounded PostgreSQL snapshot. Account credentials
+    // are excluded, and all bucket counts come from worker-owned projections.
+    const { migrations, accounts, activeAccount, bucketStats, activeItems } =
+      await getMigrationDashboardBootstrap()
+    const bucketError = (
       !activeAccount
         ? "No active Cloudflare account"
         : !activeAccount.cloudflareAccountId
@@ -51,7 +36,7 @@ export async function GET() {
     return jsonOk({
       migrations,
       accounts: accounts.map(({ id, label, email, status }) => ({ id, label, email, status })),
-      buckets: activeAccount?.cloudflareAccountId ? bucketStats.rows.map((row) => ({
+      buckets: activeAccount?.cloudflareAccountId ? bucketStats.map((row) => ({
         id: row.bucketName,
         name: row.bucketName,
         objects: row.objects,

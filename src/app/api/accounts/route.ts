@@ -2,7 +2,8 @@ import { NextResponse } from "next/server"
 import {
   CloudflareAccount,
   createAccount,
-  getAllAccounts,
+  listDashboardAccountSummaries,
+  toDashboardAccountSummary,
 } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import { requireAdmin } from "@/lib/server-auth"
@@ -18,9 +19,9 @@ export async function GET() {
     const auth = await requireAdmin()
     if (!auth.ok) return auth.response
 
-    const accounts = await getAllAccounts()
+    const accounts = await listDashboardAccountSummaries()
 
-    return NextResponse.json({ accounts })
+    return NextResponse.json({ accounts }, { headers: { "Cache-Control": "no-store" } })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to load accounts")
     return NextResponse.json({ error: message }, { status: 400 })
@@ -34,7 +35,7 @@ export async function POST(request: Request) {
 
     const body = await request.json()
     const actorUserId = auth.user.id
-    const beforeAccounts = await getAllAccounts()
+    const beforeAccounts = await listDashboardAccountSummaries()
     const {
       label,
       email,
@@ -83,7 +84,7 @@ export async function POST(request: Request) {
       r2SecretAccessKey: r2SecretAccessKey!,
       makeActive,
     })
-    const afterAccounts = await getAllAccounts()
+    const afterAccounts = await listDashboardAccountSummaries()
     const changedActiveAccount = beforeAccounts.some((before) => {
       const after = afterAccounts.find((candidate) => candidate.id === before.id)
       return after && before.status !== after.status
@@ -102,17 +103,11 @@ export async function POST(request: Request) {
           id: item.id,
           label: item.label,
           status: item.status,
-          lastMigrated: item.lastMigrated,
         })),
       },
       after: {
-        account,
-        accounts: afterAccounts.map((item) => ({
-          id: item.id,
-          label: item.label,
-          status: item.status,
-          lastMigrated: item.lastMigrated,
-        })),
+        account: toDashboardAccountSummary(account),
+        accounts: afterAccounts.map((item) => ({ id: item.id, label: item.label, status: item.status })),
       },
       undoable: false,
       undoReason: changedActiveAccount
@@ -123,7 +118,7 @@ export async function POST(request: Request) {
       ...getRequestActivityContext(request),
     })
 
-    return NextResponse.json({ account })
+    return NextResponse.json({ account: toDashboardAccountSummary(account) })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to create account")
     return NextResponse.json({ error: message }, { status: 400 })

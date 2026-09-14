@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { deleteAccount, getAllAccounts, updateAccount } from "@/lib/accounts-store"
+import { deleteAccount, getAccountById, listDashboardAccountSummaries, toDashboardAccountSummary, updateAccount } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import { requireAdmin } from "@/lib/server-auth"
 
@@ -7,6 +7,22 @@ function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
     ? String((error as { message?: unknown }).message ?? fallback)
     : fallback
+}
+
+export async function GET(
+  _request: Request,
+  context: { params: Promise<{ id: string }> }
+) {
+  try {
+    const auth = await requireAdmin()
+    if (!auth.ok) return auth.response
+    const { id } = await context.params
+    const account = await getAccountById(id)
+    if (!account) return NextResponse.json({ error: "Account not found" }, { status: 404 })
+    return NextResponse.json({ account }, { headers: { "Cache-Control": "no-store" } })
+  } catch (error: unknown) {
+    return NextResponse.json({ error: errorMessage(error, "Unable to load account") }, { status: 400 })
+  }
 }
 
 export async function PATCH(
@@ -19,8 +35,10 @@ export async function PATCH(
 
     const { id } = await context.params
     const actorUserId = auth.user.id
-    const beforeAccounts = await getAllAccounts()
-    const before = beforeAccounts.find((account) => account.id === id)
+    const [before, beforeAccounts] = await Promise.all([
+      getAccountById(id),
+      listDashboardAccountSummaries(),
+    ])
     const body = await request.json()
 
     const {
@@ -53,7 +71,7 @@ export async function PATCH(
       updates.cloudflareAccountId = cloudflareAccountId
 
     const updated = await updateAccount(id, updates)
-    const afterAccounts = await getAllAccounts()
+    const afterAccounts = await listDashboardAccountSummaries()
     const changedStatus = typeof status !== "undefined" && before?.status !== updated.status
     const changedActiveAccount = changedStatus || beforeAccounts.some((account) => {
       const after = afterAccounts.find((candidate) => candidate.id === account.id)
@@ -73,21 +91,19 @@ export async function PATCH(
         ? "Account status changes are permanent. Disabled accounts cannot be restored."
         : "Account credentials or profile fields were updated.",
       before: {
-        account: before,
+        account: before ? toDashboardAccountSummary(before) : null,
         accounts: beforeAccounts.map((account) => ({
           id: account.id,
           label: account.label,
           status: account.status,
-          lastMigrated: account.lastMigrated,
         })),
       },
       after: {
-        account: updated,
+        account: toDashboardAccountSummary(updated),
         accounts: afterAccounts.map((account) => ({
           id: account.id,
           label: account.label,
           status: account.status,
-          lastMigrated: account.lastMigrated,
         })),
       },
       undoable: false,
@@ -97,7 +113,7 @@ export async function PATCH(
       ...getRequestActivityContext(request),
     })
 
-    return NextResponse.json({ account: updated })
+    return NextResponse.json({ account: toDashboardAccountSummary(updated) })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to update account")
     return NextResponse.json({ error: message }, { status: 400 })
@@ -114,7 +130,7 @@ export async function DELETE(
 
     const { id } = await context.params
     const actorUserId = auth.user.id
-    const before = (await getAllAccounts()).find((account) => account.id === id)
+    const before = await getAccountById(id)
     await deleteAccount(id)
     await recordActivity({
       actorUserId,
@@ -124,7 +140,7 @@ export async function DELETE(
       entityLabel: before?.label,
       summary: `Deleted account ${before?.label ?? id}`,
       detail: "Account deletion is not automatically undoable because credentials and external state may no longer be valid.",
-      before: before ? { account: before } : null,
+      before: before ? { account: toDashboardAccountSummary(before) } : null,
       undoReason: "Deleted accounts must be recreated manually.",
       ...getRequestActivityContext(_request),
     })

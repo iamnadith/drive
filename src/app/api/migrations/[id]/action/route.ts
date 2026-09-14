@@ -74,18 +74,21 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function wakeMigrationService(kind: "scanner" | "orchestrator"): Promise<void> {
+async function wakeMigrationOrchestrator(options?: { requireFileScanner?: boolean }): Promise<void> {
   const settings = await getMigrationOrchestratorSettings()
-  const url = kind === "scanner" ? settings.fileScannerUrl : settings.orchestratorUrl
-  const secret = kind === "scanner" ? settings.fileScannerSecret : settings.sharedSecret
-  const enabled = kind === "scanner" ? settings.fileScannerEnabled : settings.migrationEnabled
-  if (!enabled || !url || !secret) throw new Error(`${kind === "scanner" ? "File Scanner" : "Migration Orchestrator"} is not configured and enabled`)
-  const response = await fetch(`${url.replace(/\/+$/, "")}/run`, {
+  if (!settings.migrationEnabled || !settings.orchestratorUrl || settings.sharedSecret.length < 24) {
+    throw new Error("Migration Orchestrator is not configured and enabled")
+  }
+  if (options?.requireFileScanner && (!settings.fileScannerEnabled || !settings.fileScannerUrl || settings.fileScannerSecret.length < 24)) {
+    throw new Error("File Scanner is not configured and enabled")
+  }
+  const response = await fetch(`${settings.orchestratorUrl.replace(/\/+$/, "")}/wake`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${secret}` },
-    signal: AbortSignal.timeout(10_000),
+    headers: { Authorization: `Bearer ${settings.sharedSecret}` },
+    cache: "no-store",
+    signal: AbortSignal.timeout(8_000),
   })
-  if (!response.ok) throw new Error(`${kind === "scanner" ? "File Scanner" : "Migration Orchestrator"} wake-up returned HTTP ${response.status}`)
+  if (!response.ok) throw new Error(`Migration Orchestrator wake-up returned HTTP ${response.status}`)
 }
 
 async function waitForOrchestratorCycleToRelease(migrationId: string): Promise<boolean> {
@@ -602,7 +605,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           syncMessage: `File Scanner verification requested for ${verifying} bucket(s)`,
           lastSyncedAt: now,
         })
-        await wakeMigrationService("scanner")
+        await wakeMigrationOrchestrator({ requireFileScanner: true })
         return NextResponse.json({ ok: true, verifying, scanner: true }, { status: 200 })
       }
       const prefix =
@@ -631,6 +634,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         lastSyncedAt: now,
         options: { ...migration.options, manualCompleted: false, targetActivatedAt: undefined },
       })
+
+      await wakeMigrationOrchestrator()
 
       return NextResponse.json({ ok: true, verifying: candidates.length }, { status: 200 })
     }
@@ -698,7 +703,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           targetActivatedAt: undefined,
         },
       })
-      await wakeMigrationService("orchestrator")
+      await wakeMigrationOrchestrator()
       return NextResponse.json({ ok: true, repairing: items.length, generation: nextGeneration, executionMode: "migration_workers" }, { status: 200 })
     }
 
@@ -779,6 +784,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
             : {}),
         },
       })
+
+      await wakeMigrationOrchestrator()
 
       return NextResponse.json({ ok: true, retried: candidates.length }, { status: 200 })
     }

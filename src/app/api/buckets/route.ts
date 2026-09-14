@@ -1,21 +1,17 @@
 import { NextResponse } from "next/server"
 
-import { getAllAccounts } from "@/lib/accounts-store"
-import { listBucketDeliverySettings, type BucketDeliverySettings } from "@/lib/bucket-delivery-settings-store"
-import { listBucketSettingsSnapshots } from "@/lib/bucket-settings-snapshot-store"
-import { getBucketStatsMap, type DriveBucketStats } from "@/lib/bucket-stats-store"
+import { getBucketDashboardBootstrap } from "@/lib/bucket-dashboard-store"
 import { requireAdmin } from "@/lib/server-auth"
 import { mergeManyMediaAllowedOrigins, resolveEffectiveMediaAllowedOrigins } from "@/lib/project-media-origins.cjs"
-import { listAssignedProjectsForBuckets, type Project } from "@/lib/projects-store"
-import { listProjectDeliverySettings, type ProjectDeliverySettings } from "@/lib/project-delivery-settings-store"
 import { allowedStorageCorsOrigins } from "@/lib/storage-delivery.cjs"
 
 function serializeDeliverySettings(
-  settings: BucketDeliverySettings,
-  projects: Project[],
-  projectSettings: ProjectDeliverySettings[]
+  accountId: string,
+  bucketName: string,
+  settings: { publicAccessEnabled: boolean; mediaAllowedOrigins: string[] | null; createdAt: string | null; updatedAt: string | null },
+  projects: Array<{ id: string; projectId: string; name: string; mediaAllowedOrigins: string[] | null }>
 ) {
-  const inheritedPolicies = projectSettings
+  const inheritedPolicies = projects
     .map((entry) => entry.mediaAllowedOrigins)
     .filter((origins): origins is string[] => Array.isArray(origins))
   const inherited = inheritedPolicies.length > 0
@@ -28,8 +24,8 @@ function serializeDeliverySettings(
     fallback: allowedStorageCorsOrigins().filter((origin): origin is string => typeof origin === "string"),
   })
   return {
-    accountId: settings.accountId,
-    bucketName: settings.bucketName,
+    accountId,
+    bucketName,
     deliveryPublicAccessEnabled: settings.publicAccessEnabled,
     manualMediaAllowedOrigins: settings.mediaAllowedOrigins,
     inheritedMediaAllowedOrigins: inherited,
@@ -52,59 +48,41 @@ export async function GET() {
     const auth = await requireAdmin()
     if (!auth.ok) return auth.response
 
-    const accounts = await getAllAccounts()
-    const account = accounts.find((candidate) => candidate.status === "active")
-    if (!account) {
+    const bootstrap = await getBucketDashboardBootstrap()
+    if (!bootstrap) {
       return NextResponse.json({ error: "There is no active Cloudflare account", buckets: [] }, { status: 409 })
     }
-
-    const [snapshots, stats] = await Promise.all([
-      listBucketSettingsSnapshots(account.id),
-      getBucketStatsMap(account.id).catch(() => new Map<string, DriveBucketStats>()),
-    ])
-    const snapshotByName = new Map(snapshots.map((snapshot) => [snapshot.bucketName, snapshot]))
-    const names = Array.from(new Set([...snapshots.map((snapshot) => snapshot.bucketName), ...stats.keys()]))
-    const [deliverySettings, assignedProjects] = await Promise.all([
-      listBucketDeliverySettings(account.id, names),
-      listAssignedProjectsForBuckets(account.id, names),
-    ])
-    const projectSettings = await listProjectDeliverySettings(
-      Array.from(assignedProjects.values()).flatMap((projects) => projects.map((project) => project.id))
-    )
-    const buckets = names.map((name) => {
-      const snapshot = snapshotByName.get(name)
-      const cached = stats.get(name)
+    const { account } = bootstrap
+    const buckets = bootstrap.buckets.map((bucket) => {
+      const snapshot = bucket.snapshot
       return {
-        id: `${account.id}:${name}`,
+        id: `${account.id}:${bucket.name}`,
         accountId: account.id,
         accountLabel: account.label,
         accountStatus: account.status,
-        name,
+        name: bucket.name,
         createdAt: snapshot?.createdAt ?? null,
         jurisdiction: snapshot?.jurisdiction ?? "default",
         storageClass: snapshot?.storageClass ?? "Standard",
-        objects: cached?.objects ?? 0,
-        bytes: cached?.bytes ?? 0,
-        statsStatus: cached?.status ?? "pending",
+        objects: bucket.objects,
+        bytes: bucket.bytes,
+        statsStatus: bucket.statsStatus,
+        statsError: bucket.statsError,
+        statsUpdatedAt: bucket.statsUpdatedAt,
         settings: snapshot?.settings ?? null,
-        deliverySettings: (() => {
-          const projects = assignedProjects.get(name) ?? []
-          return serializeDeliverySettings(
-            deliverySettings.get(name)!,
-            projects,
-            projects.flatMap((project) => {
-              const settings = projectSettings.get(project.id)
-              return settings ? [settings] : []
-            })
-          )
-        })(),
+        deliverySettings: serializeDeliverySettings(account.id, bucket.name, {
+          publicAccessEnabled: bucket.publicAccessEnabled,
+          mediaAllowedOrigins: bucket.mediaAllowedOrigins,
+          createdAt: bucket.deliveryCreatedAt,
+          updatedAt: bucket.deliveryUpdatedAt,
+        }, bucket.projects),
         settingsStatus: snapshot?.settingsStatus ?? "pending",
         settingsError: snapshot?.settingsError ?? null,
         settingsLastAttemptedAt: snapshot?.settingsLastAttemptedAt ?? null,
         settingsLastSyncedAt: snapshot?.settingsLastSyncedAt ?? null,
         inventorySyncedAt: snapshot?.inventorySyncedAt ?? null,
       }
-    }).sort((a, b) => a.name.localeCompare(b.name))
+    })
 
     return NextResponse.json({
       buckets,

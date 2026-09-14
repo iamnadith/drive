@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { getAllAccounts } from "@/lib/accounts-store"
+import { getActiveAccountR2Credentials, getActiveDashboardAccountSummary } from "@/lib/accounts-store"
 import { r2CreateBucket } from "@/lib/r2-s3"
 import { requireAdmin } from "@/lib/server-auth"
 import { ensureBucketStatsRows, listBucketStats } from "@/lib/bucket-stats-store"
@@ -13,8 +13,7 @@ export async function GET() {
     const auth = await requireAdmin()
     if (!auth.ok) return auth.response
 
-    const accounts = await getAllAccounts()
-    const active = accounts.find((a) => a.status === "active")
+    const active = await getActiveDashboardAccountSummary()
 
     if (!active) {
       return NextResponse.json(
@@ -107,8 +106,7 @@ export async function POST(request: Request) {
       )
     }
 
-    const accounts = await getAllAccounts()
-    const active = accounts.find((a) => a.status === "active")
+    const active = await getActiveAccountR2Credentials()
 
     if (
       !active ||

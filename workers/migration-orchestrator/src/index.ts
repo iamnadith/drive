@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 17
+const BUILD = 18
 const MAX_SECRET_LENGTH = 512
 let authCache: { value: string[]; expiresAt: number } | null = null
 
@@ -304,12 +304,19 @@ async function ensureWorkerTargetBuckets(db: Client, migration: Row, generation:
 
 async function ensureShards(db: Client, migration: Row) {
   const generation = integer(opts(migration).workerGeneration, 1, 1, 1000000)
+  const hasItems = await db.query(`select 1 from drive_migration_items where migration_id=$1 limit 1`, [migration.id])
+  if (!hasItems.rowCount) {
+    return { generation, shardCount: 0, created: 0, inventoryPending: 0, queuePending: 0, terminalFailure: false, noItems: true, targetBuckets: { checked: 0, failed: 0 } }
+  }
   const targetBuckets = await ensureWorkerTargetBuckets(db, migration, generation)
   if (targetBuckets.failed > 0) {
     return { generation, shardCount: 0, created: 0, inventoryPending: 0, queuePending: 1, terminalFailure: false, targetBuckets }
   }
   const items = await db.query(`select id,source_bucket,target_bucket,progress from drive_migration_items where migration_id=$1 and coalesce(slurper_status,'')<>'worker_bucket_create_failed' order by created_at`, [migration.id])
   if (!items.rowCount) {
+    // Every configured bucket failed target preparation. Keep this distinct
+    // from a genuinely empty migration: callers finalize empty migrations via
+    // noItems before attempting destination bucket preparation.
     await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message='No migration buckets are available for worker processing',last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
     return { generation, shardCount: 0, created: 0, inventoryPending: 0, terminalFailure: true, targetBuckets }
   }
@@ -690,7 +697,7 @@ async function ensureSuperSlurperInventory(db: Client, migration: Row) {
     if (!(await migrationIsActive(db, migration.id))) break
     if (item.slurper_job_id || ["completed", "failed", "aborted", "bucket_create_failed", "verification_failed"].includes(String(item.slurper_status || ""))) continue
     if (item.progress?.sourceScanStatus === "failed") { failed += 1; continue }
-    let scanId = typeof item.progress?.sourceScanId === "string" ? item.progress.sourceScanId : ""
+    const scanId = typeof item.progress?.sourceScanId === "string" ? item.progress.sourceScanId : ""
     let scan = scanId
       ? (await db.query(`select id,status,objects,bytes,error from drive_bucket_scans where id=$1 and migration_id=$2 and migration_item_id=$3 and kind='source' limit 1`, [scanId, migration.id, item.id])).rows[0]
       : null
@@ -899,28 +906,11 @@ async function wakeBackendOrchestrator(db: Client) {
     return response.ok ? "signaled" : `http_${response.status}`
   } catch { return "deferred_to_cron" }
 }
-async function finishOrRepair(db: Client, migration: Row, generation: number) {
-  const active = await db.query(`select id from drive_migrations where id=$1 and status in('running','verifying')`, [migration.id])
-  if (!active.rowCount) return { verification: "canceled" }
-  const states = await db.query(`select status,missing_objects,mismatched_objects,extra_objects from drive_migration_verification_state where migration_id=$1 and generation=$2`, [migration.id, generation])
-  if (states.rows.some((row) => row.status === "failed")) {
-    await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message='File Scanner exhausted its scan retries',updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
-    return { verification: "failed", reason: "file_scan_failed" }
-  }
-  if (!states.rows.length || states.rows.some((row) => row.status !== "completed")) return { verification: "pending" }
-  const missing = states.rows.reduce((n, row) => n + Number(row.missing_objects), 0)
-  const mismatched = states.rows.reduce((n, row) => n + Number(row.mismatched_objects), 0)
-  const extra = states.rows.reduce((n, row) => n + Number(row.extra_objects), 0)
-  if (missing || mismatched || (opts(migration).verifyStrictDestination === true && extra)) {
-    await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id, `File Scanner verification found ${missing} missing, ${mismatched} mismatched, ${extra} extra; repair is available`])
-    return { verification: "failed", missing, mismatched, extra, repairAvailable: true }
-  }
-  const settings = await syncNextBucketSettings(db, migration)
-  if (settings.settings !== "synced") return { verification: settings.settings === "failed" ? "failed" : "settings_sync", missing, mismatched, extra, ...settings }
+async function activateTargetAndCompleteMigration(db: Client, migration: Row) {
   await db.query("begin")
   try {
     const lockedMigration = await db.query(`select id from drive_migrations where id=$1 and status in('running','verifying') for update`, [migration.id])
-    if (!lockedMigration.rowCount) { await db.query("commit"); return { verification: "canceled" } }
+    if (!lockedMigration.rowCount) { await db.query("commit"); return { activated: false, backendOrchestrator: "migration_not_active" } }
     await db.query(`
       with previous as (
         select total_buckets,total_objects,total_bytes,last_synced_at
@@ -942,7 +932,29 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
     await db.query(`update drive_migrations set status='completed',completed_at=now(),sync_status='synced',sync_message=NULL,last_synced_at=now(),updated_at=now(),summary_item_count=(select count(*) from drive_migration_items where migration_id=$1),summary_objects=(select coalesce(sum(source_objects),0) from drive_migration_items where migration_id=$1),summary_bytes=(select coalesce(sum(source_bytes),0) from drive_migration_items where migration_id=$1) where id=$1 and status in('running','verifying')`, [migration.id])
     await db.query("commit")
   } catch (error) { await db.query("rollback"); throw error }
-  return { verification: "completed", missing, mismatched, extra, backendOrchestrator: await wakeBackendOrchestrator(db) }
+  return { activated: true, backendOrchestrator: await wakeBackendOrchestrator(db) }
+}
+async function finishOrRepair(db: Client, migration: Row, generation: number) {
+  const active = await db.query(`select id from drive_migrations where id=$1 and status in('running','verifying')`, [migration.id])
+  if (!active.rowCount) return { verification: "canceled" }
+  const states = await db.query(`select status,missing_objects,mismatched_objects,extra_objects from drive_migration_verification_state where migration_id=$1 and generation=$2`, [migration.id, generation])
+  if (states.rows.some((row) => row.status === "failed")) {
+    await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message='File Scanner exhausted its scan retries',updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
+    return { verification: "failed", reason: "file_scan_failed" }
+  }
+  if (!states.rows.length || states.rows.some((row) => row.status !== "completed")) return { verification: "pending" }
+  const missing = states.rows.reduce((n, row) => n + Number(row.missing_objects), 0)
+  const mismatched = states.rows.reduce((n, row) => n + Number(row.mismatched_objects), 0)
+  const extra = states.rows.reduce((n, row) => n + Number(row.extra_objects), 0)
+  if (missing || mismatched || (opts(migration).verifyStrictDestination === true && extra)) {
+    await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id, `File Scanner verification found ${missing} missing, ${mismatched} mismatched, ${extra} extra; repair is available`])
+    return { verification: "failed", missing, mismatched, extra, repairAvailable: true }
+  }
+  const settings = await syncNextBucketSettings(db, migration)
+  if (settings.settings !== "synced") return { verification: settings.settings === "failed" ? "failed" : "settings_sync", missing, mismatched, extra, ...settings }
+  const completion = await activateTargetAndCompleteMigration(db, migration)
+  if (!completion.activated) return { verification: "canceled" }
+  return { verification: "completed", missing, mismatched, extra, backendOrchestrator: completion.backendOrchestrator }
 }
 async function dispatchWorkers(db: Client, env: Env, migration: Row) {
   const configRows = await db.query(`select key,value from drive_app_settings where key='migration-orchestrator'`)
@@ -1158,6 +1170,20 @@ async function cycle(env: Env) {
       migrationId = migration.id
       if (opts(migration).executionMode !== "migration_workers") {
         const inventory = await ensureSuperSlurperInventory(db, migration)
+        if (inventory.total === 0) {
+          const completion = await activateTargetAndCompleteMigration(db, migration)
+          return complete(db, owner, migration.id, {
+            ok: true,
+            migrationId,
+            executionMode: "super_slurper",
+            noItems: true,
+            verification: completion.activated ? "completed" : "canceled",
+            missing: 0,
+            mismatched: 0,
+            extra: 0,
+            backendOrchestrator: completion.backendOrchestrator,
+          })
+        }
         if (inventory.pending > 0) {
           const configuration = setting.rows[0]?.value || {}
           const scannerEnabled = configuration.fileScannerEnabled === true || configuration.enabled === true
@@ -1188,6 +1214,20 @@ async function cycle(env: Env) {
         return complete(db, owner, migration.id, { ok: true, migrationId, executionMode: "super_slurper", inventory, jobs, ...slurper, ...verification, fileScanner })
       }
       const shards = await ensureShards(db, migration)
+      if (shards.noItems) {
+        const completion = await activateTargetAndCompleteMigration(db, migration)
+        return complete(db, owner, migration.id, {
+          ok: true,
+          migrationId,
+          executionMode: "migration_workers",
+          noItems: true,
+          verification: completion.activated ? "completed" : "canceled",
+          missing: 0,
+          mismatched: 0,
+          extra: 0,
+          backendOrchestrator: completion.backendOrchestrator,
+        })
+      }
       // Keep the migration at the scanner-owned stage until every source
       // inventory page and its corresponding durable file jobs are present.
       // This message is intentionally independent of the worker fleet: a

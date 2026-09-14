@@ -1131,14 +1131,7 @@ export default function MigrationDetailsPage() {
     setBusyAction("sync")
     setError(null)
     try {
-      const res = await postJsonWithTimeout({
-        url: `/api/migrations/${encodeURIComponent(id)}/sync`,
-        body: {},
-        timeoutMs: 12_000,
-      })
-      const json: unknown = await res.json().catch(() => ({}))
-      const errorMessage = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to sync migration"
-      if (!res.ok) throw new Error(errorMessage)
+      await loadInitial()
     } catch (e: unknown) {
       const message =
         typeof e === "object" && e !== null && "name" in e && String((e as { name?: unknown }).name) === "AbortError"
@@ -1161,7 +1154,6 @@ export default function MigrationDetailsPage() {
       const json: unknown = await res.json().catch(() => ({}))
       const errorMessage = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to start migration"
       if (!res.ok) throw new Error(errorMessage)
-      await fetch(`/api/migrations/${encodeURIComponent(id)}/sync`, { method: "POST" }).catch(() => {})
     } catch (e: unknown) {
       const message =
         typeof e === "object" && e !== null && "message" in e
@@ -1209,8 +1201,7 @@ export default function MigrationDetailsPage() {
       const errorMessage = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to run action"
       if (!res.ok) throw new Error(errorMessage)
 
-      // Do not block UI; SSE snapshot will update state. Kick a best-effort sync.
-      void fetch(`/api/migrations/${encodeURIComponent(id)}/sync`, { method: "POST" }).catch(() => {})
+      // State-changing routes own their worker wake-up; SSE refreshes this DB snapshot.
     } catch (e: unknown) {
       const message =
         typeof e === "object" && e !== null && "name" in e && String((e as { name?: unknown }).name) === "AbortError"
@@ -1538,7 +1529,7 @@ export default function MigrationDetailsPage() {
         const lifecycleBusy = itemBusy === "pause" || itemBusy === "resume" || itemBusy === "retry"
         return (
           <div className="flex justify-center gap-1">
-            <Button size="icon-sm" variant="outline" loading={itemBusy === "verify"} title={verifyStatus === null ? "Run verification" : "Re-run verification"} aria-label="Verify" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canVerify} onClick={() => { void runItemAction(item.id, "verify").then(() => void syncNow()) }}>
+            <Button size="icon-sm" variant="outline" loading={itemBusy === "verify"} title={verifyStatus === null ? "Run verification" : "Re-run verification"} aria-label="Verify" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canVerify} onClick={() => { void runItemAction(item.id, "verify") }}>
               {itemBusy !== "verify" ? <ShieldCheck className="h-4 w-4" /> : null}
             </Button>
             <Button size="icon-sm" variant="outline" loading={itemBusy === "logs"} title="View logs" disabled={Boolean(itemBusy)} onClick={() => { setLogsItemId(item.id); setLogsOpen(true); if (bucketCounts.scanning > 0 || bucketCounts.running > 0 || bucketCounts.verifying > 0) void runItemAction(item.id, "logs") }}>
@@ -1547,7 +1538,7 @@ export default function MigrationDetailsPage() {
             <Button size="icon-sm" variant="outline" loading={lifecycleBusy} title="Failed Diagnostics" aria-label="Failed Diagnostics" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canInspectFailures} onClick={() => { void openFailedDiagnosticsForSingle(item.id) }}>
               <AlertCircle className="h-4 w-4" />
             </Button>
-            <Button size="icon-sm" variant="outline" title={lifecycleAction === "pause" ? "Stop" : lifecycleAction === "retry" ? "Start (retry)" : lifecycleAction === "resume" ? "Start" : "Start/Stop"} aria-label={lifecycleAction === "pause" ? "Stop" : lifecycleAction === "retry" ? "Start (retry)" : lifecycleAction === "resume" ? "Start" : "Start/Stop"} disabled={historyReadOnly.readOnly || Boolean(itemBusy) || lifecycleAction === null} onClick={() => { if (lifecycleAction) void runItemAction(item.id, lifecycleAction).then(() => lifecycleAction === "retry" ? void syncNow() : undefined) }}>
+            <Button size="icon-sm" variant="outline" title={lifecycleAction === "pause" ? "Stop" : lifecycleAction === "retry" ? "Start (retry)" : lifecycleAction === "resume" ? "Start" : "Start/Stop"} aria-label={lifecycleAction === "pause" ? "Stop" : lifecycleAction === "retry" ? "Start (retry)" : lifecycleAction === "resume" ? "Start" : "Start/Stop"} disabled={historyReadOnly.readOnly || Boolean(itemBusy) || lifecycleAction === null} onClick={() => { if (lifecycleAction) void runItemAction(item.id, lifecycleAction) }}>
               {!lifecycleBusy && lifecycleAction === "pause" ? <Square className="h-4 w-4" /> : !lifecycleBusy ? <Play className="h-4 w-4" /> : null}
             </Button>
             <Button size="icon-sm" variant="destructive" loading={itemBusy === "abort"} title="Abort" aria-label="Abort" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canAbort} onClick={() => { void runItemAction(item.id, "abort") }}>

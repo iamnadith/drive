@@ -705,7 +705,6 @@ export default function MigrationsPage() {
       const errorMessage =
         isRecord(json) && typeof json.error === "string" ? json.error : "Unable to start migration"
       if (!res.ok) throw new Error(errorMessage)
-      await fetch(`/api/migrations/${encodeURIComponent(activeMigration.id)}/sync`, { method: "POST" }).catch(() => {})
       await loadAll()
     } catch (e: unknown) {
       const message =
@@ -719,25 +718,17 @@ export default function MigrationsPage() {
   }
 
   const syncNow = async () => {
-    if (!activeMigration?.id) return
     setBusyAction("sync")
     setError(null)
     try {
-      const res = await postJsonWithTimeout({
-        url: `/api/migrations/${encodeURIComponent(activeMigration.id)}/sync`,
-        body: {},
-        timeoutMs: 12_000,
-      })
-      const json: unknown = await res.json().catch(() => ({}))
-      const errorMessage = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to sync migration"
-      if (!res.ok) throw new Error(errorMessage)
+      await loadAll()
     } catch (e: unknown) {
       const message =
         typeof e === "object" && e !== null && "name" in e && String((e as { name?: unknown }).name) === "AbortError"
           ? ""
           : typeof e === "object" && e !== null && "message" in e
-          ? String((e as { message?: unknown }).message ?? "Unable to sync migration")
-          : "Unable to sync migration"
+          ? String((e as { message?: unknown }).message ?? "Unable to refresh migrations")
+          : "Unable to refresh migrations"
       if (message) setError(message)
     } finally {
       setBusyAction(null)
@@ -757,7 +748,6 @@ export default function MigrationsPage() {
       const json: unknown = await res.json().catch(() => ({}))
       const errorMessage = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to retry migration"
       if (!res.ok) throw new Error(errorMessage)
-      await fetch(`/api/migrations/${encodeURIComponent(activeMigration.id)}/sync`, { method: "POST" }).catch(() => {})
       await loadAll()
     } catch (e: unknown) {
       const message =
@@ -799,7 +789,6 @@ export default function MigrationsPage() {
       const json: unknown = await res.json().catch(() => ({}))
       const errorMessage = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to start verification"
       if (!res.ok) throw new Error(errorMessage)
-      await fetch(`/api/migrations/${encodeURIComponent(activeMigration.id)}/sync`, { method: "POST" }).catch(() => {})
       await loadAll()
     } catch (e: unknown) {
       const message =
