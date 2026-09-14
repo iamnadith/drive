@@ -10,7 +10,7 @@ type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: st
 type Row = Record<string, any>
 type ClaimedTask = { kind: "migration" | "generic"; task: Row }
 type ClaimedCycle = { ok: true; owner: string; tasks: ClaimedTask[] } | { ok: true; skipped: string } | { ok: true; idle: true }
-const BUILD = 13
+const BUILD = 14
 const MAX_SECRET_LENGTH = 512
 // Keep database connections and R2 list requests bounded while allowing
 // independent bucket scans to make progress during the same cron/queue run.
@@ -86,13 +86,14 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
   try {
     result = await db.query(`
     with candidate as (
-      select v.migration_item_id,i.source_bucket,i.target_bucket,i.source_jurisdiction,m.source_account_id,m.target_account_id,
+      select v.migration_item_id,i.source_bucket,i.target_bucket,i.source_jurisdiction,coalesce(target_settings.jurisdiction,i.source_jurisdiction,'default') target_jurisdiction,m.source_account_id,m.target_account_id,
         nullif(m.options->>'pathPrefix','') scan_prefix,m.options->>'executionMode' execution_mode,
         jsonb_build_object('cloudflare_account_id',sa.cloudflare_account_id,'r2_access_key_id',sa.r2_access_key_id,'r2_secret_access_key',sa.r2_secret_access_key) source_account,
         jsonb_build_object('cloudflare_account_id',ta.cloudflare_account_id,'r2_access_key_id',ta.r2_access_key_id,'r2_secret_access_key',ta.r2_secret_access_key) target_account
       from drive_migration_verification_state v join drive_migrations m on m.id=v.migration_id
         join drive_migration_items i on i.id=v.migration_item_id
         join drive_accounts sa on sa.id=m.source_account_id join drive_accounts ta on ta.id=m.target_account_id
+        left join drive_bucket_settings_snapshots target_settings on target_settings.account_id=m.target_account_id and target_settings.bucket_name=i.target_bucket
       -- Verification may run per bucket while the migration worker fleet is
       -- still copying other buckets. Keep the task eligible in both states.
       where m.status in('running','verifying')
@@ -103,7 +104,7 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
       attempt_count=case when v.attempt_generation is distinct from v.generation then 0 else v.attempt_count end,
       attempt_generation=v.generation,last_error=case when v.attempt_generation is distinct from v.generation then null else v.last_error end,updated_at=now()
     from candidate c where v.migration_item_id=c.migration_item_id
-    returning v.*,c.source_bucket,c.target_bucket,c.source_jurisdiction,c.source_account_id,c.target_account_id,c.source_account,c.target_account
+    returning v.*,c.source_bucket,c.target_bucket,c.source_jurisdiction,c.target_jurisdiction,c.source_account_id,c.target_account_id,c.source_account,c.target_account
     `, [owner])
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -119,6 +120,7 @@ async function claimGenericScan(db: Client, owner: string): Promise<Row | null> 
       left join drive_bucket_settings_snapshots bs on bs.account_id=s.account_id and bs.bucket_name=s.bucket_name
       where s.status in('pending','running')
         and (s.lease_expires_at is null or s.lease_expires_at<now())
+        and (s.migration_id is null or exists(select 1 from drive_migrations m where m.id=s.migration_id and m.status in('running','verifying')))
         and not exists (
           select 1 from drive_migration_verification_state v
           where v.source_scan_id=s.id or v.destination_scan_id=s.id
@@ -151,32 +153,6 @@ async function ensureScan(db: Client, task: Row, phase: "source" | "destination"
   `, [id, accountId, bucket, phase === "source" ? "source" : "dest", task.migration_id, task.migration_item_id, task.generation, task.lease_owner])
   if (!attached.rowCount) throw new Error("File Scanner task lease was lost")
   return attached.rows[0].id
-}
-async function storePage(db: Client, scanId: string, objects: Row[]) {
-  if (!objects.length) return
-  await db.query(`
-    insert into drive_bucket_scan_objects(scan_id,key,size,is_dir_marker,etag,last_modified)
-    select $1,x.key,x.size,x.is_dir_marker,x.etag,x.last_modified from jsonb_to_recordset($2::jsonb)
-      as x(key text,size bigint,is_dir_marker boolean,etag text,last_modified timestamptz)
-    on conflict(scan_id,key) do update set size=excluded.size,is_dir_marker=excluded.is_dir_marker,etag=excluded.etag,last_modified=excluded.last_modified
-  `, [scanId, JSON.stringify(objects)])
-}
-async function pageDelta(db: Client, scanId: string, objects: Row[]) {
-  if (!objects.length) return { object_delta: 0, byte_delta: 0 }
-  const result = await db.query(`
-    with incoming as (
-      select x.key,x.size,x.is_dir_marker
-      from jsonb_to_recordset($2::jsonb) as x(key text,size bigint,is_dir_marker boolean)
-    ), previous as (
-      select o.key,o.size,o.is_dir_marker from drive_bucket_scan_objects o
-      join incoming i on i.key=o.key where o.scan_id=$1::uuid
-    )
-    select
-      coalesce(sum((case when i.is_dir_marker then 0 else 1 end)-(case when p.key is not null and not p.is_dir_marker then 1 else 0 end)),0)::bigint object_delta,
-      coalesce(sum((case when i.is_dir_marker then 0 else i.size end)-(case when p.key is not null and not p.is_dir_marker then p.size else 0 end)),0)::bigint byte_delta
-    from incoming i left join previous p on p.key=i.key
-  `, [scanId, JSON.stringify(objects)])
-  return result.rows[0] || { object_delta: 0, byte_delta: 0 }
 }
 async function persistMigrationPage(db: Client, scanId: string, task: Row, phase: "source" | "destination", page: Row) {
   const cursorColumn = phase === "source" ? "source_cursor" : "destination_cursor"
@@ -330,7 +306,8 @@ async function processTask(db: Client, env: Env, task: Row) {
   const account = phase === "source" ? task.source_account : task.target_account
   const bucket = phase === "source" ? task.source_bucket : task.target_bucket
   const cursor = phase === "source" ? task.source_cursor : task.destination_cursor
-  const page = await listObjects(env, account, bucket, cursor, task.source_jurisdiction || null, task.scan_prefix || null)
+  const jurisdiction = phase === "source" ? task.source_jurisdiction : task.target_jurisdiction
+  const page = await listObjects(env, account, bucket, cursor, jurisdiction || null, task.scan_prefix || null)
   if (page.truncated && (!page.cursor || page.cursor === cursor)) throw new Error("R2 returned a truncated page without a forward cursor")
   const persisted = await persistMigrationPage(db, scanId, task, phase, page)
   if (page.truncated) return { itemId: task.migration_item_id, phase, ...persisted }
@@ -343,36 +320,53 @@ async function processGenericScan(db: Client, env: Env, task: Row) {
   const page = await listObjects(env, account, task.bucket_name, task.cursor || null, task.jurisdiction || null, task.prefix || null)
   if (page.truncated && (!page.cursor || page.cursor === task.cursor)) throw new Error("R2 returned a truncated page without a forward cursor")
   const objects = [...new Map((page.objects as Row[]).map((object) => [object.key, object])).values()]
-  await db.query("begin")
-  let scan: Row
-  try {
-    const lease = await db.query(`select id from drive_bucket_scans where id=$1 and lease_owner=$2 for update`, [task.id, task.lease_owner])
-    if (!lease.rowCount) throw new Error("File Scanner generic scan lease was lost")
-    const delta = await pageDelta(db, task.id, objects)
-    await storePage(db, task.id, objects)
-    const updated = await db.query(`
-      update drive_bucket_scans set cursor=$2,status=$3,
-        objects=greatest(0,coalesce(objects,0)+$6::bigint),bytes=greatest(0,coalesce(bytes,0)+$7::bigint),last_key=$4,
-        lease_owner=null,lease_expires_at=null,completed_at=case when $3='completed' then now() else completed_at end,updated_at=now()
-      where id=$1 and lease_owner=$5 returning id,migration_id,migration_item_id,kind,objects,bytes,status
-    `, [task.id, page.truncated ? page.cursor : null, page.truncated ? "pending" : "completed", objects.at(-1)?.key || task.last_key || null, task.lease_owner, delta.object_delta, delta.byte_delta])
-    if (!updated.rowCount) throw new Error("File Scanner generic scan lease was lost")
-    scan = updated.rows[0]
-    if (scan.kind === "source" && scan.migration_id && scan.migration_item_id) {
-      await db.query(`
-        update drive_migration_items set source_objects=$2,source_bytes=$3,
-          progress=coalesce(progress,'{}'::jsonb)||jsonb_build_object(
-            'sourceScanId',$4,'sourceScanStatus',$5,'sourceScanObjects',$2,'sourceScanBytes',$3,
-            'stage',case when $5='completed' then 'scan_completed' else 'scanning_source' end
-          ),last_progress_at=now(),updated_at=now()
-        where id=$1 and migration_id=$6
-      `, [scan.migration_item_id, scan.objects, scan.bytes, scan.id, scan.status === "completed" ? "completed" : "running", scan.migration_id])
-    }
-    await db.query("commit")
-  } catch (error) {
-    await db.query("rollback")
-    throw error
-  }
+  const updated = await db.query(`
+    with lease as (
+      select id,migration_id from drive_bucket_scans where id=$1::uuid and lease_owner=$5::text for update
+    ), incoming as (
+      select x.key,x.size,x.is_dir_marker,x.etag,x.last_modified
+      from jsonb_to_recordset($6::jsonb) as x(key text,size bigint,is_dir_marker boolean,etag text,last_modified timestamptz)
+    ), previous as (
+      select o.key,o.size,o.is_dir_marker from drive_bucket_scan_objects o
+      join incoming i on i.key=o.key where o.scan_id=$1::uuid
+    ), delta as (
+      select
+        coalesce(sum((case when i.is_dir_marker then 0 else 1 end)-(case when p.key is not null and not p.is_dir_marker then 1 else 0 end)),0)::bigint object_delta,
+        coalesce(sum((case when i.is_dir_marker then 0 else i.size end)-(case when p.key is not null and not p.is_dir_marker then p.size else 0 end)),0)::bigint byte_delta
+      from incoming i left join previous p on p.key=i.key
+    ), upserted as (
+      insert into drive_bucket_scan_objects(scan_id,key,size,is_dir_marker,etag,last_modified)
+      select $1::uuid,key,size,is_dir_marker,etag,last_modified from incoming where exists(
+        select 1 from lease l where l.id=$1::uuid and (l.migration_id is null or exists(select 1 from drive_migrations m where m.id=l.migration_id and m.status in('running','verifying')))
+      )
+      on conflict(scan_id,key) do update set size=excluded.size,is_dir_marker=excluded.is_dir_marker,etag=excluded.etag,last_modified=excluded.last_modified
+      returning key
+    ), saved_scan as (
+      update drive_bucket_scans s set cursor=$2::text,status=$3::text,
+        objects=greatest(0,coalesce(s.objects,0)+d.object_delta),bytes=greatest(0,coalesce(s.bytes,0)+d.byte_delta),
+        last_key=$4::text,error=null,attempt_count=0,lease_owner=null,lease_expires_at=null,
+        completed_at=case when $3::text='completed' then now() else null end,updated_at=now()
+      from delta d,(select count(*) from upserted) writes
+      where s.id=$1::uuid and exists(
+        select 1 from lease l where l.id=s.id and (l.migration_id is null or exists(select 1 from drive_migrations m where m.id=l.migration_id and m.status in('running','verifying')))
+      )
+      returning s.id,s.migration_id,s.migration_item_id,s.kind,s.objects,s.bytes,s.status
+    ), saved_item as (
+      update drive_migration_items i set source_objects=s.objects,source_bytes=s.bytes,
+        progress=coalesce(i.progress,'{}'::jsonb)||jsonb_build_object(
+          'sourceScanId',s.id::text,'sourceScanStatus',case when s.status='completed' then 'completed' else 'running' end,
+          'sourceScanObjects',s.objects,'sourceScanBytes',s.bytes,
+          'stage',case when s.status='completed' then 'scan_completed' else 'scanning_source' end
+        ),last_progress_at=now(),updated_at=now()
+      from saved_scan s where s.kind='source' and s.migration_id is not null and s.migration_item_id is not null
+        and i.id=s.migration_item_id and i.migration_id=s.migration_id
+      returning i.id
+    )
+    select s.id,s.migration_id,s.migration_item_id,s.kind,s.objects,s.bytes,s.status,(select count(*) from saved_item) item_syncs
+    from saved_scan s
+  `, [task.id, page.truncated ? page.cursor : null, page.truncated ? "pending" : "completed", objects.at(-1)?.key || task.last_key || null, task.lease_owner, JSON.stringify(objects)])
+  if (!updated.rowCount) throw new Error("File Scanner generic scan lease was lost")
+  const scan = updated.rows[0]
   return { scanId: task.id, phase: "inventory", pageObjects: objects.length, continued: page.truncated, ...scan }
 }
 async function finishState(db: Client, owner: string, result: Row, error?: string) {
@@ -399,14 +393,17 @@ async function cycle(env: Env) {
 
       const tasks: ClaimedTask[] = []
       for (let slot = 0; slot < SCAN_CONCURRENCY; slot += 1) {
-        const migrationTask = await claim(db, owner)
-        if (migrationTask) {
-          tasks.push({ kind: "migration", task: migrationTask })
-          continue
+        const kinds = slot % 2 === 0 ? ["generic", "migration"] as const : ["migration", "generic"] as const
+        let claimedTask: ClaimedTask | null = null
+        for (const kind of kinds) {
+          const task = kind === "generic" ? await claimGenericScan(db, owner) : await claim(db, owner)
+          if (task) {
+            claimedTask = { kind, task }
+            break
+          }
         }
-        const genericTask = await claimGenericScan(db, owner)
-        if (!genericTask) break
-        tasks.push({ kind: "generic", task: genericTask })
+        if (!claimedTask) break
+        tasks.push(claimedTask)
       }
       if (!tasks.length) {
         const result = { ok: true as const, idle: true as const }
@@ -466,7 +463,7 @@ export default {
       return json({ ok: true, service: "file-scanner", build: BUILD })
     }
     if (!(await authorized(request, env))) return json({ error: "Unauthorized" }, 401)
-    if (url.pathname === "/status" && request.method === "GET") return json(await database(env, async (db) => { const state = await db.query(`select * from drive_file_scanner_state where id=true`); const queue = await db.query(`select status,count(*)::int count from drive_migration_verification_state group by status`); return { ok: true, service: "file-scanner", build: BUILD, state: state.rows[0] || null, queue: queue.rows } }))
+    if (url.pathname === "/status" && request.method === "GET") return json(await database(env, async (db) => { const [state,verificationQueue,inventoryQueue] = await Promise.all([db.query(`select * from drive_file_scanner_state where id=true`),db.query(`select status,count(*)::int count from drive_migration_verification_state group by status`),db.query(`select status,count(*)::int count,count(*) filter(where lease_expires_at>now())::int leased,min(updated_at) oldest_updated_at from drive_bucket_scans where status in('pending','running','failed') group by status`)]); return { ok: true, service: "file-scanner", build: BUILD, state: state.rows[0] || null, queue: verificationQueue.rows, inventoryScans: inventoryQueue.rows } }))
     if (url.pathname === "/run" && request.method === "POST") { try { return json(await cycleAndContinue(env)) } catch (error) { return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 503) } }
     return json({ error: "Not found" }, 404)
   },

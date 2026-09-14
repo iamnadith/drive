@@ -1010,9 +1010,9 @@ async function runRetention(db: Client, config: RuntimeConfig) {
   const tasks: Array<[string, string, string, unknown[]]> = [
     ["apiEvents", "drive_project_api_events", "occurred_at<now()-($1::text||' days')::interval", [config.retention.apiEventsDays]],
     ["objectChanges", "drive_object_change_events", "occurred_at<now()-($1::text||' days')::interval", [config.retention.objectChangesDays]],
-    ["scanObjects", "drive_bucket_scan_objects", "created_at<now()-($1::text||' days')::interval", [config.retention.scanDetailsDays]],
-    ["verifyDiffs", "drive_bucket_verify_diffs", "created_at<now()-($1::text||' days')::interval", [config.retention.scanDetailsDays]],
-    ["bucketScans", "drive_bucket_scans", "status in('completed','failed') and coalesce(completed_at,updated_at)<now()-($1::text||' days')::interval", [config.retention.scanDetailsDays]],
+    ["scanObjects", "drive_bucket_scan_objects", `created_at<now()-($1::text||' days')::interval and not exists (select 1 from drive_bucket_scans s join drive_migrations m on m.id=s.migration_id where s.id=drive_bucket_scan_objects.scan_id and m.status in('running','verifying'))`, [config.retention.scanDetailsDays]],
+    ["verifyDiffs", "drive_bucket_verify_diffs", `created_at<now()-($1::text||' days')::interval and not exists (select 1 from drive_migration_items i join drive_migrations m on m.id=i.migration_id where i.id=drive_bucket_verify_diffs.migration_item_id and m.status in('running','verifying'))`, [config.retention.scanDetailsDays]],
+    ["bucketScans", "drive_bucket_scans", `status in('completed','failed') and coalesce(completed_at,updated_at)<now()-($1::text||' days')::interval and not exists (select 1 from drive_migrations m where m.id=drive_bucket_scans.migration_id and m.status in('running','verifying'))`, [config.retention.scanDetailsDays]],
     ["syncRuns", "drive_object_sync_runs", "status<>'running' and coalesce(completed_at,started_at)<now()-($1::text||' days')::interval", [config.retention.scanDetailsDays]],
     ["operationJobs", "drive_project_operation_jobs", "status in('completed','failed','canceled') and coalesce(completed_at,updated_at)<now()-($1::text||' days')::interval", [30]],
     ["activityEvents", "drive_activity_events", "occurred_at<now()-($1::text||' days')::interval", [90]],

@@ -226,12 +226,20 @@ export async function runDatabaseMaintenance(options?: {
   })
   deleted.scanObjects = await deleteInBatches({
     table: "drive_bucket_scan_objects",
-    condition: `created_at < now() - ($1::text || ' days')::interval`,
+    condition: `created_at < now() - ($1::text || ' days')::interval
+      and not exists (
+        select 1 from drive_bucket_scans s join drive_migrations m on m.id=s.migration_id
+        where s.id=drive_bucket_scan_objects.scan_id and m.status in ('running','verifying')
+      )`,
     params: [SCAN_DETAIL_RETENTION_DAYS], batchSize: 5000, maxBatches,
   })
   deleted.verifyDiffs = await deleteInBatches({
     table: "drive_bucket_verify_diffs",
-    condition: `created_at < now() - ($1::text || ' days')::interval`,
+    condition: `created_at < now() - ($1::text || ' days')::interval
+      and not exists (
+        select 1 from drive_migration_items i join drive_migrations m on m.id=i.migration_id
+        where i.id=drive_bucket_verify_diffs.migration_item_id and m.status in ('running','verifying')
+      )`,
     params: [SCAN_DETAIL_RETENTION_DAYS], batchSize: 5000, maxBatches,
   })
   deleted.syncRuns = await deleteInBatches({
@@ -241,7 +249,10 @@ export async function runDatabaseMaintenance(options?: {
   })
   deleted.bucketScans = await deleteInBatches({
     table: "drive_bucket_scans",
-    condition: `status in ('completed', 'failed') and coalesce(completed_at, updated_at) < now() - ($1::text || ' days')::interval`,
+    condition: `status in ('completed', 'failed') and coalesce(completed_at, updated_at) < now() - ($1::text || ' days')::interval
+      and not exists (
+        select 1 from drive_migrations m where m.id=drive_bucket_scans.migration_id and m.status in ('running','verifying')
+      )`,
     params: [SCAN_DETAIL_RETENTION_DAYS], batchSize: 1000, maxBatches,
   })
   deleted.operationJobs = await deleteInBatches({

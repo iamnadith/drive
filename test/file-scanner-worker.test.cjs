@@ -23,7 +23,8 @@ test('scanner cron and queue drain up to four separately leased tasks concurrent
   assert.match(config, /"triggers":\s*\{\s*"crons":\s*\["\* \* \* \* \*"\]/)
   assert.match(scanner, /const SCAN_CONCURRENCY = 4/)
   assert.match(cycle, /for \(let slot = 0; slot < SCAN_CONCURRENCY; slot \+= 1\)/)
-  assert.match(cycle, /const migrationTask = await claim\(db, owner\)[\s\S]*?claimGenericScan\(db, owner\)/)
+  assert.match(cycle, /const kinds = slot % 2 === 0 \? \["generic", "migration"\] as const : \["migration", "generic"\] as const/)
+  assert.match(cycle, /for \(const kind of kinds\)[\s\S]*?claimGenericScan\(db, owner\)[\s\S]*?claim\(db, owner\)/)
   assert.match(cycle, /Promise\.all\(claimed\.tasks\.map\(async \(\{ kind, task \}\) => \{[\s\S]*?return await database\(env/)
   assert.match(scanner, /lease_owner=\$1,lease_expires_at=now\(\)\+interval '90 seconds'/)
   assert.match(scanner, /where migration_item_id=\$2::uuid and generation=\$3::int and lease_owner=\$4::text[\s\S]*?for update/)
@@ -40,7 +41,7 @@ test('failed concurrent scans use queue backoff instead of immediate continuatio
   assert.match(queue, /message\.retry\(\{ delaySeconds: Math\.min\(15 \* \(2 \*\* Math\.min\(message\.attempts, 8\)\), 900\) \}\)/)
 })
 
-test('migration scanner uses maximum R2 page size and avoids whole-inventory recounts per page', () => {
+test('scanner page commits are atomic, idempotent, and avoid per-page database round-trips', () => {
   const scanner = read('workers/file-scanner/src/index.ts')
   const persist = scanner.slice(scanner.indexOf('async function persistMigrationPage'), scanner.indexOf('async function compare('))
   const generic = scanner.slice(scanner.indexOf('async function processGenericScan'), scanner.indexOf('async function finishState'))
@@ -53,8 +54,41 @@ test('migration scanner uses maximum R2 page size and avoids whole-inventory rec
   assert.match(persist, /greatest\(0,coalesce\(v\.\$\{objectsColumn\},0\)\+d\.object_delta\)/)
   assert.match(persist, /begin[\s\S]*?commit[\s\S]*?rollback/)
   assert.doesNotMatch(persist, /select count\(\*\).*drive_bucket_scan_objects/i)
-  assert.match(generic, /await pageDelta\(db, task\.id, objects\)/)
+  assert.match(generic, /with lease as \([\s\S]*?for update[\s\S]*?incoming as \([\s\S]*?delta as \([\s\S]*?upserted as \([\s\S]*?saved_scan as \([\s\S]*?saved_item as \(/)
+  assert.match(generic, /jsonb_to_recordset\(\$6::jsonb\)/)
+  assert.match(generic, /on conflict\(scan_id,key\) do update/)
+  assert.match(generic, /error=null,attempt_count=0,lease_owner=null,lease_expires_at=null/)
+  assert.match(generic, /'sourceScanId',s\.id::text/)
+  assert.match(generic, /'sourceScanStatus',case when s\.status='completed' then 'completed' else 'running' end/)
+  assert.match(generic, /greatest\(0,coalesce\(s\.objects,0\)\+d\.object_delta\)/)
+  assert.match(generic, /greatest\(0,coalesce\(s\.bytes,0\)\+d\.byte_delta\)/)
+  assert.doesNotMatch(generic, /await pageDelta|await storePage/)
   assert.doesNotMatch(generic, /select count\(\*\).*drive_bucket_scan_objects/i)
+})
+
+test('pre-existing worker-pool objects count as completed, retain total counts, and are independently SHA-256 verified', () => {
+  const worker = read('workers/migration-worker/migration-worker.mjs')
+  const scanner = read('workers/file-scanner/src/index.ts')
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(worker, /alreadyPresent = Math\.max\(0, sourceObjects\.length - toRepair\.length\)/)
+  assert.match(worker, /integrityProofs: assignedInventory \? finalDestinationObjects\.map/)
+  assert.match(worker, /integrityVerified: sourceSha256 === destinationSha256/)
+  assert.match(scanner, /where s\.scan_id=\$2::uuid and not s\.is_dir_marker/)
+  assert.match(scanner, /j\.result->'items'->0->'integrityProofs'->0->>'sha256' ~ '\^\[0-9a-f\]\{64\}\$'/)
+  assert.match(orchestrator, /'transferredObjects',coalesce\(a\.completed_objects,0\)/)
+  assert.match(orchestrator, /'alreadyPresentObjects',coalesce\(a\.already_present_objects,0\)/)
+  assert.match(orchestrator, /'copiedObjects',coalesce\(a\.copied_objects,0\)/)
+  assert.match(orchestrator, /j\.status='completed' and case when coalesce\(j\.result->'items'->0->>'transferred'/)
+})
+
+test('retention preserves scanner inventory and verification rows while their migration is active', () => {
+  const appMaintenance = read('src/lib/database-maintenance.ts')
+  const worker = read('workers/backend-orchestrator/src/index.ts')
+  for (const source of [appMaintenance, worker]) {
+    assert.match(source, /drive_bucket_scans s join drive_migrations m on m\.id=s\.migration_id[\s\S]*?m\.status in\s*\(?\s*'running','verifying'/)
+    assert.match(source, /drive_migration_items i join drive_migrations m on m\.id=i\.migration_id[\s\S]*?m\.status in\s*\(?\s*'running','verifying'/)
+    assert.match(source, /drive_migrations m where m\.id=drive_bucket_scans\.migration_id[\s\S]*?m\.status in\s*\(?\s*'running','verifying'/)
+  }
 })
 
 test('scanner completion wakes the Migration Orchestrator asynchronously', () => {
