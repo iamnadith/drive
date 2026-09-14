@@ -32,9 +32,19 @@ function booleanValue(name, fallback) {
 }
 
 function sslConfig() {
+  const connectionString = value("POSTGRES_URL")
+  let urlDisablesSsl = false
+  if (connectionString) {
+    try {
+      urlDisablesSsl = new URL(connectionString).searchParams.get("sslmode")?.toLowerCase() === "disable"
+    } catch {
+      // Let the PostgreSQL client produce the canonical invalid-URL error.
+    }
+  }
   if (
     !booleanValue("POSTGRES_SSL", true) ||
-    booleanValue("DISABLE_POSTGRES_SSL", false)
+    booleanValue("DISABLE_POSTGRES_SSL", false) ||
+    urlDisablesSsl
   ) return false
   const rejectUnauthorized = booleanValue(
     "POSTGRES_SSL_REJECT_UNAUTHORIZED",

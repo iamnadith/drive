@@ -1197,5 +1197,5 @@ create table if not exists public.drive_schema_meta (
   updated_at timestamptz not null default now()
 );
 insert into public.drive_schema_meta(id, version, updated_at)
-values (true, 2026091402, now())
+values (true, 2026091403, now())
 on conflict (id) do update set version = excluded.version, updated_at = now();

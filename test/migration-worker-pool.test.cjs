@@ -102,6 +102,8 @@ test('migration worker requires PostgreSQL and honors the configured SSL switch'
   assert.match(runtime, /if \(!POSTGRES_URL \|\| !SERVER_URL \|\| AGENT_TOKEN\.length < 24\)/)
   assert.match(runtime, /const POSTGRES_URL = String\(process\.env\.POSTGRES_URL \|\| ""\)\.trim\(\)/)
   assert.match(runtime, /POSTGRES_SSL === "false"/)
+  assert.match(runtime, /const sslMode = new URL\(POSTGRES_URL\)\.searchParams\.get\("sslmode"\)/)
+  assert.match(runtime, /sslMode === "disable"/)
   assert.match(runtime, /if \(currentMigrationId && Array\.isArray\(body\.items\)\)[\s\S]*?updateMigrationItemLocal\(currentMigrationId, jobId, itemUpdate\)/)
   assert.match(runtime, /update drive_migration_items set progress=\$3::jsonb/)
   assert.match(runtime, /if \(!REPAIR_JOB_ID\) return claimJobDirectPostgres\(\)/)

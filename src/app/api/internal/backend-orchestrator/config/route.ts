@@ -1,14 +1,9 @@
 import { NextResponse } from "next/server"
 import { authenticateBackendOrchestrator } from "@/lib/backend-orchestrator-auth"
+import { postgresSslDisabled } from "@/lib/db"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
-
-function disablePostgresSsl() {
-  const ssl = String(process.env.POSTGRES_SSL ?? "").trim().toLowerCase()
-  const disabled = String(process.env.DISABLE_POSTGRES_SSL ?? "").trim().toLowerCase()
-  return ssl === "0" || ssl === "false" || disabled === "1" || disabled === "true"
-}
 
 function databaseUrl() {
   return String(process.env.POSTGRES_URL || "").trim()
@@ -25,7 +20,7 @@ export async function GET(request: Request) {
     {
       version: 2,
       postgresUrl,
-      disablePostgresSsl: disablePostgresSsl(),
+      disablePostgresSsl: postgresSslDisabled(postgresUrl),
       syncIntervalMinutes: auth.settings.syncIntervalMinutes,
       retention: { apiEventsDays: 7, objectChangesDays: 7, scanDetailsDays: 7 },
     },

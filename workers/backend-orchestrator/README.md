@@ -17,7 +17,7 @@ Add these build variables/secrets:
 - `PANEL_URL`: canonical Drive panel URL, for example `https://drive.example.com`
 - `BACKEND_ORCHESTRATOR_SECRET`: a random secret containing at least 24 characters
 
-PostgreSQL TLS is enabled by default for every provider. `DISABLE_POSTGRES_SSL=true` is an optional exception only for a database that explicitly requires plaintext transport; it is not needed for normal hosted PostgreSQL.
+PostgreSQL TLS is enabled by default for every provider. For a database that explicitly requires plaintext transport, add `sslmode=disable` to `POSTGRES_URL`; no separate SSL environment variable is required. `DISABLE_POSTGRES_SSL` remains an optional compatibility override.
 
 During deployment, the script authenticates to the panel configuration endpoint, fetches the PostgreSQL URL plus scan and retention settings, and injects them into the deployed Backend Orchestrator as encrypted Worker secrets. Runtime scan cycles use those injected bindings and do not fetch the database URL from the website. Cron uses Cloudflare's automatic loopback binding to dispatch `/run`; no self-URL is required. The HTTP runner performs the database work and resumes from durable bucket checkpoints after termination.
 

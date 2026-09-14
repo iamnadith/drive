@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { Pool } from "pg"
 import type { PoolClient, QueryResultRow } from "pg"
 
@@ -24,14 +25,23 @@ function parseBooleanEnv(value: string | undefined): boolean | undefined {
   return undefined
 }
 
+export function postgresSslDisabled(connectionString = getEnv("POSTGRES_URL")): boolean {
+  if (parseBooleanEnv(getEnv("POSTGRES_SSL")) === false) return true
+  if (parseBooleanEnv(getEnv("DISABLE_POSTGRES_SSL")) === true) return true
+  if (!connectionString) return false
+  try {
+    return new URL(connectionString).searchParams.get("sslmode")?.trim().toLowerCase() === "disable"
+  } catch {
+    return false
+  }
+}
+
 function buildSslConfig(): false | {
   rejectUnauthorized: boolean
   checkServerIdentity?: () => undefined
   servername?: string
 } {
-  const enabled = parseBooleanEnv(getEnv("POSTGRES_SSL")) ?? true
-  const explicitlyDisabled = parseBooleanEnv(getEnv("DISABLE_POSTGRES_SSL")) ?? false
-  if (!enabled || explicitlyDisabled) return false
+  if (postgresSslDisabled()) return false
 
   const rejectUnauthorized =
     parseBooleanEnv(getEnv("POSTGRES_SSL_REJECT_UNAUTHORIZED")) ?? false
@@ -67,10 +77,19 @@ function getSlowQueryThresholdMs(): number {
 const SLOW_QUERY_LOG_WINDOW_MS = 30_000
 let slowQueryWindowStartedAt = 0
 let suppressedSlowQueryCount = 0
+const slowQueriesByFingerprint = new Map<string, { calls: number; maxDurationMs: number }>()
 
-function reportSlowQuery(durationMs: number, pool: Pool, waitingAtStart: number) {
+function reportSlowQuery(durationMs: number, pool: Pool, waitingAtStart: number, queryText: string) {
   if (durationMs < getSlowQueryThresholdMs()) return
   const now = Date.now()
+  const fingerprint = createHash("sha256").update(queryText).digest("hex").slice(0, 12)
+  const sample = slowQueriesByFingerprint.get(fingerprint)
+  if (sample) {
+    sample.calls += 1
+    sample.maxDurationMs = Math.max(sample.maxDurationMs, Math.round(durationMs))
+  } else if (slowQueriesByFingerprint.size < 32) {
+    slowQueriesByFingerprint.set(fingerprint, { calls: 1, maxDurationMs: Math.round(durationMs) })
+  }
   if (now - slowQueryWindowStartedAt < SLOW_QUERY_LOG_WINDOW_MS) {
     suppressedSlowQueryCount += 1
     return
@@ -79,6 +98,10 @@ function reportSlowQuery(durationMs: number, pool: Pool, waitingAtStart: number)
   console.warn("[postgres] slow query summary", {
     durationMs: Math.round(durationMs),
     suppressedSlowQueries: suppressedSlowQueryCount,
+    slowQueries: [...slowQueriesByFingerprint.entries()]
+      .map(([queryFingerprint, summary]) => ({ queryFingerprint, ...summary }))
+      .sort((left, right) => right.maxDurationMs - left.maxDurationMs)
+      .slice(0, 10),
     pool: {
       total: pool.totalCount,
       idle: pool.idleCount,
@@ -88,6 +111,7 @@ function reportSlowQuery(durationMs: number, pool: Pool, waitingAtStart: number)
   })
   slowQueryWindowStartedAt = now
   suppressedSlowQueryCount = 0
+  slowQueriesByFingerprint.clear()
 }
 
 function attachPoolErrorHandler(pool: Pool) {
@@ -132,7 +156,7 @@ export async function queryDb<T extends QueryResultRow = QueryResultRow>(
     try {
       return await pool.query<T>(text, params as unknown[] | undefined)
     } finally {
-      reportSlowQuery(performance.now() - startedAt, pool, waitingAtStart)
+      reportSlowQuery(performance.now() - startedAt, pool, waitingAtStart, text)
     }
   }
 

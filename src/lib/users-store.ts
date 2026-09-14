@@ -327,6 +327,27 @@ export async function hasAnyUsers(): Promise<boolean> {
   return rows[0]?.exists === true
 }
 
+export async function getUserSetupSummary(): Promise<{
+  hasUsers: boolean
+  hasAdmin: boolean
+  hasSuperAdmin: boolean
+}> {
+  const { rows } = await queryDb<{
+    has_users: boolean
+    has_admin: boolean
+    has_superadmin: boolean
+  }>(`select
+    exists(select 1 from public.drive_users) as has_users,
+    exists(select 1 from public.drive_users where role='admin') as has_admin,
+    exists(select 1 from public.drive_users where role='superadmin') as has_superadmin`)
+  const row = rows[0]
+  return {
+    hasUsers: row?.has_users === true,
+    hasAdmin: row?.has_admin === true,
+    hasSuperAdmin: row?.has_superadmin === true,
+  }
+}
+
 export async function hasAdminUser(): Promise<boolean> {
   const { rows } = await queryDb<{ exists: boolean }>(`select exists(select 1 from public.drive_users where role = 'admin') as exists`)
   return rows[0]?.exists === true
@@ -369,6 +390,16 @@ export async function findUserById(id: string): Promise<User | undefined> {
   const { rows } = await queryDb<DriveUserRow>(`select * from public.drive_users where id = $1 limit 1`, [id])
   const row = rows[0]
   return row ? mapRow(row) : undefined
+}
+
+export async function findActiveSessionUserById(
+  id: string
+): Promise<Pick<User, "id" | "role" | "status"> | undefined> {
+  const { rows } = await queryDb<Pick<User, "id" | "role" | "status">>(
+    `select id,role,status from public.drive_users where id=$1 and status='active' limit 1`,
+    [id]
+  )
+  return rows[0]
 }
 
 export async function createUser(input: {

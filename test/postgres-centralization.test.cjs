@@ -6,6 +6,16 @@ const path = process.getBuiltinModule("node:path")
 const root = path.resolve(__dirname, "..")
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8")
 
+test("build and runtime schema guards use the same schema version", () => {
+  const runtime = read("src/lib/db.ts")
+  const schema = read("supabase/drive_schema.sql")
+  const runtimeVersion = runtime.match(/const DRIVE_SCHEMA_VERSION = (\d+)/)?.[1]
+  const buildVersion = schema.match(/values \(true, (\d+), now\(\)\)/)?.[1]
+
+  assert.ok(runtimeVersion, "runtime schema version is declared")
+  assert.equal(buildVersion, runtimeVersion)
+})
+
 test("dashboard data stores use the shared PostgreSQL layer without Supabase clients", () => {
   for (const file of [
     "src/lib/accounts-store.ts",
@@ -54,13 +64,15 @@ test("runtime PostgreSQL uses only POSTGRES_URL and keeps the process pool bound
   assert.match(source, /var __drivePgAdvisoryLockPool: Pool \| undefined/)
   assert.match(source, /const client = await global\.__drivePgAdvisoryLockPool\.connect\(\)/)
   assert.match(source, /process\.env\.NODE_ENV === "production" \? 2 : 1/)
-  assert.match(source, /getEnv\("POSTGRES_SSL"\).*\?\? true/)
-  assert.match(source, /getEnv\("DISABLE_POSTGRES_SSL"\).*\?\? false/)
+  assert.match(source, /parseBooleanEnv\(getEnv\("POSTGRES_SSL"\)\) === false/)
+  assert.match(source, /parseBooleanEnv\(getEnv\("DISABLE_POSTGRES_SSL"\)\) === true/)
+  assert.match(source, /searchParams\.get\("sslmode"\).*=== "disable"/)
   assert.match(source, /getEnv\("POSTGRES_SLOW_QUERY_MS"\)/)
   assert.match(source, /SLOW_QUERY_LOG_WINDOW_MS = 30_000/)
   assert.match(source, /pool\.waitingCount/)
   assert.match(source, /console\.warn\("\[postgres\] slow query summary"/)
   assert.match(source, /suppressedSlowQueries: suppressedSlowQueryCount/)
+  assert.match(source, /queryFingerprint, \.\.\.summary/)
   const slowLog = source.match(/console\.warn\("\[postgres\] slow query summary",\s*\{[\s\S]*?\n\s*\}\)/)
   assert.ok(slowLog, "expected structured slow-query pool diagnostics")
   assert.doesNotMatch(slowLog[0], /\b(text|params):/)
@@ -72,13 +84,14 @@ test("runtime PostgreSQL uses only POSTGRES_URL and keeps the process pool bound
     assert.match(read(route), /process\.env\.POSTGRES_URL/)
   }
   const backendWorker = read("workers/backend-orchestrator/src/index.ts")
-  assert.match(backendWorker, /ssl:\s*disablePostgresSsl\s*\?\s*false\s*:\s*\{\s*rejectUnauthorized:\s*false\s*\}/)
+  assert.match(backendWorker, /disablePostgresSsl \|\| sslMode === "disable" \? false : \{ rejectUnauthorized: false \}/)
   assert.doesNotMatch(backendWorker, /isSupabase|supabase\.com/)
   const schemaInstaller = read("scripts/prepare-schema.mjs")
   assert.doesNotMatch(schemaInstaller, /supabase\.co|prefersDirectSupabase/i)
   assert.match(schemaInstaller, /const url = value\("POSTGRES_URL"\)/)
   assert.match(schemaInstaller, /Set POSTGRES_URL in the build environment/)
   assert.match(schemaInstaller, /booleanValue\("DISABLE_POSTGRES_SSL", false\)/)
+  assert.match(schemaInstaller, /searchParams\.get\("sslmode"\).*=== "disable"/)
 })
 
 test("users page is server-paginated with safe columns and analytics reads only user aggregates", () => {
@@ -98,7 +111,8 @@ test("users page is server-paginated with safe columns and analytics reads only 
 
   const analytics = read("src/app/api/dashboard/analytics/route.ts")
   assert.match(analytics, /getUserSummary/)
-  assert.match(analytics, /listDashboardAccountSummaries/)
+  assert.doesNotMatch(analytics, /listDashboardAccountSummaries/)
+  assert.match(analytics, /account_summaries/)
   assert.doesNotMatch(analytics, /getAllAccounts/)
   assert.doesNotMatch(analytics, /getAllUsers|type User from ["']@\/lib\/users-store/)
   const repairProjection = analytics.match(/selectRows<AnalyticsRepairJobRow>\([\s\S]*?\n\s*100\n\s*\)/)
@@ -108,6 +122,29 @@ test("users page is server-paginated with safe columns and analytics reads only 
   assert.match(analytics, /itemMetricsByDay/)
   assert.doesNotMatch(analytics, /itemRowsAsItems\.filter\(|migrations\.filter\(\(m\) => dateKey/)
   assert.doesNotMatch(analytics, /Math\.min\(\.\.\.times\)/)
+})
+
+test("session authorization reads only the active user's id and role", () => {
+  const auth = read("src/lib/server-auth.ts")
+  const users = read("src/lib/users-store.ts")
+  assert.match(auth, /findActiveSessionUserById/)
+  assert.doesNotMatch(auth, /findUserById/)
+  const sessionLookup = users.match(/export async function findActiveSessionUserById\([\s\S]*?\n}\n/)
+  assert.ok(sessionLookup, "expected the lightweight session lookup")
+  assert.match(sessionLookup[0], /select id,role,status from public\.drive_users where id=\$1 and status='active'/)
+  assert.doesNotMatch(sessionLookup[0], /select \*|password_hash|totp_secret/)
+})
+
+test("setup status reads all account-existence flags in one query", () => {
+  const users = read("src/lib/users-store.ts")
+  const setupRoute = read("src/app/api/setup/status/route.ts")
+  const summary = users.match(/export async function getUserSetupSummary\([\s\S]*?\n}\n/)
+  assert.ok(summary, "expected one setup summary query")
+  assert.equal((summary[0].match(/queryDb</g) ?? []).length, 1)
+  assert.match(summary[0], /exists\(select 1 from public\.drive_users\) as has_users/)
+  assert.match(summary[0], /where role='admin'\) as has_admin/)
+  assert.match(summary[0], /where role='superadmin'\) as has_superadmin/)
+  assert.match(setupRoute, /getUserSetupSummary\(\)/)
 })
 
 test("analytics aggregates bucket and verification summaries in one database round trip", () => {
@@ -127,12 +164,15 @@ test("analytics aggregates bucket and verification summaries in one database rou
   assert.match(summary, /worker_status_counts as/i)
   assert.match(summary, /worker_total_count/i)
   assert.match(summary, /online_worker_count/i)
+  assert.match(summary, /from public\.drive_accounts account/i)
   assert.match(analytics, /ANALYTICS_ITEM_PROGRESS_SQL/)
   assert.match(analytics, /\$\{ANALYTICS_ITEM_PROGRESS_SQL\} as progress/)
   assert.match(analytics, /coalesce\(last_progress_at,updated_at,created_at\) >= \$1/)
   assert.match(analytics, /listAnalyticsMigrationItems\(start, days === null\)/)
   assert.doesNotMatch(analytics, /selectRows<BucketStatsRow>/)
   assert.doesNotMatch(analytics, /countRows\(/)
+  const analyticsReads = analytics.slice(analytics.indexOf("const [\n    migrations"), analytics.indexOf("const accounts = sqlSummary.account_summaries"))
+  assert.match(analyticsReads, /activeAccountSnapshotRows,[\s\S]*?Promise\.all/)
 })
 
 test("analytics worker metrics share the grouped summary query without full agent or run records", () => {
@@ -285,7 +325,7 @@ test("explicit migration retries wake the orchestrator after durable state chang
   assert.match(itemAction, /action === "retry"[\s\S]*?await updateMigration\(id,[\s\S]*?await wakeMigrationOrchestrator\(\)/)
 })
 
-test("API usage aggregates are page-stable and use one bounded database request", () => {
+test("API usage keeps exact filtered aggregates and bounds pagination before ranking", () => {
   const operations = read("src/lib/project-operations-store.ts")
   const start = operations.indexOf("export async function getProjectApiUsage(")
   const end = operations.indexOf("export async function createProjectOperationJob(", start)
@@ -293,6 +333,11 @@ test("API usage aggregates are page-stable and use one bounded database request"
   const usage = operations.slice(start, end)
   assert.equal((usage.match(/queryDb</g) ?? []).length, 1)
   assert.match(usage, /filtered_events as materialized/i)
+  assert.match(usage, /e\.project_id = \(select id from drive_projects where project_id = \$\{add\(input\.projectId\)\}\)/)
+  assert.match(usage, /select e\.action,e\.outcome,e\.status,e\.api_key_id,e\.project_id\s+from drive_project_api_events e/i)
+  assert.match(usage, /project_counts as \([\s\S]*?group by project_id\s*\),\s*project_totals as \([\s\S]*?left join drive_projects p on p\.id=project_counts\.project_id/i)
+  assert.match(usage, /page_events as materialized/i)
+  assert.match(usage, /limit \$\{limitParam\}\s*\),\s*event_rows as \([\s\S]*?row_number\(\) over/i)
   assert.match(usage, /const filterWhere = filterClauses/)
   assert.match(usage, /const pageClauses = \[\.\.\.filterClauses\]/)
   assert.match(usage, /pageClauses\.push\(`\(e\.occurred_at, e\.id\)/)

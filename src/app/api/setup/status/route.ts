@@ -1,9 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import {
-  hasAnyUsers,
-  hasAdminUser,
-  hasSuperAdminUser,
-} from "@/lib/users-store"
+import { getUserSetupSummary } from "@/lib/users-store"
 import { getSessionUser } from "@/lib/server-auth"
 import { cloudflareInstallationReady, getCloudflareInstallation, reconcileCloudflareWorkers } from "@/lib/cloudflare-worker-installer"
 import { getSystemReadiness } from "@/lib/system-readiness"
@@ -43,9 +39,7 @@ export async function GET(request: NextRequest) {
     return setupUnavailableResponse(request, readiness, databaseRequirement.error)
   }
   try {
-    const hasUsers = await hasAnyUsers()
-    const hasAdmin = await hasAdminUser()
-    const hasSuperAdmin = await hasSuperAdminUser()
+    const { hasUsers, hasAdmin, hasSuperAdmin } = await getUserSetupSummary()
     const session = await getSessionUser().catch(() => null)
     const mayManageSetup = !hasSuperAdmin || session?.role === "superadmin"
     const mayInspectWorkers = readiness.ready && mayManageSetup

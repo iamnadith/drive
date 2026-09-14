@@ -1,9 +1,9 @@
 import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
 
-import { findUserById, type User, type UserRole } from "@/lib/users-store"
+import { findActiveSessionUserById, type User, type UserRole } from "@/lib/users-store"
 
-export type SessionUser = User
+export type SessionUser = Pick<User, "id" | "role" | "status">
 
 export function unauthorized(message = "Authentication required") {
   return NextResponse.json({ error: message }, { status: 401 })
@@ -17,10 +17,7 @@ export async function getSessionUser(): Promise<SessionUser | null> {
   const userId = (await cookies()).get("sessionUserId")?.value
   if (!userId) return null
 
-  const user = await findUserById(userId)
-  if (!user || user.status !== "active") return null
-
-  return user
+  return (await findActiveSessionUserById(userId)) ?? null
 }
 
 export async function requireSessionUser(): Promise<

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { authenticateMigrationOrchestrator } from "@/lib/migration-orchestrator-auth"
-import { queryDb } from "@/lib/db"
+import { postgresSslDisabled, queryDb } from "@/lib/db"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -8,12 +8,6 @@ export const dynamic = "force-dynamic"
 function postgresUrl() {
   return String(process.env.POSTGRES_URL || "").trim()
 }
-function disablePostgresSsl() {
-  const ssl = String(process.env.POSTGRES_SSL || "").trim().toLowerCase()
-  const disabled = String(process.env.DISABLE_POSTGRES_SSL || "").trim().toLowerCase()
-  return ssl === "0" || ssl === "false" || disabled === "1" || disabled === "true"
-}
-
 export async function GET(request: Request) {
   const auth = await authenticateMigrationOrchestrator(request)
   if (!auth.ok) return NextResponse.json({ error: "Invalid orchestration secret" }, { status: 401 })
@@ -27,6 +21,6 @@ export async function GET(request: Request) {
   return NextResponse.json({
     version: 1,
     postgresUrl: database,
-    disablePostgresSsl: disablePostgresSsl(),
+    disablePostgresSsl: postgresSslDisabled(database),
   }, { headers: { "Cache-Control": "no-store, max-age=0" } })
 }

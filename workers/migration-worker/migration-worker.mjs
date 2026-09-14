@@ -76,7 +76,8 @@ if (!POSTGRES_URL || !SERVER_URL || AGENT_TOKEN.length < 24) {
 async function postgres(operation) {
   if (POSTGRES_SSL !== "true" && POSTGRES_SSL !== "false") throw new Error("POSTGRES_SSL must be set to true or false")
   const hostname = new URL(POSTGRES_URL).hostname
-  const ssl = POSTGRES_SSL === "false" || ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false }
+  const sslMode = new URL(POSTGRES_URL).searchParams.get("sslmode")?.trim().toLowerCase()
+  const ssl = POSTGRES_SSL === "false" || sslMode === "disable" || ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false }
   const client = new PostgresClient({ connectionString: POSTGRES_URL, ssl, connectionTimeoutMillis: 10_000 })
   await client.connect()
   try { return await operation(client) } finally { await client.end().catch(() => undefined) }

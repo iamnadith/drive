@@ -1,12 +1,8 @@
 import { NextResponse } from "next/server"
 import type { QueryResultRow } from "pg"
 
-import { listDashboardAccountSummaries } from "@/lib/accounts-store"
-import {
-  listMigrations,
-  type DriveMigration,
-  type DriveMigrationItem,
-} from "@/lib/migrations-store"
+import type { DashboardAccountSummary } from "@/lib/accounts-store"
+import type { DriveMigrationItem } from "@/lib/migrations-store"
 import { getMergedBucketSnapshot } from "@/lib/migration-bucket-state"
 import { queryDb } from "@/lib/db"
 import { getUserSummary } from "@/lib/users-store"
@@ -83,6 +79,16 @@ type ActiveAccountSnapshotRow = {
   captured_at: string
 }
 
+type AnalyticsMigration = {
+  id: string
+  status: string
+  syncStatus?: string
+  syncMessage?: string
+  createdAt: string
+  completedAt?: string
+  updatedAt?: string
+}
+
 const ANALYTICS_ITEM_PROGRESS_SQL = `jsonb_strip_nulls(jsonb_build_object(
   'stage',progress->'stage',
   'sourceScanStatus',progress->'sourceScanStatus',
@@ -138,6 +144,7 @@ const ANALYTICS_ITEM_PROGRESS_SQL = `jsonb_strip_nulls(jsonb_build_object(
 ))`
 
 type AnalyticsSqlSummaryRow = {
+  account_summaries: DashboardAccountSummary[]
   bucket_status_breakdown: Record<string, string | number>
   worker_status_breakdown: Record<string, string | number>
   worker_total_count: string | number
@@ -259,6 +266,32 @@ async function listAnalyticsMigrationItems(start: Date, rangeIsAll: boolean): Pr
   return rows
 }
 
+async function listAnalyticsMigrations(): Promise<AnalyticsMigration[]> {
+  const { rows } = await queryDb<{
+    id: string
+    status: string
+    sync_status: string | null
+    sync_message: string | null
+    created_at: string
+    completed_at: string | null
+    updated_at: string | null
+  }>(`
+    select id,status,sync_status,sync_message,created_at,completed_at,updated_at
+    from public.drive_migrations
+    order by created_at desc,id desc
+    limit 100
+  `)
+  return rows.map((row) => ({
+    id: row.id,
+    status: row.status,
+    syncStatus: row.sync_status ?? undefined,
+    syncMessage: row.sync_message ?? undefined,
+    createdAt: row.created_at,
+    completedAt: row.completed_at ?? undefined,
+    updatedAt: row.updated_at ?? undefined,
+  }))
+}
+
 async function getAnalyticsSqlSummary(): Promise<AnalyticsSqlSummaryRow> {
   const { rows } = await queryDb<AnalyticsSqlSummaryRow>(`
     with active_account as materialized (
@@ -308,6 +341,15 @@ async function getAnalyticsSqlSummary(): Promise<AnalyticsSqlSummaryRow> {
       group by effective_status
     )
     select
+      coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'id',account.id,'label',account.label,'email',account.email,'createdAt',account.created_at::text,
+          'cloudflareAccountId',account.cloudflare_account_id,'status',account.status,
+          'totalBuckets',account.total_buckets,'totalObjects',account.total_objects,'totalBytes',account.total_bytes,
+          'lastSyncedAt',account.last_synced_at::text,'syncStatus',account.sync_status,'syncMessage',account.sync_message
+        ) order by account.updated_at desc nulls last,account.created_at desc,account.id desc)
+        from public.drive_accounts account
+      ),'[]'::jsonb) account_summaries,
       coalesce((select jsonb_object_agg(status,count) from bucket_status_counts),'{}'::jsonb) bucket_status_breakdown,
       coalesce((select jsonb_object_agg(effective_status,count) from worker_status_counts),'{}'::jsonb) worker_status_breakdown,
       coalesce((select sum(count) from worker_status_counts),0)::text worker_total_count,
@@ -390,18 +432,14 @@ async function buildAnalyticsPayload(range: RangeKey) {
 
   const [
     migrations,
-    accounts,
     users,
     repairJobs,
     sqlSummary,
     migrationItemRows,
+    activeAccountSnapshotRows,
   ] =
     await Promise.all([
-      capture("migrations", warnings, () => listMigrations(100), [] as DriveMigration[]),
-      // Current-account identity and bucket totals are critical. If either
-      // read fails, reject the refresh so the client retains its last known
-      // payload instead of replacing current KPIs with misleading zeros.
-      listDashboardAccountSummaries(),
+      capture("migrations", warnings, listAnalyticsMigrations, [] as AnalyticsMigration[]),
       capture("users", warnings, getUserSummary, { total: 0, active: 0 }),
       capture(
         "repair jobs",
@@ -424,7 +462,17 @@ async function buildAnalyticsPayload(range: RangeKey) {
         () => listAnalyticsMigrationItems(start, days === null),
         [] as MigrationItemRow[]
       ),
+      capture(
+        "active account snapshots",
+        warnings,
+        listActiveAccountSnapshots,
+        [] as ActiveAccountSnapshotRow[]
+      ),
     ])
+
+  // Account summaries and all bucket/worker aggregates come from the same
+  // PostgreSQL statement snapshot, avoiding a second query and mixed freshness.
+  const accounts = sqlSummary.account_summaries ?? []
 
   const bucketStats = sqlSummary.active_bucket_stats
   const recentDiffs = sqlSummary.recent_diffs
@@ -472,12 +520,6 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const activeAnalyticsBucketStats = activeAccount
     ? bucketStats.filter((row) => row.account_id === activeAccount.id)
     : []
-  const activeAccountSnapshotRows = await capture(
-    "active account snapshots",
-    warnings,
-    listActiveAccountSnapshots,
-    [] as ActiveAccountSnapshotRow[]
-  )
   const chartStart =
     range === "all"
       ? earliestDate([
@@ -642,7 +684,7 @@ async function buildAnalyticsPayload(range: RangeKey) {
   const totalBuckets = activeAccount
     ? Math.max(0, activeAggregateReady ? toNumber(activeAccount.totalBuckets) : activeBucketCount)
     : 0
-  const migrationNeedsAttention = (migration: DriveMigration) =>
+  const migrationNeedsAttention = (migration: AnalyticsMigration) =>
     migration.status === "failed" ||
     (migration.syncStatus === "error" && migration.status !== "completed" && migration.status !== "canceled")
 

@@ -113,9 +113,10 @@ function runtimeConfig(env: Env): RuntimeConfig {
 }
 
 function dbClient(connectionString: string, disablePostgresSsl: boolean) {
+  const sslMode = new URL(connectionString).searchParams.get("sslmode")?.trim().toLowerCase()
   return new Client({
     connectionString,
-    ssl: disablePostgresSsl ? false : { rejectUnauthorized: false },
+    ssl: disablePostgresSsl || sslMode === "disable" ? false : { rejectUnauthorized: false },
     connectionTimeoutMillis: 10_000,
     query_timeout: 20_000,
     statement_timeout: 20_000,

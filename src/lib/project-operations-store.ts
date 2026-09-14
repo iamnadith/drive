@@ -981,7 +981,7 @@ export async function getProjectApiUsage(input: {
     return `$${params.length}`
   }
 
-  if (input.projectId) filterClauses.push(`p.project_id = ${add(input.projectId)}`)
+  if (input.projectId) filterClauses.push(`e.project_id = (select id from drive_projects where project_id = ${add(input.projectId)})`)
   if (input.action) filterClauses.push(`e.action = ${add(input.action)}`)
   if (input.outcome) filterClauses.push(`e.outcome = ${add(input.outcome)}`)
   if (input.from) filterClauses.push(`e.occurred_at >= ${add(input.from)}::timestamptz`)
@@ -1026,9 +1026,8 @@ export async function getProjectApiUsage(input: {
     }>
   }>(`
     with filtered_events as materialized (
-      select e.action,e.outcome,e.status,e.api_key_id,e.project_id,p.project_id as project_identifier,p.name as project_name
+      select e.action,e.outcome,e.status,e.api_key_id,e.project_id
       from drive_project_api_events e
-      left join drive_projects p on p.id=e.project_id
       ${filterWhere}
     ),
     summary as (
@@ -1043,20 +1042,29 @@ export async function getProjectApiUsage(input: {
     action_totals as (
       select action,count(*)::bigint as count from filtered_events group by action order by count(*) desc limit 20
     ),
-    project_totals as (
-      select project_identifier as "projectId",project_name as name,count(*)::bigint as count
-      from filtered_events group by project_identifier,project_name order by count(*) desc limit 20
+    project_counts as (
+      select project_id,count(*)::bigint as count from filtered_events group by project_id
     ),
-    event_rows as (
+    project_totals as (
+      select p.project_id as "projectId",p.name,sum(project_counts.count)::bigint as count
+      from project_counts
+      left join drive_projects p on p.id=project_counts.project_id
+      group by p.project_id,p.name order by sum(project_counts.count) desc limit 20
+    ),
+    page_events as materialized (
       select e.id,e.occurred_at,e.action,e.object_key,e.status,e.outcome,e.ip_address,e.user_agent,e.request_id,e.metadata,
-        p.project_id,p.name as project_name,k.name as key_name,k.key_prefix,
-        row_number() over (order by e.occurred_at desc,e.id desc) as page_rank
+        p.project_id,p.name as project_name,k.name as key_name,k.key_prefix
       from drive_project_api_events e
       left join drive_projects p on p.id=e.project_id
       left join drive_project_api_keys k on k.id=e.api_key_id
       ${pageWhere}
       order by e.occurred_at desc,e.id desc
       limit ${limitParam}
+    ),
+    event_rows as (
+      select page_events.*,
+        row_number() over (order by occurred_at desc,id desc) as page_rank
+      from page_events
     )
     select summary.total::text,summary.success::text,summary.failed::text,summary.rate_limited::text,
       summary.unique_keys::text,summary.unique_projects::text,

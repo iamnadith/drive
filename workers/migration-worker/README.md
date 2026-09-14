@@ -13,7 +13,7 @@ Standalone worker package for full migrations, recovery, repair, and verificatio
 The worker requires these deployment values:
 
 - `POSTGRES_URL`
-- `POSTGRES_SSL` (`true` by default; set to `false` only when the database requires SSL to be disabled)
+- `POSTGRES_SSL` (optional compatibility override; TLS is enabled by default; use `?sslmode=disable` in `POSTGRES_URL` when the database requires plaintext)
 - `AGENT_ID`
 
 It loads the shared worker secret and optional panel origin from PostgreSQL. It claims and updates fenced per-file migration jobs directly, so panel downtime does not stop a migration. PostgreSQL is required; the worker does not switch migration synchronization to the panel API or Supabase when the database is unavailable.
@@ -28,14 +28,14 @@ npm start -- --agent-id YOUR_AGENT_ID
 The same values can be supplied as environment variables instead of command-line arguments:
 
 ```bash
-POSTGRES_URL=postgresql://... POSTGRES_SSL=true AGENT_ID=YOUR_AGENT_ID npm start
+POSTGRES_URL=postgresql://...?sslmode=disable AGENT_ID=YOUR_AGENT_ID npm start
 ```
 
 PowerShell:
 
 ```powershell
 $env:POSTGRES_URL="postgresql://..."
-$env:POSTGRES_SSL="true"
+$env:POSTGRES_SSL="true" # optional; the URL's sslmode=disable is sufficient for plaintext-only PostgreSQL
 $env:AGENT_ID="YOUR_AGENT_ID"
 npm start
 ```
@@ -50,7 +50,7 @@ Required repository secret:
 
 Optional repository secret:
 
-- `POSTGRES_SSL` (`true` by default; set to `false` only when your database requires SSL to be disabled)
+- `POSTGRES_SSL` (optional compatibility override; TLS is enabled by default; the PostgreSQL URL may set `sslmode=disable`)
 
 The agent id is passed per dispatch, so one GitHub account and repository can host many separately identified worker registrations. Non-secret tuning values can be added as repository variables, such as `COPY_CONCURRENCY`, `UPLOAD_QUEUE_SIZE`, and `UPLOAD_PART_SIZE_MB`.
 

@@ -311,7 +311,9 @@ async function uploadWorker(input: { worker: HostedWorker; token: string; accoun
   const postgresUrl = String(process.env.POSTGRES_URL || "").trim()
   if (!/^https:\/\//i.test(publicPanelUrl) || !postgresUrl) throw new Error("Panel URL or PostgreSQL URL is not configured")
   const postgresSsl = String(process.env.POSTGRES_SSL || "").trim().toLowerCase()
-  const disablePostgresSsl = postgresSsl === "0" || postgresSsl === "false" || ["1", "true"].includes(String(process.env.DISABLE_POSTGRES_SSL || "").trim().toLowerCase())
+  let sslMode = ""
+  try { sslMode = new URL(postgresUrl).searchParams.get("sslmode")?.trim().toLowerCase() || "" } catch { /* POSTGRES_URL validation is handled by the database connection. */ }
+  const disablePostgresSsl = postgresSsl === "0" || postgresSsl === "false" || ["1", "true"].includes(String(process.env.DISABLE_POSTGRES_SSL || "").trim().toLowerCase()) || sslMode === "disable"
   const bindings: Array<Record<string, unknown>> = [
     { type: "secret_text", name: "POSTGRES_URL", text: postgresUrl },
     { type: "secret_text", name: worker === "backend" ? "BACKEND_ORCHESTRATOR_SECRET" : worker === "scanner" ? "FILE_SCANNER_SECRET" : "MIGRATION_ORCHESTRATOR_SECRET", text: state.secrets[worker] },
