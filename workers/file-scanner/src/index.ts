@@ -8,8 +8,13 @@ if (!(globalThis as { Node?: unknown }).Node) (globalThis as { Node?: unknown })
 type ScanMessage = { reason: "continue" }
 type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; FILE_SCAN_QUEUE: Queue<ScanMessage> }
 type Row = Record<string, any>
-const BUILD = 12
+type ClaimedTask = { kind: "migration" | "generic"; task: Row }
+type ClaimedCycle = { ok: true; owner: string; tasks: ClaimedTask[] } | { ok: true; skipped: string } | { ok: true; idle: true }
+const BUILD = 13
 const MAX_SECRET_LENGTH = 512
+// Keep database connections and R2 list requests bounded while allowing
+// independent bucket scans to make progress during the same cron/queue run.
+const SCAN_CONCURRENCY = 4
 let authCache: { value: string[]; expiresAt: number } | null = null
 let schemaReady: Promise<void> | null = null
 
@@ -372,7 +377,7 @@ async function finishState(db: Client, owner: string, result: Row, error?: strin
   await db.query(`update drive_file_scanner_state set status=$1,lease_owner=null,last_completed_at=now(),last_error=$2,last_result=$3::jsonb,cycle_count=cycle_count+1,updated_at=now() where id=true and lease_owner=$4`, [error ? "error" : "idle", error || null, JSON.stringify(result), owner])
 }
 async function cycle(env: Env) {
-  return database(env, async (db) => {
+  const claimed = await database<ClaimedCycle>(env, async (db) => {
     await ensureSchema(db)
     const owner = crypto.randomUUID()
     const lease = await db.query(`
@@ -381,34 +386,74 @@ async function cycle(env: Env) {
         where drive_file_scanner_state.status<>'running' or drive_file_scanner_state.last_started_at<now()-interval '150 seconds'
       returning id
     `, [owner])
-    if (!lease.rowCount) return { ok: true, skipped: "cycle_already_running" }
-    let task: Row | null = null
-    let genericTask: Row | null = null
+    if (!lease.rowCount) return { ok: true as const, skipped: "cycle_already_running" }
     try {
       const setting = await db.query(`select value from drive_app_settings where key='migration-orchestrator' limit 1`)
-      if (setting.rows[0]?.value?.fileScannerEnabled !== true && setting.rows[0]?.value?.enabled !== true) { const result = { ok: true, skipped: "disabled" }; await finishState(db, owner, result); return result }
-      task = await claim(db, owner)
-      if (!task) genericTask = await claimGenericScan(db, owner)
-      const result = task
-        ? { ok: true, ...(await processTask(db, env, task)) }
-        : genericTask
-          ? { ok: true, ...(await processGenericScan(db, env, genericTask)) }
-          : { ok: true, idle: true }
-      await finishState(db, owner, result); return result
+      if (setting.rows[0]?.value?.fileScannerEnabled !== true && setting.rows[0]?.value?.enabled !== true) {
+        const result = { ok: true as const, skipped: "disabled" }
+        await finishState(db, owner, result)
+        return result
+      }
+
+      const tasks: ClaimedTask[] = []
+      for (let slot = 0; slot < SCAN_CONCURRENCY; slot += 1) {
+        const migrationTask = await claim(db, owner)
+        if (migrationTask) {
+          tasks.push({ kind: "migration", task: migrationTask })
+          continue
+        }
+        const genericTask = await claimGenericScan(db, owner)
+        if (!genericTask) break
+        tasks.push({ kind: "generic", task: genericTask })
+      }
+      if (!tasks.length) {
+        const result = { ok: true as const, idle: true as const }
+        await finishState(db, owner, result)
+        return result
+      }
+      return { ok: true as const, owner, tasks }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      if (task) await db.query(`update drive_migration_verification_state set status=case when attempt_count>=4 then 'failed' else 'pending' end,attempt_count=attempt_count+1,last_error=$2,lease_owner=null,lease_expires_at=null,updated_at=now() where migration_item_id=$1 and generation=$3 and lease_owner=$4`, [task.migration_item_id, message, task.generation, owner]).catch(() => undefined)
-      if (genericTask) await db.query(`update drive_bucket_scans set status=case when attempt_count>=4 then 'failed' else 'pending' end,attempt_count=attempt_count+1,error=$2,lease_owner=null,lease_expires_at=null,updated_at=now() where id=$1 and lease_owner=$3`, [genericTask.id, message, owner]).catch(() => undefined)
       await finishState(db, owner, { ok: false, error: message }, message).catch(() => undefined); throw error
     }
   })
+
+  if (!("tasks" in claimed)) return claimed
+
+  const results = await Promise.all(claimed.tasks.map(async ({ kind, task }) => {
+    try {
+      return await database(env, async (db) => {
+        const result = kind === "migration"
+          ? await processTask(db, env, task)
+          : await processGenericScan(db, env, task)
+        return { ok: true, ...result }
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await database(env, async (db) => {
+        if (kind === "migration") {
+          await db.query(`update drive_migration_verification_state set status=case when attempt_count>=4 then 'failed' else 'pending' end,attempt_count=attempt_count+1,last_error=$2,lease_owner=null,lease_expires_at=null,updated_at=now() where migration_item_id=$1 and generation=$3 and lease_owner=$4`, [task.migration_item_id, message, task.generation, task.lease_owner])
+        } else {
+          await db.query(`update drive_bucket_scans set status=case when attempt_count>=4 then 'failed' else 'pending' end,attempt_count=attempt_count+1,error=$2,lease_owner=null,lease_expires_at=null,updated_at=now() where id=$1 and lease_owner=$3`, [task.id, message, task.lease_owner])
+        }
+      }).catch(() => undefined)
+      console.error("File Scanner task failed", { kind, taskId: task.migration_item_id || task.id, error: message })
+      return { ok: false, error: message, taskId: task.migration_item_id || task.id }
+    }
+  }))
+
+  const failed = results.filter((result) => result.ok === false).length
+  const summary = { ok: failed === 0, processed: results.length, failed, results }
+  await database(env, async (db) => finishState(db, claimed.owner, summary, failed ? `${failed} of ${results.length} scan tasks failed` : undefined))
+  return summary
 }
 
 async function cycleAndContinue(env: Env) {
   const result = await cycle(env)
   const idle = "idle" in result && result.idle === true
   const skipped = "skipped" in result && Boolean(result.skipped)
-  if (!idle && !skipped) await env.FILE_SCAN_QUEUE.send({ reason: "continue" }, { contentType: "json" })
+  const failed = "ok" in result && result.ok === false
+  if (!idle && !skipped && !failed) await env.FILE_SCAN_QUEUE.send({ reason: "continue" }, { contentType: "json" })
   return result
 }
 
@@ -425,7 +470,11 @@ export default {
   },
   async queue(batch: MessageBatch<ScanMessage>, env: Env) {
     for (const message of batch.messages) {
-      try { await cycleAndContinue(env); message.ack() }
+      try {
+        const result = await cycleAndContinue(env)
+        if ("ok" in result && result.ok === false) throw new Error("One or more File Scanner tasks failed")
+        message.ack()
+      }
       catch (error) { console.error("File Scanner continuation failed", error); message.retry({ delaySeconds: Math.min(15 * (2 ** Math.min(message.attempts, 8)), 900) }) }
     }
   },

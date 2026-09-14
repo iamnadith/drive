@@ -231,7 +231,7 @@ export async function listUsersPage(input: {
   const term = input.query?.trim()
   if (term) {
     const pattern = add(`%${term}%`)
-    conditions.push(`(name ilike ${pattern} or email ilike ${pattern} or coalesce(username, '') ilike ${pattern})`)
+    conditions.push(`(name ilike ${pattern} or email ilike ${pattern} or username ilike ${pattern})`)
   }
   if (input.role) conditions.push(`role = ${add(input.role)}`)
   if (input.status) conditions.push(`status = ${add(input.status)}`)

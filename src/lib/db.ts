@@ -2,7 +2,14 @@ import { createHash } from "node:crypto"
 import { Pool } from "pg"
 import type { PoolClient, QueryResultRow } from "pg"
 
-const DRIVE_SCHEMA_VERSION = 2026091403
+const DRIVE_SCHEMA_VERSION = 2026091405
+
+const DRIVE_USER_INDEXES = [
+  { name: "drive_users_status_role_idx", sql: "create index concurrently if not exists drive_users_status_role_idx on public.drive_users (status, role)" },
+  { name: "drive_users_name_trgm_idx", sql: "create index concurrently if not exists drive_users_name_trgm_idx on public.drive_users using gin (name gin_trgm_ops)" },
+  { name: "drive_users_email_trgm_idx", sql: "create index concurrently if not exists drive_users_email_trgm_idx on public.drive_users using gin (email gin_trgm_ops)" },
+  { name: "drive_users_username_trgm_idx", sql: "create index concurrently if not exists drive_users_username_trgm_idx on public.drive_users using gin (username gin_trgm_ops)" },
+] as const
 
 declare global {
   var __drivePgPool: Pool | undefined
@@ -250,6 +257,29 @@ export function getDbPool(): Pool {
   return global.__drivePgPool
 }
 
+async function ensureDriveUserIndexes() {
+  await withDbAdvisoryLock("drive-schema-index", "users", async () => {
+    const client = await getDbPool().connect()
+    try {
+      await client.query("set search_path to public, extensions")
+      for (const index of DRIVE_USER_INDEXES) {
+        const existing = await client.query<{ valid: boolean }>(`
+          select i.indisvalid as valid
+          from pg_index i
+          where i.indexrelid=to_regclass($1)
+        `, [`public.${index.name}`])
+        if (existing.rows[0] && !existing.rows[0].valid) {
+          await client.query(`drop index concurrently if exists public.${index.name}`)
+        }
+        await client.query(index.sql)
+      }
+    } finally {
+      await client.query("reset search_path").catch(() => undefined)
+      client.release()
+    }
+  })
+}
+
 export async function ensureDriveSchema(): Promise<void> {
   if (!isPostgresConfigured()) return
 
@@ -261,6 +291,7 @@ export async function ensureDriveSchema(): Promise<void> {
         if (Number(current.rows[0]?.version || 0) >= DRIVE_SCHEMA_VERSION) return
       }
       await queryDb(`create extension if not exists pgcrypto;`)
+      await queryDb(`create extension if not exists pg_trgm;`)
 
       await queryDb(`
         create table if not exists drive_users (
@@ -297,6 +328,7 @@ export async function ensureDriveSchema(): Promise<void> {
         `create unique index if not exists drive_users_username_key on drive_users (username) where username is not null;`
       )
       await queryDb(`create index if not exists drive_users_created_id_idx on drive_users (created_at, id);`)
+      await ensureDriveUserIndexes()
       await queryDb(`alter table if exists drive_users add column if not exists email_verified boolean not null default true;`)
       await queryDb(`alter table if exists drive_users add column if not exists email_verified_at timestamptz;`)
       await queryDb(`alter table if exists drive_users add column if not exists two_factor_enabled boolean not null default false;`)

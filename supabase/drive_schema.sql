@@ -47,6 +47,10 @@ create table if not exists drive_users (
 create unique index if not exists drive_users_email_key on drive_users (email);
 create unique index if not exists drive_users_username_key on drive_users (username) where username is not null;
 create index if not exists drive_users_created_id_idx on drive_users (created_at, id);
+create index if not exists drive_users_status_role_idx on drive_users (status, role);
+create index if not exists drive_users_name_trgm_idx on drive_users using gin (name gin_trgm_ops);
+create index if not exists drive_users_email_trgm_idx on drive_users using gin (email gin_trgm_ops);
+create index if not exists drive_users_username_trgm_idx on drive_users using gin (username gin_trgm_ops);
 
 create table if not exists drive_email_verification_tokens (
   id uuid primary key default gen_random_uuid(),
@@ -1197,5 +1201,5 @@ create table if not exists public.drive_schema_meta (
   updated_at timestamptz not null default now()
 );
 insert into public.drive_schema_meta(id, version, updated_at)
-values (true, 2026091403, now())
+values (true, 2026091405, now())
 on conflict (id) do update set version = excluded.version, updated_at = now();

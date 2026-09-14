@@ -95,6 +95,30 @@ async function main() {
 
   const schemaPath = resolve(projectRoot, "supabase", "drive_schema.sql")
   const schema = await readFile(schemaPath, "utf8")
+  const concurrentUserIndexes = [
+    {
+      name: "drive_users_status_role_idx",
+      create: "create index concurrently if not exists drive_users_status_role_idx on public.drive_users (status, role)",
+    },
+    {
+      name: "drive_users_name_trgm_idx",
+      create: "create index concurrently if not exists drive_users_name_trgm_idx on public.drive_users using gin (name gin_trgm_ops)",
+    },
+    {
+      name: "drive_users_email_trgm_idx",
+      create: "create index concurrently if not exists drive_users_email_trgm_idx on public.drive_users using gin (email gin_trgm_ops)",
+    },
+    {
+      name: "drive_users_username_trgm_idx",
+      create: "create index concurrently if not exists drive_users_username_trgm_idx on public.drive_users using gin (username gin_trgm_ops)",
+    },
+  ]
+  let transactionalSchema = schema
+  for (const index of concurrentUserIndexes) {
+    const pattern = new RegExp(`create index if not exists ${index.name}[^;]*;`, "i")
+    if (!pattern.test(transactionalSchema)) throw new Error(`The canonical schema is missing ${index.name}`)
+    transactionalSchema = transactionalSchema.replace(pattern, "")
+  }
   const config = connectionConfig()
 
   console.log(`[db:schema] applying ${schemaPath} to ${databaseLabel(config)}`)
@@ -128,8 +152,19 @@ async function main() {
       await client.query("begin")
       await client.query("set local lock_timeout = '60s'")
       await client.query("set local statement_timeout = '10min'")
-      await client.query(schema)
+      await client.query(transactionalSchema)
       await client.query("commit")
+      for (const index of concurrentUserIndexes) {
+        const existing = await client.query(`
+          select i.indisvalid as valid
+          from pg_index i
+          where i.indexrelid=to_regclass($1)
+        `, [`public.${index.name}`])
+        if (existing.rows[0] && !existing.rows[0].valid) {
+          await client.query(`drop index concurrently if exists public.${index.name}`)
+        }
+        await client.query(index.create)
+      }
       // This redundant index is already covered by the scan-object primary key.
       // Run the removal outside the schema transaction to avoid blocking reads
       // and writes while PostgreSQL releases it.

@@ -16,6 +16,30 @@ test('the orchestrator creates scan work while scanner cron and queue continue d
   assert.match(scanner, /let schemaReady: Promise<void> \| null = null/)
 })
 
+test('scanner cron and queue drain up to four separately leased tasks concurrently', () => {
+  const scanner = read('workers/file-scanner/src/index.ts')
+  const config = read('workers/file-scanner/wrangler.jsonc')
+  const cycle = scanner.slice(scanner.indexOf('async function cycle('), scanner.indexOf('async function cycleAndContinue'))
+  assert.match(config, /"triggers":\s*\{\s*"crons":\s*\["\* \* \* \* \*"\]/)
+  assert.match(scanner, /const SCAN_CONCURRENCY = 4/)
+  assert.match(cycle, /for \(let slot = 0; slot < SCAN_CONCURRENCY; slot \+= 1\)/)
+  assert.match(cycle, /const migrationTask = await claim\(db, owner\)[\s\S]*?claimGenericScan\(db, owner\)/)
+  assert.match(cycle, /Promise\.all\(claimed\.tasks\.map\(async \(\{ kind, task \}\) => \{[\s\S]*?return await database\(env/)
+  assert.match(scanner, /lease_owner=\$1,lease_expires_at=now\(\)\+interval '90 seconds'/)
+  assert.match(scanner, /where migration_item_id=\$2::uuid and generation=\$3::int and lease_owner=\$4::text[\s\S]*?for update/)
+  assert.match(scanner, /where s\.status in\('pending','running'\)[\s\S]*?for update of s skip locked limit 1/)
+})
+
+test('failed concurrent scans use queue backoff instead of immediate continuation loops', () => {
+  const scanner = read('workers/file-scanner/src/index.ts')
+  const continuation = scanner.slice(scanner.indexOf('async function cycleAndContinue'), scanner.indexOf('export default'))
+  const queue = scanner.slice(scanner.indexOf('async queue(batch:'), scanner.indexOf('async scheduled('))
+  assert.match(continuation, /const failed = "ok" in result && result\.ok === false/)
+  assert.match(continuation, /if \(!idle && !skipped && !failed\).*FILE_SCAN_QUEUE\.send/)
+  assert.match(queue, /if \("ok" in result && result\.ok === false\) throw new Error/)
+  assert.match(queue, /message\.retry\(\{ delaySeconds: Math\.min\(15 \* \(2 \*\* Math\.min\(message\.attempts, 8\)\), 900\) \}\)/)
+})
+
 test('migration scanner uses maximum R2 page size and avoids whole-inventory recounts per page', () => {
   const scanner = read('workers/file-scanner/src/index.ts')
   const persist = scanner.slice(scanner.indexOf('async function persistMigrationPage'), scanner.indexOf('async function compare('))
