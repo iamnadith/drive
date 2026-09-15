@@ -230,7 +230,7 @@ test('worker verification can be rerun for failed buckets while migration contin
   const details = read('src/app/dashboard/migrations/[id]/page.tsx')
   assert.match(action, /current\.status in\('failed','completed'\)/)
   assert.match(action, /migration\.status === "running" \? "running" : "verifying"/)
-  assert.match(details, /workerPoolMigration && effectiveMigrationStatus !== "completed" && \(hasVerificationFailure \|\| overviewProgress\.verifyIssues > 0\)/)
+  assert.match(details, /!settingsSyncFailed && effectiveMigrationStatus !== "completed" && \(hasVerificationFailure \|\| overviewProgress\.verifyIssues > 0\)/)
   assert.doesNotMatch(details, /workerPoolMigration && \(hasVerificationFailure \|\| allBucketsTerminal/)
 })
 
@@ -255,6 +255,7 @@ test('verification failure stays distinct from transfer failure and is recoverab
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   const scanner = read('workers/file-scanner/src/index.ts')
   const action = read('src/app/api/migrations/[id]/items/[itemId]/action/route.ts')
+  const migrationAction = read('src/app/api/migrations/[id]/action/route.ts')
   const store = read('src/lib/migrations-store.ts')
   const details = read('src/app/dashboard/migrations/[id]/page.tsx')
   const migrations = read('src/app/dashboard/migrations/page.tsx')
@@ -274,11 +275,15 @@ test('verification failure stays distinct from transfer failure and is recoverab
   assert.match(details, /normalizedDisplayStatus === "verification_failed"/)
   assert.match(details, /verificationWasExplicitlyRequeued/)
   assert.match(details, /normalizedDisplayStatus !== "verification_failed" && \(verifyStatus === "error"/)
-  assert.match(details, /!\["completed", "failed", "verification_failed"\]\.includes\(String\(effectiveMigrationStatus\)\)/)
+  assert.match(details, /!\["completed", "failed"\]\.includes\(String\(effectiveMigrationStatus\)\)/)
   assert.match(details, /effectiveMigrationStatus !== "verification_failed" \?/)
   assert.match(details, /rawMessage === "Bucket migration completed"[\s\S]*File Scanner verification pending/)
   assert.match(migrations, /s === "verification_failed".*Verification failed/)
   assert.match(readOnly, /"completed", "failed", "verification_failed", "canceled"/)
+  assert.match(migrationAction, /isCompletedStatus\(i\.slurperStatus\) \|\| normalizeStatus\(i\.slurperStatus\) === "verification_failed"/)
+  assert.match(details, /!settingsSyncFailed && effectiveMigrationStatus !== "completed" && \(hasVerificationFailure \|\| overviewProgress\.verifyIssues > 0\)/)
+  assert.match(details, /allBucketsTerminal && !\["completed", "failed"\]\.includes\(String\(effectiveMigrationStatus\)\)/)
+  assert.match(action, /!isCompletedStatus\(item\.slurperStatus\) && normalizeStatus\(item\.slurperStatus\) !== "verification_failed"/)
 })
 
 test('Super Slurper roll-up distinguishes transfer failures from completed transfers awaiting or failing verification', () => {

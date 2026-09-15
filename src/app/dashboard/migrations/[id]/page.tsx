@@ -1724,7 +1724,7 @@ export default function MigrationDetailsPage() {
                   return settingsSync?.status === "failed"
                 })
               const showMarkCompleted =
-                allBucketsTerminal && !["completed", "failed", "verification_failed"].includes(String(effectiveMigrationStatus)) && !settingsSyncFailed
+                allBucketsTerminal && !["completed", "failed"].includes(String(effectiveMigrationStatus)) && !settingsSyncFailed
 
               return (
                 <>
@@ -1773,7 +1773,7 @@ export default function MigrationDetailsPage() {
                     </Button>
                   ) : null}
 
-                  {workerPoolMigration && effectiveMigrationStatus !== "completed" && (hasVerificationFailure || overviewProgress.verifyIssues > 0) ? (
+                  {!settingsSyncFailed && effectiveMigrationStatus !== "completed" && (hasVerificationFailure || overviewProgress.verifyIssues > 0) ? (
                     <Button
                       onClick={() => void runMigrationAction("verify_all")}
                       loading={busyAction === "verify_all"}

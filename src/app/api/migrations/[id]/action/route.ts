@@ -613,7 +613,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           ? migration.options.pathPrefix
           : undefined
 
-      const candidates = items.filter((i) => isCompletedStatus(i.slurperStatus))
+      const candidates = items.filter((i) =>
+        isCompletedStatus(i.slurperStatus) || normalizeStatus(i.slurperStatus) === "verification_failed"
+      )
       for (const item of candidates) {
         await updateMigrationItem(item.id, {
           progress: {

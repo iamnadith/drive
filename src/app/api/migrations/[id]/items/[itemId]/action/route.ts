@@ -116,7 +116,7 @@ export async function POST(
         return NextResponse.json({ ok: true, result: item.progress }, { status: 200 })
       }
       if (action === "verify") {
-        if (!isCompletedStatus(item.slurperStatus)) {
+          if (!isCompletedStatus(item.slurperStatus) && normalizeStatus(item.slurperStatus) !== "verification_failed") {
           return NextResponse.json({ error: "Bucket transfer must be completed before verification" }, { status: 400 })
         }
 
