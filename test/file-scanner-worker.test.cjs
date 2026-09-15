@@ -25,7 +25,7 @@ test('scanner cron and queue drain up to four separately leased tasks concurrent
   assert.match(cycle, /for \(let slot = 0; slot < SCAN_CONCURRENCY; slot \+= 1\)/)
   assert.match(cycle, /const kinds = slot % 2 === 0 \? \["generic", "migration"\] as const : \["migration", "generic"\] as const/)
   assert.match(cycle, /for \(const kind of kinds\)[\s\S]*?claimGenericScan\(db, owner\)[\s\S]*?claim\(db, owner\)/)
-  assert.match(cycle, /Promise\.all\(claimed\.tasks\.map\(async \(\{ kind, task \}\) => \{[\s\S]*?return await database\(env/)
+  assert.match(cycle, /Promise\.all\(claimed\.tasks\.map\(async \(\{ kind, task \}\) => \{[\s\S]*?return await databaseTaskWithRetry\(env/)
   assert.match(scanner, /lease_owner=\$1,lease_expires_at=now\(\)\+interval '90 seconds'/)
   assert.match(scanner, /where migration_item_id=\$2::uuid and generation=\$3::int and lease_owner=\$4::text[\s\S]*?for update/)
   assert.match(scanner, /s\.status='pending'[\s\S]*?s\.status='running'[\s\S]*?for update of s skip locked limit 1/)
@@ -44,6 +44,11 @@ test('failed concurrent scans use queue backoff instead of immediate continuatio
 
 test('transient scanner failures retry without an attempt ceiling and keep the durable scan cursor', () => {
   const scanner = read('workers/file-scanner/src/index.ts')
+  assert.match(scanner, /client has encountered a connection error\|not queryable/)
+  assert.match(scanner, /async function databaseTaskWithRetry<T>/)
+  assert.match(scanner, /fresh client is required after a dropped PostgreSQL connection/)
+  assert.match(scanner, /return await database\(env, operation\)/)
+  assert.match(scanner, /DATABASE_RETRY_DELAYS_MS = \[250, 1_000, 3_000\]/)
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   assert.match(scanner, /function isTransientScanError/)
   assert.match(scanner, /status=case when \$4::boolean then 'pending' else 'failed' end,attempt_count=attempt_count\+1/)
@@ -72,6 +77,7 @@ test('scanner page commits are atomic, idempotent, and avoid per-page database r
   assert.match(persist, /on conflict\(scan_id,key\) do update/)
   assert.match(persist, /from drive_migration_verification_state[\s\S]*?for update/)
   assert.match(persist, /greatest\(0,coalesce\(s\.objects,0\)\+d\.object_delta\)/)
+  assert.match(persist, /status=case when \$6::boolean then 'running' else 'completed' end,[\s\S]*?error=null/)
   assert.match(persist, /greatest\(0,coalesce\(v\.\$\{objectsColumn\},0\)\+d\.object_delta\)/)
   assert.match(persist, /begin[\s\S]*?commit[\s\S]*?rollback/)
   assert.doesNotMatch(persist, /select count\(\*\).*drive_bucket_scan_objects/i)

@@ -5,11 +5,11 @@ type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANE
 type Row = Record<string, any>
 const BUILD = 20
 const MAX_SECRET_LENGTH = 512
-const TRANSIENT_SCAN_SQL_PATTERN = "(connection terminated unexpectedly|connection reset|connection closed|server closed the connection unexpectedly|socket hang up|econnreset|econnrefused|etimedout|timeout|timed out|eai_again|enotfound|enetunreach|epipe|fetch failed|temporar(y|ily) unavailable|too many (requests|connections|clients)|slow down|throttl|HTTP (408|425|429|500|502|503|504)|57P01|57P03|53300|08[0-9A-Z]{3}|40001|40P01)"
+const TRANSIENT_SCAN_SQL_PATTERN = "(connection terminated unexpectedly|connection reset|connection closed|server closed the connection unexpectedly|client has encountered a connection error|not queryable|socket hang up|econnreset|econnrefused|etimedout|timeout|timed out|eai_again|enotfound|enetunreach|epipe|fetch failed|temporar(y|ily) unavailable|too many (requests|connections|clients)|slow down|throttl|HTTP (408|425|429|500|502|503|504)|57P01|57P03|53300|08[0-9A-Z]{3}|40001|40P01)"
 let authCache: { value: string[]; expiresAt: number } | null = null
 
 function isTransientWorkerError(message: string) {
-  return /connection terminated unexpectedly|connection reset|connection closed|server closed the connection unexpectedly|socket hang up|econn(?:reset|refused)|etimedout|eai_again|enotfound|enetunreach|epipe|fetch failed|time(?:out|d out)|temporar(?:y|ily) unavailable|too many (?:requests|connections|clients)|slow down|throttl|\bHTTP (?:408|425|429|500|502|503|504)\b|\b(?:57P01|57P03|53300|08000|08001|08003|08004|08006|08007|40001|40P01)\b/i.test(message)
+  return /connection terminated unexpectedly|connection reset|connection closed|server closed the connection unexpectedly|client has encountered a connection error|not queryable|socket hang up|econn(?:reset|refused)|etimedout|eai_again|enotfound|enetunreach|epipe|fetch failed|time(?:out|d out)|temporar(?:y|ily) unavailable|too many (?:requests|connections|clients)|slow down|throttl|\bHTTP (?:408|425|429|500|502|503|504)\b|\b(?:57P01|57P03|53300|08000|08001|08003|08004|08006|08007|40001|40P01)\b/i.test(message)
 }
 
 function json(value: unknown, status = 200) { return Response.json(value, { status, headers: { "Cache-Control": "no-store, max-age=0" } }) }
@@ -1412,12 +1412,13 @@ async function cycle(env: Env) {
       const pendingVerification = await db.query(`select 1 from drive_migration_verification_state where migration_id=$1 and generation=$2 and status in('pending','running') limit 1`, [migration.id, shards.generation])
       const fileScanner = shards.inventoryPending || (pendingVerification.rowCount || 0) > 0 || (finalized.complete && verification.verification === "pending") ? await wakeFileScanner(db) : "not_needed"
       const current = (await db.query(`select * from drive_migrations where id=$1`, [migration.id])).rows[0]
-      // Once scanning is complete and the first durable file jobs exist, the
-      // fleet can begin consuming while later inventory pages are still being
-      // materialized. Pool-state polling keeps runners alive until every page
-      // is queued, so this does not create a completion race.
+      // Keep scanning and copying as separate phases. The worker pool starts
+      // only after every source inventory is complete and every scanned object
+      // has been materialized into a durable migration job. This prevents a
+      // partially scanned repair from looking like an active worker run.
+      const inventoryReady = !shards.inventoryPending && !shards.queuePending
       const hasRunnableFiles = shards.shardCount > 0 || shards.created > 0
-      const dispatched = current?.status === "running" && hasRunnableFiles ? await dispatchWorkers(db, env, current) : 0
+      const dispatched = current?.status === "running" && inventoryReady && hasRunnableFiles ? await dispatchWorkers(db, env, current) : 0
       await recordItemStageEvents(db, migration, shards.generation)
       if (shards.inventoryPending || shards.queuePending) await env.GITHUB_DISPATCH_QUEUE.send({ control: "cycle" })
       await db.query(`update drive_migrations set last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])

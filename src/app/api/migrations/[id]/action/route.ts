@@ -676,9 +676,13 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       await queryDb(`
         update drive_migration_items
         set slurper_job_id=null,
-            slurper_status='scanning',
+            -- The orchestrator owns scanner-task creation. Keep this state
+            -- queued until it has durably created/adopted a source scan;
+            -- otherwise a failed wake/deployment falsely renders "Scanning"
+            -- forever even though File Scanner has no task to claim.
+            slurper_status='queued',
             progress=(coalesce(progress,'{}'::jsonb)||jsonb_build_object(
-              'stage','scanning_source',
+              'stage','awaiting_source_scan',
               'migrationInventory',jsonb_build_object('generation',$2::int,'status','pending'),
               'repairWorker',null,
               'live',null,

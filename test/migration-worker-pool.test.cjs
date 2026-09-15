@@ -118,11 +118,11 @@ test('orchestrator binds the migration id as one PostgreSQL type while materiali
   assert.doesNotMatch(orchestrator, /format\('migration:%s:generation:%s:inventory:%s:%s',\$1::text/)
 })
 
-test('orchestrator dispatches the fleet as soon as durable file jobs are available', () => {
+test('orchestrator dispatches the fleet only after all scanner inventory is materialized', () => {
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
-  assert.match(orchestrator, /const hasRunnableFiles = shards\.shardCount > 0 \|\| shards\.created > 0/)
-  assert.match(orchestrator, /status === "running" && hasRunnableFiles \? await dispatchWorkers/)
-  assert.doesNotMatch(orchestrator, /!shards\.inventoryPending && !shards\.queuePending \? await dispatchWorkers/)
+  assert.match(orchestrator, /const inventoryReady = !shards\.inventoryPending && !shards\.queuePending/)
+  assert.match(orchestrator, /status === "running" && inventoryReady && hasRunnableFiles \? await dispatchWorkers/)
+  assert.match(orchestrator, /every source inventory is complete and every scanned object/)
 })
 
 test('orchestrator queues scanner pages incrementally without closing a running inventory', () => {
@@ -331,6 +331,15 @@ test('Super Slurper repair re-enters the shared worker-pool scan, queue, copy, a
   assert.doesNotMatch(details, /Run with worker|workersOpen|Worker Overview|repair_and_verify/)
   assert.doesNotMatch(route, /listRepairJobsByMigration/)
   assert.doesNotMatch(stream, /listRepairJobsByMigration/)
+})
+
+test('worker-pool repair stays queued until the orchestrator durably creates a scanner task', () => {
+  const action = read('src/app/api/migrations/[id]/action/route.ts')
+  const repair = action.slice(action.indexOf('if (action === "repair_migration")'), action.indexOf('if (action === "retry_migration")'))
+  assert.match(repair, /slurper_status='queued'/)
+  assert.match(repair, /'stage','awaiting_source_scan'/)
+  assert.match(repair, /migrationInventory.*'status','pending'/)
+  assert.doesNotMatch(repair, /slurper_status='scanning'/)
 })
 
 test('worker-pool repair reconciles destinations before copy and bucket preparation stays worker-owned', () => {

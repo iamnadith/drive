@@ -15,12 +15,13 @@ const MAX_SECRET_LENGTH = 512
 // Keep database connections and R2 list requests bounded while allowing
 // independent bucket scans to make progress during the same cron/queue run.
 const SCAN_CONCURRENCY = 4
+const DATABASE_RETRY_DELAYS_MS = [250, 1_000, 3_000]
 function isTransientScanError(error: unknown) {
   const value = error && typeof error === "object" ? error as { message?: unknown; name?: unknown; code?: unknown; status?: unknown; $metadata?: { httpStatusCode?: unknown } } : {}
   const message = `${String(value.name || "")} ${String(value.message || error || "")}`
   const code = String(value.code || "").toUpperCase()
   const status = Number(value.$metadata?.httpStatusCode || value.status || 0)
-  return /connection terminated unexpectedly|connection reset|connection closed|server closed the connection unexpectedly|socket hang up|econn(?:reset|refused)|etimedout|eai_again|enotfound|enetunreach|epipe|fetch failed|time(?:out|d out)|temporar(?:y|ily) unavailable|too many (?:requests|connections|clients)|slow down|throttl|\bHTTP (?:408|425|429|500|502|503|504)\b|\b(?:57P01|57P03|53300|08000|08001|08003|08004|08006|08007|40001|40P01)\b/i.test(message)
+  return /connection terminated unexpectedly|connection reset|connection closed|server closed the connection unexpectedly|client has encountered a connection error|not queryable|socket hang up|econn(?:reset|refused)|etimedout|eai_again|enotfound|enetunreach|epipe|fetch failed|time(?:out|d out)|temporar(?:y|ily) unavailable|too many (?:requests|connections|clients)|slow down|throttl|\bHTTP (?:408|425|429|500|502|503|504)\b|\b(?:57P01|57P03|53300|08000|08001|08003|08004|08006|08007|40001|40P01)\b/i.test(message)
     || /^(?:57P01|57P03|53300|08000|08001|08003|08004|08006|08007|40001|40P01)$/.test(code)
     || [408, 425, 429].includes(status) || status >= 500
 }
@@ -70,6 +71,21 @@ async function ensureSchema(db: Client) {
     throw error
   })
   await schemaReady
+}
+async function databaseTaskWithRetry<T>(env: Env, operation: (client: Client) => Promise<T>): Promise<T> {
+  let lastError: unknown
+  for (let attempt = 0; attempt <= DATABASE_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      // A fresh client is required after a dropped PostgreSQL connection;
+      // pg clients are not recoverable once they report "not queryable".
+      return await database(env, operation)
+    } catch (error) {
+      lastError = error
+      if (!isTransientScanError(error) || attempt === DATABASE_RETRY_DELAYS_MS.length) throw error
+      await new Promise((resolve) => setTimeout(resolve, DATABASE_RETRY_DELAYS_MS[attempt]))
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError))
 }
 // R2 ListObjectsV2 accepts at most 1,000 keys. Larger pages reduce Worker and
 // PostgreSQL round trips while staying within the provider's documented bound.
@@ -206,6 +222,7 @@ async function persistMigrationPage(db: Client, scanId: string, task: Row, phase
           objects=greatest(0,coalesce(s.objects,0)+d.object_delta),
           bytes=greatest(0,coalesce(s.bytes,0)+d.byte_delta),
           status=case when $6::boolean then 'running' else 'completed' end,
+          error=null,
           last_key=$7::text,
           completed_at=case when $6::boolean then s.completed_at else now() end,
           updated_at=now()
@@ -433,7 +450,7 @@ async function cycle(env: Env) {
 
   const results = await Promise.all(claimed.tasks.map(async ({ kind, task }) => {
     try {
-      return await database(env, async (db) => {
+      return await databaseTaskWithRetry(env, async (db) => {
         const result = kind === "migration"
           ? await processTask(db, env, task)
           : await processGenericScan(db, env, task)
