@@ -283,6 +283,7 @@ test('verification failure stays distinct from transfer failure and is recoverab
   assert.match(migrationAction, /isCompletedStatus\(i\.slurperStatus\) \|\| normalizeStatus\(i\.slurperStatus\) === "verification_failed"/)
   assert.match(details, /!settingsSyncFailed && effectiveMigrationStatus !== "completed" && \(hasVerificationFailure \|\| overviewProgress\.verifyIssues > 0\)/)
   assert.match(details, /allBucketsTerminal && !\["completed", "failed"\]\.includes\(String\(effectiveMigrationStatus\)\)/)
+  assert.match(details, /migration\.status !== "completed" && \(workerPoolMigration/)
   assert.match(action, /!isCompletedStatus\(item\.slurperStatus\) && normalizeStatus\(item\.slurperStatus\) !== "verification_failed"/)
 })
 

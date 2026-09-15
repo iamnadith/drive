@@ -265,6 +265,18 @@ function migrationWorkerBadge(status: string | undefined) {
   return <Badge variant="outline">{value || "Worker idle"}</Badge>
 }
 
+function migrationStatusBadge(status: string | undefined) {
+  const s = String(status ?? "unknown").trim().toLowerCase()
+  if (s === "completed") return <Badge className="bg-green-600">Completed</Badge>
+  if (s === "verification_failed") return <Badge className="bg-red-600">Verification failed</Badge>
+  if (s === "failed") return <Badge className="bg-red-600">Failed</Badge>
+  if (["canceled", "cancelled", "aborted"].includes(s)) return <Badge variant="secondary">Aborted</Badge>
+  if (s === "draft") return <Badge variant="outline">Draft</Badge>
+  if (s === "paused") return <Badge className="bg-yellow-600">Paused</Badge>
+  if (["running", "verifying", "scanning", "queued", "creating_job", "job_id_pending"].includes(s)) return <Badge className="bg-primary text-primary-foreground">Running</Badge>
+  return <Badge variant="outline">{s}</Badge>
+}
+
 function mergeIncomingItem(prev: MigrationItem | undefined, next: MigrationItem): MigrationItem {
   if (!prev) return next
 
@@ -883,7 +895,7 @@ export default function MigrationDetailsPage() {
     if (status === "pending") return "syncing"
     return null
   }
-  const showSettingsColumn = items.some((item) => isCompletedStatus(getItemStatus(item)) && readBucketSettingsStatus(item) !== null)
+  const showSettingsColumn = items.some((item) => readBucketSettingsStatus(item) !== null)
 
   const bucketCounts = React.useMemo(() => {
     let completed = 0
@@ -1543,7 +1555,7 @@ export default function MigrationDetailsPage() {
     {
       id: "actions",
       header: "Actions",
-      meta: { width: "min-w-[190px]", align: "center", divider: false },
+      meta: { width: "min-w-[170px]", align: "center", divider: false },
       cell: ({ row }) => {
         const item = row.original
         const progress = isRecord(item.progress) ? item.progress : {}
@@ -1569,21 +1581,21 @@ export default function MigrationDetailsPage() {
         const lifecycleAction: "pause" | "resume" | "retry" | null = canPause ? "pause" : canRetry ? "retry" : canResume ? "resume" : null
         const lifecycleBusy = itemBusy === "pause" || itemBusy === "resume" || itemBusy === "retry"
         return (
-          <div className="flex justify-center gap-1">
-            <Button size="icon-sm" variant="outline" loading={itemBusy === "verify"} title={verifyStatus === null ? "Run verification" : "Re-run verification"} aria-label="Verify" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canVerify} onClick={() => { void runItemAction(item.id, "verify") }}>
-              {itemBusy !== "verify" ? <ShieldCheck className="h-4 w-4" /> : null}
+          <div className="flex min-h-[40px] w-full items-center justify-center gap-1.5 text-center">
+            <Button variant="ghost" size="icon" loading={itemBusy === "verify"} className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md" title={verifyStatus === null ? "Run verification" : "Re-run verification"} aria-label="Verify" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canVerify} onClick={() => { void runItemAction(item.id, "verify") }}>
+              {itemBusy !== "verify" ? <ShieldCheck className="h-3.5 w-3.5" /> : null}
             </Button>
-            <Button size="icon-sm" variant="outline" loading={itemBusy === "logs"} title="View logs" disabled={Boolean(itemBusy)} onClick={() => { setLogsItemId(item.id); setLogsOpen(true); if (bucketCounts.scanning > 0 || bucketCounts.running > 0 || bucketCounts.verifying > 0) void runItemAction(item.id, "logs") }}>
-              {itemBusy !== "logs" ? <ScrollText className="h-4 w-4" /> : null}
+            <Button variant="ghost" size="icon" loading={itemBusy === "logs"} className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md" title="View logs" disabled={Boolean(itemBusy)} onClick={() => { setLogsItemId(item.id); setLogsOpen(true); if (bucketCounts.scanning > 0 || bucketCounts.running > 0 || bucketCounts.verifying > 0) void runItemAction(item.id, "logs") }}>
+              {itemBusy !== "logs" ? <ScrollText className="h-3.5 w-3.5" /> : null}
             </Button>
-            <Button size="icon-sm" variant="outline" loading={lifecycleBusy} title="Failed Diagnostics" aria-label="Failed Diagnostics" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canInspectFailures} onClick={() => { void openFailedDiagnosticsForSingle(item.id) }}>
-              <AlertCircle className="h-4 w-4" />
+            <Button variant="ghost" size="icon" loading={lifecycleBusy} className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md" title="Failed Diagnostics" aria-label="Failed Diagnostics" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canInspectFailures} onClick={() => { void openFailedDiagnosticsForSingle(item.id) }}>
+              <AlertCircle className="h-3.5 w-3.5" />
             </Button>
-            <Button size="icon-sm" variant="outline" title={lifecycleAction === "pause" ? "Stop" : lifecycleAction === "retry" ? "Start (retry)" : lifecycleAction === "resume" ? "Start" : "Start/Stop"} aria-label={lifecycleAction === "pause" ? "Stop" : lifecycleAction === "retry" ? "Start (retry)" : lifecycleAction === "resume" ? "Start" : "Start/Stop"} disabled={historyReadOnly.readOnly || Boolean(itemBusy) || lifecycleAction === null} onClick={() => { if (lifecycleAction) void runItemAction(item.id, lifecycleAction) }}>
-              {!lifecycleBusy && lifecycleAction === "pause" ? <Square className="h-4 w-4" /> : !lifecycleBusy ? <Play className="h-4 w-4" /> : null}
+            <Button variant="ghost" size="icon" className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:shadow-md" title={lifecycleAction === "pause" ? "Stop" : lifecycleAction === "retry" ? "Start (retry)" : lifecycleAction === "resume" ? "Start" : "Start/Stop"} aria-label={lifecycleAction === "pause" ? "Stop" : lifecycleAction === "retry" ? "Start (retry)" : lifecycleAction === "resume" ? "Start" : "Start/Stop"} disabled={historyReadOnly.readOnly || Boolean(itemBusy) || lifecycleAction === null} onClick={() => { if (lifecycleAction) void runItemAction(item.id, lifecycleAction) }}>
+              {!lifecycleBusy && lifecycleAction === "pause" ? <Square className="h-3.5 w-3.5" /> : !lifecycleBusy ? <Play className="h-3.5 w-3.5" /> : null}
             </Button>
-            <Button size="icon-sm" variant="destructive" loading={itemBusy === "abort"} title="Abort" aria-label="Abort" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canAbort} onClick={() => { void runItemAction(item.id, "abort") }}>
-              {itemBusy !== "abort" ? <CircleX className="h-4 w-4" /> : null}
+            <Button variant="ghost" size="icon" loading={itemBusy === "abort"} className="!h-7 !w-7 !min-h-7 !min-w-7 flex-none !rounded-full !border !border-white/15 !bg-background/85 !p-0 text-destructive shadow-sm backdrop-blur-sm transition-[border-color,background-color,box-shadow] hover:!border-white/25 hover:!bg-muted/55 hover:!shadow-md" title="Abort" aria-label="Abort" disabled={historyReadOnly.readOnly || Boolean(itemBusy) || !canAbort} onClick={() => { void runItemAction(item.id, "abort") }}>
+              {itemBusy !== "abort" ? <CircleX className="h-3.5 w-3.5" /> : null}
             </Button>
           </div>
         )
@@ -1601,7 +1613,7 @@ export default function MigrationDetailsPage() {
         <CardHeader>
           <CardTitle className="flex items-center justify-between gap-3">
             <span>Overview</span>
-            {statusBadge(overviewBadgeStatus, { syncStatus: migration.syncStatus, syncMessage: migration.syncMessage })}
+            {migrationStatusBadge(overviewBadgeStatus)}
           </CardTitle>
           <CardDescription>
             {migration.options.executionMode === "migration_workers" ? "Worker pool" : "Cloudflare Super Slurper"}
@@ -1785,9 +1797,9 @@ export default function MigrationDetailsPage() {
                     </Button>
                   ) : null}
 
-                  {(workerPoolMigration
+                  {migration.status !== "completed" && (workerPoolMigration
                     ? failedBuckets.length > 0 || overviewProgress.verifyIssues > 0 || effectiveMigrationStatus === "failed"
-                    : items.length > 0 && migration.status !== "draft" && (migration.status !== "completed" || failedBuckets.length > 0 || overviewProgress.verifyIssues > 0) && !hasActiveSuperSlurper) ? (
+                    : items.length > 0 && migration.status !== "draft" && !hasActiveSuperSlurper) ? (
                     <Button
                       onClick={() => void runMigrationAction("repair_migration")}
                       loading={busyAction === "repair_migration"}
@@ -1921,6 +1933,7 @@ export default function MigrationDetailsPage() {
         })()
       ) : null}
 
+      <div className="space-y-0">
       <DashboardDataTable
         data={items}
         columns={bucketColumns}
@@ -2056,6 +2069,7 @@ export default function MigrationDetailsPage() {
             ) : null}
           </Card>
       </section>
+      </div>
 
       <Dialog open={failedOpen} onOpenChange={setFailedOpen}>
         <DialogContent className="w-[96vw] max-w-[96vw] sm:max-w-[min(96vw,72rem)] h-[88vh] sm:h-[min(88vh,56rem)] overflow-hidden p-0 flex flex-col gap-0">

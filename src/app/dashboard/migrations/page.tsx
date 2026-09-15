@@ -222,22 +222,16 @@ function visibleSyncMessage(value?: string | null) {
   return value?.trim().toLowerCase() === "migration independently verified" ? "" : value ?? ""
 }
 
-function statusBadge(status: string | undefined, syncStatus?: string, syncMessage?: string) {
+function statusBadge(status: string | undefined) {
   const s = String(status ?? "unknown")
-  if (s === "verifying" && syncStatus === "error") return <Badge className="bg-red-600">{syncMessage?.toLowerCase().includes("settings sync") ? "Settings sync failed" : "Verification failed"}</Badge>
-  if (s === "verifying" && syncMessage?.toLowerCase().includes("syncing settings")) return <Badge className="bg-purple-600">Settings sync</Badge>
   if (s === "completed") return <Badge className="bg-green-600">Completed</Badge>
-  if (s === "verifying") return <Badge className="bg-purple-600">Verifying</Badge>
-  if (s === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
-  if (s === "paused") return <Badge className="bg-yellow-600">Paused</Badge>
   if (s === "failed") return <Badge className="bg-red-600">Failed</Badge>
   if (s === "verification_failed") return <Badge className="bg-red-600">Verification failed</Badge>
-  if (s === "canceled" || s === "aborted") return <Badge variant="secondary">Canceled</Badge>
+  if (s === "canceled" || s === "cancelled" || s === "aborted") return <Badge variant="secondary">Aborted</Badge>
   if (s === "draft") return <Badge variant="outline">Draft</Badge>
-  if (s === "creating_job") return <Badge className="bg-primary text-primary-foreground">Creating job</Badge>
-  if (s === "job_id_pending") return <Badge className="bg-yellow-600">Job pending</Badge>
-  if (s === "precheck_failed") return <Badge className="bg-red-600">Precheck failed</Badge>
-  if (s.endsWith("_failed") || s.includes("error")) return <Badge className="bg-red-600">Error</Badge>
+  if (s === "paused") return <Badge className="bg-yellow-600">Paused</Badge>
+  if (["running", "verifying", "scanning", "queued", "creating_job", "job_id_pending"].includes(s)) return <Badge className="bg-primary text-primary-foreground">Running</Badge>
+  if (s.endsWith("_failed") || s.includes("error")) return <Badge className="bg-red-600">Failed</Badge>
   return <Badge variant="outline">{s}</Badge>
 }
 
@@ -315,7 +309,7 @@ export default function MigrationsPage() {
       header: () => <div className="text-center">Status</div>,
       cell: ({ row }) => (
         <div className="flex min-h-10 items-center justify-center">
-          {statusBadge(row.original.status, row.original.syncStatus, row.original.syncMessage)}
+          {statusBadge(row.original.status)}
         </div>
       ),
     },
@@ -1104,7 +1098,7 @@ export default function MigrationsPage() {
                     ? "Active migration"
                     : "Latest migration"}
                 </CardTitle>
-                {statusBadge(activeMigration?.status, activeMigration?.syncStatus, activeMigration?.syncMessage)}
+                {statusBadge(activeMigration?.status)}
               </div>
               <CardDescription>
                 {activeMigration ? (
