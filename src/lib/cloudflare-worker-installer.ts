@@ -283,12 +283,30 @@ async function resolveAccount(token: string): Promise<Account> {
   return accounts[0]
 }
 
+async function fetchWithRetry(url: string, init: RequestInit, attempts = 4) {
+  let lastError: unknown
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetch(url, init)
+      if (response.ok || ![408, 425, 429, 500, 502, 503, 504].includes(response.status) || attempt === attempts - 1) return response
+      lastError = new Error(`Request failed (${response.status})`)
+    } catch (error) {
+      lastError = error
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+      const retryable = message.includes("timeout") || message.includes("timed out") || message.includes("aborted") || message.includes("fetch failed") || message.includes("connect") || message.includes("socket")
+      if (!retryable || attempt === attempts - 1) throw error
+    }
+    await new Promise((resolve) => setTimeout(resolve, 750 * 2 ** attempt))
+  }
+  throw lastError instanceof Error ? lastError : new Error("Request failed")
+}
+
 async function getManifest(): Promise<Manifest> {
   const sourceRepository = String(process.env.GITHUB_WORKER_SOURCE_REPO || "iamnadith/Drive").trim()
   const defaultUrl = `https://github.com/${sourceRepository}/releases/latest/download/manifest.json`
   const url = String(process.env.CLOUDFLARE_WORKER_MANIFEST_URL || defaultUrl).trim()
   if (!/^https:\/\//i.test(url)) throw new Error("CLOUDFLARE_WORKER_MANIFEST_URL is not configured")
-  const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(20_000) })
+  const response = await fetchWithRetry(url, { cache: "no-store", signal: AbortSignal.timeout(20_000) })
   if (!response.ok) throw new Error(`Unable to fetch Worker release manifest (${response.status})`)
   const manifest = await response.json() as Manifest
   if (!manifest.version || !ORDER.every((worker) => manifest.workers?.[worker]?.url && /^[a-f0-9]{64}$/i.test(manifest.workers[worker].sha256))) throw new Error("Worker release manifest is invalid")
@@ -296,7 +314,7 @@ async function getManifest(): Promise<Manifest> {
 }
 
 async function artifact(entry: Artifact): Promise<Uint8Array> {
-  const response = await fetch(entry.url, { cache: "no-store", signal: AbortSignal.timeout(30_000) })
+  const response = await fetchWithRetry(entry.url, { cache: "no-store", signal: AbortSignal.timeout(30_000) })
   if (!response.ok) throw new Error(`Unable to fetch Worker artifact (${response.status})`)
   const bytes = new Uint8Array(await response.arrayBuffer())
   const digest = createHash("sha256").update(bytes).digest("hex")
