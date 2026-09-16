@@ -25,6 +25,7 @@ async function readPool(id: string) {
     running_jobs: string | number
     completed_jobs: string | number
     failed_jobs: string | number
+    skipped_objects: string | number
     canceled_jobs: string | number
     jobs: Array<Record<string, unknown>> | null
     buckets: Array<Record<string, unknown>> | null
@@ -46,6 +47,7 @@ async function readPool(id: string) {
         count(*) filter(where status in('claimed','running'))::bigint running_jobs,
         count(*) filter(where status='completed')::bigint completed_jobs,
         count(*) filter(where status='failed')::bigint failed_jobs,
+        coalesce(sum(case when status='completed' and (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
         count(*) filter(where status='canceled')::bigint canceled_jobs
       from public.drive_repair_jobs
       where migration_id=$1 and mode='migration'
@@ -98,6 +100,7 @@ async function readPool(id: string) {
         'totalObjects',case when item.progress->'live'->>'totalObjects' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'totalObjects')::numeric else coalesce(item.source_objects,0) end,
         'transferredObjects',case when item.progress->'live'->>'transferredObjects' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'transferredObjects')::numeric else 0 end,
         'failedObjects',case when item.progress->'live'->>'failedObjects' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'failedObjects')::numeric else 0 end,
+        'skippedObjects',case when item.progress->'live'->>'skippedObjects' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'skippedObjects')::numeric else 0 end,
         'transferredBytes',case when item.progress->'live'->>'transferredBytes' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'transferredBytes')::numeric else 0 end,
         'sourceBytes',coalesce(item.source_bytes,0),
         'updatedAt',item.updated_at
@@ -144,6 +147,7 @@ async function readPool(id: string) {
     runningJobs: Number(stateRow.running_jobs || 0),
     completedJobs: Number(stateRow.completed_jobs || 0),
     failedJobs: Number(stateRow.failed_jobs || 0),
+    skipped: Number(stateRow.skipped_objects || 0),
     canceledJobs: Number(stateRow.canceled_jobs || 0),
     totalObjects: buckets.reduce((sum, bucket) => sum + Number(bucket.totalObjects || 0), 0),
     ...liveCounts,

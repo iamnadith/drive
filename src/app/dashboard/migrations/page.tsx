@@ -576,6 +576,7 @@ export default function MigrationsPage() {
         totalObjects,
         transferred: activeMigration.status === "completed" ? totalObjects : 0,
         skipped: 0,
+        failed: 0,
         completed: activeMigration.status === "completed" ? totalObjects : 0,
         percent: activeMigration.status === "completed" ? 100 : 0,
       }
@@ -583,6 +584,7 @@ export default function MigrationsPage() {
     let totalObjects = 0
     let transferred = 0
     let skipped = 0
+    let failed = 0
 
     for (const item of activeItems) {
       const progress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
@@ -591,6 +593,7 @@ export default function MigrationsPage() {
       const objects = result?.objects
       const transferredObjects = result?.transferredObjects
       const skippedObjects = result?.skippedObjects
+      const failedObjects = result?.failedObjects
 
       if (live && typeof live.totalObjects === "number") totalObjects += live.totalObjects
       else if (typeof item.sourceObjects === "number") totalObjects += item.sourceObjects
@@ -601,19 +604,22 @@ export default function MigrationsPage() {
 
       if (live && typeof live.skippedObjects === "number") skipped += live.skippedObjects
       else if (typeof skippedObjects === "number") skipped += skippedObjects
+
+      if (live && typeof live.failedObjects === "number") failed += live.failedObjects
+      else if (typeof failedObjects === "number") failed += failedObjects
     }
 
     const completed =
       activeMigration?.status === "completed" && totalObjects > 0
         ? totalObjects
         : totalObjects > 0
-          ? Math.min(totalObjects, transferred + skipped)
-          : transferred + skipped
+          ? Math.min(totalObjects, transferred + skipped + failed)
+          : transferred + skipped + failed
     const percent =
       totalObjects > 0
         ? Math.max(0, Math.min(100, (completed / totalObjects) * 100))
         : 0
-    return { totalObjects, transferred, skipped, completed, percent }
+    return { totalObjects, transferred, skipped, failed, completed, percent }
   }, [activeItems, activeMigration])
 
   const filteredBuckets = React.useMemo(() => {
@@ -1120,6 +1126,7 @@ export default function MigrationsPage() {
                   <span>
                     {formatNumber(totals.transferred)} transferred
                     {totals.skipped > 0 ? `, ${formatNumber(totals.skipped)} skipped` : ""}
+                    {totals.failed > 0 ? `, ${formatNumber(totals.failed)} failed` : ""}
                   </span>
                   <span>{formatNumber(totals.totalObjects)} total objects</span>
                 </div>

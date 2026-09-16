@@ -1440,6 +1440,12 @@ async function processItem(jobId, payload, item, completedResults, state) {
     // overwrite mode. Exact matches count as already transferred and are never
     // rewritten; overwrite only governs proven mismatches below.
     alreadyPresent = Math.max(0, sourceObjects.length - toRepair.length)
+    // Every source object that was not copied must be visible in the
+    // accounting.  In particular, an exact destination match is a skipped
+    // object when this is a repair/no-overwrite run; otherwise the UI reports
+    // fewer processed objects than the source scan found.  Keep this count
+    // separate from `transferred`, which means an actual copy.
+    skipped = alreadyPresent
     state.stats.repairCandidates += toRepair.length
     upsertItemProgress(state, {
       itemId: item.id,
@@ -1448,8 +1454,8 @@ async function processItem(jobId, payload, item, completedResults, state) {
       alreadyPresent,
       initialMissing,
       initialMismatched,
-      totalFiles: toRepair.length,
-      processedFiles: 0,
+      totalFiles: sourceObjectCount,
+      processedFiles: transferred + failed + skipped,
       summary: `Scan complete for ${item.sourceBucket}${shardLabel}: ${alreadyPresent} already verified, ${initialMissing} missing, ${initialMismatched} mismatched`,
     })
     pushLog(state, `Scan complete for ${item.sourceBucket}`, {
@@ -1494,7 +1500,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
             failed,
             skipped,
             processedFiles: transferred + failed + skipped,
-            totalFiles: toRepair.length,
+            totalFiles: sourceObjectCount,
             summary: `Skipping mismatched ${item.sourceBucket} object because overwrite is disabled`,
           })
           return
@@ -1523,7 +1529,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
             failed,
             skipped,
             processedFiles: transferred + failed + skipped,
-            totalFiles: toRepair.length,
+            totalFiles: sourceObjectCount,
             summary: `Repairing ${item.sourceBucket}: ${transferred} copied, ${failed} failed, ${skipped} skipped`,
           })
           return

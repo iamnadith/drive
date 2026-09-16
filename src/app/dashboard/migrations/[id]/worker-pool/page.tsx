@@ -53,6 +53,7 @@ type BucketStat = {
   status: string;
   totalObjects: number;
   transferredObjects: number;
+  skippedObjects: number;
   failedObjects: number;
   sourceBytes: number;
 };
@@ -67,6 +68,8 @@ type PoolSnapshot = {
   canceledJobs?: number;
   totalObjects?: number;
   transferred?: number;
+  skipped?: number;
+  failed?: number;
   processedFiles?: number;
   completedBytes?: number;
   buckets?: BucketStat[];
@@ -266,6 +269,7 @@ export default function MigrationWorkerPoolDetailsPage() {
   const canceledJobs = num(snapshot.canceledJobs);
   const totalObjects = num(snapshot.totalObjects);
   const transferredFiles = num(snapshot.transferred || snapshot.completedJobs);
+  const skippedFiles = num(snapshot.skipped);
   const processedFiles = num(snapshot.processedFiles);
   const onlineWorkers = num(snapshot.onlineWorkers);
   const activeTransfers = num(snapshot.activeTransfers);
@@ -311,7 +315,7 @@ export default function MigrationWorkerPoolDetailsPage() {
         />
       </div>
 
-      <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-4">
+      <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-5">
         <MetricCard
           label="Migration objects"
           value={formatNumber(totalObjects)}
@@ -329,6 +333,12 @@ export default function MigrationWorkerPoolDetailsPage() {
           value={formatNumber(transferredFiles)}
           detail={`${formatBytes(num(snapshot.completedBytes))} transferred`}
           icon={CircleCheck}
+        />
+        <MetricCard
+          label="Skipped files"
+          value={formatNumber(skippedFiles)}
+          detail="Already present or overwrite disabled"
+          icon={Files}
         />
         <MetricCard
           label="Online workers"
@@ -434,6 +444,8 @@ export default function MigrationWorkerPoolDetailsPage() {
               <TableHead>Target bucket</TableHead>
               <TableHead className="text-center">Status</TableHead>
               <TableHead className="text-center">Objects</TableHead>
+              <TableHead className="text-center">Skipped</TableHead>
+              <TableHead className="text-center">Failed</TableHead>
               <TableHead className="min-w-[190px]">Progress</TableHead>
             </TableRow>
           </TableHeader>
@@ -465,6 +477,12 @@ export default function MigrationWorkerPoolDetailsPage() {
                       {formatNumber(num(bucket.transferredObjects))} /{" "}
                       {formatNumber(num(bucket.totalObjects))}
                     </TableCell>
+                    <TableCell className="text-center tabular-nums">
+                      {formatNumber(num(bucket.skippedObjects))}
+                    </TableCell>
+                    <TableCell className="text-center tabular-nums text-destructive">
+                      {formatNumber(num(bucket.failedObjects))}
+                    </TableCell>
                     <TableCell>
                       <div className="flex flex-col gap-1.5">
                         <Progress value={value} className="h-2" />
@@ -482,7 +500,7 @@ export default function MigrationWorkerPoolDetailsPage() {
             ) : (
               <TableRow>
                 <TableCell
-                  colSpan={5}
+                  colSpan={7}
                   className="h-24 text-center text-muted-foreground"
                 >
                   Bucket statistics are not available yet.
