@@ -37,6 +37,7 @@ type BucketInfo = {
   storageClass: string
 }
 type BucketMetric = { bucket: string; objects: number; bytes: number; observedAt: string }
+type PublishedAccountMetrics = { objects: number; bytes: number }
 type BucketCorsRule = {
   id?: string
   allowedOrigins: string[]
@@ -487,6 +488,28 @@ async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Pro
   metricsCache.set(cacheKey, { expiresAt: Date.now() + METRICS_CACHE_TTL_MS, metrics })
   while (metricsCache.size > 64) metricsCache.delete(metricsCache.keys().next().value as string)
   return metrics
+}
+
+async function getPublishedAccountMetrics(account: AccountRow): Promise<PublishedAccountMetrics> {
+  if (!account.cloudflare_account_id) throw new Error(`Account ${account.label} has no Cloudflare account ID`)
+  const response = await fetchWithTimeout(`https://api.cloudflare.com/client/v4/accounts/${account.cloudflare_account_id}/r2/metrics`, {
+    headers: { Authorization: `Bearer ${account.api_token}` },
+  })
+  const payload = await response.json().catch(() => ({})) as {
+    result?: Record<string, { published?: { objects?: number | string; payloadSize?: number | string } }>
+    errors?: Array<{ message?: string }>
+  }
+  if (!response.ok || payload.errors?.length) {
+    throw new Error(payload.errors?.[0]?.message || `Published R2 metrics query failed (${response.status})`)
+  }
+  return Object.values(payload.result ?? {}).reduce(
+    (totals, storageClass) => {
+      totals.objects += Math.max(0, Math.trunc(Number(storageClass.published?.objects) || 0))
+      totals.bytes += Math.max(0, Math.trunc(Number(storageClass.published?.payloadSize) || 0))
+      return totals
+    },
+    { objects: 0, bytes: 0 }
+  )
 }
 
 async function recordBucketHistory(db: Client, input: { accountId: string; bucket: string; objects: number; bytes: number; deleted: boolean }) {
@@ -957,18 +980,20 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
       where account_id=$1 and settings_status<>'completed'
     `, [account.id])
     const staleSettingsCount = Number(staleSettings.rows[0]?.count ?? 0)
+    const publishedMetrics = await getPublishedAccountMetrics(account)
     await db.query(`
       update drive_accounts a set
         total_buckets=(select count(*) from drive_bucket_stats s where s.account_id=a.id),
-        total_objects=(select coalesce(sum(objects),0) from drive_bucket_stats s where s.account_id=a.id),
-        total_bytes=(select coalesce(sum(bytes),0) from drive_bucket_stats s where s.account_id=a.id),
-        sync_status='ok',sync_message=$2,last_synced_at=now(),updated_at=now()
+        total_objects=$2,total_bytes=$3,
+        sync_status='ok',sync_message=$4,last_synced_at=now(),updated_at=now()
       where a.id=$1
     `, [
       account.id,
+      publishedMetrics.objects,
+      publishedMetrics.bytes,
       staleSettingsCount > 0
         ? `R2 metrics synced; settings need retry for ${staleSettingsCount} bucket(s)`
-        : `R2 metrics and settings synced for ${buckets.length} buckets`,
+        : `R2 published metrics and settings synced for ${buckets.length} buckets`,
     ])
     await recordDailyAccountSnapshot(db, account.id)
     return {

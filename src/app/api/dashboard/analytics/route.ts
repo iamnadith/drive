@@ -343,7 +343,8 @@ async function getAnalyticsSqlSummary(): Promise<AnalyticsSqlSummaryRow> {
         select jsonb_agg(to_jsonb(daily) order by daily.captured_day asc)
         from (
           select captured_day::text as captured_day,account_id,account_label,account_email,buckets,objects,bytes,captured_at
-          from public.drive_analytics_active_account_snapshots
+          from public.drive_analytics_active_account_snapshots snapshots
+          join active_account current_account on current_account.id = snapshots.account_id
           order by captured_day desc
           limit 730
         ) daily
