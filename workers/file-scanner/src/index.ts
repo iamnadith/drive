@@ -12,9 +12,10 @@ type ClaimedTask = { kind: "migration" | "generic"; task: Row }
 type ClaimedCycle = { ok: true; owner: string; tasks: ClaimedTask[] } | { ok: true; skipped: string } | { ok: true; idle: true }
 const BUILD = 17
 const MAX_SECRET_LENGTH = 512
-// Keep database connections and R2 list requests bounded while allowing
-// independent bucket scans to make progress during the same cron/queue run.
-const SCAN_CONCURRENCY = 4
+// Workers Free allows only 10 ms of CPU per invocation. Keep each invocation
+// deliberately small; queue continuations immediately schedule the next
+// durable page, so large buckets still drain without oversized JSON/SQL work.
+const SCAN_CONCURRENCY = 1
 const DATABASE_RETRY_DELAYS_MS = [250, 1_000, 3_000]
 const DATABASE_RETRY_DELAYS_WITH_FINAL_BACKOFF_MS = [...DATABASE_RETRY_DELAYS_MS, 8_000]
 const DATABASE_QUERY_TIMEOUT_MS = 45_000
@@ -92,9 +93,10 @@ async function databaseTaskWithRetry<T>(env: Env, operation: (client: Client) =>
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError))
 }
-// R2 ListObjectsV2 accepts at most 1,000 keys. Larger pages reduce Worker and
-// PostgreSQL round trips while staying within the provider's documented bound.
-function pageSize(_env: Env) { return 1000 }
+// R2 accepts up to 1,000 keys, but that payload is too CPU-heavy for Workers
+// Free once it is parsed, serialized, and persisted through jsonb_recordset.
+// Smaller pages are independently committed and resumed by their cursor.
+function pageSize(_env: Env) { return 100 }
 async function listObjects(env: Env, account: Row, bucket: string, cursor: string | null, jurisdiction: string | null, prefix: string | null = null) {
   if (!account.cloudflare_account_id || !account.r2_access_key_id || !account.r2_secret_access_key) throw new Error("R2 S3 account credentials are missing")
   const jurisdictionPart = jurisdiction && jurisdiction !== "default" ? `.${jurisdiction.toLowerCase()}` : ""

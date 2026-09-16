@@ -16,12 +16,12 @@ test('the orchestrator creates scan work while scanner cron and queue continue d
   assert.match(scanner, /let schemaReady: Promise<void> \| null = null/)
 })
 
-test('scanner cron and queue drain up to four separately leased tasks concurrently', () => {
+test('scanner cron and queue drain one small durable page per free-plan invocation', () => {
   const scanner = read('workers/file-scanner/src/index.ts')
   const config = read('workers/file-scanner/wrangler.jsonc')
   const cycle = scanner.slice(scanner.indexOf('async function cycle('), scanner.indexOf('async function cycleAndContinue'))
   assert.match(config, /"triggers":\s*\{\s*"crons":\s*\["\* \* \* \* \*"\]/)
-  assert.match(scanner, /const SCAN_CONCURRENCY = 4/)
+  assert.match(scanner, /const SCAN_CONCURRENCY = 1/)
   assert.match(cycle, /for \(let slot = 0; slot < SCAN_CONCURRENCY; slot \+= 1\)/)
   assert.match(cycle, /const kinds = slot % 2 === 0 \? \["generic", "migration"\] as const : \["migration", "generic"\] as const/)
   assert.match(cycle, /for \(const kind of kinds\)[\s\S]*?claimGenericScan\(db, owner\)[\s\S]*?claim\(db, owner\)/)
@@ -71,7 +71,7 @@ test('scanner page commits are atomic, idempotent, and avoid per-page database r
   const scanner = read('workers/file-scanner/src/index.ts')
   const persist = scanner.slice(scanner.indexOf('async function persistMigrationPage'), scanner.indexOf('async function compare('))
   const generic = scanner.slice(scanner.indexOf('async function processGenericScan'), scanner.indexOf('async function finishState'))
-  assert.match(scanner, /function pageSize\(_env: Env\) \{ return 1000 \}/)
+  assert.match(scanner, /function pageSize\(_env: Env\) \{ return 100 \}/)
   assert.match(persist, /object_delta/)
   assert.match(persist, /byte_delta/)
   assert.match(persist, /on conflict\(scan_id,key\) do update/)
