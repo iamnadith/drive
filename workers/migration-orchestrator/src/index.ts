@@ -504,7 +504,6 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
         count(j.*)::bigint queued_objects,
         count(j.*) filter(where j.status='completed')::bigint completed_objects,
         count(j.*) filter(where j.status in('claimed','running'))::bigint active_objects,
-        count(j.*) filter(where j.status='failed')::bigint failed_objects,
         coalesce(sum(case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint transferred_objects,
         coalesce(sum(case when (j.result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (j.result->'items'->0->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,
         coalesce(sum(case when (j.result->'items'->0->>'skipped') ~ '^[0-9]+$' then (j.result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
