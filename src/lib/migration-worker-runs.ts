@@ -75,7 +75,7 @@ export function mapMigrationWorkerRun(row: MigrationWorkerRunRow): MigrationWork
 
 export async function listMigrationWorkerRuns(migrationId: string): Promise<MigrationWorkerRun[]> {
   const result = await queryDb<MigrationWorkerRunRow>(`
-    select r.id,r.job_reference,r.agent_id,coalesce(nullif(r.payload->>'workerGeneration','')::int,1) worker_generation,(r.payload->>'githubAbortRequestedAt') is not null abort_requested,r.status,r.external_run_id,r.payload->>'workerInstanceId' instance_id,
+    select r.id,r.job_reference,r.agent_id,greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1)) worker_generation,(r.payload->>'githubAbortRequestedAt') is not null abort_requested,r.status,r.external_run_id,r.payload->>'workerInstanceId' instance_id,
       (r.status='running' and a.status='online' and a.last_heartbeat_at>now()-interval '90 seconds') online,
       j.status job_status,j.payload job_payload,j.progress job_progress,j.last_heartbeat_at job_heartbeat,
       coalesce((r.payload->>'completedFiles')::bigint,0) completed_files,
@@ -90,7 +90,7 @@ export async function listMigrationWorkerRuns(migrationId: string): Promise<Migr
     -- and rendered an empty worker list).
     left join drive_repair_jobs j on j.id::text=r.job_reference
     where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1
-      and coalesce(nullif(r.payload->>'workerGeneration','')::int,1)=coalesce(nullif(m.options->>'workerGeneration','')::int,1)
+      and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1))
     order by r.created_at
     limit 100
   `, [migrationId])

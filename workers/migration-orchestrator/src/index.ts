@@ -498,10 +498,10 @@ async function ensureShards(db: Client, migration: Row) {
 }
 
 async function migrationLiveState(db: Client, migrationId: string) {
-  const generation = Number((await db.query(`select coalesce(nullif(options->>'workerGeneration','')::int,1) generation from drive_migrations where id=$1`, [migrationId])).rows[0]?.generation || 1)
+  const generation = Math.max(1, Number((await db.query(`select coalesce(nullif(options->>'workerGeneration','')::int,1) generation from drive_migrations where id=$1`, [migrationId])).rows[0]?.generation || 1))
   const [jobsResult, runsResult, aggregateResult, itemsResult] = await Promise.all([
     db.query(`select id,status,claimed_by_agent_id,progress,result,summary,error,created_at,updated_at,last_heartbeat_at from drive_repair_jobs where migration_id=$1 and mode='migration' and work_key like $2 order by updated_at desc limit 500`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`]),
-    db.query(`select r.id,r.status,r.job_reference,r.payload,r.created_at,r.updated_at,a.status agent_status,a.last_heartbeat_at agent_heartbeat from drive_agent_runs r left join drive_agents a on a.id=r.agent_id where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1 and coalesce(nullif(r.payload->>'workerGeneration','')::int,1)=$2 order by r.created_at`, [migrationId, generation]),
+    db.query(`select r.id,r.status,r.job_reference,r.payload,r.created_at,r.updated_at,a.status agent_status,a.last_heartbeat_at agent_heartbeat from drive_agent_runs r left join drive_agents a on a.id=r.agent_id where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=$2 order by r.created_at`, [migrationId, generation]),
     db.query(`select count(*)::bigint total_jobs,count(*) filter(where status='pending')::bigint queued_jobs,count(*) filter(where status in('claimed','running'))::bigint running_jobs,count(*) filter(where status='completed')::bigint completed_jobs,count(*) filter(where status='failed')::bigint failed_jobs,count(*) filter(where status='canceled')::bigint canceled_jobs,coalesce(sum(case when (result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (result->'items'->0->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint transferred_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then 1 else 0 end),0)::bigint copied_objects,coalesce(sum(case when (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,coalesce(sum(case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' and jsonb_typeof(result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then coalesce(nullif(payload->'inventoryObjects'->0->>'size','')::bigint,0) else 0 end),0)::bigint completed_bytes from drive_repair_jobs where migration_id=$1 and mode='migration' and work_key like $2`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`]),
     db.query(`select id,source_bucket,target_bucket,source_objects,source_bytes,slurper_status,progress,updated_at from drive_migration_items where migration_id=$1 order by created_at`, [migrationId]),
   ])
@@ -792,7 +792,7 @@ async function finalizeVerifiedBuckets(db: Client, migration: Row, generation: n
   `, [migration.id, generation])
 }
 async function finalizeShards(db: Client, migration: Row, generation: number, shardCount: number) {
-  const currentGeneration = await db.query(`select 1 from drive_migrations where id=$1 and status in('running','verifying') and coalesce(nullif(options->>'workerGeneration','')::int,1)=$2 limit 1`, [migration.id, generation])
+  const currentGeneration = await db.query(`select 1 from drive_migrations where id=$1 and status in('running','verifying') and greatest(1,coalesce(nullif(options->>'workerGeneration','')::int,1))=$2 limit 1`, [migration.id, generation])
   if (!currentGeneration.rowCount) return { complete: false, superseded: true, jobs: {} }
   const counts = await db.query(`select status,count(*)::int count from drive_repair_jobs where migration_id=$1 and work_key like $2 group by status`, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
   const jobs = Object.fromEntries(counts.rows.map((row) => [row.status, Number(row.count)]))
@@ -1157,7 +1157,7 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
   const configRows = await db.query(`select key,value from drive_app_settings where key='migration-orchestrator'`)
   const orchestration = configRows.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
   const budget = integer(orchestration.maxDispatchesPerCycle, 100, 1, 100)
-  const stranded = await db.query(`select id from drive_agent_runs where run_type='github_dispatch' and status='pending' and payload->>'migrationId'=$1 and coalesce(nullif(payload->>'workerGeneration','')::int,1)=$2 and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit $3`, [migration.id, generation, budget])
+  const stranded = await db.query(`select id from drive_agent_runs where run_type='github_dispatch' and status='pending' and payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2 and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit $3`, [migration.id, generation, budget])
   for (const row of stranded.rows) await env.GITHUB_DISPATCH_QUEUE.send({ intentId: row.id }, { contentType: "json" })
   // Every registered GitHub workflow contributes its configured capacity to
   // every active worker-pool migration. Re-read this set on every cycle so a
@@ -1193,7 +1193,7 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
     const workflowKey = `${account}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
     if (blockedWorkflows.has(workflowKey)) continue
     const remoteRuns = githubRunsByWorkflow.get(workflowKey) || []
-    const staleRuns = await db.query(`select id,payload,external_run_id from drive_agent_runs where agent_id=$1 and run_type='github_dispatch' and status in('pending','running') and updated_at<now()-interval '3 minutes' and payload->>'migrationId'=$2 and coalesce(nullif(payload->>'workerGeneration','')::int,1)=$3`, [agent.id, migration.id, generation])
+    const staleRuns = await db.query(`select id,payload,external_run_id from drive_agent_runs where agent_id=$1 and run_type='github_dispatch' and status in('pending','running') and updated_at<now()-interval '3 minutes' and payload->>'migrationId'=$2 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$3`, [agent.id, migration.id, generation])
     for (const stale of staleRuns.rows) {
       const instanceId = String(stale.payload?.workerInstanceId || "")
       const remote = remoteRuns.find((run) => (stale.external_run_id && String(run.id) === String(stale.external_run_id)) || (instanceId && String(run.display_title || "").includes(instanceId)))
@@ -1312,7 +1312,7 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
     const intent = result.rows[0]
     if (!intent || intent.external_run_id || ["completed", "failed", "canceled"].includes(intent.status)) return "terminal"
     if (intent.payload?.pool === true) {
-      const current = await db.query(`select m.status,coalesce(nullif(m.options->>'workerGeneration','')::int,1) generation from drive_migrations m where m.id=$1 for share`, [intent.payload.migrationId])
+      const current = await db.query(`select m.status,greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1)) generation from drive_migrations m where m.id=$1 for share`, [intent.payload.migrationId])
       const migration = current.rows[0]
       const intentGeneration = integer(intent.payload.workerGeneration, 1, 1, 1000000)
       if (!migration || !["running", "verifying"].includes(String(migration.status)) || Number(migration.generation) !== intentGeneration) {

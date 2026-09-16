@@ -97,14 +97,14 @@ async function reserveMigrationWorkerGeneration(migrationId: string, expectedSta
       update drive_migrations m
       set status='running',completed_at=null,sync_status='syncing',
           sync_message='Worker-pool attempt reserved; File Scanner inventory pending',
-          options=jsonb_set(coalesce(m.options,'{}'::jsonb),'{workerGeneration}',to_jsonb(coalesce(nullif(m.options->>'workerGeneration','')::int,1)+1),true),
+          options=jsonb_set(coalesce(m.options,'{}'::jsonb),'{workerGeneration}',to_jsonb(greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1))+1),true),
           last_synced_at=now(),updated_at=now()
       where m.id=$1 and m.status=$2
         and $2=any(array['failed','verification_failed','canceled','aborted']::text[])
         and not exists (
           select 1 from drive_agent_runs r
           where r.run_type='github_dispatch' and r.payload->>'migrationId'=m.id::text
-            and coalesce(nullif(r.payload->>'workerGeneration','')::int,1)=coalesce(nullif(m.options->>'workerGeneration','')::int,1)
+            and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1))
             and r.status in('pending','running')
         )
         and not exists (
