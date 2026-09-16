@@ -577,6 +577,8 @@ export async function getMigrationDetailBootstrap(
           'id',run.id,
           'job_reference',run.job_reference,
           'agent_id',run.agent_id,
+          'worker_generation',coalesce(nullif(run.payload->>'workerGeneration','')::int,1),
+          'abort_requested',(run.payload->>'githubAbortRequestedAt') is not null,
           'status',run.status,
           'online',(run.status='running' and run.agent_status='online' and run.agent_last_heartbeat>now()-interval '90 seconds'),
           'external_run_id',run.external_run_id,
@@ -600,6 +602,7 @@ export async function getMigrationDetailBootstrap(
           join selected_migration migration on migration.options->>'executionMode'='migration_workers'
             and run.run_type='github_dispatch'
             and run.payload->>'migrationId'=migration.id::text
+            and coalesce(nullif(run.payload->>'workerGeneration','')::int,1)=coalesce(nullif(migration.options->>'workerGeneration','')::int,1)
           left join public.drive_agents agent on agent.id=run.agent_id
           order by run.created_at asc
           limit 100

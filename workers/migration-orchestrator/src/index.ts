@@ -484,16 +484,25 @@ async function ensureShards(db: Client, migration: Row) {
   const total = await db.query(`select count(*)::int count from drive_repair_jobs where migration_id=$1 and work_key like $2`, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
   const shardCount = Number(total.rows[0]?.count || 0)
   if (!shardCount) {
-    await db.query(`update drive_migration_items set slurper_status='completed',source_objects=0,source_bytes=00,updated_at=now() where migration_id=$1`, [migration.id])
+    const inventory = await db.query(`select coalesce(sum(source_objects),0)::bigint objects from drive_migration_items where migration_id=$1`, [migration.id])
+    const objects = Number(inventory.rows[0]?.objects || 0)
+    if (objects > 0) {
+      const message = `File Scanner found ${objects} source object(s), but this worker-pool generation created no durable migration jobs. Retry to rebuild the queue.`
+      await db.query(`update drive_migration_items set slurper_status='precheck_failed',progress=coalesce(progress,'{}'::jsonb)||jsonb_build_object('stage','queue_materialization_failed','lastError',$2::text),last_progress_at=now(),updated_at=now() where migration_id=$1 and coalesce(slurper_status,'')<>'worker_bucket_create_failed'`, [migration.id, message])
+      await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id, message])
+      return { generation, shardCount, created, inventoryPending: 0, queuePending: 0, terminalFailure: true, targetBuckets }
+    }
+    await db.query(`update drive_migration_items set slurper_status='completed',source_objects=0,source_bytes=0,updated_at=now() where migration_id=$1`, [migration.id])
   }
   return { generation, shardCount, created, inventoryPending: 0, queuePending: 0, targetBuckets }
 }
 
 async function migrationLiveState(db: Client, migrationId: string) {
+  const generation = Number((await db.query(`select coalesce(nullif(options->>'workerGeneration','')::int,1) generation from drive_migrations where id=$1`, [migrationId])).rows[0]?.generation || 1)
   const [jobsResult, runsResult, aggregateResult, itemsResult] = await Promise.all([
-    db.query(`select id,status,claimed_by_agent_id,progress,result,summary,error,created_at,updated_at,last_heartbeat_at from drive_repair_jobs where migration_id=$1 and mode='migration' order by updated_at desc limit 500`, [migrationId]),
-    db.query(`select r.id,r.status,r.job_reference,r.payload,r.created_at,r.updated_at,a.status agent_status,a.last_heartbeat_at agent_heartbeat from drive_agent_runs r left join drive_agents a on a.id=r.agent_id where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1 order by r.created_at`, [migrationId]),
-    db.query(`select count(*)::bigint total_jobs,count(*) filter(where status='pending')::bigint queued_jobs,count(*) filter(where status in('claimed','running'))::bigint running_jobs,count(*) filter(where status='completed')::bigint completed_jobs,count(*) filter(where status='failed')::bigint failed_jobs,count(*) filter(where status='canceled')::bigint canceled_jobs,coalesce(sum(case when (result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (result->'items'->0->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint transferred_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then 1 else 0 end),0)::bigint copied_objects,coalesce(sum(case when (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,coalesce(sum(case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' and jsonb_typeof(result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then coalesce(nullif(payload->'inventoryObjects'->0->>'size','')::bigint,0) else 0 end),0)::bigint completed_bytes from drive_repair_jobs where migration_id=$1 and mode='migration'`, [migrationId]),
+    db.query(`select id,status,claimed_by_agent_id,progress,result,summary,error,created_at,updated_at,last_heartbeat_at from drive_repair_jobs where migration_id=$1 and mode='migration' and work_key like $2 order by updated_at desc limit 500`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`]),
+    db.query(`select r.id,r.status,r.job_reference,r.payload,r.created_at,r.updated_at,a.status agent_status,a.last_heartbeat_at agent_heartbeat from drive_agent_runs r left join drive_agents a on a.id=r.agent_id where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1 and coalesce(nullif(r.payload->>'workerGeneration','')::int,1)=$2 order by r.created_at`, [migrationId, generation]),
+    db.query(`select count(*)::bigint total_jobs,count(*) filter(where status='pending')::bigint queued_jobs,count(*) filter(where status in('claimed','running'))::bigint running_jobs,count(*) filter(where status='completed')::bigint completed_jobs,count(*) filter(where status='failed')::bigint failed_jobs,count(*) filter(where status='canceled')::bigint canceled_jobs,coalesce(sum(case when (result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (result->'items'->0->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint transferred_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then 1 else 0 end),0)::bigint copied_objects,coalesce(sum(case when (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,coalesce(sum(case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' and jsonb_typeof(result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then coalesce(nullif(payload->'inventoryObjects'->0->>'size','')::bigint,0) else 0 end),0)::bigint completed_bytes from drive_repair_jobs where migration_id=$1 and mode='migration' and work_key like $2`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`]),
     db.query(`select id,source_bucket,target_bucket,source_objects,source_bytes,slurper_status,progress,updated_at from drive_migration_items where migration_id=$1 order by created_at`, [migrationId]),
   ])
   const jobs = jobsResult.rows
@@ -516,7 +525,7 @@ async function migrationLiveState(db: Client, migrationId: string) {
   }
   const snapshot = { migrationId, ...totals, buckets, updatedAt: new Date().toISOString() }
   await db.query(`insert into drive_migration_worker_live_state(migration_id,snapshot,updated_at) values($1,$2::jsonb,now()) on conflict(migration_id) do update set snapshot=excluded.snapshot,updated_at=now()`, [migrationId, JSON.stringify(snapshot)])
-  return { snapshot, jobs, runs }
+  return { snapshot: { ...snapshot, workerGeneration: generation }, jobs, runs, workerGeneration: generation }
 }
 async function recoverJobs(db: Client, migrationId: string, generation: number, shardCount: number) {
   const result = await db.query(`
@@ -783,6 +792,8 @@ async function finalizeVerifiedBuckets(db: Client, migration: Row, generation: n
   `, [migration.id, generation])
 }
 async function finalizeShards(db: Client, migration: Row, generation: number, shardCount: number) {
+  const currentGeneration = await db.query(`select 1 from drive_migrations where id=$1 and status in('running','verifying') and coalesce(nullif(options->>'workerGeneration','')::int,1)=$2 limit 1`, [migration.id, generation])
+  if (!currentGeneration.rowCount) return { complete: false, superseded: true, jobs: {} }
   const counts = await db.query(`select status,count(*)::int count from drive_repair_jobs where migration_id=$1 and work_key like $2 group by status`, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
   const jobs = Object.fromEntries(counts.rows.map((row) => [row.status, Number(row.count)]))
   if ((jobs.completed || 0) !== shardCount) {
@@ -1142,10 +1153,11 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
   return { verification: "completed", missing, mismatched, extra, backendOrchestrator: completion.backendOrchestrator }
 }
 async function dispatchWorkers(db: Client, env: Env, migration: Row) {
+  const generation = integer(opts(migration).workerGeneration, 1, 1, 1000000)
   const configRows = await db.query(`select key,value from drive_app_settings where key='migration-orchestrator'`)
   const orchestration = configRows.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
   const budget = integer(orchestration.maxDispatchesPerCycle, 100, 1, 100)
-  const stranded = await db.query(`select id from drive_agent_runs where run_type='github_dispatch' and status='pending' and payload->>'migrationId'=$1 and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit $2`, [migration.id, budget])
+  const stranded = await db.query(`select id from drive_agent_runs where run_type='github_dispatch' and status='pending' and payload->>'migrationId'=$1 and coalesce(nullif(payload->>'workerGeneration','')::int,1)=$2 and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit $3`, [migration.id, generation, budget])
   for (const row of stranded.rows) await env.GITHUB_DISPATCH_QUEUE.send({ intentId: row.id }, { contentType: "json" })
   // Every registered GitHub workflow contributes its configured capacity to
   // every active worker-pool migration. Re-read this set on every cycle so a
@@ -1181,7 +1193,7 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
     const workflowKey = `${account}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
     if (blockedWorkflows.has(workflowKey)) continue
     const remoteRuns = githubRunsByWorkflow.get(workflowKey) || []
-    const staleRuns = await db.query(`select id,payload,external_run_id from drive_agent_runs where agent_id=$1 and run_type='github_dispatch' and status in('pending','running') and updated_at<now()-interval '3 minutes' and payload->>'migrationId'=$2`, [agent.id, migration.id])
+    const staleRuns = await db.query(`select id,payload,external_run_id from drive_agent_runs where agent_id=$1 and run_type='github_dispatch' and status in('pending','running') and updated_at<now()-interval '3 minutes' and payload->>'migrationId'=$2 and coalesce(nullif(payload->>'workerGeneration','')::int,1)=$3`, [agent.id, migration.id, generation])
     for (const stale of staleRuns.rows) {
       const instanceId = String(stale.payload?.workerInstanceId || "")
       const remote = remoteRuns.find((run) => (stale.external_run_id && String(run.id) === String(stale.external_run_id)) || (instanceId && String(run.display_title || "").includes(instanceId)))
@@ -1209,7 +1221,7 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
     const vacancies = Math.min(workflowVacancies, Math.max(0, Number(agent.worker_count || 1) - Number(active.rows[0]?.count || 0)))
     for (let slot = 0; slot < vacancies && queued < budget; slot += 1) {
       const workerInstanceId = crypto.randomUUID()
-      const intent = await db.query(`insert into drive_agent_runs(id,agent_id,run_type,status,payload,summary,created_at,updated_at) values(gen_random_uuid(),$1,'github_dispatch','pending',$2::jsonb,'Durable GitHub dispatch intent queued',now(),now()) returning id`, [agent.id, JSON.stringify({ migrationId: migration.id, pool: true, workerInstanceId, source: "migration_orchestrator", phase: "created" })])
+      const intent = await db.query(`insert into drive_agent_runs(id,agent_id,run_type,status,payload,summary,created_at,updated_at) values(gen_random_uuid(),$1,'github_dispatch','pending',$2::jsonb,'Durable GitHub dispatch intent queued',now(),now()) returning id`, [agent.id, JSON.stringify({ migrationId: migration.id, workerGeneration: generation, pool: true, workerInstanceId, source: "migration_orchestrator", phase: "created" })])
       await env.GITHUB_DISPATCH_QUEUE.send({ intentId: intent.rows[0].id }, { contentType: "json" })
       await db.query(`update drive_agent_runs set payload=payload||'{"phase":"queued"}'::jsonb,summary='Queued for independent GitHub dispatch consumer',updated_at=now() where id=$1`, [intent.rows[0].id])
       workflowRuns.add(`pending:${intent.rows[0].id}`)
@@ -1299,6 +1311,15 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
     const result = await db.query(`select r.*,a.github_repo_owner,a.github_repo_name,a.github_workflow_file,a.github_ref,a.github_token,a.status agent_status from drive_agent_runs r join drive_agents a on a.id=r.agent_id where r.id=$1 for update of r`, [intentId])
     const intent = result.rows[0]
     if (!intent || intent.external_run_id || ["completed", "failed", "canceled"].includes(intent.status)) return "terminal"
+    if (intent.payload?.pool === true) {
+      const current = await db.query(`select m.status,coalesce(nullif(m.options->>'workerGeneration','')::int,1) generation from drive_migrations m where m.id=$1 for share`, [intent.payload.migrationId])
+      const migration = current.rows[0]
+      const intentGeneration = integer(intent.payload.workerGeneration, 1, 1, 1000000)
+      if (!migration || !["running", "verifying"].includes(String(migration.status)) || Number(migration.generation) !== intentGeneration) {
+        await db.query(`update drive_agent_runs set status='canceled',summary='Superseded migration worker-pool generation; dispatch skipped',completed_at=now(),updated_at=now() where id=$1 and status='pending'`, [intent.id])
+        return "terminal"
+      }
+    }
     if (intent.agent_status === "disabled" || !intent.github_token) throw new Error("Registered workflow is disabled or missing its GitHub token")
     if (await reconcileGitHubIntent(db, intent, intent)) return "reconciled"
     const phase = String(intent.payload?.phase || "created")

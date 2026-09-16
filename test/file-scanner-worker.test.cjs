@@ -62,7 +62,7 @@ test('transient scanner failures retry without an attempt ceiling and keep the d
 
 test('Super Slurper no-overwrite progress counts skipped existing objects and only finalizes them after clean verification', () => {
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
-  assert.match(orchestrator, /const alreadyPresent = opts\(migration\)\.overwrite === false \? Math\.min\(objects, skipped\) : 0/)
+  assert.match(orchestrator, /const exclusiveSkipped = Math\.max\(0, Math\.min\(objects \|\| skipped, skipped - cumulative\)\)[\s\S]*?const alreadyPresent = opts\(migration\)\.overwrite === false \? exclusiveSkipped : 0/)
   assert.match(orchestrator, /transferredObjects: countedTransferred, copiedObjects:/)
   assert.match(orchestrator, /alreadyPresentObjects: alreadyPresent/)
   assert.match(orchestrator, /if \(opts\(migration\)\.executionMode !== "migration_workers" && opts\(migration\)\.overwrite === false\)[\s\S]*?v\.missing_objects=0 and v\.mismatched_objects=0/)

@@ -91,6 +91,47 @@ async function wakeMigrationOrchestrator(options?: { requireFileScanner?: boolea
   if (!response.ok) throw new Error(`Migration Orchestrator wake-up returned HTTP ${response.status}`)
 }
 
+async function reserveMigrationWorkerGeneration(migrationId: string, expectedStatus: string, itemIds: string[], action: "repair_migration" | "retry_migration") {
+  const result = await queryDb<{ generation: string }>(`
+    with claimed as (
+      update drive_migrations m
+      set status='running',completed_at=null,sync_status='syncing',
+          sync_message='Worker-pool attempt reserved; File Scanner inventory pending',
+          options=jsonb_set(coalesce(m.options,'{}'::jsonb),'{workerGeneration}',to_jsonb(coalesce(nullif(m.options->>'workerGeneration','')::int,1)+1),true),
+          last_synced_at=now(),updated_at=now()
+      where m.id=$1 and m.status=$2
+        and $2=any(array['failed','verification_failed','canceled','aborted']::text[])
+        and not exists (
+          select 1 from drive_agent_runs r
+          where r.run_type='github_dispatch' and r.payload->>'migrationId'=m.id::text
+            and coalesce(nullif(r.payload->>'workerGeneration','')::int,1)=coalesce(nullif(m.options->>'workerGeneration','')::int,1)
+            and r.status in('pending','running')
+        )
+        and not exists (
+          select 1 from drive_migration_orchestrator_state s
+          where s.id=true and s.status='running' and s.lease_expires_at>now()
+        )
+      returning m.id, m.options->>'workerGeneration' generation
+    ), reset_items as (
+      update drive_migration_items i
+      set slurper_job_id=null,slurper_status='queued',
+          progress=(coalesce(i.progress,'{}'::jsonb)||jsonb_build_object(
+            'stage','awaiting_source_scan',
+            'migrationInventory',jsonb_build_object('generation',claimed.generation::int,'status','pending'),
+            'migrationQueue',jsonb_build_object('generation',claimed.generation::int,'status','pending'),
+            'repairWorker',null,'live',null,
+            'lastAction',jsonb_build_object('action',$4::text,'at',now())
+          )),
+          last_progress_at=now(),updated_at=now()
+      from claimed
+      where i.migration_id=claimed.id and i.id=any($3::uuid[])
+      returning i.id
+    )
+    select generation from claimed
+  `, [migrationId, expectedStatus, itemIds, action])
+  return result.rows[0] ? Number(result.rows[0].generation) : null
+}
+
 async function waitForOrchestratorCycleToRelease(migrationId: string): Promise<boolean> {
   const deadline = Date.now() + 5_000
   while (Date.now() < deadline) {
@@ -399,13 +440,31 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         }
       }
 
-      const warningCount = remoteCancellationWarnings.length + cancelRepairResult.blockedJobs.length
+      let orchestratorWakeError: string | null = null
+      const workerMode = migration.options.executionMode === "migration_workers"
+      if (workerMode) {
+        try {
+          // The orchestrator owns unclaimed/pending GitHub dispatches too. Wake
+          // it immediately so it cancels those runs instead of waiting for cron.
+          await wakeMigrationOrchestrator()
+        } catch (error) {
+          orchestratorWakeError = error instanceof Error ? error.message : String(error)
+        }
+      }
+      const activeDispatches = workerMode
+        ? Number((await queryDb<{ count: string }>(`select count(*)::text count from drive_agent_runs where run_type='github_dispatch' and payload->>'migrationId'=$1 and status in('pending','running')`, [id])).rows[0]?.count || 0)
+        : 0
+      const workerCancellationPending = activeDispatches > 0
+
+      const warningCount = remoteCancellationWarnings.length + cancelRepairResult.blockedJobs.length + (orchestratorWakeError ? 1 : 0)
       await updateMigration(id, {
         status: "canceled",
         completedAt: null,
-        syncStatus: warningCount ? "error" : "ok",
+        syncStatus: warningCount ? "error" : workerCancellationPending ? "syncing" : "ok",
         syncMessage: warningCount
-          ? `Migration canceled; remote stop was not confirmed for ${warningCount} job(s)`
+          ? `Migration canceled; remote stop was not confirmed for ${remoteCancellationWarnings.length + cancelRepairResult.blockedJobs.length} worker job(s)${orchestratorWakeError ? `; Migration Orchestrator wake failed: ${orchestratorWakeError}` : ""}`
+          : workerCancellationPending
+            ? `Migration canceled; waiting for ${activeDispatches} GitHub worker run(s) to stop`
           : `Migration canceled${cancelRepairResult.abortedJobs > 0 ? `; aborted ${cancelRepairResult.abortedJobs} worker job(s)` : ""}`,
         lastSyncedAt: new Date().toISOString(),
       })
@@ -414,6 +473,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         abortedRepairJobs: cancelRepairResult.abortedJobs,
         abortedSlurperJobs: candidates.length,
         remoteCancellationWarnings: [...cancelRepairResult.blockedJobs, ...remoteCancellationWarnings],
+        orchestratorWakeError,
+        workerCancellationPending,
       }, { status: 200 })
     }
 
@@ -654,6 +715,15 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       if (!orchestratorSettings.fileScannerEnabled || !orchestratorSettings.fileScannerUrl || orchestratorSettings.fileScannerSecret.length < 24) {
         return NextResponse.json({ error: "File Scanner must be configured and enabled before worker-pool repair" }, { status: 409 })
       }
+      const workerMode = migration.options.executionMode === "migration_workers"
+      let nextGeneration = 0
+      if (workerMode) {
+        const reserved = await reserveMigrationWorkerGeneration(id, migration.status, items.map((item) => item.id), "repair_migration")
+        if (reserved === null) {
+          return NextResponse.json({ error: "This worker-pool migration is active, or its previous workers are still stopping. Wait for the current attempt to finish before starting another pool." }, { status: 409 })
+        }
+        nextGeneration = reserved
+      }
       const activeWorkerJobs = (await listRepairJobsByMigration(id, 500).catch(() => []))
         .filter((job) => ["pending", "claimed", "running"].includes(job.status))
       await Promise.all(activeWorkerJobs.map((job) => abortRepairJob(job.id).catch(() => undefined)))
@@ -669,13 +739,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           return NextResponse.json({ error: "Migration Orchestrator is still finishing the previous Super Slurper cycle. Retry worker-pool repair shortly." }, { status: 409 })
         }
       }
-      const previousGeneration = migration.options.executionMode === "migration_workers"
-        ? (typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
-          ? Math.max(1, Math.floor(migration.options.workerGeneration))
-          : 1)
-        : 0
-      const nextGeneration = previousGeneration + 1
-      await queryDb(`
+      if (!workerMode) await queryDb(`
         update drive_migration_items
         set slurper_job_id=null,
             -- The orchestrator owns scanner-task creation. Keep this state
@@ -715,11 +779,6 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     if (action === "retry_migration") {
       const workerMode = migration.options.executionMode === "migration_workers"
-      if (workerMode) {
-        const activeWorkerJobs = (await listRepairJobsByMigration(id, 500).catch(() => []))
-          .filter((job) => ["pending", "claimed", "running"].includes(job.status))
-        await Promise.all(activeWorkerJobs.map((job) => abortRepairJob(job.id).catch(() => undefined)))
-      }
       const candidates = items.filter((item) => {
         const s = normalizeStatus(item.slurperStatus)
         const verifyStatus = readVerifyStatus(
@@ -729,7 +788,21 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         return true
       })
 
+      let workerGeneration = 0
+      if (workerMode) {
+        if (!candidates.length) return NextResponse.json({ error: "No failed or incomplete buckets need a worker-pool retry" }, { status: 409 })
+        const reserved = await reserveMigrationWorkerGeneration(id, migration.status, candidates.map((item) => item.id), "retry_migration")
+        if (reserved === null) {
+          return NextResponse.json({ error: "This worker-pool migration is active, or its previous workers are still stopping. Wait for the current attempt to finish before retrying." }, { status: 409 })
+        }
+        workerGeneration = reserved
+        const activeWorkerJobs = (await listRepairJobsByMigration(id, 500).catch(() => []))
+          .filter((job) => ["pending", "claimed", "running"].includes(job.status))
+        await Promise.all(activeWorkerJobs.map((job) => abortRepairJob(job.id).catch(() => undefined)))
+      }
+
       for (const item of candidates) {
+        if (workerMode) continue
         const prevProgress = isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
         const prevCumulative = isRecord(prevProgress.slurperCumulative)
           ? (prevProgress.slurperCumulative as Record<string, unknown>)
@@ -781,19 +854,14 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           manualCompleted: false,
           targetActivatedAt: undefined,
           ...(workerMode
-            ? {
-                workerGeneration:
-                  (typeof migration.options.workerGeneration === "number" && Number.isFinite(migration.options.workerGeneration)
-                    ? Math.max(1, Math.floor(migration.options.workerGeneration))
-                    : 1) + 1,
-              }
+            ? { workerGeneration }
             : {}),
         },
       })
 
       await wakeMigrationOrchestrator()
 
-      return NextResponse.json({ ok: true, retried: candidates.length }, { status: 200 })
+      return NextResponse.json({ ok: true, retried: candidates.length, ...(workerMode ? { generation: workerGeneration, executionMode: "migration_workers" } : {}) }, { status: 200 })
     }
 
     return NextResponse.json({ error: "Unsupported action" }, { status: 400 })

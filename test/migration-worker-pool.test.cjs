@@ -75,12 +75,14 @@ test('canceled migration and bucket states cannot be masked by stale verifying s
   const cancelRoute = read('src/app/api/migrations/[id]/action/route.ts')
   const itemRoute = read('src/app/api/migrations/[id]/items/[itemId]/action/route.ts')
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const cancelAction = cancelRoute.slice(cancelRoute.indexOf('if (action === "cancel_migration") {'), cancelRoute.indexOf('if (action === "settings_sync")'))
   assert.match(bucketState, /isAbortedStatus\(durableItemStatus\)[\s\S]*?stableLive\.status/)
   assert.match(bucketState, /if \(isAbortedStatus\(item\.slurperStatus\)\) return item\.slurperStatus/)
   assert.match(details, /\["completed", "failed", "verification_failed", "canceled"\]\.includes\(migration\.status\)/)
   assert.match(details, /migration\.status === "completed" \? formatDate\(migration\.completedAt\) : "-"/)
   assert.match(cancelRoute, /status: "canceled",\s*completedAt: null,\s*syncStatus: "syncing",\s*syncMessage: "Cancellation requested"/)
   assert.match(cancelRoute, /abortedProgress\(item, "aborted_all"/)
+  assert.match(cancelAction, /const workerMode = migration\.options\.executionMode === "migration_workers"[\s\S]*?if \(workerMode\)[\s\S]*?await wakeMigrationOrchestrator\(\)/)
   assert.match(itemRoute, /migration\.status === "canceled"[\s\S]*?status: 409/)
   assert.match(orchestrator, /select id from drive_migrations where id=\$1 and status in\('running','verifying'\) for update/)
   assert.match(orchestrator, /where id=\$1 and status in\('running','verifying'\)/)
@@ -378,13 +380,22 @@ test('Super Slurper repair re-enters the shared worker-pool scan, queue, copy, a
 
 test('worker-pool repair stays queued until the orchestrator durably creates a scanner task', () => {
   const action = read('src/app/api/migrations/[id]/action/route.ts')
-  const repair = action.slice(action.indexOf('if (action === "repair_migration")'), action.indexOf('if (action === "retry_migration")'))
+  const reservation = action.slice(action.indexOf('async function reserveMigrationWorkerGeneration'), action.indexOf('async function waitForOrchestratorCycleToRelease'))
   const details = read('src/app/dashboard/migrations/[id]/page.tsx')
-  assert.match(repair, /slurper_status='queued'/)
-  assert.match(repair, /'stage','awaiting_source_scan'/)
-  assert.match(repair, /migrationInventory.*'status','pending'/)
-  assert.doesNotMatch(repair, /slurper_status='scanning'/)
+  assert.match(reservation, /slurper_status='queued'/)
+  assert.match(reservation, /'stage','awaiting_source_scan'/)
+  assert.match(reservation, /migrationInventory.*'status','pending'/)
+  assert.match(reservation, /r\.status in\('pending','running'\)/)
+  assert.match(reservation, /drive_migration_orchestrator_state/)
+  assert.match(details, /Retry with worker pool/)
   assert.match(details, /effectiveMigrationStatus === "canceled"/)
+})
+
+test('worker-pool queue failures cannot be mistaken for an empty successful migration', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(orchestrator, /if \(objects > 0\)[\s\S]*?queue_materialization_failed[\s\S]*?status='failed'[\s\S]*?terminalFailure: true/)
+  assert.match(orchestrator, /work_key like \$2[\s\S]*?generation:\$\{generation\}:inventory/)
+  assert.match(orchestrator, /Superseded migration worker-pool generation; dispatch skipped/)
 })
 
 test('worker-pool repair reconciles destinations before copy and bucket preparation stays worker-owned', () => {

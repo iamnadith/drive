@@ -69,6 +69,7 @@ type Migration = {
   status: "draft" | "running" | "verifying" | "completed" | "failed" | "verification_failed" | "canceled"
   options: {
     executionMode?: "super_slurper" | "migration_workers"
+    workerGeneration?: number
     workerShardCount?: number
     overwrite?: boolean
     concurrency?: number
@@ -173,6 +174,8 @@ type MigrationWorkerRun = {
   id: string
   jobId?: string
   agentId: string
+  workerGeneration?: number
+  abortRequested?: boolean
   status: string
   online: boolean
   externalRunId?: string
@@ -258,6 +261,7 @@ function migrationWorkerBadge(status: string | undefined) {
   const value = String(status || "").toLowerCase()
   if (value === "completed") return <Badge className="bg-green-600">Worker completed</Badge>
   if (value === "deploying") return <Badge className="bg-yellow-600">Worker deploying</Badge>
+  if (value === "aborting") return <Badge className="bg-yellow-600">Worker stopping</Badge>
   if (value === "running") return <Badge className="bg-primary text-primary-foreground">Worker running</Badge>
   if (value === "verifying") return <Badge className="bg-purple-600">Worker verifying</Badge>
   if (value === "claimed") return <Badge className="bg-sky-600">Worker claimed</Badge>
@@ -1780,7 +1784,7 @@ export default function MigrationDetailsPage() {
                     {busyAction !== "start" && busyAction !== "retry_migration" ? (
                       <Play className="h-4 w-4 mr-0" />
                     ) : null}
-                    {effectiveMigrationStatus === "failed" ? "Retry" : "Start"}
+                    {effectiveMigrationStatus === "failed" ? workerPoolMigration ? "Retry with worker pool" : "Retry" : "Start"}
                   </Button>
                   ) : null}
 
@@ -1831,7 +1835,9 @@ export default function MigrationDetailsPage() {
                       variant="outline"
                     >
                       {busyAction !== "repair_migration" ? <RefreshCw className="h-4 w-4 mr-0" /> : null}
-                      {workerPoolMigration ? "Repair" : "Repair with worker pool"}
+                      {workerPoolMigration
+                        ? ["failed", "verification_failed", "canceled", "aborted"].includes(effectiveMigrationStatus) ? "Retry with worker pool" : "Repair with worker pool"
+                        : "Repair with worker pool"}
                     </Button>
                   ) : null}
 
@@ -1890,17 +1896,20 @@ export default function MigrationDetailsPage() {
       </Card>
       {migration.options.executionMode === "migration_workers" ? (
         (() => {
-              const activeRuns = workerRuns.filter((run) => run.online)
-              const latestRun = [...workerRuns].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]
+              const currentGeneration = Number(migration.options.workerGeneration) || 1
+              const currentRuns = workerRuns.filter((run) => (Number(run.workerGeneration) || 1) === currentGeneration)
+              const activeRuns = currentRuns.filter((run) => run.online)
+              const latestRun = [...currentRuns].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]
               const isActive = activeRuns.length > 0
               const latestRunStatus = String(latestRun?.status || "").toLowerCase()
+              const stoppingRuns = currentRuns.filter((run) => run.abortRequested || ["pending", "running"].includes(String(run.status).toLowerCase()))
               const migrationStatus = String(migration.status || "").toLowerCase()
               const status = ["completed"].includes(migrationStatus)
                 ? "completed"
                 : ["failed", "verification_failed"].includes(migrationStatus)
-                  ? "failed"
+                  ? stoppingRuns.length > 0 ? "aborting" : "failed"
                   : ["canceled", "cancelled", "aborted"].includes(migrationStatus)
-                    ? "aborted"
+                    ? stoppingRuns.length > 0 ? "aborting" : "aborted"
                     : migrationStatus === "verifying"
                       ? "verifying"
                       : isActive
@@ -1909,8 +1918,8 @@ export default function MigrationDetailsPage() {
                           ? "deploying"
                           : "queued"
               const currentFiles = activeRuns.filter((run) => run.currentFile && typeof run.currentFile === "object").length
-              const startedAt = [...workerRuns].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0]?.createdAt
-              const completedFiles = workerRuns.reduce((sum, run) => sum + Number(run.completedFiles || 0), 0)
+              const startedAt = [...currentRuns].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0]?.createdAt
+              const completedFiles = currentRuns.reduce((sum, run) => sum + Number(run.completedFiles || 0), 0)
 
               return (
                 <div
@@ -1931,6 +1940,8 @@ export default function MigrationDetailsPage() {
                         <div className="text-sm leading-relaxed text-muted-foreground">
                           {migrationStatus === "completed"
                             ? "Migration and worker processing completed."
+                          : status === "aborting"
+                            ? "Migration stopped; waiting for GitHub Actions workers to confirm cancellation."
                             : migrationStatus === "failed" || migrationStatus === "verification_failed"
                               ? "Migration worker processing failed."
                               : ["canceled", "cancelled", "aborted"].includes(migrationStatus)
