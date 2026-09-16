@@ -37,8 +37,10 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
   const [busy, setBusy] = React.useState(false)
   const [syncing, setSyncing] = React.useState(false)
   const repairAttempted = React.useRef(false)
+  const initialSyncStarted = React.useRef(false)
+  const syncInFlight = React.useRef(false)
   const refresh = React.useCallback(async () => {
-    const response = await fetch("/api/workers/cloudflare-install", { cache: "no-store" })
+    const response = await fetch("/api/workers/cloudflare-install", { cache: "no-store", signal: AbortSignal.timeout(15_000) })
     const payload = await response.json().catch(() => ({})) as { installation?: Installation; canRevealTokens?: boolean; error?: string }
     if (!response.ok) throw new Error(payload.error || "Unable to load Cloudflare hosting status")
     setInstallation(payload.installation || null)
@@ -46,6 +48,8 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
     if (payload.installation?.mode) setMode(payload.installation.mode)
   }, [])
   const syncWorkers = React.useCallback(async () => {
+    if (syncInFlight.current) return
+    syncInFlight.current = true
     setSyncing(true)
     try {
       await Promise.all(([
@@ -53,14 +57,18 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
         ["scanner", "File Scanner"],
         ["migration", "Migration Orchestrator"],
       ] as const).map(async ([worker]) => {
-        const response = await fetch("/api/workers/cloudflare-install", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "reconcile_worker", worker }) })
+        const response = await fetch("/api/workers/cloudflare-install", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "reconcile_worker", worker }), signal: AbortSignal.timeout(45_000) })
         const payload = await response.json().catch(() => ({})) as { installation?: Installation; error?: string }
         if (!response.ok) throw new Error(payload.error || "Worker status sync failed")
         if (payload.installation) setInstallation(payload.installation)
       }))
-    } finally { setSyncing(false) }
+    } finally { syncInFlight.current = false; setSyncing(false) }
   }, [])
-  React.useEffect(() => { void refresh().then(() => syncWorkers()).catch(() => undefined) }, [refresh, syncWorkers])
+  React.useEffect(() => {
+    if (initialSyncStarted.current) return
+    initialSyncStarted.current = true
+    void refresh().then(() => syncWorkers()).catch(() => undefined)
+  }, [refresh, syncWorkers])
   React.useEffect(() => {
     const ready = installation?.status === "ready" && installation.tokensSaved === true && (Object.values(installation.workers) as Installation["workers"][WorkerKey][]).every((worker) => worker.deployed && worker.verified && worker.url && worker.deployedAt && worker.verifiedAt && worker.lastCheckedAt)
     if (ready) { repairAttempted.current = false; onReady?.(); return }
@@ -182,7 +190,7 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
             <div className="flex flex-wrap gap-2">
               {!installationReady ? <Button onClick={() => void deploy(false)} disabled={busy || (!installation?.tokensSaved && !tokenInputReady)}>{busy ? "Working…" : installation?.status === "failed" || installation?.status === "running" ? "Repair and continue" : "Deploy Workers"}</Button> : null}
               {installationReady ? <>
-                <Button variant="outline" onClick={() => void deploy(false, true)} disabled={busy}><RefreshCw data-icon="inline-start" />{busy ? "Checking release…" : "Check for updates"}</Button>
+                <Button variant="outline" onClick={() => void deploy(false, true)} disabled={busy || syncing}><RefreshCw data-icon="inline-start" />{busy ? "Checking release…" : "Check for updates"}</Button>
                 <Button variant="default" onClick={() => void deploy(false, false, true)} disabled={busy}><RefreshCw data-icon="inline-start" />{busy ? "Redeploying Workers…" : "Redeploy all Workers"}</Button>
               </> : null}
               {installation?.status === "failed" ? <Button variant="outline" onClick={() => void deploy(true)} disabled={busy || (!installation.tokensSaved && !tokenInputReady)}>Start fresh</Button> : null}
@@ -192,7 +200,7 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
               {installation?.tokensSaved && canRevealTokens && tokensVisible && tokenInputReady ? <Button onClick={() => void saveReplacementTokens()} disabled={busy}>Save replacement token</Button> : null}
             </div>
 
-            {syncing ? <Alert><RefreshCw className="animate-spin" /><AlertTitle>Syncing Worker status</AlertTitle><AlertDescription>Checking each Worker separately and saving its latest heartbeat and deployment details.</AlertDescription></Alert> : installation?.error ? <Alert variant="destructive"><TriangleAlert /><AlertTitle>Worker verification failed</AlertTitle><AlertDescription>{installation.error}</AlertDescription></Alert> : installationReady ? <Alert><CheckCircle2 /><AlertTitle>All Workers are live</AlertTitle><AlertDescription>Each script exists in Cloudflare and passed a current authenticated health check.</AlertDescription></Alert> : <Alert><CircleDashed /><AlertTitle>{installation?.status === "running" ? "Deploying Workers" : installation ? "Deployment is not verified" : "Ready for first deployment"}</AlertTitle><AlertDescription>{installation ? `Current step: ${installation.step}${installation.releaseVersion ? ` · Release ${installation.releaseVersion}` : ""}.` : "Enter the required token, then Drive will deploy Workers in dependency order."}</AlertDescription></Alert>}
+            {syncing && !installationReady ? <Alert><RefreshCw className="animate-spin" /><AlertTitle>Syncing Worker status</AlertTitle><AlertDescription>Checking each Worker separately and saving its latest heartbeat and deployment details.</AlertDescription></Alert> : installation?.error ? <Alert variant="destructive"><TriangleAlert /><AlertTitle>Worker verification failed</AlertTitle><AlertDescription>{installation.error}</AlertDescription></Alert> : installationReady ? <Alert><CheckCircle2 /><AlertTitle>All Workers are live</AlertTitle><AlertDescription>Each script exists in Cloudflare and passed a current authenticated health check.</AlertDescription></Alert> : <Alert><CircleDashed /><AlertTitle>{installation?.status === "running" ? "Deploying Workers" : installation ? "Deployment is not verified" : "Ready for first deployment"}</AlertTitle><AlertDescription>{installation ? `Current step: ${installation.step}${installation.releaseVersion ? ` · Release ${installation.releaseVersion}` : ""}.` : "Enter the required token, then Drive will deploy Workers in dependency order."}</AlertDescription></Alert>}
           </CardContent>
 
           <Separator />

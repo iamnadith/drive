@@ -41,7 +41,7 @@ export async function PATCH(request: NextRequest) {
     if (body.action === "reconcile_worker") {
       const worker = body.worker === "backend" || body.worker === "scanner" || body.worker === "migration" ? body.worker : null
       if (!worker) throw new Error("A valid Worker is required")
-      return NextResponse.json({ installation: await reconcileCloudflareWorker(worker, true) })
+      return NextResponse.json({ installation: await reconcileCloudflareWorker(worker) })
     }
     if (body.mode !== "automatic") throw new Error("Manual Worker hosting has been removed; use automatic hosting")
     return NextResponse.json({ hosting: await setCloudflareHostingMode("automatic") })
