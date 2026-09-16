@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { Activity, Bot, CircleDot, Clock3, Copy, Eye, Github, HardDrive, Play, Plus, RefreshCw, Search, Server, Shield, Square, Trash2, Workflow } from "lucide-react"
+import { Activity, Bot, Clock3, Copy, Eye, Github, HardDrive, Play, Plus, RefreshCw, Search, Server, Square, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { useRouter, useSearchParams } from "next/navigation"
 import { GitHubWorkerSetup } from "@/components/dashboard/github-worker-setup"
@@ -220,6 +220,41 @@ function getWorkerConnectionLabel(worker: Pick<AgentRow, "provider" | "githubRep
     return worker.githubRepoOwner && worker.githubRepoName ? `${worker.githubRepoOwner} / ${worker.githubRepoName}` : "-"
   }
   return worker.lastSeenHost || worker.endpointDomain || worker.lastSeenIp || worker.endpointIp || "-"
+}
+
+function MigrationWorkerSecretControl() {
+  const [secret, setSecret] = React.useState("")
+  const [configured, setConfigured] = React.useState(false)
+  const [updatedAt, setUpdatedAt] = React.useState("")
+  const [loaded, setLoaded] = React.useState(false)
+  const [busy, setBusy] = React.useState(false)
+  const [visible, setVisible] = React.useState(false)
+  const [message, setMessage] = React.useState("")
+
+  const load = React.useCallback(async () => {
+    const response = await fetch("/api/settings/migration-workers", { cache: "no-store" })
+    const payload = await response.json().catch(() => ({})) as { settings?: { sharedSecret?: string; secretConfigured?: boolean; updatedAt?: string }; error?: string }
+    if (!response.ok) throw new Error(payload.error || "Unable to load migration Worker secret")
+    setConfigured(payload.settings?.secretConfigured === true)
+    setSecret(payload.settings?.sharedSecret || "")
+    setUpdatedAt(payload.settings?.updatedAt || "")
+    setLoaded(true)
+  }, [])
+
+  React.useEffect(() => { void load().catch((error) => { setLoaded(true); setMessage(error instanceof Error ? error.message : String(error)) }) }, [load])
+
+  const save = async () => {
+    setBusy(true); setMessage("")
+    try {
+      const response = await fetch("/api/settings/migration-workers", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sharedSecret: secret }) })
+      const payload = await response.json().catch(() => ({})) as { error?: string }
+      if (!response.ok) throw new Error(payload.error || "Unable to save migration Worker secret")
+      setSecret(""); setVisible(false); await load(); setMessage("Migration Worker secret saved.")
+    } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
+    finally { setBusy(false) }
+  }
+
+  return <div className="rounded-xl border bg-card p-4 shadow-sm"><div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-medium">Migration Worker access</div><p className="text-xs text-muted-foreground">One shared secret authenticates migration workers; each worker keeps its own identity.</p></div><Badge variant={configured ? "outline" : "destructive"}>{!loaded ? "Loading..." : configured ? "Secret saved" : "Secret required"}</Badge></div><div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center"><div className="relative flex-1"><Input aria-label="Migration Worker shared secret" type={visible ? "text" : "password"} value={secret} disabled={!loaded || busy} onChange={(event) => setSecret(event.target.value)} placeholder={configured ? "Saved securely — enter a replacement" : "At least 24 characters"} className="pr-10" />{configured ? <Button type="button" variant="ghost" size="icon" className="absolute top-1/2 right-1 -translate-y-1/2" aria-label={visible ? "Hide migration Worker secret" : "Show migration Worker secret"} onClick={() => setVisible((current) => !current)} disabled={busy}>{visible ? <EyeOff /> : <Eye />}</Button> : null}</div><Button onClick={() => void save()} disabled={!loaded || busy || !secret.trim()}>{busy ? "Saving..." : "Save secret"}</Button></div><div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground"><span>Last saved: {updatedAt ? new Date(updatedAt).toLocaleString() : "Never"}</span>{message ? <span>{message}</span> : null}</div></div>
 }
 
 function jobStatusBadge(status: RepairJobRow["status"]) {
@@ -951,7 +986,7 @@ export default function WorkersPage() {
             <Bot className="h-4 w-4" />
             Worker orchestration
           </div>
-          <h1 className="mt-2 text-3xl font-bold tracking-tight">Workflows & Workers</h1>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight">Workers</h1>
           <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
             Manage GitHub-triggered and self-hosted workers, monitor heartbeat health, and keep migration jobs visible from one place.
           </p>
@@ -1180,7 +1215,6 @@ export default function WorkersPage() {
           </Dialog>
         </div>
       </div>
-      <CloudflareWorkerHosting />
 
       <Dialog
         open={workerDetailsOpen}
@@ -1431,8 +1465,8 @@ export default function WorkersPage() {
       <Card>
         <CardHeader className="flex flex-col gap-3 border-b pb-5 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <CardTitle>Registered Workflows & Worker Fleet</CardTitle>
-            <CardDescription>GitHub accounts are registered as workflows; each workflow dispatches its configured worker count.</CardDescription>
+            <CardTitle>Workers</CardTitle>
+            <CardDescription>Manage registered workers, deployment connections, heartbeat health, and active work.</CardDescription>
           </div>
           <div className="flex flex-wrap gap-2">
             <Badge variant="outline" className="gap-1">
@@ -1634,6 +1668,9 @@ export default function WorkersPage() {
         </CardContent>
       </Card>
 
+      <MigrationWorkerSecretControl />
+      <CloudflareWorkerHosting />
+
       <AlertDialog open={!!confirmDeleteWorker} onOpenChange={(open: boolean) => !open && setConfirmDeleteWorker(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -1710,26 +1747,6 @@ export default function WorkersPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Current model</CardTitle>
-          <CardDescription>How entries are identified and how they connect.</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3 text-sm md:grid-cols-3">
-          <div className="rounded-xl border p-4">
-            <div className="flex items-center gap-2 font-medium"><Shield className="h-4 w-4" /> Identity</div>
-            <div className="mt-2 text-muted-foreground">Workers authenticate with their unique agent id and the shared worker secret from Settings. Legacy registration tokens remain accepted for existing self-hosted workers.</div>
-          </div>
-          <div className="rounded-xl border p-4">
-            <div className="flex items-center gap-2 font-medium"><Workflow className="h-4 w-4" /> GitHub</div>
-            <div className="mt-2 text-muted-foreground">GitHub entries store repo, workflow, and ref so the website can dispatch jobs against the configured repository.</div>
-          </div>
-          <div className="rounded-xl border p-4">
-            <div className="flex items-center gap-2 font-medium"><CircleDot className="h-4 w-4" /> Live status</div>
-            <div className="mt-2 text-muted-foreground">This page uses adaptive refresh and turns token-based workers offline when heartbeats are stale for more than 60 seconds.</div>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   )
 }

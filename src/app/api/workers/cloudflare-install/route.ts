@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getCloudflareHostingPreference, getCloudflareInstallation, installCloudflareWorkers, reconcileCloudflareWorkers, replaceCloudflareTokens, revealCloudflareTokens, setCloudflareHostingMode } from "@/lib/cloudflare-worker-installer"
+import { deleteCloudflareWorkers, getCloudflareHostingPreference, getCloudflareInstallation, installCloudflareWorkers, reconcileCloudflareWorker, reconcileCloudflareWorkers, replaceCloudflareTokens, revealCloudflareTokens, setCloudflareHostingMode } from "@/lib/cloudflare-worker-installer"
 import { requireSuperAdmin } from "@/lib/server-auth"
 import { hasSuperAdminUser } from "@/lib/users-store"
 import { getSystemReadiness } from "@/lib/system-readiness"
@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   const auth = await authorizeBootstrap(); if (!auth.ok) return auth.response
   try {
-    const body = await request.json() as { mode?: unknown; refreshManual?: unknown; action?: unknown; token?: unknown; backendToken?: unknown; scannerToken?: unknown; migrationToken?: unknown }
+    const body = await request.json() as { mode?: unknown; action?: unknown; worker?: unknown; token?: unknown; backendToken?: unknown; scannerToken?: unknown; migrationToken?: unknown }
     if (body.action === "reveal_tokens") {
       if (auth.bootstrap) return NextResponse.json({ error: "Create the Super Admin before revealing saved tokens" }, { status: 403 })
       return NextResponse.json({ tokens: await revealCloudflareTokens() }, { headers: { "Cache-Control": "no-store" } })
@@ -37,8 +37,14 @@ export async function PATCH(request: NextRequest) {
       const mode = body.mode === "separate" ? "separate" : "single"
       return NextResponse.json({ installation: await replaceCloudflareTokens({ mode, tokens: { backend: String(mode === "single" ? body.token || "" : body.backendToken || ""), scanner: String(body.scannerToken || ""), migration: String(body.migrationToken || "") } }) })
     }
-    if (body.mode !== "automatic" && body.mode !== "manual") throw new Error("Hosting mode must be automatic or manual")
-    return NextResponse.json({ hosting: await setCloudflareHostingMode(body.mode, body.refreshManual === true) })
+    if (body.action === "delete_workers") return NextResponse.json({ installation: await deleteCloudflareWorkers() })
+    if (body.action === "reconcile_worker") {
+      const worker = body.worker === "backend" || body.worker === "scanner" || body.worker === "migration" ? body.worker : null
+      if (!worker) throw new Error("A valid Worker is required")
+      return NextResponse.json({ installation: await reconcileCloudflareWorker(worker, true) })
+    }
+    if (body.mode !== "automatic") throw new Error("Manual Worker hosting has been removed; use automatic hosting")
+    return NextResponse.json({ hosting: await setCloudflareHostingMode("automatic") })
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to change hosting mode" }, { status: 400 })
   }

@@ -52,12 +52,6 @@ export default function DashboardSettingsPage() {
   const [orchestratorConnection, setOrchestratorConnection] = React.useState<"unknown" | "connected" | "failed">("unknown")
   const [orchestratorBusy, setOrchestratorBusy] = React.useState(false)
   const [orchestratorMessage, setOrchestratorMessage] = React.useState("")
-  const [workerSecret, setWorkerSecret] = React.useState("")
-  const [workerSecretConfigured, setWorkerSecretConfigured] = React.useState(false)
-  const [workerSecretUpdatedAt, setWorkerSecretUpdatedAt] = React.useState("")
-  const [workerSecretLoaded, setWorkerSecretLoaded] = React.useState(false)
-  const [workerSecretBusy, setWorkerSecretBusy] = React.useState(false)
-  const [workerSecretMessage, setWorkerSecretMessage] = React.useState("")
   const [migrationOrchestratorUrl, setMigrationOrchestratorUrl] = React.useState("")
   const [migrationOrchestratorSavedUrl, setMigrationOrchestratorSavedUrl] = React.useState("")
   const [fileScannerUrl, setFileScannerUrl] = React.useState("")
@@ -107,16 +101,6 @@ export default function DashboardSettingsPage() {
     })
   }, [loadOrchestratorSettings])
 
-  const loadMigrationWorkerSettings = React.useCallback(async () => {
-    const response = await fetch("/api/settings/migration-workers", { cache: "no-store" })
-    const payload = await response.json().catch(() => ({})) as { settings?: { sharedSecret?: string; secretConfigured?: boolean; updatedAt?: string }; error?: string }
-    if (!response.ok) throw new Error(payload.error || "Unable to load Migration Worker settings")
-    setWorkerSecretConfigured(payload.settings?.secretConfigured === true)
-    setWorkerSecret(payload.settings?.sharedSecret ?? "")
-    setWorkerSecretUpdatedAt(payload.settings?.updatedAt ?? "")
-    setWorkerSecretLoaded(true)
-  }, [])
-
   const loadMigrationOrchestratorSettings = React.useCallback(async () => {
     const response = await fetch("/api/settings/migration-orchestrator", { cache: "no-store" })
     const payload = await response.json().catch(() => ({})) as {
@@ -142,36 +126,11 @@ export default function DashboardSettingsPage() {
   }, [])
 
   React.useEffect(() => {
-    void loadMigrationWorkerSettings().catch((error) => {
-      setWorkerSecretLoaded(true)
-      setWorkerSecretMessage(error instanceof Error ? error.message : String(error))
-    })
     void loadMigrationOrchestratorSettings().catch((error) => {
       setMigrationOrchestratorLoaded(true)
       setMigrationOrchestratorMessage(error instanceof Error ? error.message : String(error))
     })
-  }, [loadMigrationOrchestratorSettings, loadMigrationWorkerSettings])
-
-  const saveMigrationWorkerSettings = async () => {
-    setWorkerSecretBusy(true)
-    setWorkerSecretMessage("")
-    try {
-      const response = await fetch("/api/settings/migration-workers", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sharedSecret: workerSecret }),
-      })
-      const payload = await response.json().catch(() => ({})) as { error?: string }
-      if (!response.ok) throw new Error(payload.error || "Unable to save Migration Worker secret")
-      setWorkerSecret("")
-      await loadMigrationWorkerSettings()
-      setWorkerSecretMessage("Shared worker secret saved. Use the same secret for every worker.")
-    } catch (error) {
-      setWorkerSecretMessage(error instanceof Error ? error.message : String(error))
-    } finally {
-      setWorkerSecretBusy(false)
-    }
-  }
+  }, [loadMigrationOrchestratorSettings])
 
   const saveMigrationOrchestratorSettings = async (worker: "migration" | "file") => {
     setMigrationOrchestratorBusy(true)
@@ -441,43 +400,6 @@ export default function DashboardSettingsPage() {
             {orchestratorEnabled ? "Disable" : "Enable"}
           </Button>
           <Button variant="outline" onClick={runOrchestratorNow} disabled={orchestratorBusy || !orchestratorLoaded || !orchestratorEnabled}>Run now</Button>
-        </CardFooter>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Migration workers</CardTitle>
-          <CardDescription>
-            One shared secret authenticates every migration worker. Each worker still has its own generated id, so concurrent workers can claim and report separate object-shard jobs safely.
-          </CardDescription>
-          <CardAction>
-            <Badge variant={workerSecretConfigured ? "outline" : "destructive"}>
-              {!workerSecretLoaded ? "Loading..." : workerSecretConfigured ? "Secret saved" : "Secret required"}
-            </Badge>
-          </CardAction>
-        </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="space-y-2">
-          <Label htmlFor="migration-worker-secret">Shared worker secret</Label>
-          <Input
-            id="migration-worker-secret"
-            type="text"
-            value={workerSecret}
-            disabled={!workerSecretLoaded}
-            onChange={(event) => setWorkerSecret(event.target.value)}
-            placeholder="At least 24 characters"
-          />
-            </div>
-          <p className="text-xs text-muted-foreground">
-            This admin-only page displays the common secret. GitHub dispatch synchronizes the URL and secret, then passes each worker&apos;s unique id as a workflow input.
-          </p>
-          <p className="text-xs text-muted-foreground">Last saved: {workerSecretUpdatedAt ? new Date(workerSecretUpdatedAt).toLocaleString() : "Never"}</p>
-          {workerSecretMessage ? <p className="text-sm">{workerSecretMessage}</p> : null}
-        </CardContent>
-        <CardFooter>
-          <Button onClick={saveMigrationWorkerSettings} disabled={workerSecretBusy || !workerSecretLoaded || !workerSecret.trim()}>
-            Save worker connection
-          </Button>
         </CardFooter>
       </Card>
 

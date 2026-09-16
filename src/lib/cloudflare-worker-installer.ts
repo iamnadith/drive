@@ -11,7 +11,7 @@ type TokenMap = Record<HostedWorker, string>
 type Account = { id: string; name: string }
 type Artifact = { url: string; sha256: string; compatibilityDate: string; compatibilityFlags?: string[] }
 type Manifest = { version: string; workers: Record<HostedWorker, Artifact> }
-type WorkerState = { accountId?: string; accountName?: string; scriptName: string; url?: string; deployed?: boolean; verified?: boolean; phase?: "queued" | "uploading" | "configuring" | "deployed" | "verifying" | "verified" | "failed"; deployedAt?: string; verifiedAt?: string; lastCheckedAt?: string; latencyMs?: number; build?: string | number; releaseVersion?: string; artifactSha256?: string; error?: string }
+type WorkerState = { accountId?: string; accountName?: string; scriptName: string; url?: string; deployed?: boolean; verified?: boolean; phase?: "queued" | "uploading" | "configuring" | "deployed" | "deleting" | "verifying" | "verified" | "failed"; deployedAt?: string; verifiedAt?: string; lastCheckedAt?: string; latencyMs?: number; build?: string | number; releaseVersion?: string; artifactSha256?: string; error?: string }
 type InstallState = {
   id: string
   mode: InstallMode
@@ -29,7 +29,7 @@ type RuntimeSnapshot = {
   backend: { enabled: boolean; orchestratorUrl: string; sharedSecret: string; syncIntervalMinutes: number }
   migration: { enabled: boolean; migrationEnabled: boolean; fileScannerEnabled: boolean; orchestratorUrl: string; fileScannerUrl: string; sharedSecret: string; fileScannerSecret: string }
 }
-type HostingPreference = { mode: "automatic" | "manual"; manual?: RuntimeSnapshot }
+type HostingPreference = { mode: "automatic" }
 
 const API = "https://api.cloudflare.com/client/v4"
 const ORDER: HostedWorker[] = ["backend", "scanner", "migration"]
@@ -217,32 +217,22 @@ async function writeRuntimeSnapshot(snapshot: RuntimeSnapshot) {
 }
 
 export async function getCloudflareHostingPreference(): Promise<HostingPreference> {
-  const result = await queryDb<{ value: unknown }>(`select value from drive_app_settings where key='cloudflare-worker-hosting' limit 1`)
-  const value = result.rows[0]?.value
-  if (!value || typeof value !== "object") return { mode: "manual" }
-  const row = value as Partial<HostingPreference>
-  return { mode: row.mode === "automatic" ? "automatic" : "manual", manual: row.manual }
+  await queryDb(`select value from drive_app_settings where key='cloudflare-worker-hosting' limit 1`)
+  return { mode: "automatic" }
 }
 
-export async function setCloudflareHostingMode(mode: "automatic" | "manual", refreshManual = false) {
-  const current = await getCloudflareHostingPreference()
-  let manual = current.manual
-  if ((current.mode === "manual" && mode === "automatic") || (mode === "manual" && refreshManual)) manual = await currentRuntimeSnapshot()
-  if (mode === "manual") {
-    if (manual) await writeRuntimeSnapshot(manual)
-  } else {
-    const installation = await loadState()
-    if (installation?.status === "ready") await saveRuntimeConfiguration(installation, true)
-    else {
-      const disabled = await currentRuntimeSnapshot()
-      disabled.backend.enabled = false
-      disabled.migration.enabled = false
-      disabled.migration.migrationEnabled = false
-      disabled.migration.fileScannerEnabled = false
-      await writeRuntimeSnapshot(disabled)
-    }
+export async function setCloudflareHostingMode(mode: "automatic") {
+  const installation = await loadState()
+  if (installation?.status === "ready") await saveRuntimeConfiguration(installation, true)
+  else {
+    const disabled = await currentRuntimeSnapshot()
+    disabled.backend.enabled = false
+    disabled.migration.enabled = false
+    disabled.migration.migrationEnabled = false
+    disabled.migration.fileScannerEnabled = false
+    await writeRuntimeSnapshot(disabled)
   }
-  const preference: HostingPreference = { mode, manual }
+  const preference: HostingPreference = { mode }
   await queryDb(`insert into drive_app_settings(key,value,updated_at) values('cloudflare-worker-hosting',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`, [JSON.stringify(preference)])
   return { mode }
 }
@@ -401,6 +391,11 @@ async function scriptExists(token: string, accountId: string, scriptName: string
   return true
 }
 
+async function deleteWorkerScript(token: string, accountId: string, scriptName: string) {
+  try { await cf(token, `/accounts/${accountId}/workers/scripts/${scriptName}`, { method: "DELETE" }) }
+  catch (error) { if (!(error instanceof Error && /\(404\)$/.test(error.message))) throw error }
+}
+
 async function inspectWorkerOnce(url: string, secret: string) {
   const started = Date.now()
   const [health, status] = await Promise.all([
@@ -422,42 +417,75 @@ async function inspectWorker(url: string, secret: string) {
   }
 }
 
-export async function reconcileCloudflareWorkers(force = false) {
+export async function reconcileCloudflareWorker(worker: HostedWorker, force = false) {
   return withDbAdvisoryLock("cloudflare-worker-reconcile", "singleton", async () => {
     const state = await loadState()
     if (!state || !state.encryptedTokens) return getCloudflareInstallation()
     // A running or never-finished installation must be resumed by the installer.
     // Reconciling it cannot work without URLs and used to erase the actionable
     // deployment error with a generic "metadata is incomplete" message.
-    if (state.status === "running" || (state.status === "failed" && !ORDER.some((worker) => Boolean(state.workers[worker].url)))) {
-      return getCloudflareInstallation()
+    if (state.status === "running" || (state.status === "failed" && !ORDER.some((key) => Boolean(state.workers[key].url)))) return getCloudflareInstallation()
+    if (!force && state.workers[worker].lastCheckedAt && Date.now() - new Date(state.workers[worker].lastCheckedAt).getTime() < 60_000) return getCloudflareInstallation()
+
+    const current = state.workers[worker]
+    current.phase = "verifying"
+    current.error = undefined
+    state.step = `${worker}_verifying`
+    await saveState(state)
+    try {
+      if (!current.accountId || !current.url || !state.encryptedTokens[worker]) throw new Error("Deployment metadata is incomplete")
+      const token = decryptToken(state.encryptedTokens[worker]!, state.id, worker)
+      if (!(await scriptExists(token, current.accountId, current.scriptName))) throw new Error("Worker script was not found in Cloudflare")
+      const inspected = await inspectWorker(current.url, state.secrets[worker])
+      const names = resourceNames()
+      if (worker === "scanner") await ensureConsumer(token, current.accountId, names.scannerQueue, names.scannerDlq, current.scriptName, 15)
+      if (worker === "migration") await ensureConsumer(token, current.accountId, names.migrationQueue, names.migrationDlq, current.scriptName, 30)
+      await ensureSchedule(token, current.accountId, current.scriptName)
+      current.deployed = true; current.verified = true; current.phase = "verified"; current.error = undefined
+      current.lastCheckedAt = new Date().toISOString(); current.latencyMs = inspected.latencyMs; current.build = inspected.build
+    } catch (error) {
+      current.deployed = false; current.verified = false; current.phase = "failed"
+      current.error = error instanceof Error ? error.message : "Worker reconciliation failed"; current.lastCheckedAt = new Date().toISOString(); current.latencyMs = undefined; current.build = undefined
     }
-    const encryptedTokens = state.encryptedTokens
-    if (!force && state.lastReconciledAt && Date.now() - new Date(state.lastReconciledAt).getTime() < 60_000) return getCloudflareInstallation()
-    await Promise.all(ORDER.map(async (worker) => {
-      const current = state.workers[worker]
-      try {
-        if (!current.accountId || !current.url || !encryptedTokens[worker]) throw new Error("Deployment metadata is incomplete")
-        const token = decryptToken(encryptedTokens[worker]!, state.id, worker)
-        if (!(await scriptExists(token, current.accountId, current.scriptName))) throw new Error("Worker script was not found in Cloudflare")
-        const inspected = await inspectWorker(current.url, state.secrets[worker])
-        const names = resourceNames()
-        if (worker === "scanner") await ensureConsumer(token, current.accountId, names.scannerQueue, names.scannerDlq, current.scriptName, 15)
-        if (worker === "migration") await ensureConsumer(token, current.accountId, names.migrationQueue, names.migrationDlq, current.scriptName, 30)
-        await ensureSchedule(token, current.accountId, current.scriptName)
-        current.deployed = true; current.verified = true; current.phase = "verified"; current.error = undefined
-        current.lastCheckedAt = new Date().toISOString(); current.latencyMs = inspected.latencyMs; current.build = inspected.build
-      } catch (error) {
-        current.deployed = false; current.verified = false; current.phase = "failed"
-        current.error = error instanceof Error ? error.message : "Worker reconciliation failed"; current.lastCheckedAt = new Date().toISOString(); current.latencyMs = undefined; current.build = undefined
-      }
-    }))
     state.lastReconciledAt = new Date().toISOString()
-    const failed = ORDER.filter((worker) => !state.workers[worker].verified)
+    const failed = ORDER.filter((key) => !state.workers[key].verified)
     if (failed.length) { state.status = "failed"; state.step = "reconciliation_failed"; state.error = `${failed.length} Worker${failed.length === 1 ? "" : "s"} require repair` }
     else { state.status = "ready"; state.step = "reconciled"; state.error = undefined }
     await saveState(state)
     return getCloudflareInstallation()
+  })
+}
+
+export async function reconcileCloudflareWorkers(force = false) {
+  for (const worker of ORDER) await reconcileCloudflareWorker(worker, force)
+  return getCloudflareInstallation()
+}
+
+export async function deleteCloudflareWorkers() {
+  return withDbAdvisoryLock("cloudflare-worker-install", "singleton", async () => {
+    const state = await loadState()
+    if (!state) return null
+    state.status = "running"; state.step = "deleting_workers"; state.error = undefined
+    await saveState(state)
+    try {
+      for (const worker of ORDER) {
+        const current = state.workers[worker]
+        current.phase = "deleting"; state.step = `${worker}_deleting`; await saveState(state)
+        if (current.accountId && state.encryptedTokens?.[worker]) {
+          const token = decryptToken(state.encryptedTokens[worker]!, state.id, worker)
+          await deleteWorkerScript(token, current.accountId, current.scriptName)
+        }
+        state.workers[worker] = { scriptName: current.scriptName, phase: "queued" }
+        await saveState(state)
+      }
+      await setCloudflareHostingMode("automatic")
+      await queryDb(`delete from public.drive_cloudflare_worker_installations where id=$1`, [state.id])
+      return null
+    } catch (error) {
+      state.status = "failed"; state.step = "deletion_failed"; state.error = error instanceof Error ? error.message : "Worker deletion failed"
+      await saveState(state)
+      throw error
+    }
   })
 }
 
@@ -590,7 +618,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       for (const worker of ORDER) await setSchedule(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
       state.step = "schedules_ready"; await saveState(state)
       await saveRuntimeConfiguration(state, true)
-      await queryDb(`insert into drive_app_settings(key,value,updated_at) values('cloudflare-worker-hosting',$1::jsonb,now()) on conflict(key) do update set value=jsonb_set(excluded.value,'{manual}',coalesce(drive_app_settings.value->'manual','null'::jsonb)),updated_at=now()`, [JSON.stringify({ mode: "automatic" })])
+      await queryDb(`insert into drive_app_settings(key,value,updated_at) values('cloudflare-worker-hosting',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`, [JSON.stringify({ mode: "automatic" })])
       state.status = "ready"; state.step = "enabled"; await saveState(state)
       return getCloudflareInstallation()
     } catch (error) {
