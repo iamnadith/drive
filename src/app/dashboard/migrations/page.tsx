@@ -2,10 +2,8 @@
 
 import * as React from "react"
 import {
-  CheckCircle2,
   ExternalLink,
   Plus,
-  RefreshCw,
   Play,
   Trash2,
   X,
@@ -170,15 +168,6 @@ function isCompletedStatus(value: string | undefined): boolean {
     s === "success" ||
     s === "succeeded"
   )
-}
-
-function readVerifyStatus(progress: Record<string, unknown>): "pending" | "running" | "ok" | "error" | null {
-  if (!isRecord(progress)) return null
-  const verify = progress.verify
-  if (!isRecord(verify)) return null
-  const status = typeof verify.status === "string" ? verify.status : ""
-  if (status === "pending" || status === "running" || status === "ok" || status === "error") return status
-  return null
 }
 
 async function postJsonWithTimeout(input: {
@@ -725,24 +714,6 @@ export default function MigrationsPage() {
     }
   }
 
-  const syncNow = async () => {
-    setBusyAction("sync")
-    setError(null)
-    try {
-      await loadAll()
-    } catch (e: unknown) {
-      const message =
-        typeof e === "object" && e !== null && "name" in e && String((e as { name?: unknown }).name) === "AbortError"
-          ? ""
-          : typeof e === "object" && e !== null && "message" in e
-          ? String((e as { message?: unknown }).message ?? "Unable to refresh migrations")
-          : "Unable to refresh migrations"
-      if (message) setError(message)
-    } finally {
-      setBusyAction(null)
-    }
-  }
-
   const retryMigration = async () => {
     if (!activeMigration?.id) return
     setBusyAction("retry_migration")
@@ -764,47 +735,6 @@ export default function MigrationsPage() {
           : typeof e === "object" && e !== null && "message" in e
           ? String((e as { message?: unknown }).message ?? "Unable to retry migration")
           : "Unable to retry migration"
-      if (message) setError(message)
-    } finally {
-      setBusyAction(null)
-    }
-  }
-
-  const canRunVerifyAll = React.useMemo(() => {
-    if (!activeMigration) return false
-    // Worker-pool migrations verify each object as part of every shard. The
-    // Super Slurper bucket verifier is a separate flow and must not be shown
-    // for this lane.
-    if (activeMigration.options.executionMode === "migration_workers") return false
-    if (activeMigration.status !== "completed" && activeMigration.status !== "verifying") return false
-    return activeItems.some((item) => {
-      if (!isCompletedStatus(item.slurperStatus)) return false
-      const v = readVerifyStatus(item.progress)
-      return v === null || v === "error"
-    })
-  }, [activeMigration, activeItems])
-
-  const runVerifyAll = async () => {
-    if (!activeMigration?.id) return
-    setBusyAction("verify_all")
-    setError(null)
-    try {
-      const res = await postJsonWithTimeout({
-        url: `/api/migrations/${encodeURIComponent(activeMigration.id)}/action`,
-        body: { action: "verify_all" },
-        timeoutMs: 12_000,
-      })
-      const json: unknown = await res.json().catch(() => ({}))
-      const errorMessage = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to start verification"
-      if (!res.ok) throw new Error(errorMessage)
-      await loadAll()
-    } catch (e: unknown) {
-      const message =
-        typeof e === "object" && e !== null && "name" in e && String((e as { name?: unknown }).name) === "AbortError"
-          ? ""
-          : typeof e === "object" && e !== null && "message" in e
-          ? String((e as { message?: unknown }).message ?? "Unable to start verification")
-          : "Unable to start verification"
       if (message) setError(message)
     } finally {
       setBusyAction(null)
@@ -1150,24 +1080,13 @@ export default function MigrationsPage() {
                   ) : null}
                   {activeMigration?.status === "failed" ? "Retry" : "Start"}
                 </Button>
-                <Button onClick={syncNow} loading={busyAction === "sync"} variant="outline" disabled={Boolean(busyAction)}>
-                  {busyAction !== "sync" ? <RefreshCw className="h-4 w-4 mr-0" /> : null}
-                  Sync now
-                </Button>
                 {activeMigration ? (
                   <Button
                     onClick={() => router.push(`/dashboard/migrations/${encodeURIComponent(activeMigration.id)}`)}
                     variant="outline"
-                    disabled={Boolean(busyAction)}
                   >
                     <ExternalLink className="h-4 w-4 mr-0" />
                     Details
-                  </Button>
-                ) : null}
-                {canRunVerifyAll ? (
-                  <Button onClick={runVerifyAll} loading={busyAction === "verify_all"} variant="outline" disabled={Boolean(busyAction)}>
-                    {busyAction !== "verify_all" ? <CheckCircle2 className="h-4 w-4 mr-0" /> : null}
-                    Verify all buckets
                   </Button>
                 ) : null}
               </div>

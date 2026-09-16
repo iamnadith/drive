@@ -1576,7 +1576,7 @@ export default function MigrationDetailsPage() {
         const verifyStatus = verifyState?.status ?? null
         const canRetry = !workerPoolMigration && normalizedDisplayStatus !== "verification_failed" && (verifyStatus === "error" || normalizedDisplayStatus === "queued" || normalizedDisplayStatus === "job_id_pending" || normalizedDisplayStatus.endsWith("_failed") || normalizedDisplayStatus.includes("failed") || normalizedDisplayStatus.includes("error"))
         const canAbort = !["canceled", "completed"].includes(migration?.status ?? "") && !workerPoolMigration && (Boolean(item.slurperJobId) || canRetry) && !["completed", "aborted", "failed", "verification_failed", "no_files"].includes(normalizedDisplayStatus)
-        const canVerify = !workerPoolMigration && (normalizedDisplayStatus === "verification_failed" || (isCompletedStatus(displayStatus) && verifyStatus !== "pending" && verifyStatus !== "running"))
+        const canVerify = migration.status !== "completed" && !workerPoolMigration && (normalizedDisplayStatus === "verification_failed" || (isCompletedStatus(displayStatus) && verifyStatus !== "pending" && verifyStatus !== "running"))
         const canInspectFailures = snapshot.failed > 0 || snapshot.verifyIssues > 0 || normalizedDisplayStatus.includes("failed") || normalizedDisplayStatus.includes("error")
         const lifecycleAction: "pause" | "resume" | "retry" | null = canPause ? "pause" : canRetry ? "retry" : canResume ? "resume" : null
         const lifecycleBusy = itemBusy === "pause" || itemBusy === "resume" || itemBusy === "retry"
@@ -1735,6 +1735,8 @@ export default function MigrationDetailsPage() {
                   const settingsSync = isRecord(progress.settingsSync) ? progress.settingsSync : null
                   return settingsSync?.status === "failed"
                 })
+              const settingsSyncInProgress =
+                migration.syncStatus === "syncing" || items.some((item) => readBucketSettingsStatus(item) === "syncing")
               const showMarkCompleted =
                 allBucketsTerminal && !["completed", "failed"].includes(String(effectiveMigrationStatus)) && !settingsSyncFailed
 
@@ -1798,8 +1800,8 @@ export default function MigrationDetailsPage() {
                   ) : null}
 
                   {migration.status !== "completed" && (workerPoolMigration
-                    ? failedBuckets.length > 0 || overviewProgress.verifyIssues > 0 || effectiveMigrationStatus === "failed"
-                    : items.length > 0 && migration.status !== "draft" && !hasActiveSuperSlurper) ? (
+                    ? !settingsSyncInProgress && effectiveMigrationStatus !== "completed" && (failedBuckets.length > 0 || overviewProgress.verifyIssues > 0 || effectiveMigrationStatus === "failed")
+                    : !settingsSyncInProgress && effectiveMigrationStatus !== "completed" && items.length > 0 && migration.status !== "draft" && !hasActiveSuperSlurper) ? (
                     <Button
                       onClick={() => void runMigrationAction("repair_migration")}
                       loading={busyAction === "repair_migration"}
@@ -1865,15 +1867,11 @@ export default function MigrationDetailsPage() {
         </CardContent>
       </Card>
       {migration.options.executionMode === "migration_workers" ? (
-        workerRuns.length === 0 ? (
-          <div className="rounded-2xl border border-dashed p-5 text-sm text-muted-foreground">
-            Waiting for a migration worker to start.
-          </div>
-        ) : (() => {
+        (() => {
               const activeRuns = workerRuns.filter((run) => run.online)
               const latestRun = [...workerRuns].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]
               const isActive = activeRuns.length > 0
-              const status = isActive ? "running" : "completed"
+              const status = isActive ? "running" : workerRuns.length > 0 ? "completed" : "pending"
               const currentFiles = activeRuns.filter((run) => run.currentFile && typeof run.currentFile === "object").length
               const startedAt = [...workerRuns].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0]?.createdAt
               const completedFiles = workerRuns.reduce((sum, run) => sum + Number(run.completedFiles || 0), 0)
@@ -1895,7 +1893,11 @@ export default function MigrationDetailsPage() {
                       <div className="space-y-1">
                         <div className="font-mono text-[11px] text-muted-foreground">Migration worker pool</div>
                         <div className="text-sm leading-relaxed text-muted-foreground">
-                          {isActive ? `${activeRuns.length} worker${activeRuns.length === 1 ? " is" : "s are"} processing this migration.` : "Migration worker pool run finished."}
+                          {isActive
+                            ? `${activeRuns.length} worker${activeRuns.length === 1 ? " is" : "s are"} processing this migration.`
+                            : workerRuns.length > 0
+                              ? "Migration worker pool run finished."
+                              : "Worker pool is queued; waiting for an available worker."}
                         </div>
                       </div>
                     </div>
@@ -1933,7 +1935,7 @@ export default function MigrationDetailsPage() {
         })()
       ) : null}
 
-      <div className="space-y-0">
+      <div className="space-y-6">
       <DashboardDataTable
         data={items}
         columns={bucketColumns}
@@ -1948,7 +1950,7 @@ export default function MigrationDetailsPage() {
       />
 
 
-      <section>
+      <section className="relative">
           <Card className="gap-0 overflow-hidden rounded-3xl border border-border/70 p-0">
             <div className="border-b px-4 py-3">
               <CardTitle className="text-sm">Migration Logs</CardTitle>
