@@ -41,9 +41,11 @@ async function syncGitHubWorkerSecrets(input: {
   repo: string
   serverUrl: string
   sharedSecret: string
+  postgresUrl: string
   agentId?: string
   includeLegacyAgentId?: boolean
 }) {
+  if (!input.postgresUrl) throw new Error("POSTGRES_URL is not configured for the GitHub migration worker")
   const writes = [
     setGitHubActionsSecret({
       token: input.token,
@@ -58,6 +60,13 @@ async function syncGitHubWorkerSecrets(input: {
       repo: input.repo,
       name: "DRIVE_WORKER_SHARED_SECRET",
       value: input.sharedSecret,
+    }),
+    setGitHubActionsSecret({
+      token: input.token,
+      owner: input.owner,
+      repo: input.repo,
+      name: "POSTGRES_URL",
+      value: input.postgresUrl,
     }),
   ]
   if (input.includeLegacyAgentId && input.agentId) {
@@ -212,6 +221,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           repo: selected.githubRepoName,
           serverUrl: orchestrator.orchestratorUrl,
           sharedSecret: workerSecret,
+          postgresUrl: String(process.env.POSTGRES_URL || "").trim(),
           agentId: selected.id,
           includeLegacyAgentId: false,
         })
@@ -293,7 +303,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const runIdsBeforeDispatch = new Set(runsBeforeDispatch.map((candidate) => candidate.id))
     let secretSyncError: string | null = null
     try {
-      await syncGitHubWorkerSecrets({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, sharedSecret, agentId: id, includeLegacyAgentId: false })
+      await syncGitHubWorkerSecrets({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, sharedSecret, postgresUrl: String(process.env.POSTGRES_URL || "").trim(), agentId: id, includeLegacyAgentId: false })
     } catch (error: unknown) {
       secretSyncError = errorMessage(error, "Unable to sync GitHub worker secrets")
     }

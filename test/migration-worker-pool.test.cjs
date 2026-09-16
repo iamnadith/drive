@@ -39,6 +39,13 @@ test('the GitHub workflow exposes no manual dispatch fields and receives system 
   assert.doesNotMatch(workflow, /DRIVE_REPAIR_JOB_ID:.*vars\.DRIVE_REPAIR_JOB_ID/)
 })
 
+test('GitHub migration worker dispatch provisions the database secret required by worker startup', () => {
+  const route = read('src/app/api/agents/[id]/dispatch/route.ts')
+  assert.match(route, /name: "POSTGRES_URL"/)
+  assert.match(route, /postgresUrl: String\(process\.env\.POSTGRES_URL \|\| ""\)\.trim\(\)/)
+  assert.match(route, /POSTGRES_URL is not configured for the GitHub migration worker/)
+})
+
 test('worker-pool details hydrate and refresh from PostgreSQL only', () => {
   const route = read('src/app/api/migrations/[id]/worker-pool/route.ts')
   const page = read('src/app/dashboard/migrations/[id]/worker-pool/page.tsx')
