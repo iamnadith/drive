@@ -306,7 +306,7 @@ test('workflow compatibility requires the orchestrator URL and shared worker sec
   const f = fixture([])
   const current = fs.readFileSync(path.resolve('.github/workflows/migration-worker.yml'), 'utf8')
   assert.equal(f.isWorkerWorkflow(current), true)
-  assert.equal(f.isWorkerWorkflow(current.replace('DRIVE_WORKER_SHARED_SECRET', 'UNRELATED_SECRET')), false)
+  assert.equal(f.isWorkerWorkflow(current.replaceAll('DRIVE_WORKER_SHARED_SECRET', 'UNRELATED_SECRET')), false)
   assert.equal(f.isWorkerWorkflow('name: unrelated\non:\n  workflow_dispatch:\n'), false)
 })
 
