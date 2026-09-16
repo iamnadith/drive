@@ -3,10 +3,20 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 21
+const BUILD = 22
+const MIN_QUEUE_BATCH_SIZE = 100
+const DEFAULT_QUEUE_BATCH_SIZE = 500
+const MAX_QUEUE_BATCH_SIZE = 1_000
 const MAX_SECRET_LENGTH = 512
 const TRANSIENT_SCAN_SQL_PATTERN = "(connection terminated unexpectedly|connection reset|connection closed|server closed the connection unexpectedly|client has encountered a connection error|not queryable|socket hang up|econnreset|econnrefused|etimedout|timeout|timed out|eai_again|enotfound|enetunreach|epipe|fetch failed|temporar(y|ily) unavailable|too many (requests|connections|clients)|slow down|throttl|HTTP (408|425|429|500|502|503|504)|57P01|57P03|53300|08[0-9A-Z]{3}|40001|40P01)"
 let authCache: { value: string[]; expiresAt: number } | null = null
+let adaptiveQueueBatchSize = DEFAULT_QUEUE_BATCH_SIZE
+
+function tuneQueueBatchSize(elapsedMs: number, succeeded: boolean) {
+  if (!succeeded) adaptiveQueueBatchSize = Math.max(MIN_QUEUE_BATCH_SIZE, Math.floor(adaptiveQueueBatchSize / 2))
+  else if (elapsedMs < 5_000) adaptiveQueueBatchSize = Math.min(MAX_QUEUE_BATCH_SIZE, adaptiveQueueBatchSize + 100)
+  else if (elapsedMs > 20_000) adaptiveQueueBatchSize = Math.max(MIN_QUEUE_BATCH_SIZE, adaptiveQueueBatchSize - 100)
+}
 
 function isTransientWorkerError(message: string) {
   return /connection terminated unexpectedly|connection reset|connection closed|server closed the connection unexpectedly|client has encountered a connection error|not queryable|socket hang up|econn(?:reset|refused)|etimedout|eai_again|enotfound|enetunreach|epipe|fetch failed|time(?:out|d out)|temporar(?:y|ily) unavailable|too many (?:requests|connections|clients)|slow down|throttl|\bHTTP (?:408|425|429|500|502|503|504)\b|\b(?:57P01|57P03|53300|08000|08001|08003|08004|08006|08007|40001|40P01)\b/i.test(message)
@@ -417,7 +427,7 @@ async function ensureShards(db: Client, migration: Row) {
     const scanId = String(candidate.progress?.migrationInventory?.sourceScanId || "")
     if (!scanId) continue
     const lastKey = Number(candidate.progress?.migrationQueue?.generation) === generation ? String(candidate.progress?.migrationQueue?.lastKey || "") : ""
-    const page = await db.query(`select key,size,etag from drive_bucket_scan_objects where scan_id=$1 and not is_dir_marker and key>$2 order by key limit 100`, [scanId, lastKey])
+    const page = await db.query(`select key,size,etag from drive_bucket_scan_objects where scan_id=$1 and not is_dir_marker and key>$2 order by key limit ${adaptiveQueueBatchSize}`, [scanId, lastKey])
     const scan = scansByItem.get(candidate.id) || {}
     if ((page.rowCount || 0) > 0 || scan.status === "completed") {
       queueItem = candidate
@@ -431,22 +441,29 @@ async function ensureShards(db: Client, migration: Row) {
     const page = queuePage!
     await db.query("begin")
     try {
-      for (const object of page.rows) {
-        const inserted = await db.query(`
-          insert into drive_repair_jobs(id,migration_id,status,mode,work_key,payload,progress,result,created_at,updated_at)
-          values(gen_random_uuid(),$1::uuid,'pending','migration',format('migration:%s:generation:%s:inventory:%s:%s',$1::uuid,$2::int,$3::uuid,encode(convert_to($4::text,'UTF8'),'hex')),
-            jsonb_build_object('source','file_scanner_inventory','kind','migration_inventory_file','workerGeneration',$2::int,'itemIds',jsonb_build_array($3::uuid),'inventoryObjects',jsonb_build_array(jsonb_build_object('key',$4::text,'size',$5::bigint,'etag',$6::text))),
-            '{}'::jsonb,'{}'::jsonb,now(),now()) on conflict(work_key) where work_key is not null do nothing
-        `, [migration.id, generation, queueItem.id, object.key, object.size, object.etag])
-        created += inserted.rowCount || 0
-      }
+      const queueStartedAt = Date.now()
+      const inserted = await db.query(`
+        insert into drive_repair_jobs(id,migration_id,status,mode,work_key,payload,progress,result,created_at,updated_at)
+        select gen_random_uuid(),$1::uuid,'pending','migration',
+          format('migration:%s:generation:%s:inventory:%s:%s',$1::uuid,$2::int,$3::uuid,encode(convert_to(object_row.key,'UTF8'),'hex')),
+          jsonb_build_object('source','file_scanner_inventory','kind','migration_inventory_file','workerGeneration',$2::int,'itemIds',jsonb_build_array($3::uuid),'inventoryObjects',jsonb_build_array(jsonb_build_object('key',object_row.key,'size',object_row.size,'etag',object_row.etag))),
+          '{}'::jsonb,'{}'::jsonb,now(),now()
+        from jsonb_to_recordset($4::jsonb) as object_row(key text,size bigint,etag text)
+        on conflict(work_key) where work_key is not null do nothing
+      `, [migration.id, generation, queueItem.id, JSON.stringify(page.rows)])
+      created += inserted.rowCount || 0
+      tuneQueueBatchSize(Date.now() - queueStartedAt, true)
       // A temporary end of the persisted prefix is not end-of-inventory while
       // File Scanner is still listing. Only its completed state closes queueing.
       const completed = queueScan?.status === "completed" && page.rowCount === 0
       const nextKey = page.rows[page.rows.length - 1]?.key || lastKey
       await db.query(`update drive_migration_items set progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{migrationQueue}',$2::jsonb),updated_at=now() where id=$1`, [queueItem.id, JSON.stringify({ generation, status: completed ? "completed" : "materializing", lastKey: nextKey, updatedAt: new Date().toISOString() })])
       await db.query("commit")
-    } catch (error) { await db.query("rollback").catch(() => undefined); throw error }
+    } catch (error) {
+      tuneQueueBatchSize(Number.MAX_SAFE_INTEGER, false)
+      await db.query("rollback").catch(() => undefined)
+      throw error
+    }
     return { generation, shardCount: 0, created, inventoryPending, queuePending: 1 }
   }
   if (inventoryPending) return { generation, shardCount: 0, created: 0, inventoryPending, queuePending: 1 }
@@ -501,7 +518,7 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
   await db.query(`
     with aggregate as (
       select i0.id item_id,
-        count(j.*)::bigint queued_objects,
+        count(j.*) filter(where j.status='pending')::bigint queued_objects,
         count(j.*) filter(where j.status='completed')::bigint completed_objects,
         count(j.*) filter(where j.status in('claimed','running'))::bigint active_objects,
         coalesce(sum(case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint transferred_objects,
@@ -1423,7 +1440,9 @@ async function cycle(env: Env) {
       if (shards.inventoryPending || shards.queuePending) {
         const syncMessage = shards.targetBuckets?.failed
           ? "Waiting for Migration Orchestrator to prepare destination buckets"
-          : "Scanning source buckets and creating migration queue"
+          : shards.inventoryPending
+            ? `Scanning source buckets (${shards.inventoryPending} remaining)`
+            : "Building migration queue for migration workers"
         await db.query(`update drive_migrations set sync_status='running',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status='running'`, [migration.id, syncMessage])
       }
       await refreshWorkerItemProgress(db, migration, shards.generation)

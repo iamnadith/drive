@@ -122,7 +122,7 @@ test('migration worker requires PostgreSQL and honors the configured SSL switch'
 
 test('orchestrator binds the migration id as one PostgreSQL type while materializing file jobs', () => {
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
-  assert.match(orchestrator, /values\(gen_random_uuid\(\),\$1::uuid,'pending','migration'/)
+  assert.match(orchestrator, /select gen_random_uuid\(\),\$1::uuid,'pending','migration'/)
   assert.match(orchestrator, /format\('migration:%s:generation:%s:inventory:%s:%s',\$1::uuid/)
   assert.doesNotMatch(orchestrator, /format\('migration:%s:generation:%s:inventory:%s:%s',\$1::text/)
 })
@@ -138,6 +138,12 @@ test('orchestrator queues scanner pages incrementally without closing a running 
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   assert.doesNotMatch(orchestrator, /if \(inventoryPending\) return \{ generation, shardCount: 0, created: 0, inventoryPending \}/)
   assert.match(orchestrator, /queueScan\?\.status === "completed" && page\.rowCount === 0/)
+  assert.match(orchestrator, /MIN_QUEUE_BATCH_SIZE = 100/)
+  assert.match(orchestrator, /MAX_QUEUE_BATCH_SIZE = 1_000/)
+  assert.match(orchestrator, /jsonb_to_recordset\(\$4::jsonb\)/)
+  assert.match(orchestrator, /tuneQueueBatchSize/)
+  assert.match(orchestrator, /filter\(where j\.status='pending'\)::bigint queued_objects/)
+  assert.match(orchestrator, /Building migration queue for migration workers/)
   assert.match(orchestrator, /jsonb_build_object\('status',s\.status,'objects',s\.objects,'bytes',s\.bytes/)
   assert.match(orchestrator, /temporarily empty running scan block another bucket/)
 })

@@ -1479,6 +1479,18 @@ export default function MigrationDetailsPage() {
       cell: ({ row }) => <span className="font-mono text-xs">{formatNumber(getBucketSnapshot(row.original).transferred)}</span>,
     },
     {
+      id: "skipped",
+      header: "Skipped",
+      meta: { width: "min-w-[100px]", align: "center" },
+      cell: ({ row }) => <span className="font-mono text-xs">{formatNumber(getBucketSnapshot(row.original).skipped)}</span>,
+    },
+    {
+      id: "queued",
+      header: "Queue",
+      meta: { width: "min-w-[100px]", align: "center" },
+      cell: ({ row }) => <span className="font-mono text-xs">{formatNumber(getBucketSnapshot(row.original).queued)}</span>,
+    },
+    {
       id: "total",
       header: "Total",
       meta: { width: "min-w-[100px]", align: "center" },

@@ -31,6 +31,7 @@ export type RepairResultItemMetrics = {
 export type BucketSnapshot = {
   displayStatus: string | undefined
   total: number
+  queued: number
   transferred: number
   skipped: number
   failed: number
@@ -182,6 +183,7 @@ export function readLiveBucketState(progress: Record<string, unknown>) {
     transferredObjects: typeof live.transferredObjects === "number" ? live.transferredObjects : 0,
     transferredBytes: typeof live.transferredBytes === "number" ? live.transferredBytes : 0,
     skippedObjects: typeof live.skippedObjects === "number" ? live.skippedObjects : 0,
+    queuedObjects: typeof live.queuedObjects === "number" ? Math.max(0, live.queuedObjects) : 0,
     failedObjects: typeof live.failedObjects === "number" ? live.failedObjects : 0,
     unaccountedObjects: typeof live.unaccountedObjects === "number" ? live.unaccountedObjects : 0,
     verifyIssues: typeof live.verifyIssues === "number" ? live.verifyIssues : 0,
@@ -384,6 +386,7 @@ export function getMergedBucketSnapshot(
             ? persistedVerificationStatus
           : stableLive.status ?? getItemDisplayStatus(item, repairResultItem, stableLive.workerStatus ?? undefined),
       total: stableLive.totalObjects,
+      queued: stableLive.queuedObjects,
       transferred: stableLive.transferredObjects,
       skipped: stableLive.skippedObjects,
       failed: stableLive.failedObjects,
@@ -497,6 +500,7 @@ export function getMergedBucketSnapshot(
   return normalizeBucketSnapshot({
     displayStatus,
     total,
+    queued: 0,
     transferred: transferredValue,
     skipped: skippedValue,
     failed: total > 0 ? Math.min(remainingCapacity, failedValueRaw) : failedValueRaw,
