@@ -257,7 +257,9 @@ function statusBadge(
 function migrationWorkerBadge(status: string | undefined) {
   const value = String(status || "").toLowerCase()
   if (value === "completed") return <Badge className="bg-green-600">Worker completed</Badge>
+  if (value === "deploying") return <Badge className="bg-yellow-600">Worker deploying</Badge>
   if (value === "running") return <Badge className="bg-primary text-primary-foreground">Worker running</Badge>
+  if (value === "verifying") return <Badge className="bg-purple-600">Worker verifying</Badge>
   if (value === "claimed") return <Badge className="bg-sky-600">Worker claimed</Badge>
   if (value === "pending" || value === "queued") return <Badge variant="secondary">Worker queued</Badge>
   if (value === "failed") return <Badge className="bg-red-600">Worker failed</Badge>
@@ -1437,6 +1439,8 @@ export default function MigrationDetailsPage() {
 
   const sourceLabel = accountLabelById.get(migration.sourceAccountId) ?? migration.sourceAccountId
   const targetLabel = accountLabelById.get(migration.targetAccountId) ?? migration.targetAccountId
+  const showSkippedColumn = items.some((item) => getBucketSnapshot(item).skipped > 0)
+  const showFailedColumn = items.some((item) => getBucketSnapshot(item).failed > 0)
 
   const bucketColumns: ColumnDef<MigrationItem, unknown>[] = [
     {
@@ -1478,18 +1482,24 @@ export default function MigrationDetailsPage() {
       meta: { width: "min-w-[120px]", align: "center" },
       cell: ({ row }) => <span className="font-mono text-xs">{formatNumber(getBucketSnapshot(row.original).transferred)}</span>,
     },
-    {
+    ...(showSkippedColumn ? [{
       id: "skipped",
       header: "Skipped",
       meta: { width: "min-w-[100px]", align: "center" },
       cell: ({ row }) => <span className="font-mono text-xs">{formatNumber(getBucketSnapshot(row.original).skipped)}</span>,
-    },
+    } satisfies ColumnDef<MigrationItem, unknown>] : []),
     {
       id: "queued",
       header: "Queue",
       meta: { width: "min-w-[100px]", align: "center" },
       cell: ({ row }) => <span className="font-mono text-xs">{formatNumber(getBucketSnapshot(row.original).queued)}</span>,
     },
+    ...(showFailedColumn ? [{
+      id: "failed",
+      header: "Failed",
+      meta: { width: "min-w-[100px]", align: "center" },
+      cell: ({ row }) => <span className="font-mono text-xs">{formatNumber(getBucketSnapshot(row.original).failed)}</span>,
+    } satisfies ColumnDef<MigrationItem, unknown>] : []),
     {
       id: "total",
       header: "Total",
@@ -1883,7 +1893,21 @@ export default function MigrationDetailsPage() {
               const activeRuns = workerRuns.filter((run) => run.online)
               const latestRun = [...workerRuns].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]
               const isActive = activeRuns.length > 0
-              const status = isActive ? "running" : workerRuns.length > 0 ? "completed" : "pending"
+              const latestRunStatus = String(latestRun?.status || "").toLowerCase()
+              const migrationStatus = String(migration.status || "").toLowerCase()
+              const status = ["completed"].includes(migrationStatus)
+                ? "completed"
+                : ["failed", "verification_failed"].includes(migrationStatus)
+                  ? "failed"
+                  : ["canceled", "cancelled", "aborted"].includes(migrationStatus)
+                    ? "aborted"
+                    : migrationStatus === "verifying"
+                      ? "verifying"
+                      : isActive
+                        ? "running"
+                        : ["pending", "queued", "created", "dispatching"].includes(latestRunStatus)
+                          ? "deploying"
+                          : "queued"
               const currentFiles = activeRuns.filter((run) => run.currentFile && typeof run.currentFile === "object").length
               const startedAt = [...workerRuns].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0]?.createdAt
               const completedFiles = workerRuns.reduce((sum, run) => sum + Number(run.completedFiles || 0), 0)
@@ -1905,11 +1929,19 @@ export default function MigrationDetailsPage() {
                       <div className="space-y-1">
                         <div className="font-mono text-[11px] text-muted-foreground">Migration worker pool</div>
                         <div className="text-sm leading-relaxed text-muted-foreground">
-                          {isActive
-                            ? `${activeRuns.length} worker${activeRuns.length === 1 ? " is" : "s are"} processing this migration.`
-                            : workerRuns.length > 0
-                              ? "Migration worker pool run finished."
-                              : "Worker pool is queued; waiting for an available worker."}
+                          {migrationStatus === "completed"
+                            ? "Migration and worker processing completed."
+                            : migrationStatus === "failed" || migrationStatus === "verification_failed"
+                              ? "Migration worker processing failed."
+                              : ["canceled", "cancelled", "aborted"].includes(migrationStatus)
+                                ? "Migration worker processing was stopped."
+                                : migrationStatus === "verifying"
+                                  ? "Migration transfer finished; destination verification is running."
+                                  : isActive
+                                    ? `${activeRuns.length} worker${activeRuns.length === 1 ? " is" : "s are"} processing this migration.`
+                                    : status === "deploying"
+                                      ? "Dispatching migration workers to GitHub Actions."
+                                      : "Migration is still active; waiting for workers to claim the queue."}
                         </div>
                       </div>
                     </div>

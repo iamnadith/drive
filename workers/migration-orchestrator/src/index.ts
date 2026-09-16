@@ -198,15 +198,19 @@ async function refreshSuperSlurperProgress(db: Client, migration: Row) {
     const skipped = Math.max(nonNegative(previous.skippedObjects) ?? 0, values.skipped)
     const failed = Math.max(nonNegative(previous.failedObjects) ?? 0, values.failed)
     const objects = Math.max(values.objects ?? 0, nonNegative(item.source_objects) ?? 0)
-    const alreadyPresent = opts(migration).overwrite === false ? Math.min(objects, skipped) : 0
-    const countedTransferred = Math.min(objects || cumulative + alreadyPresent, cumulative + alreadyPresent)
+    // A retry can report the same object as both copied and skipped. Keep the
+    // canonical counters mutually exclusive so copied objects never inflate
+    // the skipped column (or vice versa).
+    const exclusiveSkipped = Math.max(0, Math.min(objects || skipped, skipped - cumulative))
+    const alreadyPresent = opts(migration).overwrite === false ? exclusiveSkipped : 0
+    const countedTransferred = Math.min(objects || cumulative, cumulative)
     const liveStatus = status === "completed" ? "verifying" : status
-    const normalized = { status, objects, transferredObjects: cumulative, skippedObjects: skipped, failedObjects: failed }
+    const normalized = { status, objects, transferredObjects: cumulative, skippedObjects: exclusiveSkipped, failedObjects: failed }
     const live = {
       ...(item.progress?.live && typeof item.progress.live === "object" ? item.progress.live : {}),
       updatedAt: new Date().toISOString(), status: liveStatus, totalObjects: objects,
       transferredObjects: countedTransferred, copiedObjects: Math.min(objects || cumulative, cumulative),
-      alreadyPresentObjects: alreadyPresent, skippedObjects: skipped,
+      alreadyPresentObjects: alreadyPresent, skippedObjects: exclusiveSkipped,
       failedObjects: failed, unaccountedObjects: Math.max(0, objects - countedTransferred - failed),
       verifyIssues: 0, slurperJobId: item.slurper_job_id,
     }
@@ -490,14 +494,16 @@ async function migrationLiveState(db: Client, migrationId: string) {
   const runs = runsResult.rows
   const activeRuns = runs.filter((run) => String(run.status) === "running" && String(run.agent_status) === "online" && Date.now() - Date.parse(String(run.agent_heartbeat || "")) < 90_000)
   const aggregate = aggregateResult.rows[0] || {}
-  const buckets = itemsResult.rows.map((item) => { const live = item.progress?.live || {}; return { id: item.id, sourceBucket: item.source_bucket, targetBucket: item.target_bucket, status: live.status || item.slurper_status || "pending", totalObjects: Number(live.totalObjects ?? item.source_objects ?? 0), transferredObjects: Number(live.transferredObjects ?? 0), alreadyPresentObjects: Number(live.alreadyPresentObjects ?? 0), copiedObjects: Number(live.copiedObjects ?? 0), skippedObjects: Number(live.skippedObjects ?? 0), failedObjects: Number(live.failedObjects ?? 0), transferredBytes: Number(live.transferredBytes ?? 0), sourceBytes: Number(item.source_bytes ?? 0), updatedAt: item.updated_at } })
+  const buckets = itemsResult.rows.map((item) => { const live = item.progress?.live || {}; return { id: item.id, sourceBucket: item.source_bucket, targetBucket: item.target_bucket, status: live.status || item.slurper_status || "pending", totalObjects: Number(live.totalObjects ?? item.source_objects ?? 0), queuedObjects: Number(live.queuedObjects ?? 0), transferredObjects: Number(live.transferredObjects ?? 0), alreadyPresentObjects: Number(live.alreadyPresentObjects ?? 0), copiedObjects: Number(live.copiedObjects ?? 0), skippedObjects: Number(live.skippedObjects ?? 0), failedObjects: Number(live.failedObjects ?? 0), transferredBytes: Number(live.transferredBytes ?? 0), sourceBytes: Number(item.source_bytes ?? 0), updatedAt: item.updated_at } })
   const totalObjects = buckets.reduce((sum, bucket) => sum + bucket.totalObjects, 0)
   const transferredObjects = buckets.reduce((sum, bucket) => sum + bucket.transferredObjects, 0)
   const alreadyPresentObjects = buckets.reduce((sum, bucket) => sum + bucket.alreadyPresentObjects, 0)
   const copiedObjects = buckets.reduce((sum, bucket) => sum + bucket.copiedObjects, 0)
   const failedObjects = buckets.reduce((sum, bucket) => sum + bucket.failedObjects, 0)
   const skippedObjects = buckets.reduce((sum, bucket) => sum + bucket.skippedObjects, 0)
-  const totals = { onlineWorkers: activeRuns.length, activeTransfers: 0, totalJobs: Number(aggregate.total_jobs || 0), queuedJobs: Number(aggregate.queued_jobs || 0), runningJobs: Number(aggregate.running_jobs || 0), completedJobs: Number(aggregate.completed_jobs || 0), failedJobs: Number(aggregate.failed_jobs || 0), canceledJobs: Number(aggregate.canceled_jobs || 0), totalObjects, transferred: transferredObjects || Number(aggregate.transferred_objects || 0), alreadyPresentObjects: alreadyPresentObjects || Number(aggregate.already_present_objects || 0), copiedObjects: copiedObjects || Number(aggregate.copied_objects || 0), failed: failedObjects || Number(aggregate.failed_objects || 0), skipped: skippedObjects || Number(aggregate.skipped_objects || 0), missing: 0, mismatched: 0, processedFiles: Number(aggregate.completed_jobs || 0) + Number(aggregate.failed_jobs || 0) + Number(aggregate.canceled_jobs || 0), totalFiles: Number(aggregate.total_jobs || 0), completedBytes: Number(aggregate.completed_bytes || 0) }
+  const aggregateTransferred = Number(aggregate.transferred_objects || 0)
+  const aggregateSkipped = Math.max(0, Number(aggregate.skipped_objects || 0) - aggregateTransferred)
+  const totals = { onlineWorkers: activeRuns.length, activeTransfers: 0, totalJobs: Number(aggregate.total_jobs || 0), queuedJobs: Number(aggregate.queued_jobs || 0), runningJobs: Number(aggregate.running_jobs || 0), completedJobs: Number(aggregate.completed_jobs || 0), failedJobs: Number(aggregate.failed_jobs || 0), canceledJobs: Number(aggregate.canceled_jobs || 0), totalObjects, transferred: transferredObjects || aggregateTransferred, alreadyPresentObjects: alreadyPresentObjects || Number(aggregate.already_present_objects || 0), copiedObjects: copiedObjects || Number(aggregate.copied_objects || 0), failed: failedObjects || Number(aggregate.failed_objects || 0), skipped: skippedObjects || aggregateSkipped, missing: 0, mismatched: 0, processedFiles: Number(aggregate.completed_jobs || 0) + Number(aggregate.failed_jobs || 0) + Number(aggregate.canceled_jobs || 0), totalFiles: Number(aggregate.total_jobs || 0), completedBytes: Number(aggregate.completed_bytes || 0) }
   for (const job of jobs) {
     const progress = job.progress && typeof job.progress === "object" ? job.progress : {}
     if (["claimed", "running"].includes(String(job.status)) && progress.currentFile && Date.now() - Date.parse(String(job.last_heartbeat_at || "")) < 90_000) totals.activeTransfers += 1
