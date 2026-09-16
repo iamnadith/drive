@@ -130,9 +130,10 @@ test('migration worker requires PostgreSQL and honors the configured SSL switch'
 
 test('orchestrator binds the migration id as one PostgreSQL type while materializing file jobs', () => {
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
-  assert.match(orchestrator, /select gen_random_uuid\(\),\$1::uuid,'pending','migration'/)
-  assert.match(orchestrator, /format\('migration:%s:generation:%s:inventory:%s:%s',\$1::uuid/)
+  assert.match(orchestrator, /select gen_random_uuid\(\),\$3::uuid,'pending','migration'/)
+  assert.match(orchestrator, /format\('migration:%s:generation:%s:inventory:%s:%s',\$3::uuid/)
   assert.doesNotMatch(orchestrator, /format\('migration:%s:generation:%s:inventory:%s:%s',\$1::text/)
+  assert.match(orchestrator, /with page as materialized[\s\S]*from page object_row[\s\S]*\[queueScan\?\.id, lastKey, migration\.id, generation, queueItem\.id\]/)
 })
 
 test('orchestrator dispatches the fleet only after all scanner inventory is materialized', () => {
@@ -145,10 +146,13 @@ test('orchestrator dispatches the fleet only after all scanner inventory is mate
 test('orchestrator queues scanner pages incrementally without closing a running inventory', () => {
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   assert.doesNotMatch(orchestrator, /if \(inventoryPending\) return \{ generation, shardCount: 0, created: 0, inventoryPending \}/)
-  assert.match(orchestrator, /queueScan\?\.status === "completed" && page\.rowCount === 0/)
-  assert.match(orchestrator, /MIN_QUEUE_BATCH_SIZE = 100/)
-  assert.match(orchestrator, /MAX_QUEUE_BATCH_SIZE = 1_000/)
-  assert.match(orchestrator, /jsonb_to_recordset\(\$4::jsonb\)/)
+  assert.match(orchestrator, /queueScan\?\.status === "completed" && pageCount === 0/)
+  assert.match(orchestrator, /MIN_QUEUE_BATCH_SIZE = 500/)
+  assert.match(orchestrator, /DEFAULT_QUEUE_BATCH_SIZE = 2_000/)
+  assert.match(orchestrator, /MAX_QUEUE_BATCH_SIZE = 4_000/)
+  assert.match(orchestrator, /select exists\(select 1 from drive_bucket_scan_objects[\s\S]*?has_page/)
+  assert.match(orchestrator, /materializedObjects: priorMaterialized \+ pageCount/)
+  assert.doesNotMatch(orchestrator, /jsonb_to_recordset\(\$4::jsonb\)/)
   assert.match(orchestrator, /tuneQueueBatchSize/)
   assert.match(orchestrator, /filter\(where j\.status='pending'\)::bigint queued_objects/)
   assert.match(orchestrator, /Building migration queue for migration workers/)
