@@ -16,6 +16,11 @@ const MAX_SECRET_LENGTH = 512
 // independent bucket scans to make progress during the same cron/queue run.
 const SCAN_CONCURRENCY = 4
 const DATABASE_RETRY_DELAYS_MS = [250, 1_000, 3_000]
+const DATABASE_RETRY_DELAYS_WITH_FINAL_BACKOFF_MS = [...DATABASE_RETRY_DELAYS_MS, 8_000]
+const DATABASE_QUERY_TIMEOUT_MS = 45_000
+const R2_REQUEST_TIMEOUT_MS = 30_000
+const SCANNER_STATE_LEASE_MS = 150_000
+const SCANNER_HEARTBEAT_MS = 30_000
 function isTransientScanError(error: unknown) {
   const value = error && typeof error === "object" ? error as { message?: unknown; name?: unknown; code?: unknown; status?: unknown; $metadata?: { httpStatusCode?: unknown } } : {}
   const message = `${String(value.name || "")} ${String(value.message || error || "")}`
@@ -54,7 +59,7 @@ async function database<T>(env: Env, operation: (client: Client) => Promise<T>):
   const hostname = new URL(connectionString).hostname
   const sslMode = new URL(connectionString).searchParams.get("sslmode")?.trim().toLowerCase()
   const disableSsl = ["1", "true"].includes(String(env.DISABLE_POSTGRES_SSL || "").toLowerCase()) || sslMode === "disable"
-  const client = new Client({ connectionString, ssl: disableSsl || ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false }, connectionTimeoutMillis: 8_000 })
+  const client = new Client({ connectionString, ssl: disableSsl || ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false }, connectionTimeoutMillis: 8_000, query_timeout: DATABASE_QUERY_TIMEOUT_MS, statement_timeout: DATABASE_QUERY_TIMEOUT_MS })
   await client.connect()
   try { return await operation(client) } finally { await client.end().catch(() => undefined) }
 }
@@ -74,15 +79,15 @@ async function ensureSchema(db: Client) {
 }
 async function databaseTaskWithRetry<T>(env: Env, operation: (client: Client) => Promise<T>): Promise<T> {
   let lastError: unknown
-  for (let attempt = 0; attempt <= DATABASE_RETRY_DELAYS_MS.length; attempt += 1) {
+  for (let attempt = 0; attempt <= DATABASE_RETRY_DELAYS_WITH_FINAL_BACKOFF_MS.length; attempt += 1) {
     try {
       // A fresh client is required after a dropped PostgreSQL connection;
       // pg clients are not recoverable once they report "not queryable".
       return await database(env, operation)
     } catch (error) {
       lastError = error
-      if (!isTransientScanError(error) || attempt === DATABASE_RETRY_DELAYS_MS.length) throw error
-      await new Promise((resolve) => setTimeout(resolve, DATABASE_RETRY_DELAYS_MS[attempt]))
+      if (!isTransientScanError(error) || attempt === DATABASE_RETRY_DELAYS_WITH_FINAL_BACKOFF_MS.length) throw error
+      await new Promise((resolve) => setTimeout(resolve, DATABASE_RETRY_DELAYS_WITH_FINAL_BACKOFF_MS[attempt]))
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError))
@@ -98,7 +103,7 @@ async function listObjects(env: Env, account: Row, bucket: string, cursor: strin
     endpoint: `https://${account.cloudflare_account_id}${jurisdictionPart}.r2.cloudflarestorage.com`,
     credentials: { accessKeyId: account.r2_access_key_id, secretAccessKey: account.r2_secret_access_key },
   })
-  const result = await client.send(new ListObjectsV2Command({ Bucket: bucket, MaxKeys: pageSize(env), ContinuationToken: cursor || undefined, Prefix: prefix || undefined }))
+  const result = await client.send(new ListObjectsV2Command({ Bucket: bucket, MaxKeys: pageSize(env), ContinuationToken: cursor || undefined, Prefix: prefix || undefined }), { abortSignal: AbortSignal.timeout(R2_REQUEST_TIMEOUT_MS) })
   const objects = (result.Contents || []).map((object) => ({
     key: String(object.Key || ""), size: Math.max(0, Number(object.Size) || 0), etag: object.ETag ? String(object.ETag) : null,
     last_modified: object.LastModified?.toISOString() || null, is_dir_marker: String(object.Key || "").endsWith("/") && Number(object.Size || 0) === 0,
@@ -401,6 +406,11 @@ async function processGenericScan(db: Client, env: Env, task: Row) {
 async function finishState(db: Client, owner: string, result: Row, error?: string) {
   await db.query(`update drive_file_scanner_state set status=$1,lease_owner=null,last_completed_at=now(),last_error=$2,last_result=$3::jsonb,cycle_count=cycle_count+1,updated_at=now() where id=true and lease_owner=$4`, [error ? "error" : "idle", error || null, JSON.stringify(result), owner])
 }
+async function heartbeatState(env: Env, owner: string) {
+  await database(env, async (db) => {
+    await db.query(`update drive_file_scanner_state set last_started_at=now(),updated_at=now() where id=true and status='running' and lease_owner=$1`, [owner])
+  })
+}
 async function cycle(env: Env) {
   const claimed = await database<ClaimedCycle>(env, async (db) => {
     await ensureSchema(db)
@@ -408,9 +418,9 @@ async function cycle(env: Env) {
     const lease = await db.query(`
       insert into drive_file_scanner_state(id,status,lease_owner,last_started_at,last_error,updated_at) values(true,'running',$1,now(),null,now())
       on conflict(id) do update set status='running',lease_owner=$1,last_started_at=now(),last_error=null,updated_at=now()
-        where drive_file_scanner_state.status<>'running' or drive_file_scanner_state.last_started_at<now()-interval '150 seconds'
+        where drive_file_scanner_state.status<>'running' or drive_file_scanner_state.last_started_at<now()-($2::int * interval '1 millisecond')
       returning id
-    `, [owner])
+    `, [owner, SCANNER_STATE_LEASE_MS])
     if (!lease.rowCount) return { ok: true as const, skipped: "cycle_already_running" }
     try {
       const setting = await db.query(`select value from drive_app_settings where key='migration-orchestrator' limit 1`)
@@ -448,32 +458,37 @@ async function cycle(env: Env) {
 
   if (!("tasks" in claimed)) return claimed
 
-  const results = await Promise.all(claimed.tasks.map(async ({ kind, task }) => {
-    try {
-      return await databaseTaskWithRetry(env, async (db) => {
+  const heartbeat = setInterval(() => { void heartbeatState(env, claimed.owner).catch(() => undefined) }, SCANNER_HEARTBEAT_MS)
+  try {
+    const results = await Promise.all(claimed.tasks.map(async ({ kind, task }) => {
+      try {
+        return await databaseTaskWithRetry(env, async (db) => {
         const result = kind === "migration"
           ? await processTask(db, env, task)
           : await processGenericScan(db, env, task)
         return { ok: true, ...result }
       })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      await database(env, async (db) => {
-        if (kind === "migration") {
-          await db.query(`update drive_migration_verification_state set status=case when $5::boolean then 'pending' else 'failed' end,attempt_count=attempt_count+1,last_error=$2,lease_owner=null,lease_expires_at=null,updated_at=now() where migration_item_id=$1 and generation=$3 and lease_owner=$4`, [task.migration_item_id, message, task.generation, task.lease_owner, isTransientScanError(error)])
-        } else {
-          await db.query(`update drive_bucket_scans set status=case when $4::boolean then 'pending' else 'failed' end,attempt_count=attempt_count+1,error=$2,lease_owner=null,lease_expires_at=null,updated_at=now() where id=$1 and lease_owner=$3`, [task.id, message, task.lease_owner, isTransientScanError(error)])
-        }
-      }).catch(() => undefined)
-      console.error("File Scanner task failed", { kind, taskId: task.migration_item_id || task.id, error: message })
-      return { ok: false, error: message, taskId: task.migration_item_id || task.id }
-    }
-  }))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        await database(env, async (db) => {
+          if (kind === "migration") {
+            await db.query(`update drive_migration_verification_state set status=case when $5::boolean then 'pending' else 'failed' end,attempt_count=attempt_count+1,last_error=$2,lease_owner=null,lease_expires_at=null,updated_at=now() where migration_item_id=$1 and generation=$3 and lease_owner=$4`, [task.migration_item_id, message, task.generation, task.lease_owner, isTransientScanError(error)])
+          } else {
+            await db.query(`update drive_bucket_scans set status=case when $4::boolean then 'pending' else 'failed' end,attempt_count=attempt_count+1,error=$2,lease_owner=null,lease_expires_at=null,updated_at=now() where id=$1 and lease_owner=$3`, [task.id, message, task.lease_owner, isTransientScanError(error)])
+          }
+        }).catch(() => undefined)
+        console.error("File Scanner task failed", { kind, taskId: task.migration_item_id || task.id, error: message })
+        return { ok: false, error: message, taskId: task.migration_item_id || task.id }
+      }
+    }))
 
-  const failed = results.filter((result) => result.ok === false).length
-  const summary = { ok: failed === 0, processed: results.length, failed, results }
-  await database(env, async (db) => finishState(db, claimed.owner, summary, failed ? `${failed} of ${results.length} scan tasks failed` : undefined))
-  return summary
+    const failed = results.filter((result) => result.ok === false).length
+    const summary = { ok: failed === 0, processed: results.length, failed, results }
+    await database(env, async (db) => finishState(db, claimed.owner, summary, failed ? `${failed} of ${results.length} scan tasks failed` : undefined))
+    return summary
+  } finally {
+    clearInterval(heartbeat)
+  }
 }
 
 async function cycleAndContinue(env: Env) {
