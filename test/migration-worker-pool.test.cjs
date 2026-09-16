@@ -36,6 +36,8 @@ test('the GitHub workflow exposes no manual dispatch fields and receives system 
   assert.match(workflow, /DRIVE_REPAIR_JOB_ID: \$\{\{ github\.event\.client_payload\.repair_job_id \|\| '' \}\}/)
   assert.match(workflow, /POSTGRES_URL: \$\{\{ secrets\.POSTGRES_URL \}\}/)
   assert.match(workflow, /POSTGRES_SSL: \$\{\{ secrets\.POSTGRES_SSL \|\| 'true' \}\}/)
+  assert.match(workflow, /Validate worker configuration/)
+  assert.match(workflow, /POSTGRES_URL GitHub secret is missing/)
   assert.doesNotMatch(workflow, /DRIVE_REPAIR_JOB_ID:.*vars\.DRIVE_REPAIR_JOB_ID/)
 })
 
