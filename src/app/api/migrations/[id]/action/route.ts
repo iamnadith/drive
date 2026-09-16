@@ -3,7 +3,7 @@ import { getAgentById, getAgentGithubToken, getLatestAgentRunByJobReference, upd
 import { activateAccountForCompletedMigration, getAllAccounts } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 import { slurperAbortJob, slurperPauseJob, slurperResumeJob } from "@/lib/cloudflare-r2-super-slurper"
-import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflowRun } from "@/lib/github-oauth"
+import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflowRun, listGitHubWorkflowRuns } from "@/lib/github-oauth"
 import { getMigration, listMigrationItems, updateMigration, updateMigrationItem } from "@/lib/migrations-store"
 import { abortRepairJob, listRepairJobsByMigration } from "@/lib/repair-jobs-store"
 import { createInitialBucketVerifyState } from "@/lib/bucket-verifier"
@@ -157,6 +157,7 @@ async function ensureGitHubRunCanceled(input: {
   owner: string
   repo: string
   runId: string
+  waitForTerminal?: boolean
 }): Promise<{
   terminal: boolean
   status: "completed" | "failed" | "canceled" | "running"
@@ -165,8 +166,24 @@ async function ensureGitHubRunCanceled(input: {
   htmlUrl?: string
   updatedAt?: string
 }> {
-  await cancelGitHubWorkflowRun(input)
+  // GitHub can reject a second cancel request for an already-terminal run.
+  // Always inspect the actual run afterward before treating cancellation as failed.
+  await cancelGitHubWorkflowRun(input).catch(() => undefined)
   await forceCancelGitHubWorkflowRun(input).catch(() => undefined)
+
+  if (input.waitForTerminal === false) {
+    const run = await getGitHubWorkflowRun(input)
+    const currentStatus = String(run.status ?? "").toLowerCase()
+    const conclusion = String(run.conclusion ?? "").toLowerCase()
+    return {
+      terminal: currentStatus === "completed",
+      status: normalizeGitHubRunTerminalStatus(currentStatus, conclusion),
+      githubStatus: currentStatus,
+      githubConclusion: conclusion,
+      htmlUrl: run.htmlUrl,
+      updatedAt: run.updatedAt,
+    }
+  }
 
   for (let attempt = 0; attempt < 12; attempt += 1) {
     await sleep(attempt === 0 ? 1200 : 2500)
@@ -329,6 +346,107 @@ async function abortRepairJobsForMigration(migrationId: string): Promise<{
   return { abortedJobs, blockedJobs }
 }
 
+async function abortGitHubDispatchesForMigration(migrationId: string): Promise<{
+  matched: number
+  canceled: number
+  pending: number
+  blocked: Array<{ runId: string; reason: string }>
+}> {
+  const { rows } = await queryDb<{
+    id: string
+    status: string
+    external_run_id: string | null
+    payload: Record<string, unknown> | null
+    agent_id: string
+    owner: string
+    repo: string
+    workflow: string | null
+    branch: string | null
+    token: string | null
+  }>(`
+    select r.id,r.status,r.external_run_id,r.payload,a.id agent_id,
+      a.github_repo_owner owner,a.github_repo_name repo,a.github_workflow_file workflow,
+      a.github_ref branch,a.github_token token
+    from drive_agent_runs r
+    join drive_agents a on a.id=r.agent_id
+    where r.run_type='github_dispatch' and r.status in('pending','running')
+      and (r.payload->>'migrationId'=$1 or exists(
+        select 1 from drive_repair_jobs j where j.id::text=r.job_reference and j.migration_id=$1
+      ))
+      and a.provider='github_actions'
+    order by r.created_at
+  `, [migrationId])
+  let canceled = 0
+  let pending = 0
+  const blocked: Array<{ runId: string; reason: string }> = []
+
+  const cancelRun = async (run: (typeof rows)[number]) => {
+    const token = run.token || getGitHubTokenFallback()
+    if (!token || !run.owner || !run.repo) {
+      blocked.push({ runId: run.id, reason: "GitHub credentials or repository configuration are missing" })
+      return
+    }
+    let remoteId = run.external_run_id || (typeof run.payload?.githubRunId === "string" ? run.payload.githubRunId : "")
+    if (!remoteId) {
+      const instanceId = typeof run.payload?.workerInstanceId === "string" ? run.payload.workerInstanceId : ""
+      if (instanceId) {
+        try {
+          const remoteRuns = await listGitHubWorkflowRuns({
+            token, owner: run.owner, repo: run.repo,
+            workflow: run.workflow || ".github/workflows/migration-worker.yml",
+            ...(run.branch ? { branch: run.branch } : {}),
+            event: "repository_dispatch", perPage: 100,
+          })
+          remoteId = remoteRuns.find((entry) => entry.displayTitle?.includes(instanceId))?.id || ""
+        } catch { /* Keep the durable run pending and report the lookup failure below. */ }
+      }
+    }
+    if (!remoteId) {
+      blocked.push({ runId: run.id, reason: "Could not resolve the GitHub Actions run; its worker slot remains reserved" })
+      return
+    }
+
+    const cancellation = await ensureGitHubRunCanceled({ token, owner: run.owner, repo: run.repo, runId: remoteId, waitForTerminal: false }).catch(() => null)
+    if (!cancellation) {
+      blocked.push({ runId: run.id, reason: "Could not confirm the GitHub Actions run state; its worker slot remains reserved" })
+      return
+    }
+    const payload = {
+      ...(run.payload || {}), githubRunId: remoteId,
+      githubAbortRequestedAt: new Date().toISOString(),
+      githubStatus: cancellation.githubStatus || null,
+      githubConclusion: cancellation.githubConclusion || null,
+      githubUpdatedAt: cancellation.updatedAt || null,
+      ...(cancellation.htmlUrl ? { htmlUrl: cancellation.htmlUrl } : {}),
+    }
+    if (cancellation.status === "canceled") {
+      await updateAgentRun(run.id, {
+        status: "canceled", externalRunId: remoteId, completedAt: new Date().toISOString(),
+        summary: "GitHub Actions worker cancellation confirmed", payload,
+      })
+      canceled += 1
+      return
+    }
+    if (cancellation.terminal) {
+      await updateAgentRun(run.id, {
+        status: cancellation.status, externalRunId: remoteId, completedAt: new Date().toISOString(),
+        summary: `GitHub Actions worker ended before cancellation (${cancellation.status})`, payload,
+      })
+      return
+    }
+    await updateAgentRun(run.id, {
+      externalRunId: remoteId,
+      summary: "GitHub accepted cancellation; waiting for terminal confirmation",
+      payload,
+    })
+    pending += 1
+  }
+  for (let offset = 0; offset < rows.length; offset += 4) {
+    await Promise.all(rows.slice(offset, offset + 4).map(cancelRun))
+  }
+  return { matched: rows.length, canceled, pending, blocked }
+}
+
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const auth = await requireAdmin()
@@ -345,13 +463,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (action === "cancel_migration" && migration.status === "completed") {
       return NextResponse.json({ error: "A completed migration cannot be canceled" }, { status: 409 })
     }
-    if (action === "cancel_migration" && migration.status === "canceled") {
-      return NextResponse.json({ ok: true, alreadyCanceled: true }, { status: 200 })
-    }
     const readOnly = getMigrationReadOnlyState(migration)
     const workerMaintenanceAction =
       (migration.options.executionMode === "migration_workers" && action === "verify_all") || action === "repair_migration"
-    if (readOnly.readOnly && !workerMaintenanceAction) {
+    if (readOnly.readOnly && !workerMaintenanceAction && action !== "cancel_migration") {
       return NextResponse.json({ error: `Migration history is read-only: ${readOnly.reason}` }, { status: 409 })
     }
 
@@ -371,12 +486,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
     const accounts = await getAllAccounts()
     const target = accounts.find((a) => a.id === migration.targetAccountId)
-    if (!target?.cloudflareAccountId) {
+    if (!target?.cloudflareAccountId && action !== "cancel_migration") {
       return NextResponse.json({ error: "Target Cloudflare account is not synced" }, { status: 400 })
     }
 
     const now = new Date().toISOString()
-    const jobArgsBase = { accountId: target.cloudflareAccountId, apiToken: target.apiToken }
+    const jobArgsBase = { accountId: target?.cloudflareAccountId || "", apiToken: target?.apiToken || "" }
 
     if (action === "pause_all") {
       const candidates = items.filter((i) => Boolean(i.slurperJobId) && normalizeStatus(i.slurperStatus) === "running")
@@ -442,6 +557,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
       let orchestratorWakeError: string | null = null
       const workerMode = migration.options.executionMode === "migration_workers"
+      const cancelDispatchResult = workerMode ? await abortGitHubDispatchesForMigration(id) : { matched: 0, canceled: 0, pending: 0, blocked: [] as Array<{ runId: string; reason: string }> }
       if (workerMode) {
         try {
           // The orchestrator owns unclaimed/pending GitHub dispatches too. Wake
@@ -456,13 +572,14 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         : 0
       const workerCancellationPending = activeDispatches > 0
 
-      const warningCount = remoteCancellationWarnings.length + cancelRepairResult.blockedJobs.length + (orchestratorWakeError ? 1 : 0)
+      const workerWarnings = [...cancelDispatchResult.blocked.map((entry) => ({ jobId: entry.runId, reason: entry.reason }))]
+      const warningCount = remoteCancellationWarnings.length + cancelRepairResult.blockedJobs.length + workerWarnings.length + (orchestratorWakeError ? 1 : 0)
       await updateMigration(id, {
         status: "canceled",
         completedAt: null,
         syncStatus: warningCount ? "error" : workerCancellationPending ? "syncing" : "ok",
         syncMessage: warningCount
-          ? `Migration canceled; remote stop was not confirmed for ${remoteCancellationWarnings.length + cancelRepairResult.blockedJobs.length} worker job(s)${orchestratorWakeError ? `; Migration Orchestrator wake failed: ${orchestratorWakeError}` : ""}`
+          ? `Migration canceled; remote stop was not confirmed for ${remoteCancellationWarnings.length + cancelRepairResult.blockedJobs.length + workerWarnings.length} worker job(s)${orchestratorWakeError ? `; Migration Orchestrator wake failed: ${orchestratorWakeError}` : ""}`
           : workerCancellationPending
             ? `Migration canceled; waiting for ${activeDispatches} GitHub worker run(s) to stop`
           : `Migration canceled${cancelRepairResult.abortedJobs > 0 ? `; aborted ${cancelRepairResult.abortedJobs} worker job(s)` : ""}`,
@@ -471,8 +588,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       return NextResponse.json({
         ok: true,
         abortedRepairJobs: cancelRepairResult.abortedJobs,
+        canceledGitHubRuns: cancelDispatchResult.canceled,
         abortedSlurperJobs: candidates.length,
-        remoteCancellationWarnings: [...cancelRepairResult.blockedJobs, ...remoteCancellationWarnings],
+        remoteCancellationWarnings: [...cancelRepairResult.blockedJobs, ...workerWarnings, ...remoteCancellationWarnings],
         orchestratorWakeError,
         workerCancellationPending,
       }, { status: 200 })
