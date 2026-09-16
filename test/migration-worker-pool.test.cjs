@@ -182,10 +182,27 @@ test('migration detail SSE snapshots reuse the one-query database bootstrap', ()
 test('migration orchestrator projects durable per-file completion into live bucket counts', () => {
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   assert.match(orchestrator, /async function refreshWorkerItemProgress/)
-  assert.match(orchestrator, /'transferredObjects',coalesce\(a\.completed_objects,0\)/)
+  assert.match(orchestrator, /'transferredObjects',least\(coalesce\(i\.source_objects,0\)/)
+  assert.match(orchestrator, /a\.transferred_objects/)
+  assert.match(orchestrator, /'skippedObjects',greatest\(/)
   assert.match(orchestrator, /v\.status='completed' and v\.missing_objects=0 and v\.mismatched_objects=0/)
   assert.match(orchestrator, /then 'verification_failed'/)
   assert.match(orchestrator, /await refreshWorkerItemProgress\(db, migration, shards\.generation\)/)
+})
+
+test('migration accounting keeps source totals and counts actual outcomes separately', () => {
+  const runtime = read('workers/migration-worker/migration-worker.mjs')
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const poolRoute = read('src/app/api/migrations/[id]/worker-pool/route.ts')
+
+  assert.match(runtime, /sourceObjectCount = allSourceObjects\.length/)
+  assert.match(runtime, /processedFiles: transferred \+ failed \+ skipped,\s*totalFiles: sourceObjectCount/)
+  assert.match(runtime, /skipped = sourceObjectCount/)
+  assert.match(orchestrator, /transferred_objects/)
+  assert.match(orchestrator, /result->'items'->0->>'skipped'/)
+  assert.match(orchestrator, /result->'items'->0->>'failed'/)
+  assert.match(poolRoute, /transferred_objects/)
+  assert.match(poolRoute, /failed_objects/)
 })
 
 test('orchestrator continuously maintains every registered workflow instance', () => {
@@ -373,7 +390,7 @@ test('worker-pool repair reconciles destinations before copy and bucket preparat
   assert.match(runtime, /already verified, \$\{initialMissing\} missing/)
   assert.ok(runtime.indexOf('const [sourceSha256, destinationSha256]') < runtime.indexOf('if (isMismatch && !overwrite)'), 'destination integrity checks must run before the overwrite setting is applied')
   assert.match(runtime, /if \(!isMismatch && latestTargetSize === objectSize\)/)
-  assert.match(orchestrator, /'transferredObjects',coalesce\(a\.completed_objects,0\)/)
+  assert.match(orchestrator, /'transferredObjects',least\(coalesce\(i\.source_objects,0\)/)
   assert.match(orchestrator, /await ensureBucketVerification\(db, migration, shards\.generation\)/)
 })
 

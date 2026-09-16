@@ -1245,6 +1245,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
   let failed = 0
   let skipped = 0
   let alreadyPresent = 0
+  let sourceObjectCount = 0
   let initialMissing = 0
   let initialMismatched = 0
   const failureSamples = []
@@ -1404,7 +1405,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
     const destinationObjects = filterObjectsForShard(allDestinationObjects, item.sourceBucket, workerShard)
     const sourceBytes = allSourceObjects.reduce((sum, object) => sum + Number(object?.size || 0), 0)
     const shardSourceBytes = sourceObjects.reduce((sum, object) => sum + Number(object?.size || 0), 0)
-    const sourceObjectCount = allSourceObjects.length
+    sourceObjectCount = allSourceObjects.length
     const shardObjectCount = sourceObjects.length
     const initialDiff = diffObjectsByListing(sourceObjects, destinationObjects, ({ checked, key, size, missing, mismatched }) => {
       state.currentFile = {
@@ -1656,7 +1657,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
           failed,
           skipped,
           processedFiles: transferred + failed + skipped,
-          totalFiles: toRepair.length,
+          totalFiles: sourceObjectCount,
           summary: `Repairing ${item.sourceBucket}: ${transferred} copied, ${failed} failed, ${skipped} skipped`,
         })
 
@@ -1699,7 +1700,10 @@ async function processItem(jobId, payload, item, completedResults, state) {
       })
       if (copyPhaseSync?.canceled) throw new JobAbortedError()
     } else {
-      skipped = toRepair.length
+      // Verify-only jobs do not copy anything. Every source object is
+      // therefore accounted for as skipped, including exact matches found in
+      // the initial source/destination diff.
+      skipped = sourceObjectCount
       upsertItemProgress(state, {
         itemId: item.id,
         stage: "repair_verify",
@@ -1707,8 +1711,8 @@ async function processItem(jobId, payload, item, completedResults, state) {
         transferred,
         failed,
         skipped,
-        processedFiles: toRepair.length,
-        totalFiles: toRepair.length,
+        processedFiles: sourceObjectCount,
+        totalFiles: sourceObjectCount,
         summary: `Verify-only mode for ${item.sourceBucket}${shardLabel}: ${toRepair.length} files queued for verification`,
       })
     }
@@ -1929,7 +1933,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
       failed,
       skipped,
       processedFiles: Math.max(toRepair.length, transferred + failed + skipped),
-      totalFiles: toRepair.length,
+      totalFiles: sourceObjectCount,
       initialMissing,
       initialMismatched,
       finalMissing,
@@ -2060,7 +2064,8 @@ async function processItem(jobId, payload, item, completedResults, state) {
       transferred,
       failed,
       skipped,
-      processedFiles: transferred + failed,
+      processedFiles: transferred + failed + skipped,
+      totalFiles: sourceObjectCount,
       summary: `Worker ${stage.replace("repair_", "")} failed for ${item.sourceBucket}`,
       error: error instanceof Error ? error.message : String(error),
     })

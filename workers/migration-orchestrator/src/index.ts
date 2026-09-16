@@ -466,7 +466,7 @@ async function migrationLiveState(db: Client, migrationId: string) {
   const [jobsResult, runsResult, aggregateResult, itemsResult] = await Promise.all([
     db.query(`select id,status,claimed_by_agent_id,progress,result,summary,error,created_at,updated_at,last_heartbeat_at from drive_repair_jobs where migration_id=$1 and mode='migration' order by updated_at desc limit 500`, [migrationId]),
     db.query(`select r.id,r.status,r.job_reference,r.payload,r.created_at,r.updated_at,a.status agent_status,a.last_heartbeat_at agent_heartbeat from drive_agent_runs r left join drive_agents a on a.id=r.agent_id where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1 order by r.created_at`, [migrationId]),
-    db.query(`select count(*)::bigint total_jobs,count(*) filter(where status='pending')::bigint queued_jobs,count(*) filter(where status in('claimed','running'))::bigint running_jobs,count(*) filter(where status='completed')::bigint completed_jobs,count(*) filter(where status='failed')::bigint failed_jobs,count(*) filter(where status='canceled')::bigint canceled_jobs,coalesce(sum(case when status='completed' and (result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (result->'items'->0->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,coalesce(sum(case when status='completed' and (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint copied_objects,coalesce(sum(case when status='completed' and (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,coalesce(sum(case when status='completed' and case when coalesce(result->'items'->0->>'transferred','') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint>0 else false end then coalesce(nullif(payload->'inventoryObjects'->0->>'size','')::bigint,0) else 0 end),0)::bigint completed_bytes from drive_repair_jobs where migration_id=$1 and mode='migration'`, [migrationId]),
+    db.query(`select count(*)::bigint total_jobs,count(*) filter(where status='pending')::bigint queued_jobs,count(*) filter(where status in('claimed','running'))::bigint running_jobs,count(*) filter(where status='completed')::bigint completed_jobs,count(*) filter(where status='failed')::bigint failed_jobs,count(*) filter(where status='canceled')::bigint canceled_jobs,coalesce(sum(case when (result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (result->'items'->0->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint transferred_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then 1 else 0 end),0)::bigint copied_objects,coalesce(sum(case when (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,coalesce(sum(case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' and jsonb_typeof(result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then coalesce(nullif(payload->'inventoryObjects'->0->>'size','')::bigint,0) else 0 end),0)::bigint completed_bytes from drive_repair_jobs where migration_id=$1 and mode='migration'`, [migrationId]),
     db.query(`select id,source_bucket,target_bucket,source_objects,source_bytes,slurper_status,progress,updated_at from drive_migration_items where migration_id=$1 order by created_at`, [migrationId]),
   ])
   const jobs = jobsResult.rows
@@ -480,7 +480,7 @@ async function migrationLiveState(db: Client, migrationId: string) {
   const copiedObjects = buckets.reduce((sum, bucket) => sum + bucket.copiedObjects, 0)
   const failedObjects = buckets.reduce((sum, bucket) => sum + bucket.failedObjects, 0)
   const skippedObjects = buckets.reduce((sum, bucket) => sum + bucket.skippedObjects, 0)
-  const totals = { onlineWorkers: activeRuns.length, activeTransfers: 0, totalJobs: Number(aggregate.total_jobs || 0), queuedJobs: Number(aggregate.queued_jobs || 0), runningJobs: Number(aggregate.running_jobs || 0), completedJobs: Number(aggregate.completed_jobs || 0), failedJobs: Number(aggregate.failed_jobs || 0), canceledJobs: Number(aggregate.canceled_jobs || 0), totalObjects, transferred: transferredObjects || Number(aggregate.completed_jobs || 0), alreadyPresentObjects: alreadyPresentObjects || Number(aggregate.already_present_objects || 0), copiedObjects: copiedObjects || Number(aggregate.copied_objects || 0), failed: failedObjects || Number(aggregate.failed_jobs || 0), skipped: skippedObjects || Number(aggregate.skipped_objects || 0), missing: 0, mismatched: 0, processedFiles: Number(aggregate.completed_jobs || 0) + Number(aggregate.failed_jobs || 0) + Number(aggregate.canceled_jobs || 0), totalFiles: Number(aggregate.total_jobs || 0), completedBytes: Number(aggregate.completed_bytes || 0) }
+  const totals = { onlineWorkers: activeRuns.length, activeTransfers: 0, totalJobs: Number(aggregate.total_jobs || 0), queuedJobs: Number(aggregate.queued_jobs || 0), runningJobs: Number(aggregate.running_jobs || 0), completedJobs: Number(aggregate.completed_jobs || 0), failedJobs: Number(aggregate.failed_jobs || 0), canceledJobs: Number(aggregate.canceled_jobs || 0), totalObjects, transferred: transferredObjects || Number(aggregate.transferred_objects || 0), alreadyPresentObjects: alreadyPresentObjects || Number(aggregate.already_present_objects || 0), copiedObjects: copiedObjects || Number(aggregate.copied_objects || 0), failed: failedObjects || Number(aggregate.failed_objects || 0), skipped: skippedObjects || Number(aggregate.skipped_objects || 0), missing: 0, mismatched: 0, processedFiles: Number(aggregate.completed_jobs || 0) + Number(aggregate.failed_jobs || 0) + Number(aggregate.canceled_jobs || 0), totalFiles: Number(aggregate.total_jobs || 0), completedBytes: Number(aggregate.completed_bytes || 0) }
   for (const job of jobs) {
     const progress = job.progress && typeof job.progress === "object" ? job.progress : {}
     if (["claimed", "running"].includes(String(job.status)) && progress.currentFile && Date.now() - Date.parse(String(job.last_heartbeat_at || "")) < 90_000) totals.activeTransfers += 1
@@ -505,9 +505,11 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
         count(j.*) filter(where j.status='completed')::bigint completed_objects,
         count(j.*) filter(where j.status in('claimed','running'))::bigint active_objects,
         count(j.*) filter(where j.status='failed')::bigint failed_objects,
-        count(j.*) filter(where j.status='completed' and j.result->'items'->0->>'alreadyPresent'='1')::bigint already_present_objects,
-        coalesce(sum(case when j.status='completed' and (j.result->'items'->0->>'skipped') ~ '^[0-9]+$' then (j.result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
-        count(j.*) filter(where j.status='completed' and case when coalesce(j.result->'items'->0->>'transferred','') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint>0 else false end)::bigint copied_objects,
+        coalesce(sum(case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint transferred_objects,
+        coalesce(sum(case when (j.result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (j.result->'items'->0->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,
+        coalesce(sum(case when (j.result->'items'->0->>'skipped') ~ '^[0-9]+$' then (j.result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
+        coalesce(sum(case when (j.result->'items'->0->>'failed') ~ '^[0-9]+$' then (j.result->'items'->0->>'failed')::bigint when j.status='failed' and jsonb_typeof(j.result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,
+        coalesce(sum(case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' and (j.result->'items'->0->>'transferred')::bigint>0 then 1 else 0 end),0)::bigint copied_objects,
         coalesce(sum((j.payload->'inventoryObjects'->0->>'size')::bigint) filter(where j.status='completed' and case when coalesce(j.result->'items'->0->>'transferred','') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint>0 else false end),0)::bigint completed_bytes
       from drive_migration_items i0
       left join drive_repair_jobs j on j.migration_id=i0.migration_id
@@ -544,13 +546,25 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
           when coalesce(a.queued_objects,0)>0 then 'queued'
           else 'scanning'
         end,
-        'transferredObjects',coalesce(a.completed_objects,0),
+        'transferredObjects',least(coalesce(i.source_objects,0),
+          (case when i.progress->'slurperCumulative'->>'transferredObjects' ~ '^[0-9]+$'
+            then (i.progress->'slurperCumulative'->>'transferredObjects')::bigint else 0 end)
+          + coalesce(a.transferred_objects,0)),
         'transferredBytes',coalesce(a.completed_bytes,0),
         'alreadyPresentObjects',coalesce(a.already_present_objects,0),
-        'copiedObjects',coalesce(a.copied_objects,0),
-        'skippedObjects',coalesce(a.skipped_objects,0),
+        'copiedObjects',coalesce(a.transferred_objects,0),
+        'skippedObjects',greatest(
+          case when i.progress->'slurperCumulative'->>'skippedObjects' ~ '^[0-9]+$'
+            then (i.progress->'slurperCumulative'->>'skippedObjects')::bigint else 0 end,
+          coalesce(a.skipped_objects,0)),
         'failedObjects',coalesce(a.failed_objects,0),
-        'unaccountedObjects',greatest(coalesce(i.source_objects,0)-coalesce(a.completed_objects,0)-coalesce(a.failed_objects,0),0),
+        'unaccountedObjects',greatest(coalesce(i.source_objects,0)-least(coalesce(i.source_objects,0),
+          (case when i.progress->'slurperCumulative'->>'transferredObjects' ~ '^[0-9]+$'
+            then (i.progress->'slurperCumulative'->>'transferredObjects')::bigint else 0 end)
+          + coalesce(a.transferred_objects,0))-greatest(
+          case when i.progress->'slurperCumulative'->>'skippedObjects' ~ '^[0-9]+$'
+            then (i.progress->'slurperCumulative'->>'skippedObjects')::bigint else 0 end,
+          coalesce(a.skipped_objects,0))-coalesce(a.failed_objects,0),0),
         'verifyIssues',0,
         'totalObjects',coalesce(i.source_objects,0),
         'workerStatus',case

@@ -102,9 +102,9 @@ test('pre-existing worker-pool objects count as completed, retain total counts, 
   assert.match(worker, /integrityVerified: sourceSha256 === destinationSha256/)
   assert.match(scanner, /where s\.scan_id=\$2::uuid and not s\.is_dir_marker/)
   assert.match(scanner, /j\.result->'items'->0->'integrityProofs'->0->>'sha256' ~ '\^\[0-9a-f\]\{64\}\$'/)
-  assert.match(orchestrator, /'transferredObjects',coalesce\(a\.completed_objects,0\)/)
+  assert.match(orchestrator, /'transferredObjects',least\(coalesce\(i\.source_objects,0\)/)
   assert.match(orchestrator, /'alreadyPresentObjects',coalesce\(a\.already_present_objects,0\)/)
-  assert.match(orchestrator, /'copiedObjects',coalesce\(a\.copied_objects,0\)/)
+  assert.match(orchestrator, /'copiedObjects',coalesce\(a\.transferred_objects,0\)/)
   assert.match(orchestrator, /j\.status='completed' and case when coalesce\(j\.result->'items'->0->>'transferred'/)
 })
 

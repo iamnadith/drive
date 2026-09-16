@@ -25,6 +25,8 @@ async function readPool(id: string) {
     running_jobs: string | number
     completed_jobs: string | number
     failed_jobs: string | number
+    transferred_objects: string | number
+    failed_objects: string | number
     skipped_objects: string | number
     canceled_jobs: string | number
     jobs: Array<Record<string, unknown>> | null
@@ -47,7 +49,9 @@ async function readPool(id: string) {
         count(*) filter(where status in('claimed','running'))::bigint running_jobs,
         count(*) filter(where status='completed')::bigint completed_jobs,
         count(*) filter(where status='failed')::bigint failed_jobs,
-        coalesce(sum(case when status='completed' and (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
+        coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint transferred_objects,
+        coalesce(sum(case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' and jsonb_typeof(result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,
+        coalesce(sum(case when (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
         count(*) filter(where status='canceled')::bigint canceled_jobs
       from public.drive_repair_jobs
       where migration_id=$1 and mode='migration'
@@ -120,7 +124,7 @@ async function readPool(id: string) {
     select state.snapshot,state.updated_at snapshot_updated_at,
       worker_counts.online_workers,worker_counts.active_transfers,
       job_counts.total_jobs,job_counts.queued_jobs,job_counts.running_jobs,
-      job_counts.completed_jobs,job_counts.failed_jobs,job_counts.canceled_jobs,
+      job_counts.completed_jobs,job_counts.failed_jobs,job_counts.transferred_objects,job_counts.failed_objects,job_counts.canceled_jobs,
       telemetry.jobs,bucket_projection.buckets
     from job_counts cross join worker_counts cross join telemetry cross join bucket_projection
     left join state on true
@@ -147,6 +151,8 @@ async function readPool(id: string) {
     runningJobs: Number(stateRow.running_jobs || 0),
     completedJobs: Number(stateRow.completed_jobs || 0),
     failedJobs: Number(stateRow.failed_jobs || 0),
+    transferred: Number(stateRow.transferred_objects || 0),
+    failed: Number(stateRow.failed_objects || 0),
     skipped: Number(stateRow.skipped_objects || 0),
     canceledJobs: Number(stateRow.canceled_jobs || 0),
     totalObjects: buckets.reduce((sum, bucket) => sum + Number(bucket.totalObjects || 0), 0),
