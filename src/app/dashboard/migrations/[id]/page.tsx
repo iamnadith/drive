@@ -1822,7 +1822,7 @@ export default function MigrationDetailsPage() {
                   ) : null}
 
                   {migration.status !== "completed" && (workerPoolMigration
-                    ? !settingsSyncInProgress && effectiveMigrationStatus !== "completed" && (failedBuckets.length > 0 || overviewProgress.verifyIssues > 0 || effectiveMigrationStatus === "failed")
+                    ? !settingsSyncInProgress && effectiveMigrationStatus !== "completed" && (failedBuckets.length > 0 || overviewProgress.verifyIssues > 0 || effectiveMigrationStatus === "failed" || effectiveMigrationStatus === "canceled")
                     : !settingsSyncInProgress && effectiveMigrationStatus !== "completed" && items.length > 0 && migration.status !== "draft" && !hasActiveSuperSlurper) ? (
                     <Button
                       onClick={() => void runMigrationAction("repair_migration")}

@@ -1226,6 +1226,7 @@ async function abortMigrationWorkers(db: Client, migrationId: string, reason: st
     where r.run_type='github_dispatch' and r.status in('pending','running') and (
       r.payload->>'migrationId'=$1 or exists(select 1 from drive_repair_jobs j where j.id::text=r.job_reference and j.migration_id=$1)
     )
+      and exists(select 1 from drive_migrations m where m.id=$1 and m.status in('canceled','completed','aborted','failed','verification_failed'))
       and a.provider='github_actions' and a.github_token is not null
   `, [migrationId])
   let canceled = 0

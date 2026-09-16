@@ -379,10 +379,12 @@ test('Super Slurper repair re-enters the shared worker-pool scan, queue, copy, a
 test('worker-pool repair stays queued until the orchestrator durably creates a scanner task', () => {
   const action = read('src/app/api/migrations/[id]/action/route.ts')
   const repair = action.slice(action.indexOf('if (action === "repair_migration")'), action.indexOf('if (action === "retry_migration")'))
+  const details = read('src/app/dashboard/migrations/[id]/page.tsx')
   assert.match(repair, /slurper_status='queued'/)
   assert.match(repair, /'stage','awaiting_source_scan'/)
   assert.match(repair, /migrationInventory.*'status','pending'/)
   assert.doesNotMatch(repair, /slurper_status='scanning'/)
+  assert.match(details, /effectiveMigrationStatus === "canceled"/)
 })
 
 test('worker-pool repair reconciles destinations before copy and bucket preparation stays worker-owned', () => {
