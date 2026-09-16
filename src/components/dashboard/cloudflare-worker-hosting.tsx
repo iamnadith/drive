@@ -52,16 +52,16 @@ export function CloudflareWorkerHosting({ onboarding = false, onReady }: { onboa
     syncInFlight.current = true
     setSyncing(true)
     try {
-      await Promise.all(([
+      for (const [worker] of ([
         ["backend", "Backend Orchestrator"],
         ["scanner", "File Scanner"],
         ["migration", "Migration Orchestrator"],
-      ] as const).map(async ([worker]) => {
+      ] as const)) {
         const response = await fetch("/api/workers/cloudflare-install", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "reconcile_worker", worker }), signal: AbortSignal.timeout(45_000) })
         const payload = await response.json().catch(() => ({})) as { installation?: Installation; error?: string }
         if (!response.ok) throw new Error(payload.error || "Worker status sync failed")
         if (payload.installation) setInstallation(payload.installation)
-      }))
+      }
     } finally { syncInFlight.current = false; setSyncing(false) }
   }, [])
   React.useEffect(() => {
