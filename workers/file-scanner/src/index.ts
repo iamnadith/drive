@@ -10,7 +10,7 @@ type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: st
 type Row = Record<string, any>
 type ClaimedTask = { kind: "migration" | "generic"; task: Row }
 type ClaimedCycle = { ok: true; owner: string; tasks: ClaimedTask[] } | { ok: true; skipped: string } | { ok: true; idle: true }
-const BUILD = 17
+const BUILD = 18
 const MAX_SECRET_LENGTH = 512
 // Workers Free allows only 10 ms of CPU per invocation. Keep each invocation
 // deliberately small; queue continuations immediately schedule the next
@@ -22,6 +22,11 @@ const DATABASE_QUERY_TIMEOUT_MS = 45_000
 const R2_REQUEST_TIMEOUT_MS = 30_000
 const SCANNER_STATE_LEASE_MS = 150_000
 const SCANNER_HEARTBEAT_MS = 30_000
+const TASK_HEARTBEAT_MS = 20_000
+const MIN_PAGE_SIZE = 50
+const DEFAULT_PAGE_SIZE = 100
+const MAX_PAGE_SIZE = 250
+let adaptivePageSize = DEFAULT_PAGE_SIZE
 function isTransientScanError(error: unknown) {
   const value = error && typeof error === "object" ? error as { message?: unknown; name?: unknown; code?: unknown; status?: unknown; $metadata?: { httpStatusCode?: unknown } } : {}
   const message = `${String(value.name || "")} ${String(value.message || error || "")}`
@@ -96,7 +101,17 @@ async function databaseTaskWithRetry<T>(env: Env, operation: (client: Client) =>
 // R2 accepts up to 1,000 keys, but that payload is too CPU-heavy for Workers
 // Free once it is parsed, serialized, and persisted through jsonb_recordset.
 // Smaller pages are independently committed and resumed by their cursor.
-function pageSize(_env: Env) { return 100 }
+function pageSize(_env: Env) { return adaptivePageSize }
+function tunePageSize(elapsedMs: number, succeeded: boolean) {
+  if (!succeeded) {
+    adaptivePageSize = Math.max(MIN_PAGE_SIZE, Math.floor(adaptivePageSize / 2))
+    return
+  }
+  // Grow only when the complete R2-list plus DB-commit round trip is quick.
+  // This maximizes throughput without returning to the free-plan CPU cliff.
+  if (elapsedMs < 3_000) adaptivePageSize = Math.min(MAX_PAGE_SIZE, adaptivePageSize + 25)
+  else if (elapsedMs > 8_000) adaptivePageSize = Math.max(MIN_PAGE_SIZE, adaptivePageSize - 25)
+}
 async function listObjects(env: Env, account: Row, bucket: string, cursor: string | null, jurisdiction: string | null, prefix: string | null = null) {
   if (!account.cloudflare_account_id || !account.r2_access_key_id || !account.r2_secret_access_key) throw new Error("R2 S3 account credentials are missing")
   const jurisdictionPart = jurisdiction && jurisdiction !== "default" ? `.${jurisdiction.toLowerCase()}` : ""
@@ -413,6 +428,14 @@ async function heartbeatState(env: Env, owner: string) {
     await db.query(`update drive_file_scanner_state set last_started_at=now(),updated_at=now() where id=true and status='running' and lease_owner=$1`, [owner])
   })
 }
+async function heartbeatTask(env: Env, kind: ClaimedTask["kind"], task: Row) {
+  await database(env, async (db) => {
+    const result = kind === "migration"
+      ? await db.query(`update drive_migration_verification_state set lease_expires_at=now()+interval '90 seconds' where migration_item_id=$1 and generation=$2 and status='running' and lease_owner=$3`, [task.migration_item_id, task.generation, task.lease_owner])
+      : await db.query(`update drive_bucket_scans set lease_expires_at=now()+interval '90 seconds' where id=$1 and status='running' and lease_owner=$2`, [task.id, task.lease_owner])
+    if (result.rowCount !== 1) throw new Error("File Scanner task lease was lost")
+  })
+}
 async function cycle(env: Env) {
   const claimed = await database<ClaimedCycle>(env, async (db) => {
     await ensureSchema(db)
@@ -463,14 +486,23 @@ async function cycle(env: Env) {
   const heartbeat = setInterval(() => { void heartbeatState(env, claimed.owner).catch(() => undefined) }, SCANNER_HEARTBEAT_MS)
   try {
     const results = await Promise.all(claimed.tasks.map(async ({ kind, task }) => {
+      const startedAt = Date.now()
       try {
-        return await databaseTaskWithRetry(env, async (db) => {
-        const result = kind === "migration"
-          ? await processTask(db, env, task)
-          : await processGenericScan(db, env, task)
-        return { ok: true, ...result }
-      })
+        const taskHeartbeat = setInterval(() => { void heartbeatTask(env, kind, task).catch(() => undefined) }, TASK_HEARTBEAT_MS)
+        try {
+          const result = await databaseTaskWithRetry(env, async (db) => {
+            const result = kind === "migration"
+              ? await processTask(db, env, task)
+              : await processGenericScan(db, env, task)
+            return { ok: true, ...result }
+          })
+          tunePageSize(Date.now() - startedAt, true)
+          return result
+        } finally {
+          clearInterval(taskHeartbeat)
+        }
       } catch (error) {
+        tunePageSize(Date.now() - startedAt, false)
         const message = error instanceof Error ? error.message : String(error)
         await database(env, async (db) => {
           if (kind === "migration") {
