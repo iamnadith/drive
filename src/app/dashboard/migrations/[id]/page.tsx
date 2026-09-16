@@ -1951,7 +1951,7 @@ export default function MigrationDetailsPage() {
 
 
       <section className="relative">
-          <Card className="gap-0 overflow-hidden rounded-3xl border border-border/70 p-0">
+          <Card className="gap-0 md:gap-0 overflow-hidden rounded-3xl border border-border/70 p-0">
             <div className="border-b px-4 py-3">
               <CardTitle className="text-sm">Migration Logs</CardTitle>
             </div>
