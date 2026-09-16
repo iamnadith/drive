@@ -230,14 +230,16 @@ function MigrationWorkerSecretControl() {
   const [busy, setBusy] = React.useState(false)
   const [visible, setVisible] = React.useState(false)
   const [message, setMessage] = React.useState("")
+  const [secretSyncStatus, setSecretSyncStatus] = React.useState<"ready" | "syncing" | "failed" | "unverified">("unverified")
 
   const load = React.useCallback(async () => {
     const response = await fetch("/api/settings/migration-workers", { cache: "no-store" })
-    const payload = await response.json().catch(() => ({})) as { settings?: { sharedSecret?: string; secretConfigured?: boolean; updatedAt?: string }; error?: string }
+    const payload = await response.json().catch(() => ({})) as { settings?: { sharedSecret?: string; secretConfigured?: boolean; updatedAt?: string; secretSyncStatus?: "ready" | "syncing" | "failed" | "unverified" }; error?: string }
     if (!response.ok) throw new Error(payload.error || "Unable to load migration Worker secret")
     setConfigured(payload.settings?.secretConfigured === true)
     setSecret(payload.settings?.sharedSecret || "")
     setUpdatedAt(payload.settings?.updatedAt || "")
+    setSecretSyncStatus(payload.settings?.secretSyncStatus || "unverified")
     setLoaded(true)
   }, [])
 
@@ -247,14 +249,16 @@ function MigrationWorkerSecretControl() {
     setBusy(true); setMessage("")
     try {
       const response = await fetch("/api/settings/migration-workers", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sharedSecret: secret }) })
-      const payload = await response.json().catch(() => ({})) as { error?: string }
+      const payload = await response.json().catch(() => ({})) as { error?: string; syncedRepositories?: number }
       if (!response.ok) throw new Error(payload.error || "Unable to save migration Worker secret")
-      setSecret(""); setVisible(false); await load(); setMessage("Migration Worker secret saved.")
+      setSecret(""); setVisible(false); await load(); setMessage(`Secret synced to ${payload.syncedRepositories ?? 0} GitHub ${payload.syncedRepositories === 1 ? "repository" : "repositories"}.`)
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
     finally { setBusy(false) }
   }
 
-  return <div className="rounded-xl border bg-card p-4 shadow-sm"><div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-medium">Migration Worker access</div><p className="text-xs text-muted-foreground">One shared secret authenticates migration workers; each worker keeps its own identity.</p></div><Badge variant={configured ? "outline" : "destructive"}>{!loaded ? "Loading..." : configured ? "Secret saved" : "Secret required"}</Badge></div><div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center"><div className="relative flex-1"><Input aria-label="Migration Worker shared secret" type={visible ? "text" : "password"} value={secret} disabled={!loaded || busy} onChange={(event) => setSecret(event.target.value)} placeholder={configured ? "Saved securely — enter a replacement" : "At least 24 characters"} className="pr-10" />{configured ? <Button type="button" variant="ghost" size="icon" className="absolute top-1/2 right-1 -translate-y-1/2" aria-label={visible ? "Hide migration Worker secret" : "Show migration Worker secret"} onClick={() => setVisible((current) => !current)} disabled={busy}>{visible ? <EyeOff /> : <Eye />}</Button> : null}</div><Button onClick={() => void save()} disabled={!loaded || busy || !secret.trim()}>{busy ? "Saving..." : "Save secret"}</Button></div><div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground"><span>Last saved: {updatedAt ? new Date(updatedAt).toLocaleString() : "Never"}</span>{message ? <span>{message}</span> : null}</div></div>
+  const syncLabel = !loaded ? "Loading..." : !configured ? "Secret required" : secretSyncStatus === "ready" ? "Synced" : secretSyncStatus === "syncing" ? "Syncing GitHub secrets" : secretSyncStatus === "failed" ? "GitHub sync failed" : "GitHub sync required"
+  const syncVariant = secretSyncStatus === "failed" || !configured ? "destructive" : secretSyncStatus === "ready" ? "outline" : "secondary"
+  return <div className="rounded-xl border bg-card p-4 shadow-sm"><div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between"><div><div className="font-medium">Migration Worker access</div><p className="text-xs text-muted-foreground">One shared secret authenticates migration workers; each worker keeps its own identity.</p></div><Badge variant={syncVariant}>{syncLabel}</Badge></div><div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center"><div className="relative flex-1"><Input aria-label="Migration Worker shared secret" type={visible ? "text" : "password"} value={secret} disabled={!loaded || busy} onChange={(event) => setSecret(event.target.value)} placeholder={configured ? "Saved securely — enter a replacement" : "At least 24 characters"} className="pr-10" />{configured ? <Button type="button" variant="ghost" size="icon" className="absolute top-1/2 right-1 -translate-y-1/2" aria-label={visible ? "Hide migration Worker secret" : "Show migration Worker secret"} onClick={() => setVisible((current) => !current)} disabled={busy}>{visible ? <EyeOff /> : <Eye />}</Button> : null}</div><Button onClick={() => void save()} disabled={!loaded || busy || !secret.trim()}>{busy ? "Syncing..." : "Save and sync"}</Button></div><div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground"><span>Last saved: {updatedAt ? new Date(updatedAt).toLocaleString() : "Never"}</span>{message ? <span>{message}</span> : null}</div></div>
 }
 
 function jobStatusBadge(status: RepairJobRow["status"]) {

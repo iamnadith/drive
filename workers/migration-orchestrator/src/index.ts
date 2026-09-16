@@ -1168,8 +1168,17 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
 }
 async function dispatchWorkers(db: Client, env: Env, migration: Row) {
   const generation = integer(opts(migration).workerGeneration, 1, 1, 1000000)
-  const configRows = await db.query(`select key,value from drive_app_settings where key='migration-orchestrator'`)
+  const stopped = await db.query(`
+    select 1 from drive_repair_jobs j
+    where j.migration_id=$1 and j.mode='migration' and j.status='canceled'
+      and not exists(select 1 from drive_repair_jobs newer where newer.migration_id=j.migration_id and newer.mode='migration' and (newer.created_at,newer.id)>(j.created_at,j.id))
+    limit 1
+  `, [migration.id])
+  if (stopped.rowCount) return 0
+  const configRows = await db.query(`select key,value from drive_app_settings where key in('migration-orchestrator','migration-workers')`)
   const orchestration = configRows.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
+  const workerSettings = configRows.rows.find((row) => row.key === "migration-workers")?.value || {}
+  if (String(workerSettings.secretSyncStatus || "") !== "ready") return 0
   const budget = integer(orchestration.maxDispatchesPerCycle, 100, 1, 100)
   const stranded = await db.query(`select id from drive_agent_runs where run_type='github_dispatch' and status='pending' and payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2 and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit $3`, [migration.id, generation, budget])
   for (const row of stranded.rows) await env.GITHUB_DISPATCH_QUEUE.send({ intentId: row.id }, { contentType: "json" })
@@ -1235,7 +1244,17 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
     const vacancies = Math.min(workflowVacancies, Math.max(0, Number(agent.worker_count || 1) - Number(active.rows[0]?.count || 0)))
     for (let slot = 0; slot < vacancies && queued < budget; slot += 1) {
       const workerInstanceId = crypto.randomUUID()
-      const intent = await db.query(`insert into drive_agent_runs(id,agent_id,run_type,status,payload,summary,created_at,updated_at) values(gen_random_uuid(),$1,'github_dispatch','pending',$2::jsonb,'Durable GitHub dispatch intent queued',now(),now()) returning id`, [agent.id, JSON.stringify({ migrationId: migration.id, workerGeneration: generation, pool: true, workerInstanceId, source: "migration_orchestrator", phase: "created" })])
+      const intent = await db.query(`
+        insert into drive_agent_runs(id,agent_id,run_type,status,payload,summary,created_at,updated_at)
+        select gen_random_uuid(),$1,'github_dispatch','pending',$2::jsonb,'Durable GitHub dispatch intent queued',now(),now()
+        where exists (
+          select 1 from drive_migrations m where m.id=$3 and m.status in('running','verifying')
+            and greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1))=$4
+          for update
+        )
+        returning id
+      `, [agent.id, JSON.stringify({ migrationId: migration.id, workerGeneration: generation, pool: true, workerInstanceId, source: "migration_orchestrator", phase: "created" }), migration.id, generation])
+      if (!intent.rows[0]) return queued
       await env.GITHUB_DISPATCH_QUEUE.send({ intentId: intent.rows[0].id }, { contentType: "json" })
       await db.query(`update drive_agent_runs set payload=payload||'{"phase":"queued"}'::jsonb,summary='Queued for independent GitHub dispatch consumer',updated_at=now() where id=$1`, [intent.rows[0].id])
       workflowRuns.add(`pending:${intent.rows[0].id}`)
@@ -1252,7 +1271,10 @@ async function abortMigrationWorkers(db: Client, migrationId: string, reason: st
     where r.run_type='github_dispatch' and r.status in('pending','running') and (
       r.payload->>'migrationId'=$1 or exists(select 1 from drive_repair_jobs j where j.id::text=r.job_reference and j.migration_id=$1)
     )
-      and exists(select 1 from drive_migrations m where m.id=$1 and m.status in('canceled','completed','aborted','failed','verification_failed'))
+      and (
+        r.payload->>'githubAbortRequestedAt' is not null
+        or exists(select 1 from drive_migrations m where m.id=$1 and m.status in('canceled','completed','aborted','failed','verification_failed'))
+      )
       and a.provider='github_actions' and a.github_token is not null
   `, [migrationId])
   let canceled = 0
@@ -1296,6 +1318,37 @@ async function abortMigrationWorkers(db: Client, migrationId: string, reason: st
   return { matched: result.rowCount || 0, canceled, warnings }
 }
 
+async function reconcileCanceledWorkerRepairJobs(db: Client) {
+  const jobs = await db.query(`
+    select j.id repair_job_id,j.migration_id,greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1)) generation
+    from drive_repair_jobs j join drive_migrations m on m.id=j.migration_id
+    where j.mode='migration' and j.status='canceled'
+      and not exists(select 1 from drive_repair_jobs newer where newer.migration_id=j.migration_id and newer.mode='migration' and (newer.created_at,newer.id)>(j.created_at,j.id))
+      and exists(select 1 from drive_agent_runs r where r.run_type='github_dispatch' and r.status in('pending','running')
+        and r.payload->>'migrationId'=j.migration_id::text and r.payload->>'pool'='true'
+        and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1)))
+    order by j.updated_at limit 20
+  `)
+  const results = []
+  for (const job of jobs.rows) {
+    await db.query(`
+      update drive_agent_runs set payload=payload||jsonb_build_object('githubAbortRequestedAt',coalesce(payload->>'githubAbortRequestedAt',now()::text)),
+        summary=case when payload->>'githubAbortRequestedAt' is null then 'GitHub worker stopping; canceled migration worker job' else summary end,updated_at=now()
+      where run_type='github_dispatch' and status in('pending','running') and payload->>'migrationId'=$1 and payload->>'pool'='true'
+        and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2
+    `, [job.migration_id, job.generation])
+    const queued = await db.query(`
+      update drive_agent_runs set status='canceled',summary='Canceled migration worker job; dispatch was not submitted',completed_at=now(),updated_at=now()
+      where run_type='github_dispatch' and status='pending' and payload->>'migrationId'=$1 and payload->>'pool'='true'
+        and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2
+        and coalesce(payload->>'phase','created') in('created','queued')
+    `, [job.migration_id, job.generation])
+    const shutdown = await abortMigrationWorkers(db, String(job.migration_id), `Migration worker job ${job.repair_job_id} was canceled`)
+    results.push({ migrationId: job.migration_id, matched: shutdown.matched, canceled: shutdown.canceled, queuedCanceled: queued.rowCount || 0, warnings: shutdown.warnings })
+  }
+  return results
+}
+
 async function reconcileGitHubIntent(db: Client, intent: Row, agent: Row) {
   const instanceId = String(intent.payload?.workerInstanceId || "")
   if (!instanceId) throw new Error("Dispatch intent is missing workerInstanceId")
@@ -1320,25 +1373,37 @@ async function reconcileGitHubIntent(db: Client, intent: Row, agent: Row) {
 
 async function consumeDispatch(env: Env, intentId: string, attempts: number) {
   return database(env, async (db) => {
+    await db.query("begin")
+    let transactionOpen = true
+    try {
     const lock = await db.query(`select pg_try_advisory_lock(hashtext($1)) acquired`, [intentId])
-    if (lock.rows[0]?.acquired !== true) return "awaiting_reconciliation"
+    if (lock.rows[0]?.acquired !== true) { await db.query("commit"); transactionOpen = false; return "awaiting_reconciliation" }
     const result = await db.query(`select r.*,a.github_repo_owner,a.github_repo_name,a.github_workflow_file,a.github_ref,a.github_token,a.status agent_status from drive_agent_runs r join drive_agents a on a.id=r.agent_id where r.id=$1 for update of r`, [intentId])
     const intent = result.rows[0]
-    if (!intent || intent.external_run_id || ["completed", "failed", "canceled"].includes(intent.status)) return "terminal"
+    if (!intent || intent.external_run_id || ["completed", "failed", "canceled"].includes(intent.status)) { await db.query("commit"); transactionOpen = false; return "terminal" }
     if (intent.payload?.pool === true) {
-      const current = await db.query(`select m.status,greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1)) generation from drive_migrations m where m.id=$1 for share`, [intent.payload.migrationId])
+      const current = await db.query(`select m.status,greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1)) generation,
+        exists(select 1 from drive_repair_jobs j where j.migration_id=m.id and j.mode='migration' and j.status='canceled'
+          and not exists(select 1 from drive_repair_jobs newer where newer.migration_id=j.migration_id and newer.mode='migration' and (newer.created_at,newer.id)>(j.created_at,j.id))) pool_stopped
+        from drive_migrations m where m.id=$1 for update`, [intent.payload.migrationId])
       const migration = current.rows[0]
       const intentGeneration = integer(intent.payload.workerGeneration, 1, 1, 1000000)
-      if (!migration || !["running", "verifying"].includes(String(migration.status)) || Number(migration.generation) !== intentGeneration) {
+      if (!migration || migration.pool_stopped || !["running", "verifying"].includes(String(migration.status)) || Number(migration.generation) !== intentGeneration) {
         await db.query(`update drive_agent_runs set status='canceled',summary='Superseded migration worker-pool generation; dispatch skipped',completed_at=now(),updated_at=now() where id=$1 and status='pending'`, [intent.id])
+        await db.query("commit"); transactionOpen = false
         return "terminal"
+      }
+      const workerSettings = await db.query(`select value from drive_app_settings where key='migration-workers' limit 1`)
+      if (String(workerSettings.rows[0]?.value?.secretSyncStatus || "") !== "ready") {
+        await db.query("commit"); transactionOpen = false
+        throw new Error("GitHub migration-worker secrets are not synchronized; dispatch is paused")
       }
     }
     if (intent.agent_status === "disabled" || !intent.github_token) throw new Error("Registered workflow is disabled or missing its GitHub token")
-    if (await reconcileGitHubIntent(db, intent, intent)) return "reconciled"
+    if (await reconcileGitHubIntent(db, intent, intent)) { await db.query("commit"); transactionOpen = false; return "reconciled" }
     const phase = String(intent.payload?.phase || "created")
     const dispatchStartedAt = Date.parse(String(intent.payload?.dispatchStartedAt || ""))
-    if (phase === "accepted" || (phase === "dispatching" && Number.isFinite(dispatchStartedAt) && Date.now() - dispatchStartedAt < 5 * 60_000)) return "awaiting_reconciliation"
+    if (phase === "accepted" || (phase === "dispatching" && Number.isFinite(dispatchStartedAt) && Date.now() - dispatchStartedAt < 5 * 60_000)) { await db.query("commit"); transactionOpen = false; return "awaiting_reconciliation" }
     const workerInstanceId = String(intent.payload.workerInstanceId)
     await db.query(`update drive_agent_runs set payload=payload||$2::jsonb,summary='Submitting GitHub workflow dispatch',updated_at=now() where id=$1`, [intent.id, JSON.stringify({ phase: "dispatching", dispatchStartedAt: new Date().toISOString(), dispatchAttempt: attempts })])
     const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(intent.github_repo_owner)}/${encodeURIComponent(intent.github_repo_name)}/dispatches`, {
@@ -1347,7 +1412,12 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
     })
     if (!response.ok) throw new Error(`GitHub dispatch HTTP ${response.status}`)
     await db.query(`update drive_agent_runs set payload=payload||$2::jsonb,summary='GitHub accepted workflow dispatch; awaiting run reconciliation',updated_at=now() where id=$1`, [intent.id, JSON.stringify({ phase: "accepted", acceptedAt: new Date().toISOString() })])
+    await db.query("commit"); transactionOpen = false
     return "accepted"
+    } catch (error) {
+      if (transactionOpen) await db.query("rollback").catch(() => undefined)
+      throw error
+    }
   })
 }
 async function wakeFileScanner(db: Client) {
@@ -1374,9 +1444,16 @@ async function workerAuthorized(db: Client, agentId: string, token: unknown): Pr
   const result = await db.query(`select id,name,status,capabilities from drive_agents where id=$1 limit 1`, [agentId])
   const agent = result.rows[0]
   if (!agent || agent.status === "disabled") return null
-  const settings = await db.query(`select value->>'sharedSecret' secret from drive_app_settings where key='migration-workers' limit 1`)
-  const expected = String(settings.rows[0]?.secret || "")
-  return expected.length >= 24 && expected.length <= MAX_SECRET_LENGTH && safeEqual(token, expected) ? agent : null
+  const settings = await db.query(`select value from drive_app_settings where key='migration-workers' limit 1`)
+  const value = settings.rows[0]?.value || {}
+  const expected = String(value.sharedSecret || "")
+  const currentMatches = expected.length >= 24 && expected.length <= MAX_SECRET_LENGTH && safeEqual(token, expected)
+  const previousMatches = Array.isArray(value.previousSharedSecrets) && value.previousSharedSecrets.some((entry: Row) => {
+    const secret = String(entry?.secret || "")
+    const expires = Date.parse(String(entry?.expiresAt || ""))
+    return secret.length >= 24 && secret.length <= MAX_SECRET_LENGTH && Number.isFinite(expires) && expires > Date.now() && safeEqual(token, secret)
+  })
+  return currentMatches || previousMatches ? agent : null
 }
 
 async function workerPayload(db: Client, job: Row) {
@@ -1409,9 +1486,16 @@ async function workerRequest(request: Request, env: Env, path: string) {
       const token = String(body.token || "").trim()
       const instanceId = String(body.instanceId || "").trim()
       if (!/^[0-9a-f-]{36}$/i.test(instanceId)) return json({ error: "Valid worker instanceId is required" }, 400)
-      const settings = await db.query(`select value->>'sharedSecret' secret from drive_app_settings where key='migration-workers' limit 1`)
-      const expected = String(settings.rows[0]?.secret || "")
-      if (expected.length < 24 || expected.length > MAX_SECRET_LENGTH || !safeEqual(token, expected)) {
+      const settings = await db.query(`select value from drive_app_settings where key='migration-workers' limit 1`)
+      const value = settings.rows[0]?.value || {}
+      const expected = String(value.sharedSecret || "")
+      const currentMatches = expected.length >= 24 && expected.length <= MAX_SECRET_LENGTH && safeEqual(token, expected)
+      const previousMatches = Array.isArray(value.previousSharedSecrets) && value.previousSharedSecrets.some((entry: Row) => {
+        const secret = String(entry?.secret || "")
+        const expires = Date.parse(String(entry?.expiresAt || ""))
+        return secret.length >= 24 && secret.length <= MAX_SECRET_LENGTH && Number.isFinite(expires) && expires > Date.now() && safeEqual(token, secret)
+      })
+      if (!currentMatches && !previousMatches) {
         return json({ error: "Invalid worker secret" }, 401)
       }
       const requestedAgentId = /^[0-9a-f-]{36}$/i.test(String(body.agentId || "")) ? String(body.agentId) : ""
@@ -1504,9 +1588,10 @@ async function cycle(env: Env) {
     let migrationId: string | null = null
     try {
       const setting = await db.query(`select value from drive_app_settings where key='migration-orchestrator' limit 1`)
+      const canceledWorkerJobs = await reconcileCanceledWorkerRepairJobs(db)
       if (setting.rows[0]?.value?.migrationEnabled !== true && setting.rows[0]?.value?.enabled !== true) return complete(db, owner, null, { ok: true, skipped: "disabled" })
       let migration = await selectMigration(db)
-      if (!migration) return complete(db, owner, null, { ok: true, idle: true })
+      if (!migration) return complete(db, owner, null, { ok: true, idle: true, canceledWorkerJobs })
       const terminalWorkerMigration = String(migration.options?.executionMode || "super_slurper") === "migration_workers" && ["failed", "verification_failed"].includes(String(migration.status).toLowerCase())
       if (["canceled", "completed", "aborted"].includes(String(migration.status).toLowerCase()) || terminalWorkerMigration) {
         migrationId = migration.id

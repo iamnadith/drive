@@ -16,6 +16,8 @@ import os from "os"
 import path from "path"
 import { Transform } from "stream"
 
+class WorkerAuthenticationError extends Error {}
+
 function getArg(name, fallback = "") {
   const index = process.argv.indexOf(`--${name}`)
   if (index >= 0 && index + 1 < process.argv.length) return process.argv[index + 1]
@@ -65,6 +67,7 @@ const jobAbortControllers = new Map()
 const jobUpdateQueues = new Map()
 const jobClaimTokens = new Map()
 let runtimeConfigurationLoadedAt = 0
+let fatalAuthenticationError = false
 const WORKER_STATE_DIR = path.resolve(String(getArg("state-dir", path.join(process.cwd(), ".drive-worker"))))
 const WORKER_IDENTITY_PATH = path.join(WORKER_STATE_DIR, "identity.json")
 
@@ -337,6 +340,7 @@ async function api(path, body, options = {}) {
         const json = await response.json().catch(() => ({}))
         if (!response.ok) {
           const message = typeof json.error === "string" ? json.error : `Request failed: ${response.status}`
+          if (response.status === 401 || response.status === 403) throw new WorkerAuthenticationError(`Migration Orchestrator rejected the worker identity/secret (HTTP ${response.status})`)
           const requestError = new Error(message)
           requestError.status = response.status
           throw requestError
@@ -353,9 +357,19 @@ async function api(path, body, options = {}) {
 async function heartbeat(extra = {}) {
   await loadRuntimeConfiguration()
   await postgres(async (db) => {
-    const auth = await db.query(`select a.id,a.status,s.value->>'sharedSecret' secret from drive_agents a left join drive_app_settings s on s.key='migration-workers' where a.id=$1 limit 1`, [AGENT_ID])
+    const auth = await db.query(`
+      select a.id,a.status,
+        s.value->>'sharedSecret'=$2 or exists(
+          select 1 from jsonb_array_elements(case when jsonb_typeof(s.value->'previousSharedSecrets')='array' then s.value->'previousSharedSecrets' else '[]'::jsonb end) previous
+          where previous->>'secret'=$2 and case when previous->>'expiresAt' ~ '^\\d{4}-\\d{2}-\\d{2}T' then (previous->>'expiresAt')::timestamptz>now() else false end
+        ) secret_valid
+      from drive_agents a left join drive_app_settings s on s.key='migration-workers'
+      where a.id=$1 limit 1
+    `, [AGENT_ID, AGENT_TOKEN])
     const row = auth.rows[0]
-    if (!row || row.status === "disabled" || row.secret !== AGENT_TOKEN) throw new Error("Worker is missing, disabled, or has an invalid shared secret")
+    if (!row) throw new WorkerAuthenticationError("Worker agent is missing from the PostgreSQL database configured by POSTGRES_URL; verify it targets the same Drive database")
+    if (row.status === "disabled") throw new WorkerAuthenticationError("Worker agent is disabled in the PostgreSQL database configured by POSTGRES_URL")
+    if (!row.secret_valid) throw new WorkerAuthenticationError("DRIVE_WORKER_SHARED_SECRET does not match the configured Drive database; synchronize GitHub Worker secrets")
     await db.query(`update drive_agents set status='online',last_heartbeat_at=now(),last_seen_host=$2,last_seen_version='worker-v2',metadata=coalesce(metadata,'{}'::jsonb)||$3::jsonb,updated_at=now() where id=$1 and status<>'disabled'`, [AGENT_ID, os.hostname(), JSON.stringify(extra)])
     if (WORKER_INSTANCE_ID) {
       await db.query(`update drive_agent_runs set status='running',updated_at=now() where agent_id=$1 and payload->>'workerInstanceId'=$2 and status in('pending','running')`, [AGENT_ID, WORKER_INSTANCE_ID])
@@ -387,16 +401,22 @@ async function claimJobDirectPostgres() {
   if (!MIGRATION_ID) throw new Error("Direct autonomous claim requires migrationId")
   return postgres(async (db) => {
     const auth = await db.query(`
-      select a.status agent_status,a.capabilities,m.*,m.status migration_status,s.value->>'sharedSecret' worker_secret,
+      select a.status agent_status,a.capabilities,m.*,m.status migration_status,
+        (s.value->>'sharedSecret'=$3 or exists(
+          select 1 from jsonb_array_elements(case when jsonb_typeof(s.value->'previousSharedSecrets')='array' then s.value->'previousSharedSecrets' else '[]'::jsonb end) previous
+          where previous->>'secret'=$3 and case when previous->>'expiresAt' ~ '^\\d{4}-\\d{2}-\\d{2}T' then (previous->>'expiresAt')::timestamptz>now() else false end
+        )) secret_valid,
         jsonb_build_object('cloudflare_account_id',sa.cloudflare_account_id,'r2_access_key_id',sa.r2_access_key_id,'r2_secret_access_key',sa.r2_secret_access_key) source_account,
         jsonb_build_object('cloudflare_account_id',ta.cloudflare_account_id,'r2_access_key_id',ta.r2_access_key_id,'r2_secret_access_key',ta.r2_secret_access_key) target_account
       from drive_agents a cross join drive_migrations m
       join drive_accounts sa on sa.id=m.source_account_id join drive_accounts ta on ta.id=m.target_account_id
       left join drive_app_settings s on s.key='migration-workers'
       where a.id=$1 and m.id=$2 limit 1
-    `, [AGENT_ID, MIGRATION_ID])
+    `, [AGENT_ID, MIGRATION_ID, AGENT_TOKEN])
     const migration = auth.rows[0]
-    if (!migration || migration.agent_status === "disabled" || migration.worker_secret !== AGENT_TOKEN) throw new Error("Worker is missing, disabled, or has an invalid shared secret")
+    if (!migration) throw new WorkerAuthenticationError("Worker agent or migration is missing from the PostgreSQL database configured by POSTGRES_URL; verify it targets the same Drive database")
+    if (migration.agent_status === "disabled") throw new WorkerAuthenticationError("Worker agent is disabled in the PostgreSQL database configured by POSTGRES_URL")
+    if (!migration.secret_valid) throw new WorkerAuthenticationError("DRIVE_WORKER_SHARED_SECRET does not match the configured Drive database; synchronize GitHub Worker secrets")
     if (!Array.isArray(migration.capabilities) || !migration.capabilities.includes("bulk_migrate")) throw new Error("Worker is not registered for bulk migrations")
     if (migration.options?.executionMode !== "migration_workers") throw new Error("Direct claim requires a migration worker migration")
     if (["completed", "failed", "verification_failed", "canceled"].includes(migration.migration_status)) return { ok: true, job: null, poolComplete: true, poolStatus: migration.migration_status }
@@ -2224,6 +2244,11 @@ async function startHeartbeatLoop() {
     try {
       await heartbeat({ currentJobId: currentJobId ?? null })
     } catch (error) {
+      if (error instanceof WorkerAuthenticationError) {
+        fatalAuthenticationError = true
+        console.error("Worker authentication failed:", error.message)
+        stopHeartbeatLoop()
+      }
       console.error("Heartbeat failed:", error instanceof Error ? error.message : String(error))
     }
     if (currentJobId) {
@@ -2255,7 +2280,7 @@ async function main() {
     void startHeartbeatLoop()
   }
 
-  while (true) {
+  while (!fatalAuthenticationError) {
     try {
       const claimed = await tryClaimJob()
       if (claimed?.poolComplete === true) {
@@ -2285,6 +2310,13 @@ async function main() {
         return
       }
     } catch (error) {
+      if (error instanceof WorkerAuthenticationError) {
+        fatalAuthenticationError = true
+        console.error("Worker authentication failed:", error.message)
+        stopHeartbeatLoop()
+        process.exitCode = 1
+        return
+      }
       console.error("Worker loop error:", error instanceof Error ? error.message : String(error))
       const failedJobId = currentJobId
       if (currentJobId) {
@@ -2323,6 +2355,12 @@ async function runWorkerForever() {
       return
     } catch (error) {
       console.error("Worker fatal error:", error instanceof Error ? error.stack || error.message : String(error))
+      if (error instanceof WorkerAuthenticationError) {
+        fatalAuthenticationError = true
+        stopHeartbeatLoop()
+        process.exitCode = 1
+        return
+      }
       currentJobId = null
       currentMigrationId = null
       migrationItemProgressCache.clear()

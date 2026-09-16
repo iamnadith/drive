@@ -3,7 +3,8 @@ import crypto from "node:crypto"
 import { NextResponse } from "next/server"
 import { createAgentRun, getAgentById, getAgentGithubToken, listAgentRunsByAgentId, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { abortRepairJob, createRepairJob, ensureMigrationWorkerJobs, findActiveRepairJobForDispatch, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
-import { GITHUB_TOKEN_COOKIE, listGitHubWorkflowRuns, setGitHubActionsSecret } from "@/lib/github-oauth"
+import { GITHUB_TOKEN_COOKIE, listGitHubWorkflowRuns } from "@/lib/github-oauth"
+import { syncGitHubWorkerSecrets } from "@/lib/github-worker-secrets"
 import { assertWorkerWorkflow } from "@/lib/github-worker-setup"
 import { enrollMigrationWorkerAgents, getMigration, listMigrationItems } from "@/lib/migrations-store"
 import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
@@ -33,52 +34,6 @@ function getGitHubTokenFallback(): string {
     process.env.GH_TOKEN ||
     ""
   ).trim()
-}
-
-async function syncGitHubWorkerSecrets(input: {
-  token: string
-  owner: string
-  repo: string
-  serverUrl: string
-  sharedSecret: string
-  postgresUrl: string
-  agentId?: string
-  includeLegacyAgentId?: boolean
-}) {
-  if (!input.postgresUrl) throw new Error("POSTGRES_URL is not configured for the GitHub migration worker")
-  const writes = [
-    setGitHubActionsSecret({
-      token: input.token,
-      owner: input.owner,
-      repo: input.repo,
-      name: "DRIVE_MIGRATION_ORCHESTRATOR_URL",
-      value: input.serverUrl,
-    }),
-    setGitHubActionsSecret({
-      token: input.token,
-      owner: input.owner,
-      repo: input.repo,
-      name: "DRIVE_WORKER_SHARED_SECRET",
-      value: input.sharedSecret,
-    }),
-    setGitHubActionsSecret({
-      token: input.token,
-      owner: input.owner,
-      repo: input.repo,
-      name: "POSTGRES_URL",
-      value: input.postgresUrl,
-    }),
-  ]
-  if (input.includeLegacyAgentId && input.agentId) {
-    writes.push(setGitHubActionsSecret({
-      token: input.token,
-      owner: input.owner,
-      repo: input.repo,
-      name: "DRIVE_AGENT_ID",
-      value: input.agentId,
-    }))
-  }
-  await Promise.all(writes)
 }
 
 function isRecentIso(value: string | undefined, maxAgeMs: number): boolean {

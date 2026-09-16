@@ -43,9 +43,26 @@ test('the GitHub workflow exposes no manual dispatch fields and receives system 
 
 test('GitHub migration worker dispatch provisions the database secret required by worker startup', () => {
   const route = read('src/app/api/agents/[id]/dispatch/route.ts')
-  assert.match(route, /name: "POSTGRES_URL"/)
-  assert.match(route, /postgresUrl: String\(process\.env\.POSTGRES_URL \|\| ""\)\.trim\(\)/)
-  assert.match(route, /POSTGRES_URL is not configured for the GitHub migration worker/)
+  const helper = read('src/lib/github-worker-secrets.ts')
+  const workflow = read('.github/workflows/migration-worker.yml')
+  assert.match(route, /syncGitHubWorkerSecrets/)
+  assert.match(helper, /DRIVE_MIGRATION_ORCHESTRATOR_URL/)
+  assert.match(helper, /DRIVE_WORKER_SHARED_SECRET/)
+  assert.match(helper, /POSTGRES_URL/)
+  assert.match(workflow, /SERVER_URL: \$\{\{ secrets\.DRIVE_MIGRATION_ORCHESTRATOR_URL \}\}/)
+  assert.match(workflow, /TOKEN: \$\{\{ secrets\.DRIVE_WORKER_SHARED_SECRET \}\}/)
+})
+
+test('migration-pool cancellation is an orchestrator-owned durable intent', () => {
+  const route = read('src/app/api/repair-jobs/[id]/route.ts')
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(route, /job\.mode === "migration"[\s\S]*?Migration Orchestrator is stopping the active worker pool/)
+  assert.match(orchestrator, /reconcileCanceledWorkerRepairJobs/)
+  assert.match(orchestrator, /githubAbortRequestedAt/)
+  assert.match(orchestrator, /Migration worker job .* was canceled/)
+  assert.match(orchestrator, /if \(stopped\.rowCount\) return 0/)
+  assert.match(orchestrator, /pool_stopped/)
+  assert.match(orchestrator, /secretSyncStatus[\s\S]*!== "ready"/)
 })
 
 test('worker-pool details hydrate and refresh from PostgreSQL only', () => {

@@ -154,6 +154,20 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const agent = agentId ? await getAgentById(agentId).catch(() => null) : null
     const locallyAbortedJob = await abortRepairJob(id)
 
+    // Migration worker pools are controlled by Migration Orchestrator. The
+    // dashboard records the canceled durable job; the orchestrator reconciles
+    // and confirms cancellation of every associated GitHub run.
+    if (job.mode === "migration") {
+      const refreshedRun = await getLatestAgentRunByJobReference(id).catch(() => null)
+      return NextResponse.json({
+        ok: true,
+        abortRequested: true,
+        remoteCancellationPending: true,
+        warning: "Migration Orchestrator is stopping the active worker pool and will confirm each GitHub run is terminated.",
+        job: { ...(locallyAbortedJob || job), linkedRun: refreshedRun },
+      })
+    }
+
     if (
       agent &&
       agent.provider === "github_actions" &&
