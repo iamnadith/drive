@@ -268,7 +268,10 @@ export default function MigrationWorkerPoolDetailsPage() {
   const failedJobs = num(snapshot.failedJobs);
   const canceledJobs = num(snapshot.canceledJobs);
   const totalObjects = num(snapshot.totalObjects);
-  const transferredFiles = num(snapshot.transferred || snapshot.completedJobs);
+  // A completed job is not necessarily a copied object: skipped objects and
+  // job lifecycle completion are separate dimensions. Show only the
+  // authoritative transferred counter here.
+  const transferredFiles = num(snapshot.transferred);
   const skippedFiles = num(snapshot.skipped);
   const processedFiles = num(snapshot.processedFiles);
   const onlineWorkers = num(snapshot.onlineWorkers);

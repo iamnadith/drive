@@ -255,6 +255,24 @@ export async function listMigrations(limit = 50): Promise<DriveMigration[]> {
   return rows.map(mapMigrationRow)
 }
 
+function compactedObjectCounts(row: DriveMigrationItemRow) {
+  const progress = row.progress && typeof row.progress === "object" ? row.progress as Record<string, unknown> : {}
+  const live = progress.live && typeof progress.live === "object" ? progress.live as Record<string, unknown> : null
+  const slurperCandidates = [
+    progress.slurperCumulative,
+    progress.slurperNormalized,
+    progress.slurper && typeof progress.slurper === "object" ? (progress.slurper as Record<string, unknown>).result : null,
+  ]
+  const slurper = slurperCandidates.find((value) => value && typeof value === "object") as Record<string, unknown> | undefined
+  const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : undefined
+  return {
+    transferred: number(live?.transferredObjects) ?? number(slurper?.transferredObjects) ?? 0,
+    skipped: number(live?.skippedObjects) ?? number(slurper?.skippedObjects) ?? 0,
+    failed: number(live?.failedObjects) ?? number(slurper?.failedObjects) ?? 0,
+    unaccounted: number(live?.unaccountedObjects) ?? 0,
+  }
+}
+
 /** One database round trip for the migrations page's initial database snapshot. */
 export async function getMigrationDashboardBootstrap(limit = 50): Promise<MigrationDashboardBootstrap> {
   const boundedLimit = Math.max(1, Math.min(500, Math.floor(limit)))
@@ -782,6 +800,38 @@ export async function updateMigration(
     migration.summaryItemCount = summary.summary_item_count
     migration.summaryObjects = summary.summary_objects
     migration.summaryBytes = summary.summary_bytes
+
+    // Preserve the object-level accounting before retention can remove the
+    // migration items. `completed` means the destination was reconciled; it
+    // does not mean every object was copied during this run. Exact matches
+    // remain skipped and must never be presented as transferred.
+    const { rows: itemRows } = await queryDb<DriveMigrationItemRow>(
+      `select * from public.${MIGRATION_ITEMS_TABLE} where migration_id = $1`,
+      [id]
+    )
+    const objectCounts = itemRows.reduce(
+      (totals, row) => {
+        const counts = compactedObjectCounts(row)
+        totals.transferred += counts.transferred
+        totals.skipped += counts.skipped
+        totals.failed += counts.failed
+        totals.unaccounted += counts.unaccounted
+        return totals
+      },
+      { transferred: 0, skipped: 0, failed: 0, unaccounted: 0 }
+    )
+    await queryDb(
+      `update public.${MIGRATIONS_TABLE}
+       set worker_summary = jsonb_set(
+         coalesce(worker_summary, '{}'::jsonb),
+         '{objectCounts}',
+         $2::jsonb,
+         true
+       )
+       where id = $1`,
+      [id, JSON.stringify(objectCounts)]
+    )
+    migration.workerSummary = { ...migration.workerSummary, objectCounts }
     await compactPreviousMigrationDetails(id).catch((cleanupError) => {
       console.error("Unable to compact previous migration details:", cleanupError)
     })

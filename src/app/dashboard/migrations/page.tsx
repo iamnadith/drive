@@ -572,13 +572,20 @@ export default function MigrationsPage() {
   const totals = React.useMemo(() => {
     if (activeItems.length === 0 && activeMigration?.detailsCompactedAt) {
       const totalObjects = activeMigration.summaryObjects ?? 0
+      const objectCounts = isRecord(activeMigration.workerSummary?.objectCounts)
+        ? activeMigration.workerSummary.objectCounts
+        : {}
+      const transferred = typeof objectCounts.transferred === "number" ? objectCounts.transferred : 0
+      const skipped = typeof objectCounts.skipped === "number" ? objectCounts.skipped : 0
+      const failed = typeof objectCounts.failed === "number" ? objectCounts.failed : 0
+      const completed = Math.min(totalObjects, transferred + skipped + failed)
       return {
         totalObjects,
-        transferred: activeMigration.status === "completed" ? totalObjects : 0,
-        skipped: 0,
-        failed: 0,
-        completed: activeMigration.status === "completed" ? totalObjects : 0,
-        percent: activeMigration.status === "completed" ? 100 : 0,
+        transferred,
+        skipped,
+        failed,
+        completed: activeMigration.status === "completed" ? totalObjects : completed,
+        percent: activeMigration.status === "completed" ? 100 : totalObjects > 0 ? (completed / totalObjects) * 100 : 0,
       }
     }
     let totalObjects = 0

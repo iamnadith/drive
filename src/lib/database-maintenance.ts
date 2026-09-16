@@ -142,6 +142,7 @@ export async function compactPreviousMigrationDetails(completedMigrationId?: str
     `
       update drive_migrations m
       set worker_summary = jsonb_build_object(
+        'objectCounts', coalesce(m.worker_summary->'objectCounts', '{}'::jsonb),
         'repairJobs', coalesce((
           select jsonb_agg(jsonb_build_object(
             'id', r.id,
