@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { Activity, Bot, Clock3, Copy, Eye, Github, HardDrive, Play, Plus, RefreshCw, Search, Server, Square, Trash2 } from "lucide-react"
+import { Activity, Bot, Clock3, Copy, Eye, EyeOff, Github, HardDrive, Play, Plus, RefreshCw, Search, Server, Square, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { useRouter, useSearchParams } from "next/navigation"
 import { GitHubWorkerSetup } from "@/components/dashboard/github-worker-setup"
