@@ -251,14 +251,30 @@ function freshState(mode: InstallMode): InstallState {
 
 async function cf<T>(token: string, path: string, init: RequestInit = {}): Promise<T> {
   const isForm = typeof FormData !== "undefined" && init.body instanceof FormData
-  const response = await fetch(`${API}${path}`, {
-    ...init,
-    headers: { Authorization: `Bearer ${token}`, ...(init.body && !isForm ? { "Content-Type": "application/json" } : {}), ...(init.headers || {}) },
-    signal: AbortSignal.timeout(25_000),
-  })
-  const payload = await response.json().catch(() => ({})) as { success?: boolean; result?: T; errors?: Array<{ message?: string }> }
-  if (!response.ok || payload.success === false) throw new Error(payload.errors?.[0]?.message || `Cloudflare request failed (${response.status})`)
-  return payload.result as T
+  let lastError: unknown
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const response = await fetch(`${API}${path}`, {
+        ...init,
+        headers: { Authorization: `Bearer ${token}`, ...(init.body && !isForm ? { "Content-Type": "application/json" } : {}), ...(init.headers || {}) },
+        signal: AbortSignal.timeout(25_000),
+      })
+      const payload = await response.json().catch(() => ({})) as { success?: boolean; result?: T; errors?: Array<{ message?: string }> }
+      if (!response.ok || payload.success === false) {
+        const error = new Error(payload.errors?.[0]?.message || `Cloudflare request failed (${response.status})`)
+        if (![408, 425, 429, 500, 502, 503, 504].includes(response.status)) throw error
+        throw error
+      }
+      return payload.result as T
+    } catch (error) {
+      lastError = error
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+      const retryable = message.includes("timeout") || message.includes("timed out") || message.includes("aborted") || message.includes("fetch failed") || message.includes("connect") || message.includes("socket")
+      if (!retryable || attempt === 3) throw error
+      await new Promise((resolve) => setTimeout(resolve, 750 * 2 ** attempt))
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Cloudflare request failed")
 }
 
 async function resolveAccount(token: string): Promise<Account> {
@@ -622,7 +638,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       state.status = "ready"; state.step = "enabled"; await saveState(state)
       return getCloudflareInstallation()
     } catch (error) {
-      state.status = "failed"; state.error = error instanceof Error ? error.message : "Installation failed"
+      state.status = "failed"; state.error = `${state.step}: ${error instanceof Error ? error.message : "Installation failed"}`
       const active = ORDER.find((worker) => state.step.startsWith(`${worker}_`) && !state.workers[worker].verified)
       if (active) { state.workers[active].phase = "failed"; state.workers[active].error = state.error }
       await saveState(state); throw error
