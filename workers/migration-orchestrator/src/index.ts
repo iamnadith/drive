@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 20
+const BUILD = 21
 const MAX_SECRET_LENGTH = 512
 const TRANSIENT_SCAN_SQL_PATTERN = "(connection terminated unexpectedly|connection reset|connection closed|server closed the connection unexpectedly|client has encountered a connection error|not queryable|socket hang up|econnreset|econnrefused|etimedout|timeout|timed out|eai_again|enotfound|enetunreach|epipe|fetch failed|temporar(y|ily) unavailable|too many (requests|connections|clients)|slow down|throttl|HTTP (408|425|429|500|502|503|504)|57P01|57P03|53300|08[0-9A-Z]{3}|40001|40P01)"
 let authCache: { value: string[]; expiresAt: number } | null = null
@@ -1192,8 +1192,13 @@ async function wakeFileScanner(db: Client) {
   const settings = result.rows[0]?.value || {}
   if (!settings.fileScannerUrl || !settings.fileScannerSecret) return "not_configured"
   try {
-    const response = await fetch(`${String(settings.fileScannerUrl).replace(/\/+$/, "")}/run`, { method: "POST", headers: { Authorization: `Bearer ${settings.fileScannerSecret}` }, signal: AbortSignal.timeout(8_000) })
-    return response.ok ? "signaled" : `http_${response.status}`
+    const base = String(settings.fileScannerUrl).replace(/\/+$/, "")
+    const headers = { Authorization: `Bearer ${settings.fileScannerSecret}` }
+    const response = await fetch(`${base}/run`, { method: "POST", headers, signal: AbortSignal.timeout(8_000) })
+    if (response.ok) return "signaled"
+    if (response.status !== 404) return `http_${response.status}`
+    const compatibility = await fetch(`${base}/wake`, { method: "POST", headers, signal: AbortSignal.timeout(8_000) })
+    return compatibility.ok ? "signaled_compatibility" : `http_${compatibility.status}`
   } catch { return "deferred_to_cron" }
 }
 async function complete(db: Client, owner: string, migrationId: string | null, result: Row) {
@@ -1369,7 +1374,9 @@ async function cycle(env: Env) {
           const scannerEnabled = configuration.fileScannerEnabled === true || configuration.enabled === true
           const fileScanner = scannerEnabled ? await wakeFileScanner(db) : "disabled"
           const message = scannerEnabled
-            ? `File Scanner is scanning source buckets (${inventory.pending} remaining)`
+            ? fileScanner === "signaled"
+              ? `File Scanner is scanning source buckets (${inventory.pending} remaining)`
+              : `File Scanner wake ${fileScanner}; retrying source scan (${inventory.pending} remaining)`
             : "Waiting for File Scanner to be enabled before starting Super Slurper jobs"
           await db.query(`update drive_migrations set status='running',sync_status='running',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id, message])
           await renew(db, owner)

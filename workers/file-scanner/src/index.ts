@@ -10,7 +10,7 @@ type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: st
 type Row = Record<string, any>
 type ClaimedTask = { kind: "migration" | "generic"; task: Row }
 type ClaimedCycle = { ok: true; owner: string; tasks: ClaimedTask[] } | { ok: true; skipped: string } | { ok: true; idle: true }
-const BUILD = 16
+const BUILD = 17
 const MAX_SECRET_LENGTH = 512
 // Keep database connections and R2 list requests bounded while allowing
 // independent bucket scans to make progress during the same cron/queue run.
@@ -508,7 +508,7 @@ export default {
     }
     if (!(await authorized(request, env))) return json({ error: "Unauthorized" }, 401)
     if (url.pathname === "/status" && request.method === "GET") return json(await database(env, async (db) => { const [state,verificationQueue,inventoryQueue] = await Promise.all([db.query(`select * from drive_file_scanner_state where id=true`),db.query(`select status,count(*)::int count from drive_migration_verification_state group by status`),db.query(`select status,count(*)::int count,count(*) filter(where lease_expires_at>now())::int leased,min(updated_at) oldest_updated_at from drive_bucket_scans where status in('pending','running','failed') group by status`)]); return { ok: true, service: "file-scanner", build: BUILD, state: state.rows[0] || null, queue: verificationQueue.rows, inventoryScans: inventoryQueue.rows } }))
-    if (url.pathname === "/run" && request.method === "POST") { try { return json(await cycleAndContinue(env)) } catch (error) { return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 503) } }
+    if (url.pathname === "/run" && request.method === "POST" || url.pathname === "/wake" && request.method === "POST") { try { return json(await cycleAndContinue(env)) } catch (error) { return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 503) } }
     return json({ error: "Not found" }, 404)
   },
   async queue(batch: MessageBatch<ScanMessage>, env: Env) {
