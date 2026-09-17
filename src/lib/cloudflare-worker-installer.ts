@@ -3,6 +3,8 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 import { queryDb, withDbAdvisoryLock, withDbTransaction } from "@/lib/db"
 import { getBackendOrchestratorSettings } from "@/lib/backend-orchestrator-settings-store"
 import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
+import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
+import { syncAllGitHubWorkerSecrets } from "@/lib/github-worker-secrets"
 import { runtimeHealthError } from "./cloudflare-worker-health.cjs"
 
 export type HostedWorker = "backend" | "scanner" | "migration"
@@ -640,6 +642,8 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
   return withDbAdvisoryLock("cloudflare-worker-install", "singleton", async () => {
     const previous = await loadState()
     const previousRuntime = await currentRuntimeSnapshot()
+    let githubSecretsSynchronized = false
+    let workerSharedSecretForSync = ""
     const hasSuppliedToken = ORDER.some((worker) => Boolean(String(input.tokens[worker] || "").trim()))
     if (previous?.status === "ready" && !input.restart && !input.checkForUpdates && !input.forceRedeploy && !hasSuppliedToken) return getCloudflareInstallation()
     const supplied = input.mode === "single"
@@ -724,6 +728,20 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
         await ensureSchedule(tokens[worker], accounts[worker].id, state.workers[worker].scriptName, replacedScriptName)
       }
       state.step = "schedules_ready"; await saveState(state)
+      const workerSettings = await getMigrationWorkerSettings()
+      workerSharedSecretForSync = workerSettings.sharedSecret
+      const migrationUrlChanged = previousRuntime.migration.orchestratorUrl !== state.workers.migration.url
+      const synchronizedConfigurationMatches = workerSettings.synchronizedServerUrl === state.workers.migration.url
+        && workerSettings.synchronizedSecretHash === createHash("sha256").update(workerSettings.sharedSecret).digest("hex")
+      if (migrationUrlChanged || workerSettings.secretSyncStatus !== "ready" || !synchronizedConfigurationMatches) {
+        state.step = "github_worker_secrets_syncing"; await saveState(state)
+        await syncAllGitHubWorkerSecrets({
+          serverUrl: state.workers.migration.url || "",
+          sharedSecret: workerSettings.sharedSecret,
+        })
+        githubSecretsSynchronized = true
+        state.step = "github_worker_secrets_ready"; await saveState(state)
+      }
       await saveRuntimeConfiguration(state, true)
       await queryDb(`insert into drive_app_settings(key,value,updated_at) values('cloudflare-worker-hosting',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`, [JSON.stringify({ mode: "automatic" })])
       state.status = "ready"; state.step = "enabled"; await saveState(state)
@@ -733,7 +751,15 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       // disabled just because one Worker failed its readiness check. Preserve
       // the exact prior runtime flags/URLs/secrets; the visible install state
       // still records which Worker needs repair.
-      if (previous?.status === "ready") await writeRuntimeSnapshot(previousRuntime).catch(() => undefined)
+      if (previous?.status === "ready") {
+        if (githubSecretsSynchronized && previousRuntime.migration.orchestratorUrl) {
+          await syncAllGitHubWorkerSecrets({
+            serverUrl: previousRuntime.migration.orchestratorUrl,
+            sharedSecret: workerSharedSecretForSync,
+          }).catch(() => undefined)
+        }
+        await writeRuntimeSnapshot(previousRuntime).catch(() => undefined)
+      }
       state.status = "failed"; state.error = `${state.step}: ${error instanceof Error ? error.message : "Installation failed"}`
       const active = ORDER.find((worker) => state.step.startsWith(`${worker}_`) && !state.workers[worker].verified)
       if (active) { state.workers[active].phase = "failed"; state.workers[active].error = state.error }

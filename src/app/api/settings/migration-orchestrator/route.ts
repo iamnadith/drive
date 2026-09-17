@@ -5,6 +5,8 @@ import {
   publicMigrationOrchestratorSettings,
   saveMigrationOrchestratorSettings,
 } from "@/lib/migration-orchestrator-settings-store"
+import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
+import { syncAllGitHubWorkerSecrets } from "@/lib/github-worker-secrets"
 import { workerFailureResponse } from "@/lib/worker-failure-response"
 
 export const runtime = "nodejs"
@@ -42,15 +44,32 @@ export async function GET() {
 export async function PUT(request: Request) {
   const auth = await requireAdmin()
   if (!auth.ok) return auth.response
+  let synchronizationAttempted = false
   try {
     const body = await request.json().catch(() => ({})) as { worker?: unknown; orchestratorUrl?: unknown; fileScannerUrl?: unknown; sharedSecret?: unknown; fileScannerSecret?: unknown }
+    const current = await getMigrationOrchestratorSettings()
     // Saving connection details must preserve the current enabled state.
     const settings = await saveMigrationOrchestratorSettings(body.worker === "file"
       ? { fileScannerUrl: body.fileScannerUrl, fileScannerSecret: body.fileScannerSecret }
       : { orchestratorUrl: body.orchestratorUrl, sharedSecret: body.sharedSecret })
-    return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings) })
+    let syncedRepositories: number | undefined
+    if (body.worker !== "file" && settings.orchestratorUrl !== current.orchestratorUrl) {
+      synchronizationAttempted = true
+      const workerSettings = await getMigrationWorkerSettings()
+      const synchronization = await syncAllGitHubWorkerSecrets({
+        serverUrl: settings.orchestratorUrl,
+        sharedSecret: workerSettings.sharedSecret,
+      })
+      syncedRepositories = synchronization.syncedRepositories
+    }
+    return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings), syncedRepositories })
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 })
+    const message = error instanceof Error ? error.message : String(error)
+    return NextResponse.json({
+      error: synchronizationAttempted
+        ? `The Migration Orchestrator setting was saved, but GitHub Actions credentials could not be synchronized. Dispatch is paused until synchronization succeeds. ${message}`
+        : message,
+    }, { status: synchronizationAttempted ? 502 : 400 })
   }
 }
 

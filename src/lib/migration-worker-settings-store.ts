@@ -11,6 +11,8 @@ export type MigrationWorkerSettings = {
   secretSyncStatus: "ready" | "syncing" | "failed" | "unverified"
   secretSyncError?: string
   secretSyncAt?: string
+  synchronizedServerUrl?: string
+  synchronizedSecretHash?: string
 }
 
 type SettingsRow = {
@@ -42,6 +44,8 @@ function normalize(value: unknown, updatedAt?: string | null): MigrationWorkerSe
       : "unverified",
     secretSyncError: typeof row.secretSyncError === "string" ? row.secretSyncError : undefined,
     secretSyncAt: typeof row.secretSyncAt === "string" ? row.secretSyncAt : undefined,
+    synchronizedServerUrl: typeof row.synchronizedServerUrl === "string" ? row.synchronizedServerUrl : undefined,
+    synchronizedSecretHash: typeof row.synchronizedSecretHash === "string" ? row.synchronizedSecretHash : undefined,
   }
 }
 
@@ -95,15 +99,19 @@ export async function saveMigrationWorkerSettings(input: { sharedSecret?: unknow
   return normalize(rows[0]?.value, rows[0]?.updated_at)
 }
 
-export async function setMigrationWorkerSecretSyncStatus(status: "ready" | "syncing" | "failed", error?: string) {
+export async function setMigrationWorkerSecretSyncStatus(
+  status: "ready" | "syncing" | "failed",
+  error?: string,
+  synchronized?: { serverUrl: string; secretHash: string }
+) {
   await ensureDriveSchema()
   await queryDb(`
     insert into drive_app_settings(key,value,updated_at)
-    values($1,jsonb_build_object('secretSyncStatus',$2,'secretSyncError',$3,'secretSyncAt',now()),now())
+    values($1,jsonb_build_object('secretSyncStatus',$2,'secretSyncError',$3,'secretSyncAt',now(),'synchronizedServerUrl',$4,'synchronizedSecretHash',$5),now())
     on conflict(key) do update set
-      value=coalesce(drive_app_settings.value,'{}'::jsonb)||jsonb_build_object('secretSyncStatus',$2,'secretSyncError',$3,'secretSyncAt',now()),
+      value=coalesce(drive_app_settings.value,'{}'::jsonb)||jsonb_build_object('secretSyncStatus',$2,'secretSyncError',$3,'secretSyncAt',now(),'synchronizedServerUrl',$4,'synchronizedSecretHash',$5),
       updated_at=now()
-  `, [SETTINGS_KEY, status, error?.slice(0, 800) || null])
+  `, [SETTINGS_KEY, status, error?.slice(0, 800) || null, synchronized?.serverUrl || null, synchronized?.secretHash || null])
 }
 
 export function publicMigrationWorkerSettings(settings: MigrationWorkerSettings) {

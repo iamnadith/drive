@@ -52,6 +52,26 @@ test('GitHub migration workers receive only Orchestrator URL and shared worker s
   assert.match(workflow, /TOKEN: \$\{\{ secrets\.DRIVE_WORKER_SHARED_SECRET \}\}/)
 })
 
+test('GitHub worker configuration changes synchronize every repository without taking over dispatch', () => {
+  const helper = read('src/lib/github-worker-secrets.ts')
+  const workerSettings = read('src/app/api/settings/migration-workers/route.ts')
+  const orchestratorSettings = read('src/app/api/settings/migration-orchestrator/route.ts')
+  assert.match(helper, /export async function syncAllGitHubWorkerSecrets/)
+  assert.match(helper, /REPOSITORY_SYNC_CONCURRENCY = 4/)
+  assert.match(helper, /Promise\.allSettled/)
+  assert.match(helper, /synchronizedServerUrl|serverUrl/)
+  assert.match(helper, /createHash\("sha256"\)/)
+  assert.match(workerSettings, /syncAllGitHubWorkerSecrets/)
+  assert.match(orchestratorSettings, /settings\.orchestratorUrl !== current\.orchestratorUrl/)
+  assert.match(orchestratorSettings, /syncAllGitHubWorkerSecrets/)
+  assert.doesNotMatch(helper, /repository_dispatch|\/dispatches/)
+  assert.doesNotMatch(orchestratorSettings, /repository_dispatch|\/dispatches/)
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(orchestrator, /githubWorkerSecretsAreCurrent/)
+  assert.match(orchestrator, /synchronizedServerUrl/)
+  assert.match(orchestrator, /synchronizedSecretHash/)
+})
+
 test('the dashboard dispatch route cannot dispatch a GitHub workflow outside the Migration Orchestrator', () => {
   const route = read('src/app/api/agents/[id]/dispatch/route.ts')
   assert.match(route, /if \(agent\.provider === "github_actions"\)[\s\S]*Migration Orchestrator\. Start or retry this migration with the worker pool/)

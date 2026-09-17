@@ -539,6 +539,17 @@ async function migrationLiveState(db: Client, migrationId: string) {
   await db.query(`insert into drive_migration_worker_live_state(migration_id,snapshot,updated_at) values($1,$2::jsonb,now()) on conflict(migration_id) do update set snapshot=excluded.snapshot,updated_at=now()`, [migrationId, JSON.stringify(snapshot)])
   return { snapshot: { ...snapshot, workerGeneration: generation }, jobs, runs, workerGeneration: generation }
 }
+async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
+}
+async function githubWorkerSecretsAreCurrent(orchestration: Row, workerSettings: Row) {
+  if (String(workerSettings.secretSyncStatus || "") !== "ready") return false
+  if (String(workerSettings.synchronizedServerUrl || "").replace(/\/+$/, "") !== String(orchestration.orchestratorUrl || "").replace(/\/+$/, "")) return false
+  const sharedSecret = String(workerSettings.sharedSecret || "")
+  if (sharedSecret.length < 24 || sharedSecret.length > MAX_SECRET_LENGTH) return false
+  return safeEqual(String(workerSettings.synchronizedSecretHash || ""), await sha256Hex(sharedSecret))
+}
 async function recoverJobs(db: Client, migrationId: string, generation: number, shardCount: number) {
   const result = await db.query(`
     update drive_repair_jobs set status='pending',claimed_by_agent_id=null,claim_token=null,claimed_at=null,started_at=null,last_heartbeat_at=null,error=null,
@@ -1208,7 +1219,7 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
   const configRows = await db.query(`select key,value from drive_app_settings where key in('migration-orchestrator','migration-workers')`)
   const orchestration = configRows.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
   const workerSettings = configRows.rows.find((row) => row.key === "migration-workers")?.value || {}
-  if (String(workerSettings.secretSyncStatus || "") !== "ready") return 0
+  if (!(await githubWorkerSecretsAreCurrent(orchestration, workerSettings))) return 0
   const budget = integer(orchestration.maxDispatchesPerCycle, 100, 1, 100)
   const stranded = await db.query(`select id from drive_agent_runs where run_type='github_dispatch' and status='pending' and payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2 and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit $3`, [migration.id, generation, budget])
   for (const row of stranded.rows) await env.GITHUB_DISPATCH_QUEUE.send({ intentId: row.id }, { contentType: "json" })
@@ -1473,10 +1484,12 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
         await db.query("commit"); transactionOpen = false
         return "terminal"
       }
-      const workerSettings = await db.query(`select value from drive_app_settings where key='migration-workers' limit 1`)
-      if (String(workerSettings.rows[0]?.value?.secretSyncStatus || "") !== "ready") {
+      const configuration = await db.query(`select key,value from drive_app_settings where key in('migration-orchestrator','migration-workers')`)
+      const orchestration = configuration.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
+      const workerSettings = configuration.rows.find((row) => row.key === "migration-workers")?.value || {}
+      if (!(await githubWorkerSecretsAreCurrent(orchestration, workerSettings))) {
         await db.query("commit"); transactionOpen = false
-        throw new Error("GitHub migration-worker secrets are not synchronized; dispatch is paused")
+        throw new Error("GitHub migration-worker URL or secret is not synchronized to the current configuration; dispatch is paused")
       }
     }
     if (intent.agent_status === "disabled" || !intent.github_token) throw new Error("Registered workflow is disabled or missing its GitHub token")
