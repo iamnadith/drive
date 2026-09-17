@@ -73,6 +73,8 @@ test("background reconciliation is durable and skips provider writes when the ma
   assert.match(service, /order by state\.last_checked_at asc nulls first/)
   assert.match(r2Settings, /if \(corsRulesEqual\(current, desired\)\) return \{ changed: false, rules: current \}/)
   assert.match(panelRoute, /reconcileAssignedProjectDeliveryCors/)
+  assert.match(panelRoute, /ok: true, deliveryHealthy: delivery\.errors\.length === 0/)
+  assert.match(service, /next_attempt_at = now\(\) \+ make_interval/)
   assert.match(worker, /project\/bucket[\s\S]*single managed R2 CORS rule[\s\S]*only[\s\S]*differs/)
 })
 

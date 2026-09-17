@@ -25,6 +25,10 @@ function runtimeHealthError(payload) {
   const detail = typeof state.last_error === "string" ? state.last_error
     : typeof state.lastError === "string" ? state.lastError
       : ""
+  // A completed storage-sync cycle can retain this summary when an optional
+  // panel-side delivery/CORS maintenance row fails. That work has its own
+  // durable retry state and must not mark the deployed Worker itself offline.
+  if (detail.trim() === "Panel delivery reconciliation reported errors") return null
   return detail.trim() || `Worker runtime reports ${status}`
 }
 

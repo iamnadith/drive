@@ -5,6 +5,7 @@ const path = require("node:path")
 
 const root = path.resolve(__dirname, "..")
 const installer = fs.readFileSync(path.join(root, "src/lib/cloudflare-worker-installer.ts"), "utf8")
+const db = fs.readFileSync(path.join(root, "src/lib/db.ts"), "utf8")
 const route = fs.readFileSync(path.join(root, "src/app/api/workers/cloudflare-install/route.ts"), "utf8")
 const workersPage = fs.readFileSync(path.join(root, "src/app/dashboard/workers/page.tsx"), "utf8")
 const hosting = fs.readFileSync(path.join(root, "src/components/dashboard/cloudflare-worker-hosting.tsx"), "utf8")
@@ -16,6 +17,7 @@ test("Worker readiness rejects durable runtime errors without confusing them wit
   assert.equal(runtimeHealthError({ ok: true, state: { status: "idle" } }), null)
   assert.equal(runtimeHealthError({ ok: true, state: null }), null)
   assert.equal(runtimeHealthError({ ok: true, state: { status: "error", last_error: "Panel reconciliation failed (401)" } }), "Panel reconciliation failed (401)")
+  assert.equal(runtimeHealthError({ ok: true, state: { status: "error", last_error: "Panel delivery reconciliation reported errors" } }), null)
   assert.equal(runtimeHealthError({ ok: true, state: { status: "failed", lastError: "database unavailable" } }), "database unavailable")
   assert.equal(runtimeHealthError({ ok: false, error: "not configured" }), "not configured")
   assert.match(runtimeHealthError("not-json"), /invalid status response/)
@@ -56,6 +58,9 @@ test("tokens are encrypted at rest, redacted by default and API is superadmin pr
 
 test("installer is resumable, locked and keeps secrets on release redeploy", () => {
   assert.match(installer, /withDbAdvisoryLock\("cloudflare-worker-install", "singleton"/)
+  assert.match(db, /pg_try_advisory_lock/)
+  assert.match(installer, /\{ wait: false \}/)
+  assert.match(route, /DRIVE_ADVISORY_LOCK_BUSY/)
   assert.match(installer, /if \(input\.forceRedeploy \|\| !current\.deployed \|\| !current\.verified \|\| !artifactMatches\)/)
   assert.match(installer, /state\.secrets = previous\.secrets/)
   assert.match(installer, /status = "failed"/)

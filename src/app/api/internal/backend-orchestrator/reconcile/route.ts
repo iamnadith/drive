@@ -40,5 +40,8 @@ export async function POST(request: Request) {
     accounts: deliveryByAccount,
   }
   const maintenance = await runDatabaseMaintenance().catch(() => ({ ran: false, deleted: {}, compactedMigrations: 0 }))
-  return NextResponse.json({ ok: delivery.errors.length === 0, migrationSyncOwner: "migration-orchestrator", delivery, maintenance })
+  // Delivery CORS work is a durable, independently retried maintenance task.
+  // Its per-bucket failures remain visible below, but must not mark the
+  // Backend Orchestrator's separate storage-sync runtime as unhealthy.
+  return NextResponse.json({ ok: true, deliveryHealthy: delivery.errors.length === 0, migrationSyncOwner: "migration-orchestrator", delivery, maintenance })
 }

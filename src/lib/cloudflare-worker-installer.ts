@@ -543,7 +543,7 @@ export async function reconcileCloudflareWorker(worker: HostedWorker, force = fa
     else { state.status = "ready"; state.step = "reconciled"; state.error = undefined }
     await saveState(state)
     return getCloudflareInstallation()
-  })
+  }, { wait: false })
 }
 
 export async function reconcileCloudflareWorkers(force = false) {
@@ -576,7 +576,7 @@ export async function deleteCloudflareWorkers() {
       await saveState(state)
       throw error
     }
-  })
+  }, { wait: false })
 }
 
 export async function reconcileAndRepairCloudflareWorkers(force = false) {
@@ -633,7 +633,7 @@ export async function replaceCloudflareTokens(input: { mode: InstallMode; tokens
     state.encryptedTokens = Object.fromEntries(ORDER.map((worker) => [worker, encryptToken(tokens[worker], state.id, worker)]))
     await saveState(state)
     return getCloudflareInstallation()
-  })
+  }, { wait: false })
 }
 
 export async function installCloudflareWorkers(input: { mode: InstallMode; tokens: Partial<TokenMap>; restart?: boolean; checkForUpdates?: boolean; forceRedeploy?: boolean }) {
@@ -739,5 +739,5 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       if (active) { state.workers[active].phase = "failed"; state.workers[active].error = state.error }
       await saveState(state); throw error
     }
-  })
+  }, { wait: false })
 }

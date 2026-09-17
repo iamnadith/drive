@@ -61,6 +61,8 @@ export async function POST(request: NextRequest) {
     } })
     return NextResponse.json({ installation })
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Installation failed", installation: await getCloudflareInstallation().catch(() => null) }, { status: 400 })
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : ""
+    const status = code === "DRIVE_ADVISORY_LOCK_BUSY" ? 409 : 400
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Installation failed", installation: await getCloudflareInstallation().catch(() => null) }, { status })
   }
 }

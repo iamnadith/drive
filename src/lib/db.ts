@@ -200,7 +200,7 @@ export async function queryDb<T extends QueryResultRow = QueryResultRow>(
   }
 }
 
-export async function withDbAdvisoryLock<T>(namespace: string, resource: string, operation: () => Promise<T>) {
+export async function withDbAdvisoryLock<T>(namespace: string, resource: string, operation: () => Promise<T>, options: { wait?: boolean } = {}) {
   if (!global.__drivePgAdvisoryLockPool) {
     const connectionString = getEnv("POSTGRES_URL")
     if (!connectionString) throw new Error("POSTGRES_URL is not configured")
@@ -226,7 +226,14 @@ export async function withDbAdvisoryLock<T>(namespace: string, resource: string,
   const client = await global.__drivePgAdvisoryLockPool.connect()
   let locked = false
   try {
-    await client.query(`select pg_advisory_lock(hashtext($1), hashtext($2))`, [namespace, resource])
+    if (options.wait === false) {
+      const result = await client.query<{ locked: boolean }>(`select pg_try_advisory_lock(hashtext($1), hashtext($2)) as locked`, [namespace, resource])
+      if (!result.rows[0]?.locked) {
+        throw Object.assign(new Error("A Cloudflare Worker operation is already running; wait for it to finish, then refresh status"), { code: "DRIVE_ADVISORY_LOCK_BUSY" })
+      }
+    } else {
+      await client.query(`select pg_advisory_lock(hashtext($1), hashtext($2))`, [namespace, resource])
+    }
     locked = true
     return await operation()
   } finally {
