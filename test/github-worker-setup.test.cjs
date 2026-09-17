@@ -342,7 +342,8 @@ test('migration UI exposes both engines while preserving Super Slurper as the de
   assert.doesNotMatch(details, /scanner-indexed per-file queue/)
   assert.match(details, /Repair with worker pool/)
   assert.doesNotMatch(details, /Run with worker|workersOpen|repair_and_verify/)
-  assert.match(details, /Migration transfer/)
+  assert.doesNotMatch(details, /Migration transfer|Current files/)
+  assert.match(details, /Queue remaining/)
   assert.match(dispatch, /const mode: RepairJobMode = pool \? "migration" : requestedMode/)
 })
 

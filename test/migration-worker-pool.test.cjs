@@ -219,6 +219,17 @@ test('migration pool abort and job deletion preserve orchestrator ownership and 
   assert.match(jobsRoute, /active migration's stop marker/)
 })
 
+test('migration worker card matches the overview layout and shows durable queue progress', () => {
+  const details = read('src/app/dashboard/migrations/[id]/page.tsx')
+  assert.match(details, /<CardTitle>Worker pool<\/CardTitle>/)
+  assert.match(details, /<dl className="grid gap-y-4 border-y py-4 sm:grid-cols-2 lg:grid-cols-4">/)
+  assert.match(details, /const queueRemaining = items\.reduce\(\(sum, item\) => sum \+ getBucketSnapshot\(item\)\.queued, 0\)/)
+  assert.match(details, /formatNumber\(overviewProgress\.transferred\)/)
+  assert.match(details, /Queue remaining/)
+  assert.match(details, /Last activity/)
+  assert.doesNotMatch(details, /Current files|Migration transfer/)
+})
+
 test('migration dashboards do not run worker sync on a timer', () => {
   const listPage = read('src/app/dashboard/migrations/page.tsx')
   const detailPage = read('src/app/dashboard/migrations/[id]/page.tsx')

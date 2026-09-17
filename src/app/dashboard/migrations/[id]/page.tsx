@@ -17,6 +17,8 @@ import {
   Square,
   ShieldCheck,
   Trash2,
+  ListTodo,
+  Users,
 } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -1924,7 +1926,6 @@ export default function MigrationDetailsPage() {
               // controls the online counter, but must not regress the pool
               // lifecycle badge back to "deploying".
               const runningRuns = currentRuns.filter((run) => String(run.status).toLowerCase() === "running")
-              const poolRunning = runningRuns.length > 0
               const latestRun = [...currentRuns].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]
               const latestRunStatus = String(latestRun?.status || "").toLowerCase()
               // Cancellation is still in progress only while a worker is
@@ -1950,48 +1951,34 @@ export default function MigrationDetailsPage() {
                         : ["pending", "queued", "created", "dispatching"].includes(latestRunStatus)
                           ? "deploying"
                           : "queued"
-              const currentFiles = activeRuns.filter((run) => run.currentFile && typeof run.currentFile === "object").length
-              const startedAt = [...currentRuns].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0]?.createdAt
-              const completedFiles = currentRuns.reduce((sum, run) => sum + Number(run.completedFiles || 0), 0)
+              const queueRemaining = items.reduce((sum, item) => sum + getBucketSnapshot(item).queued, 0)
+              const lastActivityAt = latestRun?.lastHeartbeatAt || latestRun?.updatedAt || migration.updatedAt
+              const statusMessage = migrationStatus === "completed"
+                ? "Migration and worker processing completed."
+                : status === "aborting"
+                  ? "Waiting for active GitHub Actions runs to stop."
+                  : migrationStatus === "failed" || migrationStatus === "verification_failed"
+                    ? "Worker processing ended with an issue."
+                    : ["canceled", "cancelled", "aborted"].includes(migrationStatus)
+                      ? "Worker processing was stopped."
+                      : migrationStatus === "verifying"
+                        ? "Transfers finished and destination verification is running."
+                        : runningRuns.length > 0
+                          ? `${activeRuns.length} of ${runningRuns.length} worker${runningRuns.length === 1 ? "" : "s"} online.`
+                          : status === "deploying"
+                            ? "GitHub Actions workers are being dispatched."
+                            : "Waiting for workers to claim queued files."
 
               return (
-                <div
-                  className={cn(
-                    "overflow-hidden rounded-2xl border text-sm",
-                    poolRunning ? "border-primary/30 bg-primary/[0.04]" : "bg-muted/15"
-                  )}
-                >
-                  <div className="flex flex-col gap-4 border-b px-4 py-4 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="min-w-0 flex-1 space-y-3">
+                <Card>
+                  <CardHeader className="gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
+                        <CardTitle>Worker pool</CardTitle>
                         {migrationWorkerBadge(status)}
-                        <Badge variant="outline">Migration transfer</Badge>
-                        <span className="text-xs text-muted-foreground">Updated {formatDate(latestRun?.lastHeartbeatAt || latestRun?.updatedAt)}</span>
                       </div>
-                      <div className="space-y-1">
-                        <div className="font-mono text-[11px] text-muted-foreground">Migration worker pool</div>
-                        <div className="text-sm leading-relaxed text-muted-foreground">
-                          {migrationStatus === "completed"
-                            ? "Migration and worker processing completed."
-                          : status === "aborting"
-                            ? "Migration stopped; waiting for GitHub Actions workers to confirm cancellation."
-                            : migrationStatus === "failed" || migrationStatus === "verification_failed"
-                              ? "Migration worker processing failed."
-                              : ["canceled", "cancelled", "aborted"].includes(migrationStatus)
-                                ? "Migration worker processing was stopped."
-                                : migrationStatus === "verifying"
-                                  ? "Migration transfer finished; destination verification is running."
-                                  : runningRuns.length > 0
-                                    ? activeRuns.length > 0
-                                      ? `${activeRuns.length} worker${activeRuns.length === 1 ? " is" : "s are"} processing this migration.`
-                                      : `${runningRuns.length} worker workflow${runningRuns.length === 1 ? " is" : "s are"} running and waiting for the next heartbeat.`
-                                    : status === "deploying"
-                                      ? "Dispatching migration workers to GitHub Actions."
-                                      : "Migration is still active; waiting for workers to claim the queue."}
-                        </div>
-                      </div>
+                      <CardDescription className="mt-1 leading-relaxed">{statusMessage}</CardDescription>
                     </div>
-
                     <div className="flex w-full flex-wrap items-start justify-end gap-2 lg:w-auto">
                       {canAbortPool ? (
                         <Button
@@ -2011,27 +1998,40 @@ export default function MigrationDetailsPage() {
                         Details
                       </Button>
                     </div>
-                  </div>
-
-                  <div className="grid gap-px bg-border sm:grid-cols-3 lg:grid-cols-4">
-                    <div className="bg-background/80 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Online workers</div>
-                      <div className="mt-1 truncate font-medium">{activeRuns.length}</div>
-                    </div>
-                    <div className="bg-background/80 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Files transferred</div>
-                      <div className="mt-1 font-medium">{formatNumber(completedFiles)}</div>
-                    </div>
-                    <div className="bg-background/80 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Current files</div>
-                      <div className="mt-1 font-medium">{currentFiles}</div>
-                    </div>
-                    <div className="bg-background/80 px-4 py-3">
-                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Started</div>
-                      <div className="mt-1 font-medium">{formatDate(startedAt)}</div>
-                    </div>
-                  </div>
-                </div>
+                  </CardHeader>
+                  <CardContent>
+                    <dl className="grid gap-y-4 border-y py-4 sm:grid-cols-2 lg:grid-cols-4">
+                      <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:border-r lg:first:pl-0">
+                        <Users className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                        <div className="min-w-0">
+                          <dt className="text-xs font-medium text-muted-foreground">Online workers</dt>
+                          <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatNumber(activeRuns.length)}</dd>
+                        </div>
+                      </div>
+                      <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:border-r">
+                        <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                        <div className="min-w-0">
+                          <dt className="text-xs font-medium text-muted-foreground">Transferred</dt>
+                          <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatNumber(overviewProgress.transferred)}</dd>
+                        </div>
+                      </div>
+                      <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:border-r">
+                        <ListTodo className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                        <div className="min-w-0">
+                          <dt className="text-xs font-medium text-muted-foreground">Queue remaining</dt>
+                          <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatNumber(queueRemaining)}</dd>
+                        </div>
+                      </div>
+                      <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:pr-0">
+                        <Clock className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                        <div className="min-w-0">
+                          <dt className="text-xs font-medium text-muted-foreground">Last activity</dt>
+                          <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatDate(lastActivityAt)}</dd>
+                        </div>
+                      </div>
+                    </dl>
+                  </CardContent>
+                </Card>
               )
         })()
       ) : null}
