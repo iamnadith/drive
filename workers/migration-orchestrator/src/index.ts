@@ -1299,20 +1299,34 @@ async function abortMigrationWorkers(db: Client, migrationId: string, reason: st
       continue
     }
     const cancel = await fetch(`https://api.github.com/repos/${encodeURIComponent(run.github_repo_owner)}/${encodeURIComponent(run.github_repo_name)}/actions/runs/${encodeURIComponent(remoteId)}/cancel`, { method: "POST", headers, signal: AbortSignal.timeout(15_000) }).catch(() => null)
-    if (cancel?.ok || cancel?.status === 202) {
-      const abortAt = new Date().toISOString()
-      const detail = { githubRunId: remoteId, githubAbortRequestedAt: abortAt }
+    const abortAt = new Date().toISOString()
+    const detail = { githubRunId: remoteId, githubAbortRequestedAt: abortAt }
+    const cancellationAccepted = Boolean(cancel?.ok || cancel?.status === 202)
+    if (cancellationAccepted) {
       await db.query(`update drive_agent_runs set summary=$2,payload=payload||$3::jsonb,updated_at=now() where id=$1 and status in('pending','running')`, [run.id, `${reason}; GitHub cancellation requested`, JSON.stringify(detail)])
-      const check = await fetch(`https://api.github.com/repos/${encodeURIComponent(run.github_repo_owner)}/${encodeURIComponent(run.github_repo_name)}/actions/runs/${encodeURIComponent(remoteId)}`, { headers, signal: AbortSignal.timeout(10_000) }).catch(() => null)
-      const state = check?.ok ? await check.json().catch(() => ({})) as Row : null
-      if (String(state?.status || "").toLowerCase() === "completed" && ["cancelled", "canceled"].includes(String(state?.conclusion || "").toLowerCase())) {
-        await db.query(`update drive_agent_runs set status='canceled',summary=$2,completed_at=now(),payload=payload||$3::jsonb,updated_at=now() where id=$1 and status in('pending','running')`, [run.id, reason, JSON.stringify({ ...detail, githubStatus: state?.status, githubConclusion: state?.conclusion })])
-        canceled += 1
-      } else {
-        warnings.push({ runId: String(run.id), reason: "GitHub accepted cancellation; waiting for the workflow to stop" })
-      }
+    }
+    // GitHub can return a conflict when the run finished just before this
+    // cancellation. Always inspect the run even when the cancel request was
+    // rejected so terminal runs release their durable worker slot.
+    const check = await fetch(`https://api.github.com/repos/${encodeURIComponent(run.github_repo_owner)}/${encodeURIComponent(run.github_repo_name)}/actions/runs/${encodeURIComponent(remoteId)}`, { headers, signal: AbortSignal.timeout(10_000) }).catch(() => null)
+    const state = check?.ok ? await check.json().catch(() => ({})) as Row : null
+    if (String(state?.status || "").toLowerCase() === "completed") {
+      const conclusion = String(state?.conclusion || "").toLowerCase()
+      const terminalStatus = ["cancelled", "canceled", "cancelled_by_user"].includes(conclusion)
+        ? "canceled"
+        : conclusion === "success"
+          ? "completed"
+          : "failed"
+      const terminalSummary = terminalStatus === "canceled"
+        ? reason
+        : `GitHub worker completed as ${conclusion || "unknown"} while cancellation was being reconciled`
+      await db.query(`update drive_agent_runs set status=$2,summary=$3,completed_at=now(),external_run_id=$4,payload=payload||$5::jsonb,updated_at=now() where id=$1 and status in('pending','running')`, [run.id, terminalStatus, terminalSummary, remoteId, JSON.stringify({ ...detail, githubStatus: state?.status, githubConclusion: state?.conclusion })])
+      if (terminalStatus === "canceled") canceled += 1
+      else warnings.push({ runId: String(run.id), reason: terminalSummary })
+    } else if (cancellationAccepted) {
+      warnings.push({ runId: String(run.id), reason: "GitHub accepted cancellation; waiting for the workflow to stop" })
     } else {
-      warnings.push({ runId: String(run.id), reason: `GitHub cancellation failed${cancel ? ` (HTTP ${cancel.status})` : " (network error)"}` })
+      warnings.push({ runId: String(run.id), reason: `GitHub cancellation failed${cancel ? ` (HTTP ${cancel.status})` : " (network error)"}; run is not yet confirmed terminal` })
     }
   }
   return { matched: result.rowCount || 0, canceled, warnings }

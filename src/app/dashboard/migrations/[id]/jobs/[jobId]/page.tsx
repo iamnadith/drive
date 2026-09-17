@@ -2,10 +2,20 @@
 
 import * as React from "react"
 import Link from "next/link"
-import { useParams } from "next/navigation"
-import { ArrowLeft, ExternalLink, FolderCog, RefreshCw, Workflow } from "lucide-react"
+import { useParams, useRouter } from "next/navigation"
+import { ArrowLeft, ExternalLink, FolderCog, RefreshCw, Trash2, Workflow } from "lucide-react"
 import { toast } from "sonner"
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -139,12 +149,15 @@ function readLogs(job: RepairJob | null) {
 
 export default function MigrationWorkerJobDetailsPage() {
   const params = useParams<{ id: string; jobId: string }>()
+  const router = useRouter()
   const migrationId = typeof params?.id === "string" ? params.id : ""
   const jobId = typeof params?.jobId === "string" ? params.jobId : ""
   const [job, setJob] = React.useState<RepairJob | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [refreshing, setRefreshing] = React.useState(false)
   const [stoppingGitHubRun, setStoppingGitHubRun] = React.useState(false)
+  const [deleteOpen, setDeleteOpen] = React.useState(false)
+  const [deleting, setDeleting] = React.useState(false)
 
   const loadJob = React.useCallback(
     async (silent = false) => {
@@ -260,6 +273,23 @@ export default function MigrationWorkerJobDetailsPage() {
     }
   }, [jobId, loadJob])
 
+  const deleteJob = React.useCallback(async () => {
+    if (!jobId) return
+    try {
+      setDeleting(true)
+      const res = await fetch(`/api/repair-jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json.error || "Unable to delete worker job")
+      toast.success("Worker job deleted")
+      router.replace(`/dashboard/migrations/${encodeURIComponent(migrationId)}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to delete worker job")
+      setDeleteOpen(false)
+    } finally {
+      setDeleting(false)
+    }
+  }, [jobId, migrationId, router])
+
   if (loading) {
     return <div className="p-6 text-sm text-muted-foreground">Loading worker job details...</div>
   }
@@ -292,6 +322,12 @@ export default function MigrationWorkerJobDetailsPage() {
             <RefreshCw className={`mr-2 h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
             Refresh
           </Button>
+          {job.mode === "migration" ? (
+            <Button variant="destructive" onClick={() => setDeleteOpen(true)} disabled={deleting}>
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete job
+            </Button>
+          ) : null}
           {typeof job.linkedRun?.payload?.htmlUrl === "string" ? (
             <Button
               variant="outline"
@@ -311,6 +347,23 @@ export default function MigrationWorkerJobDetailsPage() {
           ) : null}
         </div>
       </div>
+
+      <AlertDialog open={deleteOpen} onOpenChange={(open) => !deleting && setDeleteOpen(open)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this worker job?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes this job record. The Migration Orchestrator must confirm all workers for this job have stopped first. A canceled job that is still acting as the active migration&apos;s stop marker also cannot be deleted until you cancel the migration or start another worker-pool attempt.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Keep job</AlertDialogCancel>
+            <AlertDialogAction onClick={(event) => { event.preventDefault(); void deleteJob() }} disabled={deleting}>
+              {deleting ? "Deleting..." : "Delete job"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <div className="grid gap-4 xl:grid-cols-4">
         <Card className="xl:col-span-2">

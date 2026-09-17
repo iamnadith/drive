@@ -1904,6 +1904,7 @@ export default function MigrationDetailsPage() {
               const latestRunStatus = String(latestRun?.status || "").toLowerCase()
               const stoppingRuns = currentRuns.filter((run) => run.abortRequested || ["pending", "running"].includes(String(run.status).toLowerCase()))
               const migrationStatus = String(migration.status || "").toLowerCase()
+              const canAbortPool = ["running", "verifying"].includes(migrationStatus)
               const status = ["completed"].includes(migrationStatus)
                 ? "completed"
                 : ["failed", "verification_failed"].includes(migrationStatus)
@@ -1957,7 +1958,18 @@ export default function MigrationDetailsPage() {
                       </div>
                     </div>
 
-                    <div className="flex w-full items-start justify-end lg:w-auto">
+                    <div className="flex w-full flex-wrap items-start justify-end gap-2 lg:w-auto">
+                      {canAbortPool ? (
+                        <Button
+                          variant="destructive"
+                          onClick={() => void runMigrationAction("cancel_migration")}
+                          loading={busyAction === "cancel_migration"}
+                          disabled={Boolean(busyAction)}
+                        >
+                          {busyAction !== "cancel_migration" ? <CircleX className="h-4 w-4" /> : null}
+                          Abort
+                        </Button>
+                      ) : null}
                       <Button
                         variant="outline"
                         onClick={() => router.push(`/dashboard/migrations/${encodeURIComponent(id)}/worker-pool`)}

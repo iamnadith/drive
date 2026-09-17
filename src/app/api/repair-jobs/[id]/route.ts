@@ -9,6 +9,7 @@ import {
 } from "@/lib/github-oauth"
 import { abortRepairJob, deleteRepairJob, getRepairJob, getRepairJobDetail } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { queryDb } from "@/lib/db"
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
@@ -351,6 +352,42 @@ export async function DELETE(_request: Request, context: { params: Promise<{ id:
     const { id } = await context.params
     const job = await getRepairJob(id)
     if (!job) return NextResponse.json({ error: "Repair job not found" }, { status: 404 })
+
+    if (job.mode === "migration") {
+      if (["pending", "claimed", "running"].includes(job.status)) {
+        return NextResponse.json({ error: "Abort this worker job and wait for the Migration Orchestrator to confirm its workers have stopped before deleting it." }, { status: 409 })
+      }
+      const generation = job.workKey?.match(/:generation:(\d+):/)?.[1] ?? null
+      const { rows } = await queryDb<{ count: string }>(`
+        select count(*)::text count
+        from drive_agent_runs r
+        where r.run_type='github_dispatch' and r.status in('pending','running')
+          and (
+            r.job_reference=$1
+            or ($2::int is not null and r.payload->>'migrationId'=$3 and r.payload->>'pool'='true'
+              and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=$2::int)
+            or ($2::int is null and r.payload->>'migrationId'=$3 and r.payload->>'pool'='true')
+          )
+      `, [id, generation, job.migrationId])
+      if (Number(rows[0]?.count || 0) > 0) {
+        return NextResponse.json({ error: "The Migration Orchestrator is still stopping workers for this job. Refresh after all associated runs are terminal, then delete it." }, { status: 409 })
+      }
+      if (job.status === "canceled") {
+        const { rows: migrationRows } = await queryDb<{ status: string; has_newer_job: boolean }>(`
+          select m.status,exists(
+            select 1 from drive_repair_jobs newer
+            where newer.migration_id=m.id and newer.mode='migration'
+              and (newer.created_at,newer.id)>(current_job.created_at,current_job.id)
+          ) has_newer_job
+          from drive_migrations m join drive_repair_jobs current_job on current_job.id=$1
+          where m.id=$2 limit 1
+        `, [id, job.migrationId])
+        const migrationStatus = String(migrationRows[0]?.status || "").toLowerCase()
+        if (["running", "verifying"].includes(migrationStatus) && !migrationRows[0]?.has_newer_job) {
+          return NextResponse.json({ error: "This canceled job is the active migration's stop marker. Cancel the migration or start a new worker-pool attempt before deleting it." }, { status: 409 })
+        }
+      }
+    }
 
     if (job.status === "pending" || job.status === "claimed" || job.status === "running") {
       await abortRepairJob(id)
