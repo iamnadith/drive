@@ -963,9 +963,10 @@ async function copyObject(sourceClient, targetClient, sourceBucket, targetBucket
 
 async function processItem(jobId, payload, item, completedResults, state) {
   const prefix = payload.migration?.pathPrefix || null
-  // Repair generations only replace objects that the source/destination hash
-  // comparison has proven are mismatched. Correct destination objects are
-  // never rewritten, regardless of the original migration overwrite setting.
+  // Overwrite is literal for migration work: when enabled, every assigned
+  // source object is copied even if the destination already matches. When it
+  // is disabled, verified matches remain separate skipped objects and proven
+  // mismatches are not replaced.
   const overwrite = payload.migration?.options?.overwrite !== false || payload.migration?.options?.workerRepairMismatchedObjects === true
   const workerShard = normalizeWorkerShard(payload.workerShard)
   const isSharded = Boolean(workerShard && workerShard.count > 1)
@@ -1168,11 +1169,17 @@ async function processItem(jobId, payload, item, completedResults, state) {
     initialMissing = initialDiff.missing.length
     initialMismatched = initialDiff.mismatched.length
 
-    const toRepair = [...initialDiff.missing, ...initialDiff.mismatched]
-    // This SHA-256 reconciliation runs for every inventory job, regardless of
-    // overwrite mode. Exact matches count as already transferred and are never
-    // rewritten; overwrite only governs proven mismatches below.
-    alreadyPresent = Math.max(0, sourceObjects.length - toRepair.length)
+    const diffCandidates = [...initialDiff.missing, ...initialDiff.mismatched]
+    const destinationByKey = new Map(destinationObjects.map((object) => [object.key, object]))
+    const toRepair = overwrite && payload.job.mode !== "verify_only"
+      ? sourceObjects.map((object) => {
+          const destination = destinationByKey.get(object.key)
+          return destination
+            ? { ...object, destinationSize: destination.destinationSize ?? destination.size, destinationEtag: destination.destinationEtag ?? destination.etag }
+            : object
+        })
+      : diffCandidates
+    alreadyPresent = overwrite ? 0 : Math.max(0, sourceObjects.length - diffCandidates.length)
     // Every source object that was not copied must be visible in the
     // accounting.  In particular, an exact destination match is a skipped
     // object when this is a repair/no-overwrite run; otherwise the UI reports
@@ -1239,7 +1246,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
           return
         }
         const latestTargetSize = await getTargetObjectSize(targetClient, item.targetBucket, object.key)
-        if (!isMismatch && latestTargetSize === objectSize) {
+        if (!overwrite && !isMismatch && latestTargetSize === objectSize) {
           skipped += 1
           upsertFileEvent(state, {
             itemId: item.id,
@@ -1488,10 +1495,10 @@ async function processItem(jobId, payload, item, completedResults, state) {
     let finalMissing = finalDiff.missing.length
     let finalMismatched = finalDiff.mismatched.length
 
-    if ((finalMissing > 0 || finalMismatched > 0) && payload.job.mode !== "verify_only") {
+    if ((finalMissing > 0 || (overwrite && finalMismatched > 0)) && payload.job.mode !== "verify_only") {
       stage = "repair_reconcile"
       currentStageStartedAt = new Date().toISOString()
-      const remainingToRepair = [...finalDiff.missing, ...finalDiff.mismatched]
+      const remainingToRepair = overwrite ? [...finalDiff.missing, ...finalDiff.mismatched] : finalDiff.missing
       pushLog(state, `Final verify found remaining issues in ${item.sourceBucket}; retrying ${remainingToRepair.length} object(s)`, {
         itemId: item.id,
         stage,
@@ -1522,7 +1529,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
           return
         }
         const latestTargetSize = await getTargetObjectSize(targetClient, item.targetBucket, object.key)
-        if (latestTargetSize === objectSize) {
+        if (!overwrite && latestTargetSize === objectSize) {
           skipped += 1
           upsertFileEvent(state, {
             itemId: item.id,
@@ -1647,14 +1654,16 @@ async function processItem(jobId, payload, item, completedResults, state) {
       finalMismatched = finalDiff.mismatched.length
     }
 
-    const completed = finalMissing === 0 && finalMismatched === 0
+    const completed = finalMissing === 0 && (!overwrite || finalMismatched === 0)
     const resolvedAllObjects = !isSharded && completed && finalDestinationObjects.length >= sourceObjects.length
     state.stats.verifiedObjects += shardObjectCount
     const itemStatus = isSharded || assignedInventory ? "running" : completed ? "completed" : "failed"
     const completionSummary = isSharded
       ? `Shard ${workerShard.index + 1}/${workerShard.count} verified for ${item.sourceBucket}`
       : completed
-        ? `Repair verified for ${item.sourceBucket}`
+        ? overwrite
+          ? `Repair verified for ${item.sourceBucket}`
+          : `Repair completed for ${item.sourceBucket}; existing objects were preserved`
         : `Repair incomplete for ${item.sourceBucket}: ${finalMissing} missing, ${finalMismatched} mismatched`
     state.currentFile = null
     upsertItemProgress(state, {
@@ -1886,7 +1895,8 @@ async function runJob(job, payload) {
   const totalVerifiedObjects = isSharded
     ? results.reduce((sum, item) => sum + Number(item.shardObjectCount || 0), 0)
     : results.reduce((sum, item) => sum + Number(item.sourceObjectCount || 0), 0)
-  const completed = totalMissing === 0 && totalMismatched === 0 && totalFailed === 0
+  const overwrite = payload.migration?.options?.overwrite !== false || payload.migration?.options?.workerRepairMismatchedObjects === true
+  const completed = totalMissing === 0 && (!overwrite || totalMismatched === 0) && totalFailed === 0
   const completionSummary = isSharded
     ? completed
       ? `Worker shard ${workerShard.index + 1}/${workerShard.count} completed across ${bucketCount} bucket(s); ${totalVerifiedObjects} objects verified, ${totalTransferred} repaired`

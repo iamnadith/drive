@@ -135,6 +135,7 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
     with candidate as (
       select v.migration_item_id,i.source_bucket,i.target_bucket,i.source_jurisdiction,coalesce(target_settings.jurisdiction,i.source_jurisdiction,'default') target_jurisdiction,m.source_account_id,m.target_account_id,
         nullif(m.options->>'pathPrefix','') scan_prefix,m.options->>'executionMode' execution_mode,
+        coalesce((m.options->>'overwrite')::boolean,true) overwrite,
         jsonb_build_object('cloudflare_account_id',sa.cloudflare_account_id,'r2_access_key_id',sa.r2_access_key_id,'r2_secret_access_key',sa.r2_secret_access_key) source_account,
         jsonb_build_object('cloudflare_account_id',ta.cloudflare_account_id,'r2_access_key_id',ta.r2_access_key_id,'r2_secret_access_key',ta.r2_secret_access_key) target_account
       from drive_migration_verification_state v join drive_migrations m on m.id=v.migration_id
@@ -152,7 +153,7 @@ async function claim(db: Client, owner: string): Promise<Row | null> {
       attempt_count=case when v.attempt_generation is distinct from v.generation then 0 else v.attempt_count end,
       attempt_generation=v.generation,last_error=case when v.attempt_generation is distinct from v.generation then null else v.last_error end,updated_at=now()
     from candidate c where v.migration_item_id=c.migration_item_id
-    returning v.*,c.source_bucket,c.target_bucket,c.source_jurisdiction,c.target_jurisdiction,c.source_account_id,c.target_account_id,c.source_account,c.target_account
+    returning v.*,c.source_bucket,c.target_bucket,c.source_jurisdiction,c.target_jurisdiction,c.source_account_id,c.target_account_id,c.source_account,c.target_account,c.execution_mode,c.overwrite
     `, [owner])
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -290,7 +291,7 @@ async function compare(db: Client, task: Row) {
         select gen_random_uuid(),$1::uuid,$2::uuid,$3::uuid,case when d.key is null then 'missing' else 'size_mismatch' end,s.key,s.size,d.size
         from drive_bucket_scan_objects s left join drive_bucket_scan_objects d on d.scan_id=$3::uuid and d.key=s.key
         where s.scan_id=$2::uuid and not s.is_dir_marker and (
-          d.key is null or d.size<>s.size or
+          d.key is null or ($10::boolean and (d.size<>s.size or
           (trim(both '"' from coalesce(s.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from coalesce(d.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from s.etag)<>trim(both '"' from d.etag)) or
           ($8='migration_workers' and not exists (
             select 1 from drive_repair_jobs j
@@ -303,7 +304,7 @@ async function compare(db: Client, task: Row) {
               and j.result->'items'->0->'integrityProofs'->0->>'verified'='true'
               and j.result->'items'->0->'integrityProofs'->0->>'sha256' ~ '^[0-9a-f]{64}$'
               and trim(both '"' from coalesce(j.result->'items'->0->'integrityProofs'->0->>'destinationEtag',''))=trim(both '"' from coalesce(d.etag,''))
-          ))
+          )))
         ) returning kind
       ), extra_diffs as (
         insert into drive_bucket_verify_diffs(id,migration_item_id,source_scan_id,dest_scan_id,kind,key,source_size,dest_size)
@@ -329,7 +330,7 @@ async function compare(db: Client, task: Row) {
           )), '{stage}','"file_verification_completed"'::jsonb)
         from state_done s where i.id=$1::uuid returning i.id
       ) select missing,mismatched,extra from state_done
-    `, [task.migration_item_id, task.source_scan_id, task.destination_scan_id, task.generation, task.lease_owner, task.source_objects, task.source_bytes, task.execution_mode || null, task.migration_id])
+    `, [task.migration_item_id, task.source_scan_id, task.destination_scan_id, task.generation, task.lease_owner, task.source_objects, task.source_bytes, task.execution_mode || null, task.migration_id, task.overwrite !== false])
     if (!completed.rowCount) throw new Error("File Scanner task lease was lost")
     await db.query("commit")
     const value = completed.rows[0]

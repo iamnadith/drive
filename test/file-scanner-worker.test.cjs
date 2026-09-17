@@ -98,11 +98,16 @@ test('scanner page commits are atomic, idempotent, and avoid per-page database r
   assert.doesNotMatch(generic, /select count\(\*\).*drive_bucket_scan_objects/i)
 })
 
-test('pre-existing worker-pool objects count as completed, retain total counts, and are independently SHA-256 verified', () => {
+test('pre-existing worker-pool objects are skipped only when overwrite is disabled and remain independently SHA-256 verified', () => {
   const worker = read('workers/migration-worker/migration-worker.mjs')
   const scanner = read('workers/file-scanner/src/index.ts')
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
-  assert.match(worker, /alreadyPresent = Math\.max\(0, sourceObjects\.length - toRepair\.length\)/)
+  assert.match(worker, /const toRepair = overwrite && payload\.job\.mode !== "verify_only"/)
+  assert.match(worker, /alreadyPresent = overwrite \? 0 : Math\.max\(0, sourceObjects\.length - diffCandidates\.length\)/)
+  assert.match(worker, /if \(!overwrite && !isMismatch && latestTargetSize === objectSize\)/)
+  assert.match(worker, /const completed = finalMissing === 0 && \(!overwrite \|\| finalMismatched === 0\)/)
+  assert.match(scanner, /coalesce\(\(m\.options->>'overwrite'\)::boolean,true\) overwrite/)
+  assert.match(scanner, /d\.key is null or \(\$10::boolean and \(d\.size<>s\.size/)
   assert.match(worker, /integrityProofs: assignedInventory \? finalDestinationObjects\.map/)
   assert.match(worker, /integrityVerified: sourceSha256 === destinationSha256/)
   assert.match(scanner, /where s\.scan_id=\$2::uuid and not s\.is_dir_marker/)

@@ -1,683 +1,194 @@
-"use client";
+"use client"
 
-import * as React from "react";
-import Link from "next/link";
-import { useParams } from "next/navigation";
-import {
-  ArrowLeft,
-  CircleCheck,
-  Clock3,
-  Files,
-  RefreshCw,
-  Workflow,
-} from "lucide-react";
-import { toast } from "sonner";
+import * as React from "react"
+import Link from "next/link"
+import { useParams } from "next/navigation"
+import type { ColumnDef } from "@tanstack/react-table"
+import { ArrowLeft, CircleCheck, Clock3, Files, RefreshCw, Trash2, Workflow, XCircle } from "lucide-react"
+import { toast } from "sonner"
 
-import {
-  DashboardPage,
-  DashboardPageHeader,
-} from "@/components/dashboard/page-shell";
-import { formatLastSyncedAt } from "@/lib/dashboard-format";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
-import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { DashboardDataTable } from "@/components/dashboard/data-table"
+import { DashboardPage, DashboardPageHeader } from "@/components/dashboard/page-shell"
+import { formatLastSyncedAt } from "@/lib/dashboard-format"
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Progress } from "@/components/ui/progress"
+import { Skeleton } from "@/components/ui/skeleton"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
-type WorkerJob = {
-  id: string;
-  status: string;
-  claimedByAgentId?: string;
-  claimed_by_agent_id?: string;
-  progress?: Record<string, unknown>;
-  result?: Record<string, unknown>;
-};
-type BucketStat = {
-  id: string;
-  sourceBucket: string;
-  targetBucket: string;
-  status: string;
-  totalObjects: number;
-  transferredObjects: number;
-  skippedObjects: number;
-  failedObjects: number;
-  sourceBytes: number;
-};
-type PoolSnapshot = {
-  onlineWorkers?: number;
-  activeTransfers?: number;
-  totalJobs?: number;
-  queuedJobs?: number;
-  runningJobs?: number;
-  completedJobs?: number;
-  failedJobs?: number;
-  canceledJobs?: number;
-  totalObjects?: number;
-  transferred?: number;
-  skipped?: number;
-  failed?: number;
-  processedFiles?: number;
-  completedBytes?: number;
-  buckets?: BucketStat[];
-  updatedAt?: string;
-};
+type WorkerJob = { id: string; status: string; claimedByAgentId?: string; claimed_by_agent_id?: string; progress?: Record<string, unknown>; result?: Record<string, unknown> }
+type JobRow = { id: string; status: string; claimedByAgentId?: string; summary?: string; error?: string; createdAt?: string; updatedAt?: string; lastHeartbeatAt?: string; completedAt?: string; objectKey?: string; objectSize?: number; sourceBucket?: string; targetBucket?: string; transferred?: number; skipped?: number; failed?: number }
+type RepairJob = { id: string; migrationId: string; status: string; mode: string; claimedByAgentId?: string; payload: Record<string, unknown>; progress: Record<string, unknown>; result: Record<string, unknown>; summary?: string; error?: string; createdAt?: string; updatedAt?: string }
+type BucketStat = { id: string; sourceBucket: string; targetBucket: string; status: string; totalObjects: number; queuedObjects?: number; transferredObjects: number; skippedObjects: number; failedObjects: number; sourceBytes: number }
+type PoolSnapshot = { onlineWorkers?: number; activeTransfers?: number; totalJobs?: number; queuedJobs?: number; runningJobs?: number; completedJobs?: number; failedJobs?: number; canceledJobs?: number; totalObjects?: number; transferred?: number; skipped?: number; failed?: number; processedFiles?: number; completedBytes?: number; buckets?: BucketStat[]; updatedAt?: string }
+type Pagination = { pageIndex: number; pageSize: number; pageCount: number; total: number }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-function num(value: unknown) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-function formatNumber(value: number) {
-  return new Intl.NumberFormat().format(Math.max(0, value));
-}
-function formatDate(value?: string) {
-  if (!value) return "Not synced yet";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-function formatBytes(value: number) {
-  if (value <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let size = value;
-  let unit = 0;
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unit]}`;
-}
-function percentage(done: number, total: number) {
-  return total > 0 ? Math.max(0, Math.min(100, (done / total) * 100)) : 0;
-}
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null }
+function num(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0 }
+function formatNumber(value: number) { return new Intl.NumberFormat().format(Math.max(0, value)) }
+function formatDate(value?: string) { if (!value) return "—"; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString() }
+function formatBytes(value: number) { if (value <= 0) return "0 B"; const units = ["B", "KB", "MB", "GB", "TB"]; let size = value; let unit = 0; while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1 } return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unit]}` }
+function percentage(done: number, total: number) { return total > 0 ? Math.max(0, Math.min(100, (done / total) * 100)) : 0 }
 
 function statusBadge(status?: string) {
-  const value = String(status || "").toLowerCase();
-  if (["completed", "copied", "verified"].includes(value))
-    return <Badge>Completed</Badge>;
-  if (["running", "copying", "transferring"].includes(value))
-    return <Badge>Transferring</Badge>;
-  if (["scanning", "verifying"].includes(value))
-    return (
-      <Badge variant="secondary">
-        {value === "scanning" ? "Scanning" : "Verifying"}
-      </Badge>
-    );
-  if (["pending", "queued", "claimed"].includes(value))
-    return <Badge variant="outline">Queued</Badge>;
-  if (value === "failed") return <Badge variant="destructive">Failed</Badge>;
-  if (["canceled", "aborted"].includes(value))
-    return <Badge variant="outline">Canceled</Badge>;
-  return <Badge variant="outline">{value || "Pending"}</Badge>;
+  const value = String(status || "").toLowerCase()
+  if (["completed", "copied", "verified"].includes(value)) return <Badge>Completed</Badge>
+  if (["running", "copying", "transferring"].includes(value)) return <Badge>Transferring</Badge>
+  if (["scanning", "verifying"].includes(value)) return <Badge variant="secondary">{value === "scanning" ? "Scanning" : "Verifying"}</Badge>
+  if (["pending", "queued", "claimed"].includes(value)) return <Badge variant="outline">Queued</Badge>
+  if (value === "failed") return <Badge variant="destructive">Failed</Badge>
+  if (["canceled", "aborted"].includes(value)) return <Badge variant="outline">Canceled</Badge>
+  return <Badge variant="outline">{value || "Pending"}</Badge>
 }
 
-function MetricCard({
-  label,
-  value,
-  detail,
-  icon: Icon,
-}: {
-  label: string;
-  value: string;
-  detail: string;
-  icon: React.ComponentType<{ className?: string }>;
-}) {
-  return (
-    <Card className="gap-0 py-0">
-      <CardHeader className="px-4 py-3 pb-1.5">
-        <div className="flex items-center justify-between gap-3">
-          <CardDescription className="text-[13px] leading-4">
-            {label}
-          </CardDescription>
-          <Icon className="size-4 text-muted-foreground" />
-        </div>
-        <CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">
-          {value}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="px-4 pb-3 pt-0">
-        <p className="text-[11px] leading-4 text-muted-foreground">{detail}</p>
-      </CardContent>
-    </Card>
-  );
+function MetricCard({ label, value, detail, icon: Icon }: { label: string; value: string; detail: string; icon: React.ComponentType<{ className?: string }> }) {
+  return <Card className="gap-0 py-0"><CardHeader className="px-4 py-3 pb-1.5"><div className="flex items-center justify-between gap-3"><CardDescription className="text-[13px] leading-4">{label}</CardDescription><Icon className="size-4 text-muted-foreground" /></div><CardTitle className="text-xl font-bold leading-none tabular-nums sm:text-2xl">{value}</CardTitle></CardHeader><CardContent className="px-4 pb-3 pt-0"><p className="text-[11px] leading-4 text-muted-foreground">{detail}</p></CardContent></Card>
 }
 
 function PageSkeleton() {
-  return (
-    <DashboardPage>
-      <div className="flex flex-col gap-5">
-        <Skeleton className="h-16 w-full" />
-        <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
-          {Array.from({ length: 4 }, (_, index) => (
-            <Skeleton key={index} className="h-24" />
-          ))}
-        </div>
-        <Skeleton className="h-64" />
-        <Skeleton className="h-80" />
-      </div>
-    </DashboardPage>
-  );
+  return <DashboardPage><div className="flex flex-col gap-5"><Skeleton className="h-16 w-full" /><div className="grid grid-cols-2 gap-4 xl:grid-cols-5">{Array.from({ length: 5 }, (_, i) => <Skeleton key={i} className="h-24" />)}</div><Skeleton className="h-96" /></div></DashboardPage>
 }
 
 export default function MigrationWorkerPoolDetailsPage() {
-  const params = useParams<{ id: string }>();
-  const migrationId = typeof params?.id === "string" ? params.id : "";
-  const [jobs, setJobs] = React.useState<WorkerJob[]>([]);
-  const [snapshot, setSnapshot] = React.useState<PoolSnapshot>({});
-  const [loading, setLoading] = React.useState(true);
-  const [refreshing, setRefreshing] = React.useState(false);
+  const params = useParams<{ id: string }>()
+  const migrationId = typeof params?.id === "string" ? params.id : ""
+  const [jobs, setJobs] = React.useState<WorkerJob[]>([])
+  const [jobPage, setJobPage] = React.useState<JobRow[]>([])
+  const [pagination, setPagination] = React.useState<Pagination>({ pageIndex: 0, pageSize: 25, pageCount: 1, total: 0 })
+  const [snapshot, setSnapshot] = React.useState<PoolSnapshot>({})
+  const [selectedJob, setSelectedJob] = React.useState<RepairJob | null>(null)
+  const [selectedJobId, setSelectedJobId] = React.useState<string | null>(null)
+  const [tab, setTab] = React.useState("overview")
+  const [loading, setLoading] = React.useState(true)
+  const [refreshing, setRefreshing] = React.useState(false)
+  const [mutating, setMutating] = React.useState(false)
+  const [deleteOpen, setDeleteOpen] = React.useState(false)
+  const inFlight = React.useRef(false)
 
-  const load = React.useCallback(
-    async (showRefreshing = false, background = false) => {
-      if (!migrationId) return;
-      try {
-        if (showRefreshing) setRefreshing(true);
-        else if (!background) setLoading(true);
-        const response = await fetch(
-          `/api/migrations/${encodeURIComponent(migrationId)}/worker-pool`,
-          { cache: "no-store" },
-        );
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok)
-          throw new Error(data.error || "Unable to load migration worker job");
-        setJobs(Array.isArray(data.jobs) ? data.jobs : []);
-        setSnapshot(
-          isRecord(data.snapshot) ? (data.snapshot as PoolSnapshot) : {},
-        );
-      } catch (error) {
-        if (!background)
-          toast.error(
-            error instanceof Error
-              ? error.message
-              : "Unable to load migration worker job",
-          );
-      } finally {
-        setLoading(false);
-        setRefreshing(false);
+  const load = React.useCallback(async (options?: { manual?: boolean; background?: boolean; page?: number }) => {
+    if (!migrationId || inFlight.current) return
+    inFlight.current = true
+    const nextPage = options?.page ?? pagination.pageIndex
+    try {
+      if (options?.manual) setRefreshing(true)
+      else if (!options?.background) setLoading(true)
+      const poolRequest = fetch(`/api/migrations/${encodeURIComponent(migrationId)}/worker-pool?page=${nextPage}&pageSize=${pagination.pageSize}`, { cache: "no-store" })
+      const detailRequest = selectedJobId ? fetch(`/api/repair-jobs/${encodeURIComponent(selectedJobId)}`, { cache: "no-store" }) : null
+      const [poolResponse, detailResponse] = await Promise.all([poolRequest, detailRequest])
+      const data = await poolResponse.json().catch(() => ({}))
+      if (!poolResponse.ok) throw new Error(data.error || "Unable to load migration worker pool")
+      setJobs(Array.isArray(data.jobs) ? data.jobs : [])
+      setJobPage(Array.isArray(data.jobPage) ? data.jobPage : [])
+      setSnapshot(isRecord(data.snapshot) ? data.snapshot as PoolSnapshot : {})
+      if (isRecord(data.jobPagination)) setPagination(data.jobPagination as Pagination)
+      if (detailResponse) {
+        const detail = await detailResponse.json().catch(() => ({}))
+        if (detailResponse.ok) setSelectedJob(detail.job ?? null)
+        else if (detailResponse.status === 404) { setSelectedJobId(null); setSelectedJob(null) }
       }
-    },
-    [migrationId],
-  );
+    } catch (error) {
+      if (!options?.background) toast.error(error instanceof Error ? error.message : "Unable to load migration worker pool")
+    } finally {
+      inFlight.current = false
+      setLoading(false)
+      setRefreshing(false)
+    }
+  }, [migrationId, pagination.pageIndex, pagination.pageSize, selectedJobId])
 
-  React.useEffect(() => {
-    void load(false);
-  }, [load]);
-  React.useEffect(() => {
-    if (loading) return;
-    const active =
-      num(snapshot.onlineWorkers) > 0 ||
-      num(snapshot.runningJobs) > 0 ||
-      num(snapshot.queuedJobs) > 0;
-    const timer = window.setTimeout(
-      () => void load(false, true),
-      active ? 5000 : 20000,
-    );
-    return () => window.clearTimeout(timer);
-  }, [loading, load, snapshot.onlineWorkers, snapshot.runningJobs, snapshot.queuedJobs]);
+  React.useEffect(() => { void load() }, [load])
+  React.useEffect(() => { const timer = window.setInterval(() => void load({ background: true }), 5_000); return () => window.clearInterval(timer) }, [load])
+
+  const openJob = React.useCallback(async (id: string) => {
+    setSelectedJobId(id); setSelectedJob(null); setTab("jobs")
+    try {
+      const response = await fetch(`/api/repair-jobs/${encodeURIComponent(id)}`, { cache: "no-store" })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.error || "Unable to load worker job")
+      setSelectedJob(data.job ?? null)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load worker job") }
+  }, [])
+
+  const mutateSelected = React.useCallback(async (method: "POST" | "DELETE") => {
+    if (!selectedJobId) return
+    try {
+      setMutating(true)
+      const response = await fetch(`/api/repair-jobs/${encodeURIComponent(selectedJobId)}`, { method, ...(method === "POST" ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "abort" }) } : {}) })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.error || `Unable to ${method === "POST" ? "abort" : "delete"} worker job`)
+      toast.success(method === "POST" ? "Worker job abort requested" : "Worker job deleted")
+      if (method === "DELETE") { setSelectedJobId(null); setSelectedJob(null); setDeleteOpen(false) }
+      await load({ manual: true })
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update worker job") }
+    finally { setMutating(false) }
+  }, [load, selectedJobId])
 
   const telemetry = React.useMemo(() => {
-    const files: Array<Record<string, unknown>> = [];
-    const logs: Array<Record<string, unknown>> = [];
+    const files: Array<Record<string, unknown>> = []; const logs: Array<Record<string, unknown>> = []
     for (const job of jobs) {
-      const events = Array.isArray(job.progress?.fileEvents)
-        ? job.progress.fileEvents
-        : Array.isArray(job.result?.fileEvents)
-          ? job.result.fileEvents
-          : [];
-      for (const entry of events)
-        if (isRecord(entry))
-          files.push({
-            ...entry,
-            workerId: job.claimedByAgentId || job.claimed_by_agent_id || "-",
-          });
-      const entries = Array.isArray(job.progress?.logs)
-        ? job.progress.logs
-        : [];
-      for (const entry of entries) if (isRecord(entry)) logs.push(entry);
+      const events = Array.isArray(job.progress?.fileEvents) ? job.progress.fileEvents : Array.isArray(job.result?.fileEvents) ? job.result.fileEvents : []
+      for (const entry of events) if (isRecord(entry)) files.push({ ...entry, workerId: job.claimedByAgentId || job.claimed_by_agent_id || "—" })
+      const entries = Array.isArray(job.progress?.logs) ? job.progress.logs : []
+      for (const entry of entries) if (isRecord(entry)) logs.push(entry)
     }
-    files.sort((a, b) =>
-      String(b.updatedAt || b.completedAt || b.startedAt || "").localeCompare(
-        String(a.updatedAt || a.completedAt || a.startedAt || ""),
-      ),
-    );
-    logs.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
-    return { files, logs };
-  }, [jobs]);
+    files.sort((a, b) => String(b.updatedAt || b.completedAt || b.startedAt || "").localeCompare(String(a.updatedAt || a.completedAt || a.startedAt || "")))
+    logs.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")))
+    return { files: files.slice(0, 100), logs: logs.slice(0, 100) }
+  }, [jobs])
 
-  if (loading) return <PageSkeleton />;
+  const bucketColumns = React.useMemo<ColumnDef<BucketStat, unknown>[]>(() => [
+    { accessorKey: "sourceBucket", header: "Source", cell: ({ row }) => <div><div className="font-medium">{row.original.sourceBucket}</div><div className="text-xs text-muted-foreground">{formatBytes(num(row.original.sourceBytes))}</div></div> },
+    { accessorKey: "targetBucket", header: "Target", cell: ({ row }) => <span className="font-medium">{row.original.targetBucket}</span> },
+    { accessorKey: "status", header: "Status", cell: ({ row }) => statusBadge(row.original.status) },
+    { id: "queue", header: "Queue", cell: ({ row }) => <span className="tabular-nums">{formatNumber(num(row.original.queuedObjects))}</span> },
+    { id: "transferred", header: "Transferred", cell: ({ row }) => <span className="tabular-nums">{formatNumber(num(row.original.transferredObjects))}</span> },
+    { id: "skipped", header: "Skipped", cell: ({ row }) => <span className="tabular-nums">{formatNumber(num(row.original.skippedObjects))}</span> },
+    { id: "failed", header: "Failed", cell: ({ row }) => <span className="tabular-nums text-destructive">{formatNumber(num(row.original.failedObjects))}</span> },
+    { id: "progress", header: "Progress", cell: ({ row }) => { const done = num(row.original.transferredObjects) + num(row.original.skippedObjects); const value = percentage(done, num(row.original.totalObjects)); return <div className="flex min-w-40 flex-col gap-1.5"><Progress value={value} className="h-2" /><span className="text-xs text-muted-foreground">{value.toFixed(1)}% · {formatNumber(done)} / {formatNumber(num(row.original.totalObjects))}</span></div> } },
+  ], [])
 
-  const totalJobs = num(snapshot.totalJobs);
-  const queuedJobs = num(snapshot.queuedJobs);
-  const runningJobs = num(snapshot.runningJobs);
-  const completedJobs = num(snapshot.completedJobs);
-  const failedJobs = num(snapshot.failedJobs);
-  const canceledJobs = num(snapshot.canceledJobs);
-  const totalObjects = num(snapshot.totalObjects);
-  // A completed job is not necessarily a copied object: skipped objects and
-  // job lifecycle completion are separate dimensions. Show only the
-  // authoritative transferred counter here.
-  const transferredFiles = num(snapshot.transferred);
-  const skippedFiles = num(snapshot.skipped);
-  const processedFiles = num(snapshot.processedFiles);
-  const onlineWorkers = num(snapshot.onlineWorkers);
-  const activeTransfers = num(snapshot.activeTransfers);
-  const overallPercent = percentage(processedFiles, totalJobs);
-  const buckets = Array.isArray(snapshot.buckets) ? snapshot.buckets : [];
+  const fileColumns = React.useMemo<ColumnDef<Record<string, unknown>, unknown>[]>(() => [
+    { id: "object", header: "Object", cell: ({ row }) => <div className="max-w-[420px]"><div className="truncate font-mono text-xs">{String(row.original.key ?? "—")}</div><div className="text-xs text-muted-foreground">{String(row.original.bucket ?? "—")}</div></div> },
+    { id: "stage", header: "Stage", cell: ({ row }) => String(row.original.stage ?? "—") },
+    { id: "status", header: "Status", cell: ({ row }) => statusBadge(typeof row.original.status === "string" ? row.original.status : undefined) },
+    { id: "size", header: "Size", cell: ({ row }) => formatBytes(num(row.original.size ?? row.original.bytesTotal)) },
+    { id: "worker", header: "Worker", cell: ({ row }) => <span className="font-mono text-xs">{String(row.original.workerId ?? "—")}</span> },
+    { id: "updated", header: "Updated", cell: ({ row }) => <span className="text-xs">{formatDate(String(row.original.updatedAt ?? row.original.completedAt ?? row.original.startedAt ?? ""))}</span> },
+  ], [])
 
-  return (
-    <DashboardPage className="dashboard-motion-stage">
-      <div className="dashboard-motion-item">
-        <DashboardPageHeader
-          title="Migration worker job"
-          description={formatLastSyncedAt(snapshot.updatedAt)}
-          actions={
-            <div className="flex w-full gap-2 sm:w-auto">
-              <Button
-                asChild
-                variant="outline"
-                size="sm"
-                className="flex-1 rounded-xl sm:flex-none"
-              >
-                <Link
-                  href={`/dashboard/migrations/${encodeURIComponent(migrationId)}`}
-                >
-                  <ArrowLeft data-icon="inline-start" />
-                  Back
-                </Link>
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="flex-1 rounded-xl sm:flex-none"
-                onClick={() => void load(true)}
-                disabled={refreshing}
-              >
-                <RefreshCw
-                  data-icon="inline-start"
-                  className={refreshing ? "animate-spin" : undefined}
-                />
-                Refresh
-              </Button>
-            </div>
-          }
-        />
-      </div>
+  const jobColumns = React.useMemo<ColumnDef<JobRow, unknown>[]>(() => [
+    { id: "object", header: "Object", cell: ({ row }) => <div className="max-w-[440px]"><div className="truncate font-mono text-xs">{row.original.objectKey || row.original.id}</div><div className="text-xs text-muted-foreground">{row.original.sourceBucket || "Unknown bucket"} · {formatBytes(num(row.original.objectSize))}</div></div> },
+    { accessorKey: "status", header: "Status", cell: ({ row }) => statusBadge(row.original.status) },
+    { id: "outcome", header: "Outcome", cell: ({ row }) => <div className="text-xs tabular-nums"><span>{num(row.original.transferred)} transferred</span><span className="mx-1 text-muted-foreground">·</span><span>{num(row.original.skipped)} skipped</span>{num(row.original.failed) > 0 ? <><span className="mx-1 text-muted-foreground">·</span><span className="text-destructive">{num(row.original.failed)} failed</span></> : null}</div> },
+    { id: "worker", header: "Worker", cell: ({ row }) => <span className="font-mono text-xs">{row.original.claimedByAgentId || "—"}</span> },
+    { id: "updated", header: "Updated", cell: ({ row }) => <span className="text-xs">{formatDate(row.original.updatedAt)}</span> },
+    { id: "actions", header: "Actions", cell: ({ row }) => <Button variant="outline" size="sm" onClick={() => void openJob(row.original.id)}>Details</Button> },
+  ], [openJob])
 
-      <div className="dashboard-motion-item dashboard-motion-delay-1 grid grid-cols-2 gap-4 xl:grid-cols-5">
-        <MetricCard
-          label="Migration objects"
-          value={formatNumber(totalObjects)}
-          detail={`${formatNumber(buckets.length)} buckets in this migration`}
-          icon={Files}
-        />
-        <MetricCard
-          label="Job queue"
-          value={formatNumber(totalJobs)}
-          detail={`${formatNumber(queuedJobs)} queued · ${formatNumber(runningJobs)} running`}
-          icon={Clock3}
-        />
-        <MetricCard
-          label="Transferred files"
-          value={formatNumber(transferredFiles)}
-          detail={`${formatBytes(num(snapshot.completedBytes))} transferred`}
-          icon={CircleCheck}
-        />
-        <MetricCard
-          label="Skipped files"
-          value={formatNumber(skippedFiles)}
-          detail="Already present or overwrite disabled"
-          icon={Files}
-        />
-        <MetricCard
-          label="Online workers"
-          value={formatNumber(onlineWorkers)}
-          detail={`${formatNumber(activeTransfers)} active transfers`}
-          icon={Workflow}
-        />
-      </div>
+  if (loading) return <PageSkeleton />
+  const buckets = Array.isArray(snapshot.buckets) ? snapshot.buckets : []
+  const totalJobs = num(snapshot.totalJobs); const queuedJobs = num(snapshot.queuedJobs); const runningJobs = num(snapshot.runningJobs); const processedFiles = num(snapshot.processedFiles)
+  const overallPercent = percentage(processedFiles, totalJobs)
+  const selectedActive = selectedJob && ["pending", "claimed", "running"].includes(selectedJob.status)
+  const selectedTotals = isRecord(selectedJob?.result?.totals) ? selectedJob?.result.totals : isRecord(selectedJob?.progress?.totals) ? selectedJob?.progress.totals : {}
 
-      <div className="dashboard-motion-item dashboard-motion-delay-2 grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(280px,0.45fr)]">
-        <Card className="gap-0 py-0">
-          <CardHeader className="border-b px-4 py-4 sm:px-5">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="flex flex-col gap-1">
-                <CardTitle className="text-base">Overall progress</CardTitle>
-                <CardDescription>
-                  Object migration and durable queue completion.
-                </CardDescription>
-              </div>
-              <div className="flex items-center gap-2">
-                <Badge variant="outline">Database</Badge>
-                <span className="font-mono text-sm font-semibold tabular-nums">
-                  {overallPercent.toFixed(1)}%
-                </span>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-5 px-4 py-5 sm:px-5">
-            <Progress value={overallPercent} className="h-2.5" />
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-              <div>
-                <p className="text-xs text-muted-foreground">Processed</p>
-                <p className="mt-1 text-lg font-semibold tabular-nums">
-                  {formatNumber(processedFiles)}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Completed</p>
-                <p className="mt-1 text-lg font-semibold tabular-nums">
-                  {formatNumber(completedJobs)}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Failed</p>
-                <p className="mt-1 text-lg font-semibold tabular-nums">
-                  {formatNumber(failedJobs)}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground">Canceled</p>
-                <p className="mt-1 text-lg font-semibold tabular-nums">
-                  {formatNumber(canceledJobs)}
-                </p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="gap-0 py-0">
-          <CardHeader className="border-b px-4 py-4">
-            <CardTitle className="text-base">Live activity</CardTitle>
-            <CardDescription>Current orchestrator capacity.</CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3 px-4 py-4 text-sm">
-            <div className="flex items-center justify-between">
-              <span className="text-muted-foreground">Online workers</span>
-              <span className="font-semibold tabular-nums">
-                {formatNumber(onlineWorkers)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-muted-foreground">Active transfers</span>
-              <span className="font-semibold tabular-nums">
-                {formatNumber(activeTransfers)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-muted-foreground">Queue remaining</span>
-              <span className="font-semibold tabular-nums">
-                {formatNumber(queuedJobs + runningJobs)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Last update</span>
-              <span className="text-right text-xs">
-                {formatDate(snapshot.updatedAt)}
-              </span>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card className="dashboard-motion-item dashboard-motion-delay-2 gap-0 overflow-hidden py-0">
-        <CardHeader className="border-b px-4 py-4 sm:px-5">
-          <CardTitle className="text-base">Bucket progress</CardTitle>
-          <CardDescription>
-            Transfer completion and object totals for every bucket.
-          </CardDescription>
-        </CardHeader>
-        <Table className="min-w-[820px]">
-          <TableHeader>
-            <TableRow className="h-9">
-              <TableHead>Source bucket</TableHead>
-              <TableHead>Target bucket</TableHead>
-              <TableHead className="text-center">Status</TableHead>
-              <TableHead className="text-center">Objects</TableHead>
-              <TableHead className="text-center">Skipped</TableHead>
-              <TableHead className="text-center">Failed</TableHead>
-              <TableHead className="min-w-[190px]">Progress</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {buckets.length ? (
-              buckets.map((bucket) => {
-                const value = percentage(
-                  num(bucket.transferredObjects),
-                  num(bucket.totalObjects),
-                );
-                return (
-                  <TableRow
-                    key={bucket.id}
-                    className="h-[64px] hover:bg-muted/30"
-                  >
-                    <TableCell>
-                      <div className="font-medium">{bucket.sourceBucket}</div>
-                      <div className="text-[11px] text-muted-foreground">
-                        {formatBytes(num(bucket.sourceBytes))}
-                      </div>
-                    </TableCell>
-                    <TableCell className="font-medium">
-                      {bucket.targetBucket}
-                    </TableCell>
-                    <TableCell className="text-center">
-                      {statusBadge(bucket.status)}
-                    </TableCell>
-                    <TableCell className="text-center tabular-nums">
-                      {formatNumber(num(bucket.transferredObjects))} /{" "}
-                      {formatNumber(num(bucket.totalObjects))}
-                    </TableCell>
-                    <TableCell className="text-center tabular-nums">
-                      {formatNumber(num(bucket.skippedObjects))}
-                    </TableCell>
-                    <TableCell className="text-center tabular-nums text-destructive">
-                      {formatNumber(num(bucket.failedObjects))}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-col gap-1.5">
-                        <Progress value={value} className="h-2" />
-                        <div className="flex justify-between text-[11px] text-muted-foreground">
-                          <span>{value.toFixed(1)}%</span>
-                          <span>
-                            {formatNumber(num(bucket.failedObjects))} failed
-                          </span>
-                        </div>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                );
-              })
-            ) : (
-              <TableRow>
-                <TableCell
-                  colSpan={7}
-                  className="h-24 text-center text-muted-foreground"
-                >
-                  Bucket statistics are not available yet.
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </Card>
-
-      <Card className="dashboard-motion-item dashboard-motion-delay-2 gap-0 overflow-hidden py-0">
-        <CardHeader className="border-b px-4 py-4 sm:px-5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="flex flex-col gap-1">
-              <CardTitle className="text-base">File transfers</CardTitle>
-              <CardDescription>
-                Latest synchronized transfer state from the worker pool.
-              </CardDescription>
-            </div>
-            <Badge variant="outline">
-              {formatNumber(telemetry.files.length)} visible
-            </Badge>
-          </div>
-        </CardHeader>
-        <Table
-          className="table-fixed min-w-[1310px] w-full [&_th:not(:last-child)]:border-r [&_td:not(:last-child)]:border-r"
-          containerClassName="h-[560px] rounded-none"
-        >
-          <TableHeader className="sticky top-0 z-10 bg-background">
-            <TableRow className="h-9">
-              <TableHead className="w-[360px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                File
-              </TableHead>
-              <TableHead className="w-[180px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                Bucket
-              </TableHead>
-              <TableHead className="w-[170px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                Worker ID
-              </TableHead>
-              <TableHead className="w-[110px] px-2.5 text-center text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                Status
-              </TableHead>
-              <TableHead className="w-[110px] px-2.5 text-center text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                Size
-              </TableHead>
-              <TableHead className="w-[200px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                Progress
-              </TableHead>
-              <TableHead className="w-[180px] px-2.5 text-[10px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                Error
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {telemetry.files.length ? (
-              telemetry.files.map((file, index) => {
-                const total = num(file.bytesTotal || file.size);
-                const loaded = num(
-                  file.bytesTransferred ||
-                    (["copied", "completed"].includes(String(file.status))
-                      ? total
-                      : 0),
-                );
-                const value = percentage(loaded, total);
-                return (
-                  <TableRow
-                    key={`${String(file.itemId || "")}:${String(file.key || "")}:${index}`}
-                    className="h-[64px] hover:bg-muted/30"
-                  >
-                    <TableCell className="px-2.5 py-2">
-                      <div
-                        className="truncate font-mono text-xs"
-                        title={String(file.key || "")}
-                      >
-                        {String(file.key || "-")}
-                      </div>
-                      <div className="text-[11px] text-muted-foreground">
-                        {formatDate(
-                          typeof file.updatedAt === "string"
-                            ? file.updatedAt
-                            : typeof file.completedAt === "string"
-                              ? file.completedAt
-                              : undefined,
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell className="px-2.5 py-2 text-xs">
-                      <div
-                        className="truncate"
-                        title={String(file.bucket || file.sourceBucket || "-")}
-                      >
-                        {String(file.bucket || file.sourceBucket || "-")}
-                      </div>
-                    </TableCell>
-                    <TableCell className="px-2.5 py-2">
-                      <div
-                        className="truncate font-mono text-[11px] text-muted-foreground"
-                        title={String(file.workerId || "-")}
-                      >
-                        {String(file.workerId || "-")}
-                      </div>
-                    </TableCell>
-                    <TableCell className="px-2.5 py-2 text-center">
-                      {statusBadge(
-                        typeof file.status === "string"
-                          ? file.status
-                          : undefined,
-                      )}
-                    </TableCell>
-                    <TableCell className="px-2.5 py-2 text-center text-xs tabular-nums">
-                      {formatBytes(num(file.size || total))}
-                    </TableCell>
-                    <TableCell className="px-2.5 py-2">
-                      <div className="flex flex-col gap-1.5">
-                        <Progress value={value} className="h-2" />
-                        <div className="flex justify-between text-[11px] text-muted-foreground">
-                          <span>{value.toFixed(1)}%</span>
-                          <span>
-                            {formatBytes(loaded)} / {formatBytes(total)}
-                          </span>
-                        </div>
-                      </div>
-                    </TableCell>
-                    <TableCell
-                      className="truncate px-2.5 py-2 text-xs text-destructive"
-                      title={String(file.error || "")}
-                    >
-                      {String(file.error || "-")}
-                    </TableCell>
-                  </TableRow>
-                );
-              })
-            ) : (
-              <TableRow>
-                <TableCell
-                  colSpan={7}
-                  className="h-24 text-center text-muted-foreground"
-                >
-                  File activity will appear when the worker pool starts
-                  transferring objects.
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </Card>
-
-      {telemetry.logs.length ? (
-        <Card className="dashboard-motion-item dashboard-motion-delay-2 gap-0 py-0">
-          <CardHeader className="border-b px-4 py-4 sm:px-5">
-            <CardTitle className="text-base">Recent worker messages</CardTitle>
-            <CardDescription>
-              Concise operational messages from the current migration.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex max-h-80 flex-col gap-2 overflow-auto px-4 py-4">
-            {telemetry.logs.slice(0, 50).map((entry, index) => (
-              <div
-                key={`${String(entry.at || "")}-${index}`}
-                className="flex flex-col gap-1 rounded-lg border bg-muted/20 px-3 py-2"
-              >
-                <div className="text-xs font-medium">
-                  {String(entry.message || "-")}
-                </div>
-                <div className="text-[11px] text-muted-foreground">
-                  {formatDate(
-                    typeof entry.at === "string" ? entry.at : undefined,
-                  )}
-                </div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      ) : null}
-    </DashboardPage>
-  );
+  return <DashboardPage className="dashboard-motion-stage">
+    <DashboardPageHeader title="Worker pool" description={`${formatLastSyncedAt(snapshot.updatedAt)} · automatically refreshes every 5 seconds`} actions={<div className="flex w-full gap-2 sm:w-auto"><Button asChild variant="outline" size="sm" className="flex-1 rounded-xl sm:flex-none"><Link href={`/dashboard/migrations/${encodeURIComponent(migrationId)}`}><ArrowLeft data-icon="inline-start" />Back</Link></Button><Button variant="outline" size="sm" className="flex-1 rounded-xl sm:flex-none" onClick={() => void load({ manual: true })} disabled={refreshing}><RefreshCw data-icon="inline-start" className={refreshing ? "animate-spin" : undefined} />Refresh</Button></div>} />
+    <Tabs value={tab} onValueChange={setTab} className="gap-5">
+      <TabsList><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="jobs">All jobs <Badge variant="outline">{formatNumber(pagination.total)}</Badge></TabsTrigger></TabsList>
+      <TabsContent value="overview" className="flex flex-col gap-4">
+        <div className="grid grid-cols-2 gap-4 xl:grid-cols-5"><MetricCard label="Migration objects" value={formatNumber(num(snapshot.totalObjects))} detail={`${formatNumber(buckets.length)} buckets`} icon={Files} /><MetricCard label="Job queue" value={formatNumber(totalJobs)} detail={`${formatNumber(queuedJobs)} queued · ${formatNumber(runningJobs)} running`} icon={Clock3} /><MetricCard label="Transferred" value={formatNumber(num(snapshot.transferred))} detail={`${formatBytes(num(snapshot.completedBytes))} copied`} icon={CircleCheck} /><MetricCard label="Skipped" value={formatNumber(num(snapshot.skipped))} detail="Existing objects preserved" icon={Files} /><MetricCard label="Online workers" value={formatNumber(num(snapshot.onlineWorkers))} detail={`${formatNumber(num(snapshot.activeTransfers))} active transfers`} icon={Workflow} /></div>
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(280px,0.45fr)]"><Card className="gap-0 py-0"><CardHeader className="border-b px-5 py-4"><div className="flex items-center justify-between gap-4"><div><CardTitle className="text-base">Overall progress</CardTitle><CardDescription>Durable queue completion across every bucket.</CardDescription></div><span className="font-mono text-sm font-semibold tabular-nums">{overallPercent.toFixed(1)}%</span></div></CardHeader><CardContent className="flex flex-col gap-5 px-5 py-5"><Progress value={overallPercent} className="h-2.5" /><div className="grid grid-cols-2 gap-4 sm:grid-cols-4">{[["Processed", processedFiles], ["Completed", num(snapshot.completedJobs)], ["Failed", num(snapshot.failedJobs)], ["Canceled", num(snapshot.canceledJobs)]].map(([label, value]) => <div key={String(label)}><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 text-lg font-semibold tabular-nums">{formatNumber(Number(value))}</p></div>)}</div></CardContent></Card><Card className="gap-0 py-0"><CardHeader className="border-b px-4 py-4"><CardTitle className="text-base">Live activity</CardTitle><CardDescription>Current orchestrator capacity.</CardDescription></CardHeader><CardContent className="flex flex-col gap-3 px-4 py-4 text-sm">{[["Online workers", num(snapshot.onlineWorkers)], ["Active transfers", num(snapshot.activeTransfers)], ["Queue remaining", queuedJobs + runningJobs]].map(([label, value]) => <div key={String(label)} className="flex items-center justify-between"><span className="text-muted-foreground">{label}</span><span className="font-semibold tabular-nums">{formatNumber(Number(value))}</span></div>)}<div className="flex items-center justify-between gap-4"><span className="text-muted-foreground">Last update</span><span className="text-right text-xs">{formatDate(snapshot.updatedAt)}</span></div></CardContent></Card></div>
+        <DashboardDataTable data={buckets} columns={bucketColumns} pageSize={10} minWidth="1080px" resetKey={migrationId} header={<div><CardTitle className="text-base">Bucket progress</CardTitle><CardDescription>Transfer, skip, failure, and durable queue totals.</CardDescription></div>} emptyState="Bucket statistics are not available yet." />
+        <DashboardDataTable data={telemetry.files} columns={fileColumns} pageSize={25} minWidth="1060px" resetKey={snapshot.updatedAt} header={<div><CardTitle className="text-base">Live file activity</CardTitle><CardDescription>Latest synchronized events reported by the worker pool.</CardDescription></div>} emptyState="No file activity captured yet." />
+        <Card className="gap-0 py-0"><CardHeader className="border-b px-5 py-4"><CardTitle className="text-base">Recent worker logs</CardTitle><CardDescription>Lifecycle and error messages from the latest jobs.</CardDescription></CardHeader><CardContent className="max-h-[420px] overflow-auto p-3"><div className="flex flex-col gap-2">{telemetry.logs.length ? telemetry.logs.map((entry, index) => <div key={`${index}-${String(entry.at ?? "")}`} className="rounded-xl border bg-muted/25 p-3"><div className="flex items-start justify-between gap-4"><span className="text-xs font-medium">{String(entry.message ?? "—")}</span><span className="shrink-0 text-[11px] text-muted-foreground">{formatDate(typeof entry.at === "string" ? entry.at : undefined)}</span></div></div>) : <p className="p-4 text-center text-sm text-muted-foreground">No worker logs captured yet.</p>}</div></CardContent></Card>
+      </TabsContent>
+      <TabsContent value="jobs" className="flex flex-col gap-4">
+        <DashboardDataTable data={jobPage} columns={jobColumns} pageSize={pagination.pageSize} minWidth="1120px" serverPagination={{ pageIndex: pagination.pageIndex, pageCount: pagination.pageCount, onPageChange: (page) => { setPagination((current) => ({ ...current, pageIndex: page })); void load({ page }) } }} header={<div><CardTitle className="text-base">All durable jobs</CardTitle><CardDescription>Browse all {formatNumber(pagination.total)} jobs without loading the full queue into the browser.</CardDescription></div>} emptyState="No worker jobs have been materialized yet." />
+        {selectedJobId ? <Card className="gap-0 overflow-hidden py-0"><CardHeader className="border-b px-5 py-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><CardTitle className="text-base">Job details</CardTitle>{selectedJob ? statusBadge(selectedJob.status) : <Badge variant="outline">Loading</Badge>}</div><CardDescription className="mt-1 truncate font-mono">{selectedJobId}</CardDescription></div>{selectedJob ? <div className="flex flex-wrap gap-2">{selectedActive ? <Button variant="destructive" size="sm" onClick={() => void mutateSelected("POST")} disabled={mutating}><XCircle data-icon="inline-start" />Abort</Button> : null}<Button variant="outline" size="sm" onClick={() => setDeleteOpen(true)} disabled={mutating || Boolean(selectedActive)}><Trash2 data-icon="inline-start" />Delete</Button></div> : null}</div></CardHeader><CardContent className="p-5">{selectedJob ? <div className="flex flex-col gap-5"><div className="grid gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-2 xl:grid-cols-4">{[["Transferred", num(selectedTotals?.transferred)], ["Skipped", num(selectedTotals?.skipped)], ["Failed", num(selectedTotals?.failed)], ["Worker", selectedJob.claimedByAgentId || "—"]].map(([label, value]) => <div key={String(label)} className="bg-background p-4"><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 truncate font-medium tabular-nums">{typeof value === "number" ? formatNumber(value) : value}</p></div>)}</div>{selectedJob.summary || selectedJob.error ? <div className="rounded-xl border bg-muted/25 p-4"><p className="text-sm font-medium">{selectedJob.summary || "Worker job update"}</p>{selectedJob.error ? <p className="mt-2 text-sm text-destructive">{selectedJob.error}</p> : null}</div> : null}<div className="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4"><div><p className="text-xs text-muted-foreground">Mode</p><p className="mt-1 font-medium">{selectedJob.mode}</p></div><div><p className="text-xs text-muted-foreground">Created</p><p className="mt-1 font-medium">{formatDate(selectedJob.createdAt)}</p></div><div><p className="text-xs text-muted-foreground">Updated</p><p className="mt-1 font-medium">{formatDate(selectedJob.updatedAt)}</p></div><div><p className="text-xs text-muted-foreground">Migration</p><p className="mt-1 truncate font-mono text-xs">{selectedJob.migrationId}</p></div></div></div> : <Skeleton className="h-40 w-full" />}</CardContent></Card> : null}
+      </TabsContent>
+    </Tabs>
+    <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete this worker job?</AlertDialogTitle><AlertDialogDescription>This removes the terminal job record. Active jobs must be aborted and fully stopped first.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={mutating}>Keep job</AlertDialogCancel><AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={(event) => { event.preventDefault(); void mutateSelected("DELETE") }} disabled={mutating}>Delete job</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+  </DashboardPage>
 }

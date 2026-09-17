@@ -13,7 +13,7 @@ function hasCompleteSnapshot(snapshot: Record<string, unknown>) {
   return Array.isArray(snapshot.buckets) && Number.isFinite(Number(snapshot.totalJobs))
 }
 
-async function readPool(id: string) {
+async function readPool(id: string, pageIndex: number, pageSize: number) {
   await ensureDriveSchema()
   const { rows } = await queryDb<{
     snapshot: Record<string, unknown> | null
@@ -30,6 +30,8 @@ async function readPool(id: string) {
     skipped_objects: string | number
     canceled_jobs: string | number
     jobs: Array<Record<string, unknown>> | null
+    job_page: Array<Record<string, unknown>> | null
+    job_total: string | number
     buckets: Array<Record<string, unknown>> | null
   }>(`
     with state as materialized (
@@ -56,6 +58,37 @@ async function readPool(id: string) {
       from public.drive_repair_jobs
       where migration_id=$1 and mode='migration'
         and (select needs_legacy from fallback_needed)
+    ), all_job_count as materialized (
+      select count(*)::bigint job_total
+      from public.drive_repair_jobs
+      where migration_id=$1 and mode='migration'
+    ), paged_jobs as materialized (
+      select j.id,j.status,j.claimed_by_agent_id,j.summary,j.error,
+        j.created_at,j.updated_at,j.last_heartbeat_at,j.completed_at,
+        coalesce(j.payload->'inventoryObjects'->0->>'key','') object_key,
+        case when j.payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$'
+          then (j.payload->'inventoryObjects'->0->>'size')::bigint else 0 end object_size,
+        coalesce(i.source_bucket,'') source_bucket,
+        coalesce(i.target_bucket,'') target_bucket,
+        case when j.result->'items'->0->>'transferred' ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end transferred,
+        case when j.result->'items'->0->>'skipped' ~ '^[0-9]+$' then (j.result->'items'->0->>'skipped')::bigint else 0 end skipped,
+        case when j.result->'items'->0->>'failed' ~ '^[0-9]+$' then (j.result->'items'->0->>'failed')::bigint else 0 end failed
+      from public.drive_repair_jobs j
+      left join public.drive_migration_items i
+        on i.id::text=j.payload->'itemIds'->>0 and i.migration_id=j.migration_id
+      where j.migration_id=$1 and j.mode='migration'
+      order by j.created_at desc,j.id desc
+      limit $2 offset $3
+    ), job_page_projection as (
+      select coalesce(jsonb_agg(jsonb_build_object(
+        'id',id,'status',status,'claimedByAgentId',claimed_by_agent_id,
+        'summary',summary,'error',error,'createdAt',created_at,'updatedAt',updated_at,
+        'lastHeartbeatAt',last_heartbeat_at,'completedAt',completed_at,
+        'objectKey',object_key,'objectSize',object_size,
+        'sourceBucket',source_bucket,'targetBucket',target_bucket,
+        'transferred',transferred,'skipped',skipped,'failed',failed
+      ) order by created_at desc,id desc),'[]'::jsonb) job_page
+      from paged_jobs
     ), recent_jobs as materialized (
       select id,claimed_by_agent_id,status,progress,result,created_at
       from public.drive_repair_jobs
@@ -102,6 +135,7 @@ async function readPool(id: string) {
         'targetBucket',item.target_bucket,
         'status',coalesce(nullif(item.progress->'live'->>'status',''),item.slurper_status,'pending'),
         'totalObjects',case when item.progress->'live'->>'totalObjects' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'totalObjects')::numeric else coalesce(item.source_objects,0) end,
+        'queuedObjects',case when item.progress->'live'->>'queuedObjects' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'queuedObjects')::numeric else 0 end,
         'transferredObjects',case when item.progress->'live'->>'transferredObjects' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'transferredObjects')::numeric else 0 end,
         'failedObjects',case when item.progress->'live'->>'failedObjects' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'failedObjects')::numeric else 0 end,
         'skippedObjects',case when item.progress->'live'->>'skippedObjects' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'skippedObjects')::numeric else 0 end,
@@ -125,20 +159,28 @@ async function readPool(id: string) {
       worker_counts.online_workers,worker_counts.active_transfers,
       job_counts.total_jobs,job_counts.queued_jobs,job_counts.running_jobs,
       job_counts.completed_jobs,job_counts.failed_jobs,job_counts.transferred_objects,job_counts.failed_objects,job_counts.canceled_jobs,
-      telemetry.jobs,bucket_projection.buckets
-    from job_counts cross join worker_counts cross join telemetry cross join bucket_projection
+      telemetry.jobs,job_page_projection.job_page,all_job_count.job_total,bucket_projection.buckets
+    from job_counts cross join worker_counts cross join telemetry cross join job_page_projection cross join all_job_count cross join bucket_projection
     left join state on true
-  `, [id])
+  `, [id, pageSize, pageIndex * pageSize])
   const stateRow = rows[0]
   if (!stateRow) throw new Error("Migration worker pool query returned no row")
   const saved = stateRow.snapshot ?? {}
   const allJobs = stateRow.jobs ?? []
+  const jobPage = stateRow.job_page ?? []
+  const jobTotal = Number(stateRow.job_total || 0)
+  const jobPagination = {
+    pageIndex,
+    pageSize,
+    pageCount: Math.max(1, Math.ceil(jobTotal / pageSize)),
+    total: jobTotal,
+  }
   const liveCounts = {
     onlineWorkers: Number(stateRow.online_workers || 0),
     activeTransfers: Number(stateRow.active_transfers || 0),
   }
   if (hasCompleteSnapshot(saved)) {
-    return { snapshot: { ...saved, ...liveCounts }, snapshotUpdatedAt: stateRow.snapshot_updated_at, jobs: allJobs }
+    return { snapshot: { ...saved, ...liveCounts }, snapshotUpdatedAt: stateRow.snapshot_updated_at, jobs: allJobs, jobPage, jobPagination }
   }
 
   // Legacy migrations may not have an orchestrator snapshot yet. This narrow
@@ -159,30 +201,34 @@ async function readPool(id: string) {
     ...liveCounts,
     buckets,
   }
-  return { snapshot, snapshotUpdatedAt: stateRow.snapshot_updated_at, jobs: allJobs }
+  return { snapshot, snapshotUpdatedAt: stateRow.snapshot_updated_at, jobs: allJobs, jobPage, jobPagination }
 }
 
-function cachedPool(id: string) {
+function cachedPool(id: string, pageIndex: number, pageSize: number) {
   const now = Date.now()
-  const current = responseCache.get(id)
+  const key = `${id}:${pageIndex}:${pageSize}`
+  const current = responseCache.get(key)
   if (current && current.expiresAt > now) return current.promise
-  const promise = readPool(id).catch((error) => {
-    responseCache.delete(id)
+  const promise = readPool(id, pageIndex, pageSize).catch((error) => {
+    responseCache.delete(key)
     throw error
   })
-  responseCache.set(id, { expiresAt: now + 3_000, promise })
+  responseCache.set(key, { expiresAt: now + 3_000, promise })
   if (responseCache.size > 100) {
     for (const [key, entry] of responseCache) if (entry.expiresAt <= now) responseCache.delete(key)
   }
   return promise
 }
 
-export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
+export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const auth = await requireAdmin()
     if (!auth.ok) return auth.response
     const { id } = await context.params
-    const saved = await cachedPool(id)
+    const url = new URL(request.url)
+    const pageIndex = Math.max(0, Math.floor(Number(url.searchParams.get("page") || 0) || 0))
+    const pageSize = Math.max(10, Math.min(100, Math.floor(Number(url.searchParams.get("pageSize") || 25) || 25)))
+    const saved = await cachedPool(id, pageIndex, pageSize)
     return NextResponse.json({ ...saved, source: "database" }, { headers: { "Cache-Control": "no-store, max-age=0" } })
   } catch (error) {
     return NextResponse.json(

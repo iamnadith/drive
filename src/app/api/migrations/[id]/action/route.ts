@@ -100,7 +100,7 @@ async function reserveMigrationWorkerGeneration(migrationId: string, expectedSta
           options=jsonb_set(coalesce(m.options,'{}'::jsonb),'{workerGeneration}',to_jsonb(greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1))+1),true),
           last_synced_at=now(),updated_at=now()
       where m.id=$1 and m.status=$2
-        and $2=any(array['failed','verification_failed','canceled','aborted']::text[])
+        and $2=any(array['completed','failed','verification_failed','canceled','aborted']::text[])
         and not exists (
           select 1 from drive_agent_runs r
           where r.run_type='github_dispatch' and r.payload->>'migrationId'=m.id::text
@@ -716,18 +716,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       if (!orchestratorSettings.fileScannerEnabled || !orchestratorSettings.fileScannerUrl || orchestratorSettings.fileScannerSecret.length < 24) {
         return NextResponse.json({ error: "File Scanner must be configured and enabled before worker-pool repair" }, { status: 409 })
       }
-      const workerMode = migration.options.executionMode === "migration_workers"
-      let nextGeneration = 0
-      if (workerMode) {
-        const reserved = await reserveMigrationWorkerGeneration(id, migration.status, items.map((item) => item.id), "repair_migration")
-        if (reserved === null) {
-          return NextResponse.json({ error: "This worker-pool migration is active, or its previous workers are still stopping. Wait for the current attempt to finish before starting another pool." }, { status: 409 })
-        }
-        nextGeneration = reserved
-      }
       const activeWorkerJobs = (await listRepairJobsByMigration(id, 500).catch(() => []))
         .filter((job) => ["pending", "claimed", "running"].includes(job.status))
       await Promise.all(activeWorkerJobs.map((job) => abortRepairJob(job.id).catch(() => undefined)))
+      let reservableStatus = migration.status
       if (migration.options.executionMode !== "migration_workers" && ["running", "verifying"].includes(migration.status)) {
         await updateMigration(id, {
           status: "failed",
@@ -739,26 +731,16 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         if (!(await waitForOrchestratorCycleToRelease(id))) {
           return NextResponse.json({ error: "Migration Orchestrator is still finishing the previous Super Slurper cycle. Retry worker-pool repair shortly." }, { status: 409 })
         }
+        reservableStatus = "failed"
       }
-      if (!workerMode) await queryDb(`
-        update drive_migration_items
-        set slurper_job_id=null,
-            -- The orchestrator owns scanner-task creation. Keep this state
-            -- queued until it has durably created/adopted a source scan;
-            -- otherwise a failed wake/deployment falsely renders "Scanning"
-            -- forever even though File Scanner has no task to claim.
-            slurper_status='queued',
-            progress=(coalesce(progress,'{}'::jsonb)||jsonb_build_object(
-              'stage','awaiting_source_scan',
-              'migrationInventory',jsonb_build_object('generation',$2::int,'status','pending'),
-              'repairWorker',null,
-              'live',null,
-              'lastAction',jsonb_build_object('action','repair_migration','at',$3::text)
-            )),
-            last_progress_at=$3::timestamptz,
-            updated_at=now()
-        where migration_id=$1
-      `, [id, nextGeneration, now])
+      // Every repair reserves a fresh generation and re-enters the exact same
+      // File Scanner inventory/materialization path used by a normal worker
+      // migration. This also preserves the durable Slurper counters already
+      // stored on each item while clearing only the current worker attempt.
+      const nextGeneration = await reserveMigrationWorkerGeneration(id, reservableStatus, items.map((item) => item.id), "repair_migration")
+      if (nextGeneration === null) {
+        return NextResponse.json({ error: "This worker-pool migration is active, or its previous workers are still stopping. Wait for the current attempt to finish before starting another pool." }, { status: 409 })
+      }
       await updateMigration(id, {
         status: "running",
         completedAt: null,
@@ -769,7 +751,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           ...migration.options,
           executionMode: "migration_workers",
           workerGeneration: nextGeneration,
-          workerRepairMismatchedObjects: true,
+          // Repair uses the same scanner -> durable queue -> worker pool
+          // lifecycle as a normal worker migration, but it must preserve
+          // every destination object that already exists. The workers count
+          // those objects as skipped and copy only missing keys.
+          overwrite: false,
+          workerRepairMismatchedObjects: false,
           manualCompleted: false,
           targetActivatedAt: undefined,
         },
