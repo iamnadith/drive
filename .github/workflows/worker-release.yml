@@ -58,6 +58,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh release view "${{ steps.version.outputs.value }}" >/dev/null 2>&1 || gh release create "${{ steps.version.outputs.value }}" --target "${{ github.sha }}" --generate-notes --latest
-          gh release upload "${{ steps.version.outputs.value }}" worker-release/* --clobber
-          gh release edit "${{ steps.version.outputs.value }}" --latest
+          gh release view "${{ steps.version.outputs.value }}" >/dev/null 2>&1 || gh release create "${{ steps.version.outputs.value }}" --draft --target "${{ github.sha }}" --generate-notes
+          # Keep the release invisible to "latest" consumers until every
+          # bundle is present. Publish the manifest last as the commit point.
+          gh release upload "${{ steps.version.outputs.value }}" \
+            worker-release/backend-orchestrator.mjs \
+            worker-release/file-scanner.mjs \
+            worker-release/migration-orchestrator.mjs --clobber
+          gh release upload "${{ steps.version.outputs.value }}" worker-release/manifest.json --clobber
+          gh release edit "${{ steps.version.outputs.value }}" --draft=false --latest

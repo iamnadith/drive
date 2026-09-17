@@ -284,12 +284,13 @@ async function resolveAccount(token: string): Promise<Account> {
   return accounts[0]
 }
 
-async function fetchWithRetry(url: string, init: RequestInit, attempts = 4) {
+async function fetchWithRetry(url: string, init: RequestInit, attempts = 4, retryNotFound = false) {
   let lastError: unknown
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const response = await fetch(url, init)
-      if (response.ok || ![408, 425, 429, 500, 502, 503, 504].includes(response.status) || attempt === attempts - 1) return response
+      const retryableStatus = [408, 425, 429, 500, 502, 503, 504].includes(response.status) || (retryNotFound && response.status === 404)
+      if (response.ok || !retryableStatus || attempt === attempts - 1) return response
       lastError = new Error(`Request failed (${response.status})`)
     } catch (error) {
       lastError = error
@@ -307,7 +308,9 @@ async function getManifest(): Promise<Manifest> {
   const defaultUrl = `https://github.com/${sourceRepository}/releases/latest/download/manifest.json`
   const url = String(process.env.CLOUDFLARE_WORKER_MANIFEST_URL || defaultUrl).trim()
   if (!/^https:\/\//i.test(url)) throw new Error("CLOUDFLARE_WORKER_MANIFEST_URL is not configured")
-  const response = await fetchWithRetry(url, { cache: "no-store", signal: AbortSignal.timeout(20_000) })
+  // GitHub may resolve a just-published "latest" release before its manifest
+  // is visible at every edge. Retry 404s briefly instead of failing setup.
+  const response = await fetchWithRetry(url, { cache: "no-store", signal: AbortSignal.timeout(20_000) }, 6, true)
   if (!response.ok) throw new Error(`Unable to fetch Worker release manifest (${response.status})`)
   const manifest = await response.json() as Manifest
   if (!manifest.version || !ORDER.every((worker) => manifest.workers?.[worker]?.url && /^[a-f0-9]{64}$/i.test(manifest.workers[worker].sha256))) throw new Error("Worker release manifest is invalid")
@@ -315,7 +318,10 @@ async function getManifest(): Promise<Manifest> {
 }
 
 async function artifact(entry: Artifact): Promise<Uint8Array> {
-  const response = await fetchWithRetry(entry.url, { cache: "no-store", signal: AbortSignal.timeout(30_000) })
+  // Release assets can lag the manifest briefly during GitHub publication or
+  // CDN propagation. A 404 is retryable here; checksum validation still makes
+  // the accepted bytes immutable and exact.
+  const response = await fetchWithRetry(entry.url, { cache: "no-store", signal: AbortSignal.timeout(30_000) }, 6, true)
   if (!response.ok) throw new Error(`Unable to fetch Worker artifact (${response.status})`)
   const bytes = new Uint8Array(await response.arrayBuffer())
   const digest = createHash("sha256").update(bytes).digest("hex")
@@ -668,6 +674,13 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       await adoptExistingWorkers(state, tokens, accounts); state.step = "existing_workers_checked"; await saveState(state)
       const manifest = await getManifest(); state.releaseVersion = manifest.version
       await saveState(state)
+      // Download and checksum the complete immutable release before touching
+      // any Worker. A partially published release must never leave a healthy
+      // Worker marked undeployed just because a later bundle is unavailable.
+      state.step = "release_artifacts_fetching"; await saveState(state)
+      const releaseArtifacts = Object.fromEntries(
+        await Promise.all(ORDER.map(async (worker) => [worker, await artifact(manifest.workers[worker])]))
+      ) as Record<HostedWorker, Uint8Array>
       await ensureQueue(tokens.scanner, accounts.scanner.id, names.scannerQueue)
       await ensureQueue(tokens.scanner, accounts.scanner.id, names.scannerDlq)
       await ensureQueue(tokens.migration, accounts.migration.id, names.migrationQueue)
@@ -684,7 +697,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
         if (input.forceRedeploy || !current.deployed || !current.verified || !artifactMatches) {
           current.deployed = false; current.verified = false; current.verifiedAt = undefined; current.latencyMs = undefined; current.build = undefined
           state.workers[worker].phase = "uploading"; state.workers[worker].error = undefined; state.step = `${worker}_uploading`; await saveState(state)
-          await uploadWorker({ worker, token: tokens[worker], accountId: accounts[worker].id, entry: artifactEntry, code: await artifact(artifactEntry), state })
+          await uploadWorker({ worker, token: tokens[worker], accountId: accounts[worker].id, entry: artifactEntry, code: releaseArtifacts[worker], state })
           state.workers[worker].phase = "configuring"; state.step = `${worker}_configuring`; await saveState(state)
           state.workers[worker].url = await workersDevUrl(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
           state.workers[worker].deployed = true; state.workers[worker].phase = "deployed"; state.workers[worker].deployedAt = new Date().toISOString()

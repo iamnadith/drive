@@ -112,8 +112,15 @@ test("cron exhaustion fails with actionable safe guidance and never removes unre
 
 test("release artifacts are immutable checksummed bundles", () => {
   assert.match(installer, /checksum mismatch/)
+  assert.match(installer, /release_artifacts_fetching/)
+  assert.match(installer, /Promise\.all\(ORDER\.map\(async \(worker\) => \[worker, await artifact\(manifest\.workers\[worker\]\)\]\)\)/)
+  assert.match(installer, /}, 6, true\)/)
   assert.match(workflow, /build-worker-release\.mjs/)
-  assert.match(workflow, /gh release upload/)
+  assert.match(workflow, /gh release create .*--draft/)
+  const bundleUpload = workflow.indexOf("worker-release/backend-orchestrator.mjs")
+  const manifestUpload = workflow.indexOf("worker-release/manifest.json")
+  const publish = workflow.indexOf("--draft=false --latest")
+  assert.ok(bundleUpload > 0 && bundleUpload < manifestUpload && manifestUpload < publish)
   assert.match(workflow, /branches:\s*\n\s*- main/)
   assert.match(workflow, /workers-\$\{GITHUB_SHA:0:12\}/)
   assert.match(workflow, /--latest/)
