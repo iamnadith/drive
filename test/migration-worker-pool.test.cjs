@@ -64,6 +64,16 @@ test('migration-pool cancellation is an orchestrator-owned durable intent', () =
   assert.match(orchestrator, /secretSyncStatus[\s\S]*!== "ready"/)
 })
 
+test('orchestrator reconciles GitHub worker runs whose migration is deleted or terminal', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(orchestrator, /async function reconcileOrphanedGitHubDispatches\(db: Client\)/)
+  assert.match(orchestrator, /where r\.run_type='github_dispatch' and r\.status in\('pending','running'\)[\s\S]*?not exists\([\s\S]*?m\.status in\('running','verifying'\)/)
+  assert.match(orchestrator, /githubAbortRequestedAt',coalesce\(payload->>'githubAbortRequestedAt',now\(\)::text\)/)
+  assert.match(orchestrator, /await abortMigrationWorkers\(db, migrationId, `Migration \$\{migrationId\} is missing or terminal/)
+  assert.match(orchestrator, /const orphanedWorkerRuns = await reconcileOrphanedGitHubDispatches\(db\)/)
+  assert.match(orchestrator, /idle: true, canceledWorkerJobs, orphanedWorkerRuns/)
+})
+
 test('worker-pool details hydrate and refresh from PostgreSQL only', () => {
   const route = read('src/app/api/migrations/[id]/worker-pool/route.ts')
   const page = read('src/app/dashboard/migrations/[id]/worker-pool/page.tsx')

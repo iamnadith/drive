@@ -1389,6 +1389,42 @@ async function reconcileCanceledWorkerRepairJobs(db: Client) {
   return results
 }
 
+async function reconcileOrphanedGitHubDispatches(db: Client) {
+  // Migration rows can be removed after a user deletes a completed/canceled
+  // migration. Keep dispatch records independently recoverable: otherwise a
+  // GitHub workflow that already stopped can remain `running` forever, and an
+  // actually live workflow can keep consuming a worker slot without an owner.
+  const orphaned = await db.query(`
+    select r.payload->>'migrationId' migration_id,min(r.updated_at) oldest_updated_at
+    from drive_agent_runs r
+    join drive_agents a on a.id=r.agent_id and a.provider='github_actions' and a.github_token is not null
+    where r.run_type='github_dispatch' and r.status in('pending','running')
+      and nullif(r.payload->>'migrationId','') is not null
+      and not exists(
+        select 1 from drive_migrations m
+        where m.id::text=r.payload->>'migrationId' and m.status in('running','verifying')
+      )
+    group by r.payload->>'migrationId'
+    order by min(r.updated_at)
+    limit 10
+  `)
+  const results = []
+  for (const row of orphaned.rows) {
+    const migrationId = String(row.migration_id || "")
+    if (!migrationId) continue
+    await db.query(`
+      update drive_agent_runs
+      set payload=payload||jsonb_build_object('githubAbortRequestedAt',coalesce(payload->>'githubAbortRequestedAt',now()::text)),
+        summary=case when payload->>'githubAbortRequestedAt' is null then 'Migration is missing or terminal; stopping orphaned GitHub worker' else summary end,
+        updated_at=now()
+      where run_type='github_dispatch' and status in('pending','running') and payload->>'migrationId'=$1
+    `, [migrationId])
+    const shutdown = await abortMigrationWorkers(db, migrationId, `Migration ${migrationId} is missing or terminal; stopping orphaned GitHub workers`)
+    results.push({ migrationId, ...shutdown })
+  }
+  return results
+}
+
 async function reconcileGitHubIntent(db: Client, intent: Row, agent: Row) {
   const instanceId = String(intent.payload?.workerInstanceId || "")
   if (!instanceId) throw new Error("Dispatch intent is missing workerInstanceId")
@@ -1657,9 +1693,10 @@ async function cycle(env: Env) {
     try {
       const setting = await db.query(`select value from drive_app_settings where key='migration-orchestrator' limit 1`)
       const canceledWorkerJobs = await reconcileCanceledWorkerRepairJobs(db)
+      const orphanedWorkerRuns = await reconcileOrphanedGitHubDispatches(db)
       if (setting.rows[0]?.value?.migrationEnabled !== true && setting.rows[0]?.value?.enabled !== true) return complete(db, owner, null, { ok: true, skipped: "disabled" })
       let migration = await selectMigration(db)
-      if (!migration) return complete(db, owner, null, { ok: true, idle: true, canceledWorkerJobs })
+      if (!migration) return complete(db, owner, null, { ok: true, idle: true, canceledWorkerJobs, orphanedWorkerRuns })
       const terminalWorkerMigration = String(migration.options?.executionMode || "super_slurper") === "migration_workers" && ["failed", "verification_failed"].includes(String(migration.status).toLowerCase())
       if (["canceled", "completed", "aborted"].includes(String(migration.status).toLowerCase()) || terminalWorkerMigration) {
         migrationId = migration.id
