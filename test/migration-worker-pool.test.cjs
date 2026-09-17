@@ -67,7 +67,7 @@ test('migration-pool cancellation is an orchestrator-owned durable intent', () =
 test('worker-pool details hydrate and refresh from PostgreSQL only', () => {
   const route = read('src/app/api/migrations/[id]/worker-pool/route.ts')
   const page = read('src/app/dashboard/migrations/[id]/worker-pool/page.tsx')
-  assert.equal((route.match(/payload->>'migrationId'=\(\$1::uuid\)::text/g) || []).length, 1)
+  assert.ok((route.match(/payload->>'migrationId'=\(\$1::uuid\)::text/g) || []).length >= 1)
   assert.doesNotMatch(route, /payload->>'migrationId'=\$1\b/)
   assert.match(route, /ensureDriveSchema\(\)/)
   assert.match(route, /limit 100/)
@@ -85,7 +85,25 @@ test('worker-pool details hydrate and refresh from PostgreSQL only', () => {
   assert.match(page, /inFlight\.current/)
   assert.match(page, /DashboardDataTable/)
   assert.match(page, /serverPagination/)
+  assert.match(route, /attempt_generations as materialized/)
+  assert.match(route, /selected_worker_runs as/)
+  assert.match(route, /selected_generation/)
+  assert.match(page, /Worker-pool attempts/)
+  assert.match(page, /Dispatched workers/)
+  assert.match(page, /File queue/)
   assert.doesNotMatch(page, /\?live=1/)
+})
+
+test('migration worker cards prefer running workflows and terminal parents over stale deployment state', () => {
+  const details = read('src/app/dashboard/migrations/[id]/page.tsx')
+  const poolRoute = read('src/app/api/migrations/[id]/worker-pool/route.ts')
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  assert.match(details, /const runningRuns = currentRuns\.filter/)
+  assert.match(details, /runningRuns\.length > 0\s*\? "running"/)
+  assert.match(details, /run\.online \|\| \(String\(run\.status\).*?=== "pending" && !run\.abortRequested\)/s)
+  assert.match(details, /displayStatus: "aborted", queued: 0/)
+  assert.match(poolRoute, /status: "aborted", queuedObjects: 0/)
+  assert.match(orchestrator, /active\.status in\('running','verifying'\)/)
 })
 
 test('canceled migration and bucket states cannot be masked by stale verifying snapshots', () => {
@@ -102,7 +120,7 @@ test('canceled migration and bucket states cannot be masked by stale verifying s
   assert.match(cancelRoute, /status: "canceled",\s*completedAt: null,\s*syncStatus: "syncing",\s*syncMessage: "Cancellation requested"/)
   assert.match(cancelRoute, /abortedProgress\(item, "aborted_all"/)
   assert.match(cancelAction, /const workerMode = migration\.options\.executionMode === "migration_workers"[\s\S]*?if \(workerMode\)[\s\S]*?await wakeMigrationOrchestrator\(\)/)
-  assert.match(cancelRoute, /orchestratorOwnsGitHubCancellation: workerMode/)
+  assert.match(cancelRoute, /function cancelActiveMigrationFileJobs[\s\S]*?with canceled as \([\s\S]*?update drive_repair_jobs[\s\S]*?where migration_id=\$1 and status in\('pending','claimed','running'\)/)
   assert.doesNotMatch(cancelRoute, /abortGitHubDispatchesForMigration|listGitHubWorkflowRuns/)
   assert.match(cancelAction, /GitHub dispatch and cancellation belong to the orchestrator/)
   assert.doesNotMatch(cancelRoute, /if \(action === "cancel_migration" && migration\.status === "canceled"\)\s*\{\s*return NextResponse\.json\(\{ ok: true, alreadyCanceled: true/)

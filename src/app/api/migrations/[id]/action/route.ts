@@ -332,6 +332,18 @@ async function abortRepairJobsForMigration(migrationId: string, options: { orche
   return { abortedJobs, blockedJobs }
 }
 
+async function cancelActiveMigrationFileJobs(migrationId: string, summary: string): Promise<number> {
+  const result = await queryDb<{ count: string }>(`
+    with canceled as (
+      update drive_repair_jobs set status='canceled',summary=$2,error=null,
+        completed_at=now(),last_heartbeat_at=now(),updated_at=now()
+      where migration_id=$1 and status in('pending','claimed','running')
+      returning 1
+    ) select count(*)::text count from canceled
+  `, [migrationId, summary])
+  return Number(result.rows[0]?.count || 0)
+}
+
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const auth = await requireAdmin()
@@ -426,7 +438,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       })))
 
       const workerMode = migration.options.executionMode === "migration_workers"
-      const cancelRepairResult = await abortRepairJobsForMigration(id, { orchestratorOwnsGitHubCancellation: workerMode })
+      const cancelRepairResult = workerMode
+        ? { abortedJobs: await cancelActiveMigrationFileJobs(id, "Migration canceled by user"), blockedJobs: [] as Array<{ jobId: string; reason: string }> }
+        : await abortRepairJobsForMigration(id)
       const candidates = abortTargets.filter((item) => Boolean(item.slurperJobId))
       const remoteCancellationWarnings: Array<{ itemId: string; reason: string }> = []
       for (const item of candidates) {
@@ -716,9 +730,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       if (!orchestratorSettings.fileScannerEnabled || !orchestratorSettings.fileScannerUrl || orchestratorSettings.fileScannerSecret.length < 24) {
         return NextResponse.json({ error: "File Scanner must be configured and enabled before worker-pool repair" }, { status: 409 })
       }
-      const activeWorkerJobs = (await listRepairJobsByMigration(id, 500).catch(() => []))
-        .filter((job) => ["pending", "claimed", "running"].includes(job.status))
-      await Promise.all(activeWorkerJobs.map((job) => abortRepairJob(job.id).catch(() => undefined)))
+      await cancelActiveMigrationFileJobs(id, "Superseded by worker-pool repair")
       let reservableStatus = migration.status
       if (migration.options.executionMode !== "migration_workers" && ["running", "verifying"].includes(migration.status)) {
         await updateMigration(id, {
@@ -784,9 +796,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           return NextResponse.json({ error: "This worker-pool migration is active, or its previous workers are still stopping. Wait for the current attempt to finish before retrying." }, { status: 409 })
         }
         workerGeneration = reserved
-        const activeWorkerJobs = (await listRepairJobsByMigration(id, 500).catch(() => []))
-          .filter((job) => ["pending", "claimed", "running"].includes(job.status))
-        await Promise.all(activeWorkerJobs.map((job) => abortRepairJob(job.id).catch(() => undefined)))
+        await cancelActiveMigrationFileJobs(id, "Superseded by worker-pool retry")
       }
 
       for (const item of candidates) {

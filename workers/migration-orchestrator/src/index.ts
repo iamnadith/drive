@@ -633,6 +633,7 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
         'queuedObjects',coalesce(a.queued_objects,0)
       ))
     from aggregate a where i.id=a.item_id and i.migration_id=$1
+      and exists(select 1 from drive_migrations active where active.id=i.migration_id and active.status in('running','verifying'))
   `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`, generation, opts(migration).verifyStrictDestination === true])
 }
 async function recordItemStageEvents(db: Client, migration: Row, generation: number) {

@@ -888,7 +888,13 @@ export default function MigrationDetailsPage() {
     el.scrollTop = el.scrollHeight
   }, [bucketLogLines.length, logsOpen])
 
-  const getBucketSnapshot = React.useCallback((item: MigrationItem) => getMergedBucketSnapshot(item), [])
+  const getBucketSnapshot = React.useCallback((item: MigrationItem) => {
+    const snapshot = getMergedBucketSnapshot(item)
+    if (["canceled", "cancelled", "aborted"].includes(normalizeStatus(migration?.status))) {
+      return { ...snapshot, displayStatus: "aborted", queued: 0 }
+    }
+    return snapshot
+  }, [migration?.status])
 
   const readBucketSettingsStatus = (item: MigrationItem): "syncing" | "synced" | "failed" | null => {
     const progress = isRecord(item.progress) ? item.progress : {}
@@ -1899,10 +1905,22 @@ export default function MigrationDetailsPage() {
               const currentGeneration = Number(migration.options.workerGeneration) || 1
               const currentRuns = workerRuns.filter((run) => (Number(run.workerGeneration) || 1) === currentGeneration)
               const activeRuns = currentRuns.filter((run) => run.online)
+              // A GitHub workflow is already deployed/running before its first
+              // application heartbeat reaches the agent row. Heartbeat health
+              // controls the online counter, but must not regress the pool
+              // lifecycle badge back to "deploying".
+              const runningRuns = currentRuns.filter((run) => String(run.status).toLowerCase() === "running")
+              const poolRunning = runningRuns.length > 0
               const latestRun = [...currentRuns].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]
-              const isActive = activeRuns.length > 0
               const latestRunStatus = String(latestRun?.status || "").toLowerCase()
-              const stoppingRuns = currentRuns.filter((run) => run.abortRequested || ["pending", "running"].includes(String(run.status).toLowerCase()))
+              // Cancellation is still in progress only while a worker is
+              // actually heartbeating, or while an undispatched pending run
+              // has not received the durable abort intent. An offline run
+              // with abortRequested must not leave the card on "stopping"
+              // forever after GitHub has already terminated it.
+              const stoppingRuns = currentRuns.filter((run) =>
+                run.online || (String(run.status).toLowerCase() === "pending" && !run.abortRequested)
+              )
               const migrationStatus = String(migration.status || "").toLowerCase()
               const canAbortPool = ["running", "verifying"].includes(migrationStatus)
               const status = ["completed"].includes(migrationStatus)
@@ -1913,7 +1931,7 @@ export default function MigrationDetailsPage() {
                     ? stoppingRuns.length > 0 ? "aborting" : "aborted"
                     : migrationStatus === "verifying"
                       ? "verifying"
-                      : isActive
+                      : runningRuns.length > 0
                         ? "running"
                         : ["pending", "queued", "created", "dispatching"].includes(latestRunStatus)
                           ? "deploying"
@@ -1926,7 +1944,7 @@ export default function MigrationDetailsPage() {
                 <div
                   className={cn(
                     "overflow-hidden rounded-2xl border text-sm",
-                    isActive ? "border-primary/30 bg-primary/[0.04]" : "bg-muted/15"
+                    poolRunning ? "border-primary/30 bg-primary/[0.04]" : "bg-muted/15"
                   )}
                 >
                   <div className="flex flex-col gap-4 border-b px-4 py-4 lg:flex-row lg:items-start lg:justify-between">
@@ -1949,8 +1967,10 @@ export default function MigrationDetailsPage() {
                                 ? "Migration worker processing was stopped."
                                 : migrationStatus === "verifying"
                                   ? "Migration transfer finished; destination verification is running."
-                                  : isActive
-                                    ? `${activeRuns.length} worker${activeRuns.length === 1 ? " is" : "s are"} processing this migration.`
+                                  : runningRuns.length > 0
+                                    ? activeRuns.length > 0
+                                      ? `${activeRuns.length} worker${activeRuns.length === 1 ? " is" : "s are"} processing this migration.`
+                                      : `${runningRuns.length} worker workflow${runningRuns.length === 1 ? " is" : "s are"} running and waiting for the next heartbeat.`
                                     : status === "deploying"
                                       ? "Dispatching migration workers to GitHub Actions."
                                       : "Migration is still active; waiting for workers to claim the queue."}
