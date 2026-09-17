@@ -42,6 +42,8 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
     selected_generation: string | number
     migration_status: string
     buckets: Array<Record<string, unknown>> | null
+    historical_buckets: Array<Record<string, unknown>> | null
+    current_generation: string | number
   }>(`
     with state as materialized (
       select snapshot,updated_at
@@ -64,7 +66,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       select count(*)::bigint total_jobs,
         count(*) filter(where status='pending')::bigint queued_jobs,
         count(*) filter(where status in('claimed','running'))::bigint running_jobs,
-        count(*) filter(where status in('pending','claimed','running','canceled') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<3))::bigint remaining_jobs,
+        count(*) filter(where status in('pending','claimed','running') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<3))::bigint remaining_jobs,
         count(*) filter(where status='completed')::bigint completed_jobs,
         count(*) filter(where status='failed')::bigint failed_jobs,
         coalesce(sum(case when status='completed' then case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end when status in('claimed','running') then greatest(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end,case when (progress->>'transferred') ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end) else 0 end),0)::bigint transferred_objects,
@@ -205,7 +207,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
           select count(*)::bigint total_jobs,
             count(*) filter(where status='pending')::bigint queued_jobs,
             count(*) filter(where status in('claimed','running'))::bigint running_jobs,
-            count(*) filter(where status in('pending','claimed','running','canceled') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<3))::bigint remaining_jobs,
+            count(*) filter(where status in('pending','claimed','running') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<3))::bigint remaining_jobs,
             count(*) filter(where status='completed')::bigint completed_jobs,
             count(*) filter(where status='failed')::bigint failed_jobs,
             count(*) filter(where status='canceled')::bigint canceled_jobs,
@@ -255,6 +257,44 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       ) order by item.source_bucket,item.id),'[]'::jsonb) buckets
       from public.drive_migration_items item
       where item.migration_id=$1 and (select needs_legacy from fallback_needed)
+    ), historical_bucket_projection as (
+      select coalesce(jsonb_agg(jsonb_build_object(
+        'id',i.id,'sourceBucket',i.source_bucket,'targetBucket',i.target_bucket,
+        'totalObjects',coalesce(j.total_jobs,0),
+        'queuedObjects',coalesce(j.queued_jobs,0),
+        'transferredObjects',coalesce(j.transferred_objects,0),
+        'failedObjects',coalesce(j.failed_objects,0),
+        'skippedObjects',coalesce(j.skipped_objects,0),
+        'transferredBytes',coalesce(j.transferred_bytes,0),
+        'sourceBytes',coalesce(j.source_bytes,0),
+        'status',case when coalesce(j.running_jobs,0)>0 then 'running'
+          when coalesce(j.queued_jobs,0)>0 then 'queued'
+          when coalesce(j.failed_jobs,0)>0 then 'failed'
+          when coalesce(j.canceled_jobs,0)>0 then 'aborted'
+          when coalesce(j.total_jobs,0)>0 then 'completed' else coalesce(i.slurper_status,'queued') end,
+        'updatedAt',coalesce(j.updated_at,i.updated_at)
+      ) order by i.source_bucket,i.id),'[]'::jsonb) buckets
+      from public.drive_migration_items i
+      left join lateral (
+        select count(*)::bigint total_jobs,
+          count(*) filter(where status='pending')::bigint queued_jobs,
+          count(*) filter(where status in('claimed','running'))::bigint running_jobs,
+          count(*) filter(where status='failed')::bigint failed_jobs,
+          count(*) filter(where status='canceled')::bigint canceled_jobs,
+          coalesce(sum(case when status='completed' and (result->'items'->0->>'transferred') ~ '^[0-9]+$'
+            then greatest(0,(result->'items'->0->>'transferred')::bigint-coalesce(nullif(result->'items'->0->>'skipped','')::bigint,0)) else 0 end),0)::bigint transferred_objects,
+          coalesce(sum(case when (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
+          coalesce(sum(case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint else 0 end),0)::bigint failed_objects,
+          coalesce(sum(case when status='completed' and (result->'items'->0->>'transferred') ~ '^[0-9]+$'
+            and (result->'items'->0->>'transferred')::bigint>0 then case when payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$' then (payload->'inventoryObjects'->0->>'size')::bigint else 0 end else 0 end),0)::bigint transferred_bytes,
+          coalesce(sum(case when payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$' then (payload->'inventoryObjects'->0->>'size')::bigint else 0 end),0)::bigint source_bytes,
+          max(updated_at) updated_at
+        from public.drive_repair_jobs j
+        where j.migration_id=i.migration_id and j.mode='migration'
+          and j.payload->'itemIds'->>0=i.id::text
+          and greatest(1,coalesce(nullif(j.payload->>'workerGeneration','')::int,1))=(select generation from selected_generation)
+      ) j on true
+      where i.migration_id=$1
     ), worker_counts as (
       select count(*) filter(where r.status='running' and a.status='online'
           and a.last_heartbeat_at > now() - interval '90 seconds')::bigint online_workers,
@@ -272,9 +312,10 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       job_counts.completed_jobs,job_counts.failed_jobs,job_counts.transferred_objects,job_counts.failed_objects,job_counts.canceled_jobs,
       telemetry.jobs,job_page_projection.job_page,all_job_count.job_total,
       attempt_projection.attempts,selected_worker_runs.worker_runs,selected_generation.generation selected_generation,
-      migration_meta.status migration_status,bucket_projection.buckets
+      migration_meta.status migration_status,bucket_projection.buckets,
+      historical_bucket_projection.buckets historical_buckets,migration_meta.generation current_generation
     from job_counts cross join worker_counts cross join telemetry cross join job_page_projection cross join all_job_count
-      cross join attempt_projection cross join selected_worker_runs cross join selected_generation cross join migration_meta cross join bucket_projection
+      cross join attempt_projection cross join selected_worker_runs cross join selected_generation cross join migration_meta cross join bucket_projection cross join historical_bucket_projection
     left join state on true
   `, [id, pageSize, pageIndex * pageSize, selectedGeneration])
   const stateRow = rows[0]
@@ -285,6 +326,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
   const attempts = stateRow.attempts ?? []
   const workerRuns = stateRow.worker_runs ?? []
   const resolvedGeneration = Number(stateRow.selected_generation || 1)
+  const currentGeneration = Number(stateRow.current_generation || 1)
   const migrationStatus = String(stateRow.migration_status || "")
   const jobTotal = Number(stateRow.job_total || 0)
   const jobPagination = {
@@ -301,8 +343,33 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
     if (!["canceled", "cancelled", "aborted"].includes(migrationStatus.toLowerCase()) || !Array.isArray(snapshot.buckets)) return snapshot
     return { ...snapshot, buckets: snapshot.buckets.map((bucket) => isRecord(bucket) ? { ...bucket, status: "aborted", queuedObjects: 0 } : bucket) }
   }
-  if (hasCompleteSnapshot(saved)) {
+  if (hasCompleteSnapshot(saved) && resolvedGeneration === currentGeneration) {
     return { snapshot: normalizeTerminalBuckets({ ...saved, ...liveCounts }), snapshotUpdatedAt: stateRow.snapshot_updated_at, jobs: allJobs, jobPage, jobPagination, attempts, workerRuns, selectedGeneration: resolvedGeneration, migrationStatus }
+  }
+
+  if (resolvedGeneration !== currentGeneration) {
+    const attempt = attempts.find((row) => Number(row.generation) === resolvedGeneration) ?? {}
+    const buckets = stateRow.historical_buckets ?? []
+    const snapshot = {
+      migrationId: id,
+      workerGeneration: resolvedGeneration,
+      totalJobs: Number(attempt.totalJobs || 0),
+      queuedJobs: Number(attempt.queuedJobs || 0),
+      runningJobs: Number(attempt.runningJobs || 0),
+      remainingJobs: Number(attempt.remainingJobs || 0),
+      completedJobs: Number(attempt.completedJobs || 0),
+      failedJobs: Number(attempt.failedJobs || 0),
+      canceledJobs: Number(attempt.canceledJobs || 0),
+      totalObjects: buckets.reduce((sum, bucket) => sum + Number(bucket.totalObjects || 0), 0),
+      transferred: buckets.reduce((sum, bucket) => sum + Number(bucket.transferredObjects || 0), 0),
+      skipped: buckets.reduce((sum, bucket) => sum + Number(bucket.skippedObjects || 0), 0),
+      failed: buckets.reduce((sum, bucket) => sum + Number(bucket.failedObjects || 0), 0),
+      onlineWorkers: Number(attempt.onlineWorkers || 0),
+      activeTransfers: 0,
+      buckets,
+      updatedAt: attempt.updatedAt ?? stateRow.snapshot_updated_at,
+    }
+    return { snapshot: normalizeTerminalBuckets(snapshot), snapshotUpdatedAt: stateRow.snapshot_updated_at, jobs: allJobs, jobPage, jobPagination, attempts, workerRuns, selectedGeneration: resolvedGeneration, migrationStatus }
   }
 
   // Legacy migrations may not have an orchestrator snapshot yet. This narrow

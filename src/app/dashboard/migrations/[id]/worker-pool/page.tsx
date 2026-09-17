@@ -22,7 +22,7 @@ type WorkerJob = { id: string; status: string; claimedByAgentId?: string; claime
 type JobRow = { id: string; status: string; claimedByAgentId?: string; summary?: string; error?: string; createdAt?: string; updatedAt?: string; lastHeartbeatAt?: string; completedAt?: string; objectKey?: string; objectSize?: number; sourceBucket?: string; targetBucket?: string; transferred?: number; skipped?: number; failed?: number }
 type RepairJob = { id: string; migrationId: string; status: string; mode: string; claimedByAgentId?: string; payload: Record<string, unknown>; progress: Record<string, unknown>; result: Record<string, unknown>; summary?: string; error?: string; createdAt?: string; updatedAt?: string }
 type BucketStat = { id: string; sourceBucket: string; targetBucket: string; status: string; totalObjects: number; queuedObjects?: number; transferredObjects: number; skippedObjects: number; failedObjects: number; sourceBytes: number }
-type PoolSnapshot = { onlineWorkers?: number; activeTransfers?: number; totalJobs?: number; queuedJobs?: number; runningJobs?: number; remainingJobs?: number; completedJobs?: number; failedJobs?: number; canceledJobs?: number; totalObjects?: number; transferred?: number; skipped?: number; failed?: number; processedFiles?: number; completedBytes?: number; buckets?: BucketStat[]; updatedAt?: string }
+type PoolSnapshot = { workerGeneration?: number; onlineWorkers?: number; activeTransfers?: number; totalJobs?: number; queuedJobs?: number; runningJobs?: number; remainingJobs?: number; completedJobs?: number; failedJobs?: number; canceledJobs?: number; totalObjects?: number; transferred?: number; skipped?: number; failed?: number; processedFiles?: number; completedBytes?: number; buckets?: BucketStat[]; updatedAt?: string }
 type Pagination = { pageIndex: number; pageSize: number; pageCount: number; total: number }
 type PoolAttempt = { generation: number; status: string; workerCount: number; runningWorkers: number; onlineWorkers: number; totalJobs: number; queuedJobs: number; runningJobs: number; remainingJobs?: number; completedJobs: number; failedJobs: number; canceledJobs: number; createdAt?: string; updatedAt?: string }
 type PoolWorkerRun = { id: string; agentId: string; status: string; online: boolean; abortRequested?: boolean; externalRunId?: string; instanceId?: string; jobId?: string; currentStatus?: string; lastHeartbeatAt?: string; completedFiles?: number; failedFiles?: number; completedBytes?: number; createdAt?: string; updatedAt?: string }
@@ -63,6 +63,8 @@ export default function MigrationWorkerPoolDetailsPage() {
   const [attempts, setAttempts] = React.useState<PoolAttempt[]>([])
   const [workerRuns, setWorkerRuns] = React.useState<PoolWorkerRun[]>([])
   const [selectedGeneration, setSelectedGeneration] = React.useState(0)
+  const selectedGenerationRef = React.useRef(0)
+  selectedGenerationRef.current = selectedGeneration
   const [selectedJob, setSelectedJob] = React.useState<RepairJob | null>(null)
   const [selectedJobId, setSelectedJobId] = React.useState<string | null>(null)
   const [tab, setTab] = React.useState("overview")
@@ -84,9 +86,16 @@ export default function MigrationWorkerPoolDetailsPage() {
       const [poolResponse, detailResponse] = await Promise.all([poolRequest, detailRequest])
       const data = await poolResponse.json().catch(() => ({}))
       if (!poolResponse.ok) throw new Error(data.error || "Unable to load migration worker pool")
+      if (selectedGenerationRef.current > 0 && Number(data.selectedGeneration) !== selectedGenerationRef.current) return
       setJobs(Array.isArray(data.jobs) ? data.jobs : [])
       setJobPage(Array.isArray(data.jobPage) ? data.jobPage : [])
-      setSnapshot(isRecord(data.snapshot) ? data.snapshot as PoolSnapshot : {})
+      setSnapshot((previous) => {
+        const incoming = isRecord(data.snapshot) ? data.snapshot as PoolSnapshot : {}
+        const sameGeneration = Number(previous.workerGeneration || 0) === Number(incoming.workerGeneration || 0)
+        const previousTime = Date.parse(String(previous.updatedAt || ""))
+        const incomingTime = Date.parse(String(incoming.updatedAt || ""))
+        return sameGeneration && Number.isFinite(previousTime) && Number.isFinite(incomingTime) && incomingTime < previousTime ? previous : incoming
+      })
       setAttempts(Array.isArray(data.attempts) ? data.attempts : [])
       setWorkerRuns(Array.isArray(data.workerRuns) ? data.workerRuns : [])
       if (selectedGeneration === 0 && Number(data.selectedGeneration) > 0) setSelectedGeneration(Number(data.selectedGeneration))
@@ -202,7 +211,7 @@ export default function MigrationWorkerPoolDetailsPage() {
     <DashboardPageHeader title="Migration worker pools" description={`${formatLastSyncedAt(snapshot.updatedAt)} - automatically refreshes every 5 seconds`} actions={<div className="flex w-full gap-2 sm:w-auto"><Button asChild variant="outline" size="sm" className="flex-1 rounded-xl sm:flex-none"><Link href={`/dashboard/migrations/${encodeURIComponent(migrationId)}`}><ArrowLeft data-icon="inline-start" />Back</Link></Button><Button variant="outline" size="sm" className="flex-1 rounded-xl sm:flex-none" onClick={() => void load({ manual: true })} disabled={refreshing}><RefreshCw data-icon="inline-start" className={refreshing ? "animate-spin" : undefined} />Refresh</Button></div>} />
     <Card className="gap-0 overflow-hidden py-0">
       <CardHeader className="border-b px-4 py-4 sm:px-5"><div className="flex flex-col gap-1"><CardTitle className="text-base">Worker-pool attempts</CardTitle><CardDescription>Each tab is one dispatched pool generation, including retries and aborted attempts.</CardDescription></div></CardHeader>
-      <CardContent className="p-3 sm:p-4"><Tabs value={String(selectedGeneration || selectedAttempt?.generation || 1)} onValueChange={(value) => { setSelectedGeneration(Number(value)); setPagination((current) => ({ ...current, pageIndex: 0 })); setSelectedJobId(null); setSelectedJob(null) }}><TabsList>{attempts.map((attempt, index) => <TabsTrigger key={attempt.generation} value={String(attempt.generation)}><span>{index === attempts.length - 1 ? "Initial pool" : `Retry ${attempt.generation - 1}`}</span>{statusBadge(attempt.status)}</TabsTrigger>)}</TabsList></Tabs></CardContent>
+      <CardContent className="p-3 sm:p-4"><Tabs value={String(selectedGeneration || selectedAttempt?.generation || 1)} onValueChange={(value) => { selectedGenerationRef.current = Number(value); setSelectedGeneration(Number(value)); setPagination((current) => ({ ...current, pageIndex: 0 })); setSelectedJobId(null); setSelectedJob(null) }}><TabsList>{attempts.map((attempt, index) => <TabsTrigger key={attempt.generation} value={String(attempt.generation)}><span>{index === attempts.length - 1 ? "Initial pool" : `Retry ${attempt.generation - 1}`}</span>{statusBadge(attempt.status)}</TabsTrigger>)}</TabsList></Tabs></CardContent>
     </Card>
     <Tabs value={tab} onValueChange={setTab} className="gap-5">
       <TabsList><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="jobs">File queue <Badge variant="outline">{formatNumber(pagination.total)}</Badge></TabsTrigger></TabsList>

@@ -392,7 +392,10 @@ async function ensureSchedule(token: string, accountId: string, scriptName: stri
     // A fresh installation may use a new script suffix while the prior
     // Drive-owned Worker still holds the account's cron slot. Move just this
     // install's minutely trigger, then restore it if the replacement fails.
-    if (!previousRequired || !isCronTriggerLimitError(error)) throw error
+    if (!isCronTriggerLimitError(error)) throw error
+    if (!previousRequired) {
+      throw new Error("Cloudflare account cron capacity is full (Workers Free allows five triggers per account). Drive needs one trigger for each scheduled Worker. Free an unused cron slot or select an account with capacity; unrelated triggers were left untouched.")
+    }
     await replaceWorkerSchedules(token, accountId, previousScript, previousSchedules.filter((schedule) => schedule.cron !== "* * * * *"))
     try {
       await replaceWorkerSchedules(token, accountId, scriptName, [...schedules, { cron: "* * * * *" }])

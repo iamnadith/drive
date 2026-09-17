@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 26
+const BUILD = 27
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -516,7 +516,7 @@ async function migrationLiveState(db: Client, migrationId: string) {
   const [jobsResult, runsResult, aggregateResult, itemsResult] = await Promise.all([
     db.query(`select id,status,claimed_by_agent_id,progress,result,summary,error,created_at,updated_at,last_heartbeat_at from drive_repair_jobs where migration_id=$1 and mode='migration' and work_key like $2 order by updated_at desc limit 500`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`]),
     db.query(`select r.id,r.status,r.job_reference,r.payload,r.created_at,r.updated_at,a.status agent_status,a.last_heartbeat_at agent_heartbeat from drive_agent_runs r left join drive_agents a on a.id=r.agent_id where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=$2 order by r.created_at`, [migrationId, generation]),
-    db.query(`select count(*)::bigint total_jobs,count(*) filter(where status='pending')::bigint queued_jobs,count(*) filter(where status in('claimed','running'))::bigint running_jobs,count(*) filter(where status in('pending','claimed','running','canceled') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<3))::bigint remaining_jobs,count(*) filter(where status='completed')::bigint completed_jobs,count(*) filter(where status='failed')::bigint failed_jobs,count(*) filter(where status='canceled')::bigint canceled_jobs,coalesce(sum(case when (result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (result->'items'->0->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint transferred_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then 1 else 0 end),0)::bigint copied_objects,coalesce(sum(case when (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,coalesce(sum(case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' and jsonb_typeof(result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then coalesce(nullif(payload->'inventoryObjects'->0->>'size','')::bigint,0) else 0 end),0)::bigint completed_bytes from drive_repair_jobs where migration_id=$1 and mode='migration' and work_key like $2`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`]),
+    db.query(`select count(*)::bigint total_jobs,count(*) filter(where status='pending')::bigint queued_jobs,count(*) filter(where status in('claimed','running'))::bigint running_jobs,count(*) filter(where status in('pending','claimed','running') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<3))::bigint remaining_jobs,count(*) filter(where status='completed')::bigint completed_jobs,count(*) filter(where status='failed')::bigint failed_jobs,count(*) filter(where status='canceled')::bigint canceled_jobs,coalesce(sum(case when (result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (result->'items'->0->>'alreadyPresent')::bigint else greatest(case when (result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (result->'items'->0->>'alreadyPresent')::bigint else 0 end,case when (progress->>'alreadyPresent') ~ '^[0-9]+$' then (progress->>'alreadyPresent')::bigint else 0 end) end),0)::bigint already_present_objects,coalesce(sum(case when status='completed' then case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end else greatest(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end,case when (progress->>'transferred') ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end) end),0)::bigint transferred_objects,coalesce(sum(case when status='completed' and (result->'items'->0->>'transferred') ~ '^[0-9]+$' then ((result->'items'->0->>'transferred')::bigint>0)::int else (greatest(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end,case when (progress->>'transferred') ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end)>0)::int end),0)::bigint copied_objects,coalesce(sum(case when status='completed' and (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else greatest(case when (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end,case when (progress->>'skipped') ~ '^[0-9]+$' then (progress->>'skipped')::bigint else 0 end) end),0)::bigint skipped_objects,coalesce(sum(case when status='completed' and (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint else greatest(case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint else 0 end,case when (progress->>'failed') ~ '^[0-9]+$' then (progress->>'failed')::bigint else 0 end) end),0)::bigint failed_objects,coalesce(sum(case when status='completed' and (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then coalesce(nullif(payload->'inventoryObjects'->0->>'size','')::bigint,0) else 0 end),0)::bigint completed_bytes from drive_repair_jobs where migration_id=$1 and mode='migration' and work_key like $2`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`]),
     db.query(`select id,source_bucket,target_bucket,source_objects,source_bytes,slurper_status,progress,updated_at from drive_migration_items where migration_id=$1 order by created_at`, [migrationId]),
   ])
   const jobs = jobsResult.rows
@@ -535,7 +535,7 @@ async function migrationLiveState(db: Client, migrationId: string) {
     const progress = job.progress && typeof job.progress === "object" ? job.progress : {}
     if (["claimed", "running"].includes(String(job.status)) && progress.currentFile && Date.now() - Date.parse(String(job.last_heartbeat_at || "")) < 90_000) totals.activeTransfers += 1
   }
-  const snapshot = { migrationId, ...totals, buckets, updatedAt: new Date().toISOString() }
+  const snapshot = { migrationId, workerGeneration: generation, ...totals, buckets, updatedAt: new Date().toISOString() }
   await db.query(`insert into drive_migration_worker_live_state(migration_id,snapshot,updated_at) values($1,$2::jsonb,now()) on conflict(migration_id) do update set snapshot=excluded.snapshot,updated_at=now()`, [migrationId, JSON.stringify(snapshot)])
   return { snapshot: { ...snapshot, workerGeneration: generation }, jobs, runs, workerGeneration: generation }
 }
@@ -543,7 +543,7 @@ async function recoverJobs(db: Client, migrationId: string, generation: number, 
   const result = await db.query(`
     update drive_repair_jobs set status='pending',claimed_by_agent_id=null,claim_token=null,claimed_at=null,started_at=null,last_heartbeat_at=null,error=null,
       summary='Recovered by Migration Orchestrator',result=jsonb_set(coalesce(result,'{}'::jsonb),'{retryCount}',to_jsonb(coalesce((result->>'retryCount')::int,0)+1)),updated_at=now()
-    where migration_id=$1 and work_key like $2 and work_key like $3 and ((status='failed' and coalesce((result->>'retryCount')::int,0)<3) or status='canceled' or (status in('claimed','running') and coalesce(last_heartbeat_at,started_at,claimed_at,updated_at)<now()-interval '3 minutes'))
+    where migration_id=$1 and work_key like $2 and work_key like $3 and ((status='failed' and coalesce((result->>'retryCount')::int,0)<3) or (status in('claimed','running') and coalesce(last_heartbeat_at,started_at,claimed_at,updated_at)<now()-interval '3 minutes'))
   `, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`, `%`])
   return result.rowCount || 0
 }
@@ -551,13 +551,13 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
   await db.query(`
     with aggregate as (
       select i0.id item_id,
-        count(j.*) filter(where j.status in('pending','claimed','running','canceled') or (j.status='failed' and case when j.result->>'retryCount' ~ '^[0-9]+$' then (j.result->>'retryCount')::int else 0 end<3))::bigint queued_objects,
+        count(j.*) filter(where j.status='pending')::bigint queued_objects,
         count(j.*) filter(where j.status='completed')::bigint completed_objects,
         count(j.*) filter(where j.status in('claimed','running'))::bigint active_objects,
-        coalesce(sum(case when j.status='completed' then case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end when j.status in('claimed','running') then greatest(case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end,case when (j.progress->>'transferred') ~ '^[0-9]+$' then (j.progress->>'transferred')::bigint else 0 end) else 0 end),0)::bigint transferred_objects,
-        coalesce(sum(case when j.status='completed' and (j.result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (j.result->'items'->0->>'alreadyPresent')::bigint when j.status in('claimed','running') and (j.progress->>'alreadyPresent') ~ '^[0-9]+$' then (j.progress->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,
-        coalesce(sum(case when j.status='completed' and (j.result->'items'->0->>'skipped') ~ '^[0-9]+$' then (j.result->'items'->0->>'skipped')::bigint when j.status in('claimed','running') and (j.progress->>'skipped') ~ '^[0-9]+$' then (j.progress->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
-        coalesce(sum(case when j.status='completed' and (j.result->'items'->0->>'failed') ~ '^[0-9]+$' then (j.result->'items'->0->>'failed')::bigint when j.status in('claimed','running') and (j.progress->>'failed') ~ '^[0-9]+$' then (j.progress->>'failed')::bigint when j.status='failed' and jsonb_typeof(j.result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,
+        coalesce(sum(case when j.status='completed' then case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end else greatest(case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end,case when (j.progress->>'transferred') ~ '^[0-9]+$' then (j.progress->>'transferred')::bigint else 0 end) end),0)::bigint transferred_objects,
+        coalesce(sum(case when j.status='completed' and (j.result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (j.result->'items'->0->>'alreadyPresent')::bigint else greatest(case when (j.result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (j.result->'items'->0->>'alreadyPresent')::bigint else 0 end,case when (j.progress->>'alreadyPresent') ~ '^[0-9]+$' then (j.progress->>'alreadyPresent')::bigint else 0 end) end),0)::bigint already_present_objects,
+        coalesce(sum(case when j.status='completed' and (j.result->'items'->0->>'skipped') ~ '^[0-9]+$' then (j.result->'items'->0->>'skipped')::bigint else greatest(case when (j.result->'items'->0->>'skipped') ~ '^[0-9]+$' then (j.result->'items'->0->>'skipped')::bigint else 0 end,case when (j.progress->>'skipped') ~ '^[0-9]+$' then (j.progress->>'skipped')::bigint else 0 end) end),0)::bigint skipped_objects,
+        coalesce(sum(case when j.status='completed' and (j.result->'items'->0->>'failed') ~ '^[0-9]+$' then (j.result->'items'->0->>'failed')::bigint else greatest(case when (j.result->'items'->0->>'failed') ~ '^[0-9]+$' then (j.result->'items'->0->>'failed')::bigint else 0 end,case when (j.progress->>'failed') ~ '^[0-9]+$' then (j.progress->>'failed')::bigint else 0 end) end),0)::bigint failed_objects,
         coalesce(sum(case when j.status='completed' and (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' and (j.result->'items'->0->>'transferred')::bigint>0 then 1 when j.status in('claimed','running') and greatest(case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end,case when (j.progress->>'transferred') ~ '^[0-9]+$' then (j.progress->>'transferred')::bigint else 0 end)>0 then 1 else 0 end),0)::bigint copied_objects,
         coalesce(sum((j.payload->'inventoryObjects'->0->>'size')::bigint) filter(where j.status='completed' and case when coalesce(j.result->'items'->0->>'transferred','') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint>0 else false end),0)::bigint completed_bytes
       from drive_migration_items i0
@@ -595,13 +595,17 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
           when coalesce(a.queued_objects,0)>0 then 'queued'
           else 'scanning'
         end,
-        'transferredObjects',least(coalesce(i.source_objects,0),
+        'transferredObjects',least(coalesce(i.source_objects,0),greatest(0,
           (case when i.progress->'slurperCumulative'->>'transferredObjects' ~ '^[0-9]+$'
             then (i.progress->'slurperCumulative'->>'transferredObjects')::bigint else 0 end)
-          + coalesce(a.transferred_objects,0)),
+          + coalesce(a.transferred_objects,0)-least(
+            (case when i.progress->'slurperCumulative'->>'transferredObjects' ~ '^[0-9]+$'
+              then (i.progress->'slurperCumulative'->>'transferredObjects')::bigint else 0 end)+coalesce(a.transferred_objects,0),
+            greatest(case when i.progress->'slurperCumulative'->>'skippedObjects' ~ '^[0-9]+$'
+              then (i.progress->'slurperCumulative'->>'skippedObjects')::bigint else 0 end,coalesce(a.skipped_objects,0))))),
         'transferredBytes',coalesce(a.completed_bytes,0),
         'alreadyPresentObjects',coalesce(a.already_present_objects,0),
-        'copiedObjects',coalesce(a.transferred_objects,0),
+        'copiedObjects',greatest(0,coalesce(a.transferred_objects,0)-least(coalesce(a.transferred_objects,0),coalesce(a.skipped_objects,0))),
         'skippedObjects',greatest(
           case when i.progress->'slurperCumulative'->>'skippedObjects' ~ '^[0-9]+$'
             then (i.progress->'slurperCumulative'->>'skippedObjects')::bigint else 0 end,
@@ -1633,6 +1637,17 @@ async function workerRequest(request: Request, env: Env, path: string) {
           return json({ ok: true, job: null, poolComplete: true, poolStatus: migration?.status || "missing" })
         }
         const generation = integer(migration.options?.workerGeneration, 1, 1, 1000000)
+        if (body.pool === true) {
+          const inventoryReady = await db.query(`
+            select not exists(select 1 from drive_migration_items i where i.migration_id=$1
+              and (coalesce(i.progress->'migrationInventory'->>'status','')<>'completed'
+                or coalesce(i.progress->'migrationQueue'->>'status','')<>'completed')) ready
+          `, [migrationId])
+          if (inventoryReady.rows[0]?.ready !== true) {
+            await db.query("commit")
+            return json({ ok: true, job: null, poolComplete: false, poolReason: "inventory_incomplete" })
+          }
+        }
         const candidate = body.pool === true
           ? await db.query(`select * from drive_repair_jobs where migration_id=$1 and status='pending' and work_key like $2 order by created_at for update skip locked limit 1`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`])
           : await db.query(`select * from drive_repair_jobs where id=$2 and migration_id=$1 and status='pending' for update skip locked`, [migrationId, requestedJobId])

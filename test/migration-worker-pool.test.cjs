@@ -52,6 +52,13 @@ test('GitHub migration workers receive only Orchestrator URL and shared worker s
   assert.match(workflow, /TOKEN: \$\{\{ secrets\.DRIVE_WORKER_SHARED_SECRET \}\}/)
 })
 
+test('the dashboard dispatch route cannot dispatch a GitHub workflow outside the Migration Orchestrator', () => {
+  const route = read('src/app/api/agents/[id]/dispatch/route.ts')
+  assert.match(route, /if \(agent\.provider === "github_actions"\)[\s\S]*Migration Orchestrator\. Start or retry this migration with the worker pool/)
+  const workersPage = read('src/app/dashboard/workers/page.tsx')
+  assert.doesNotMatch(workersPage, /Dispatch GitHub worker|Stop worker|stop_run|\/dispatch/)
+})
+
 test('migration-pool cancellation is an orchestrator-owned durable intent', () => {
   const route = read('src/app/api/repair-jobs/[id]/route.ts')
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
@@ -81,6 +88,33 @@ test('GitHub cancellation compares migration ids consistently as text', () => {
   assert.match(abort, /j\.migration_id::text=\$1::text/)
   assert.match(abort, /m\.id::text=\$1::text/)
   assert.doesNotMatch(abort, /r\.payload->>'migrationId'=\$1(?!::text)/)
+})
+
+test('an explicit canceled pool attempt is not silently revived by recovery', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const recovery = orchestrator.slice(orchestrator.indexOf('async function recoverJobs'), orchestrator.indexOf('async function refreshWorkerItemProgress'))
+  assert.match(recovery, /status='failed'.*retryCount/)
+  assert.doesNotMatch(recovery, /or status='canceled'/)
+})
+
+test('late workers cannot claim migration files before the full inventory and queue are committed', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const claim = orchestrator.slice(orchestrator.indexOf('if (action === "claim-job")'), orchestrator.indexOf('const jobId = match[3]'))
+  assert.match(claim, /inventoryReady[\s\S]*migrationInventory[\s\S]*migrationQueue[\s\S]*inventory_incomplete/)
+})
+
+test('verification scans never replace the frozen migration source inventory totals', () => {
+  const scanner = read('workers/file-scanner/src/index.ts')
+  assert.match(scanner, /not exists\(select 1 from drive_migration_verification_state v where v\.source_scan_id=s\.id\)/)
+  const verificationComplete = scanner.slice(scanner.indexOf('), item_done as ('), scanner.indexOf(') select missing,mismatched,extra from state_done'))
+  assert.doesNotMatch(verificationComplete, /source_objects=\$6|source_bytes=\$7/)
+})
+
+test('historical worker-pool tabs build bucket progress from their selected generation', () => {
+  const route = read('src/app/api/migrations/[id]/worker-pool/route.ts')
+  assert.match(route, /historical_bucket_projection/)
+  assert.match(route, /resolvedGeneration !== currentGeneration/)
+  assert.match(route, /historical_buckets/)
 })
 
 test('worker-pool details hydrate and refresh from PostgreSQL only', () => {
@@ -229,7 +263,7 @@ test('orchestrator queues scanner pages incrementally without closing a running 
   assert.match(orchestrator, /materializedObjects: priorMaterialized \+ pageCount/)
   assert.doesNotMatch(orchestrator, /jsonb_to_recordset\(\$4::jsonb\)/)
   assert.match(orchestrator, /tuneQueueBatchSize/)
-  assert.match(orchestrator, /count\(j\.\*\) filter\(where j\.status in\('pending','claimed','running','canceled'\) or \(j\.status='failed' and case when j\.result->>'retryCount' ~ '\^\[0-9\]\+\$' then \(j\.result->>'retryCount'\)::int else 0 end<3\)\)::bigint queued_objects/)
+  assert.match(orchestrator, /count\(j\.\*\) filter\(where j\.status='pending'\)::bigint queued_objects/)
   assert.match(orchestrator, /Building migration queue for migration workers/)
   assert.match(orchestrator, /jsonb_build_object\('status',s\.status,'objects',s\.objects,'bytes',s\.bytes/)
   assert.match(orchestrator, /temporarily empty running scan block another bucket/)

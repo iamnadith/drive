@@ -10,7 +10,7 @@ type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: st
 type Row = Record<string, any>
 type ClaimedTask = { kind: "migration" | "generic"; task: Row }
 type ClaimedCycle = { ok: true; owner: string; tasks: ClaimedTask[] } | { ok: true; skipped: string } | { ok: true; idle: true }
-const BUILD = 19
+const BUILD = 20
 const MAX_SECRET_LENGTH = 512
 // Workers Free allows only 10 ms of CPU per invocation. Keep each invocation
 // deliberately small; queue continuations immediately schedule the next
@@ -333,7 +333,7 @@ async function compare(db: Client, task: Row) {
         from counts c where v.migration_item_id=$1::uuid and v.generation=$4::int and v.lease_owner=$5::text
         returning c.missing,c.mismatched,c.extra
       ), item_done as (
-        update drive_migration_items i set source_objects=$6,source_bytes=$7,last_progress_at=now(),updated_at=now(),
+        update drive_migration_items i set last_progress_at=now(),updated_at=now(),
           progress=jsonb_set(jsonb_set(coalesce(i.progress,'{}'::jsonb),'{fileVerification}',jsonb_build_object(
             'status','completed','missing',s.missing,'mismatched',s.mismatched,'extra',s.extra,'generation',$4::int,'completedAt',now()
           )), '{stage}','"file_verification_completed"'::jsonb)
@@ -420,6 +420,7 @@ async function processGenericScan(db: Client, env: Env, task: Row) {
           'stage',case when s.status='completed' then 'scan_completed' else 'scanning_source' end
         ),last_progress_at=now(),updated_at=now()
       from saved_scan s where s.kind='source' and s.migration_id is not null and s.migration_item_id is not null
+        and not exists(select 1 from drive_migration_verification_state v where v.source_scan_id=s.id)
         and i.id=s.migration_item_id and i.migration_id=s.migration_id
       returning i.id
     )

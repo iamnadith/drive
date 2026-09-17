@@ -80,6 +80,7 @@ type Migration = {
     historyReadOnlyReason?: string
   }
   createdAt: string
+  updatedAt?: string
   startedAt?: string
   completedAt?: string
   lastSyncedAt?: string
@@ -111,6 +112,7 @@ type MigrationItem = {
   progress: Record<string, unknown>
   sourceObjects?: number
   sourceBytes?: number
+  updatedAt?: string
 }
 
 type FailedObjectDiagnostic = {
@@ -285,6 +287,10 @@ function migrationStatusBadge(status: string | undefined) {
 
 function mergeIncomingItem(prev: MigrationItem | undefined, next: MigrationItem): MigrationItem {
   if (!prev) return next
+
+  const previousItemTime = Date.parse(String(prev.updatedAt || ""))
+  const nextItemTime = Date.parse(String(next.updatedAt || ""))
+  if (Number.isFinite(previousItemTime) && Number.isFinite(nextItemTime) && nextItemTime < previousItemTime) return prev
 
   const prevProgress = isRecord(prev.progress) ? (prev.progress as Record<string, unknown>) : {}
   const nextProgress = isRecord(next.progress) ? (next.progress as Record<string, unknown>) : {}
@@ -482,6 +488,14 @@ type LogLine = {
   verificationGeneration?: number
   verificationAttemptUnknown?: boolean
   verificationHistorical?: boolean
+}
+
+function mergeIncomingMigration(prev: Migration | null, next: Migration): Migration {
+  if (!prev) return next
+  const previousTime = Date.parse(String(prev.updatedAt || ""))
+  const nextTime = Date.parse(String(next.updatedAt || ""))
+  if (Number.isFinite(previousTime) && Number.isFinite(nextTime) && nextTime < previousTime) return prev
+  return next
 }
 
 function collectLogLines(items: MigrationItem[], workerRuns: MigrationWorkerRun[] = []): LogLine[] {
@@ -1079,7 +1093,7 @@ export default function MigrationDetailsPage() {
         isRecord(detailsJson) && Array.isArray(detailsJson.items) ? (detailsJson.items as MigrationItem[]) : []
       const nextWorkerRuns =
         isRecord(detailsJson) && Array.isArray(detailsJson.workerRuns) ? (detailsJson.workerRuns as MigrationWorkerRun[]) : []
-      setMigration(nextMigration)
+      setMigration((prev) => nextMigration ? mergeIncomingMigration(prev, nextMigration) : null)
       setItems((prev) => mergeIncomingItems(prev, nextItems))
       setWorkerRuns(nextWorkerRuns)
     } catch (e: unknown) {
@@ -1152,7 +1166,7 @@ export default function MigrationDetailsPage() {
         retry = 0
         try {
           const data: unknown = JSON.parse(String(event.data ?? "{}"))
-          if (isRecord(data) && isRecord(data.migration)) setMigration(data.migration as Migration)
+          if (isRecord(data) && isRecord(data.migration)) setMigration((prev) => mergeIncomingMigration(prev, data.migration as Migration))
           if (isRecord(data) && Array.isArray(data.items)) {
             const nextItems = data.items as MigrationItem[]
             setItems((prev) => mergeIncomingItems(prev, nextItems))

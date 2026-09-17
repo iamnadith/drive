@@ -191,6 +191,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       return NextResponse.json({ ok: true, queued: true, workflowIds: selectedIds }, { status: 202 })
     }
 
+    if (agent.provider === "github_actions") {
+      return NextResponse.json({ error: "GitHub Actions workers are dispatched only by the Migration Orchestrator. Start or retry this migration with the worker pool." }, { status: 409 })
+    }
+
     const workerJobs = await listRepairJobs(500)
     const activeWorkerJobs = workerJobs.filter(
       (job) =>

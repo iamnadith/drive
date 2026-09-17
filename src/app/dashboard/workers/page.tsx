@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { Activity, Bot, Clock3, Copy, Eye, EyeOff, Github, HardDrive, Play, Plus, RefreshCw, Search, Server, Square, Trash2 } from "lucide-react"
+import { Activity, Bot, Clock3, Copy, Eye, EyeOff, Github, HardDrive, Plus, RefreshCw, Search, Server, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { useRouter, useSearchParams } from "next/navigation"
 import { GitHubWorkerSetup } from "@/components/dashboard/github-worker-setup"
@@ -114,12 +114,6 @@ type RepairJobRow = {
     createdAt: string
     updatedAt: string
   } | null
-}
-
-type MigrationRow = {
-  id: string
-  status: string
-  createdAt: string
 }
 
 function normalizeAgentRow(input: unknown): AgentRow | null {
@@ -352,21 +346,10 @@ export default function WorkersPage() {
   const [githubWorkflowsLoading, setGithubWorkflowsLoading] = React.useState(false)
   const githubReposRequest = React.useRef<AbortController | null>(null)
   const [repairJobs, setRepairJobs] = React.useState<RepairJobRow[]>([])
-  const [dispatchingAgentId, setDispatchingAgentId] = React.useState<string | null>(null)
   const [deletingWorkerId, setDeletingWorkerId] = React.useState<string | null>(null)
   const [deletingJobId, setDeletingJobId] = React.useState<string | null>(null)
   const [abortingJobId, setAbortingJobId] = React.useState<string | null>(null)
-  const [stoppingWorkerId, setStoppingWorkerId] = React.useState<string | null>(null)
-  const [stoppingRunId, setStoppingRunId] = React.useState<string | null>(null)
-  const [dispatchOpen, setDispatchOpen] = React.useState(false)
-  const [dispatchAgent, setDispatchAgent] = React.useState<AgentRow | null>(null)
   const [confirmDeleteWorker, setConfirmDeleteWorker] = React.useState<AgentRow | null>(null)
-  const [confirmStopWorker, setConfirmStopWorker] = React.useState<AgentRow | null>(null)
-  const [dispatchMigrationId, setDispatchMigrationId] = React.useState("")
-  const [dispatchSearch, setDispatchSearch] = React.useState("")
-  const [dispatchMode, setDispatchMode] = React.useState<"verify_only" | "repair_and_verify">("repair_and_verify")
-  const [migrations, setMigrations] = React.useState<MigrationRow[]>([])
-  const [loadingMigrations, setLoadingMigrations] = React.useState(false)
   const [selectedWorker, setSelectedWorker] = React.useState<AgentRow | null>(null)
   const [workerDetailsOpen, setWorkerDetailsOpen] = React.useState(false)
   const [workerTokenLoading, setWorkerTokenLoading] = React.useState<string | null>(null)
@@ -380,8 +363,7 @@ export default function WorkersPage() {
       const status = getEffectiveStatus(agent)
       return status === "online"
     }) ||
-    repairJobs.some((job) => !["completed", "failed", "canceled"].includes(job.status)) ||
-    dispatchOpen
+    repairJobs.some((job) => !["completed", "failed", "canceled"].includes(job.status))
 
   const loadAgents = React.useCallback(async (notify = false) => {
     try {
@@ -600,27 +582,6 @@ export default function WorkersPage() {
     githubReposRequest.current = null
   }, [])
 
-  const loadMigrations = React.useCallback(async () => {
-    try {
-      setLoadingMigrations(true)
-      const res = await fetch("/api/migrations", { cache: "no-store" })
-      const json: unknown = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to load migrations"
-        throw new Error(message)
-      }
-      const rows =
-        typeof json === "object" && json !== null && Array.isArray((json as any).migrations)
-          ? ((json as any).migrations as MigrationRow[])
-          : []
-      setMigrations(rows)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to load migrations")
-    } finally {
-      setLoadingMigrations(false)
-    }
-  }, [])
-
   const copyText = React.useCallback(async (value: string, label: string) => {
     try {
       await navigator.clipboard.writeText(value)
@@ -736,35 +697,13 @@ export default function WorkersPage() {
     async (worker: AgentRow) => {
       setDeletingWorkerId(worker.id)
       try {
-        const activeWorkerJobs = repairJobs.filter(
-          (job) =>
-            !["completed", "failed", "canceled"].includes(job.status) &&
-            (job.claimedByAgentId === worker.id || job.requestedByAgentId === worker.id)
-        )
-
-        for (const job of activeWorkerJobs) {
-          const abortRes = await fetch(`/api/repair-jobs/${encodeURIComponent(job.id)}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "abort" }),
-          })
-          const abortJson: unknown = await abortRes.json().catch(() => ({}))
-          if (!abortRes.ok) {
-            const message =
-              typeof abortJson === "object" && abortJson !== null && "error" in abortJson
-                ? String((abortJson as any).error)
-                : "Unable to abort worker jobs before deleting the worker"
-            throw new Error(message)
-          }
-        }
-
         const res = await fetch(`/api/workers/${encodeURIComponent(worker.id)}`, { method: "DELETE" })
         const json: unknown = await res.json().catch(() => ({}))
         if (!res.ok) {
           const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to delete worker"
           throw new Error(message)
         }
-        toast.success(activeWorkerJobs.length > 0 ? "Worker jobs aborted and worker deleted" : "Worker deleted")
+        toast.success("Worker deleted")
         await loadAgents()
         await loadRepairJobs()
       } catch (error) {
@@ -773,7 +712,7 @@ export default function WorkersPage() {
         setDeletingWorkerId(null)
       }
     },
-    [loadAgents, loadRepairJobs, repairJobs]
+    [loadAgents, loadRepairJobs]
   )
 
   const deleteRepairJobRecord = React.useCallback(
@@ -824,34 +763,6 @@ export default function WorkersPage() {
     [loadAgents, loadRepairJobs]
   )
 
-  const stopGithubWorkerRun = React.useCallback(
-    async (worker: AgentRow) => {
-      setStoppingWorkerId(worker.id)
-      try {
-        const res = await fetch(`/api/workers/${encodeURIComponent(worker.id)}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "stop" }),
-        })
-        const json: unknown = await res.json().catch(() => ({}))
-        if (!res.ok) {
-          const message =
-            typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to stop GitHub worker"
-          throw new Error(message)
-        }
-        const abortedCount =
-          typeof json === "object" && json !== null && Array.isArray((json as any).abortedJobIds) ? (json as any).abortedJobIds.length : 0
-        toast.success(abortedCount > 0 ? `Worker stopped and ${abortedCount} job(s) aborted` : "GitHub worker stop requested")
-        await loadRepairJobs()
-        await loadAgents()
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Unable to stop GitHub worker")
-      } finally {
-        setStoppingWorkerId(null)
-      }
-    },
-    [loadAgents, loadRepairJobs]
-  )
 
   const totalOnline = agents.filter((agent) => getEffectiveStatus(agent) === "online").length
   const totalGithub = agents.filter((agent) => agent.provider === "github_actions").length
@@ -872,36 +783,6 @@ export default function WorkersPage() {
     [repairJobs]
   )
 
-  const getWorkerActiveLinkedJobs = React.useCallback(
-    (worker: AgentRow) => getWorkerLinkedJobs(worker).filter((job) => !["completed", "failed", "canceled"].includes(job.status)),
-    [getWorkerLinkedJobs]
-  )
-
-  const canStopWorker = React.useCallback(
-    (worker: AgentRow) =>
-      worker.provider === "github_actions" &&
-      (
-        getWorkerLinkedJobs(worker).length > 0 ||
-        worker.latestRun?.status === "pending" ||
-        worker.latestRun?.status === "running"
-      ),
-    [getWorkerLinkedJobs]
-  )
-  const filteredMigrations = migrations.filter((migration) => {
-    const query = dispatchSearch.trim().toLowerCase()
-    if (!query) return true
-    return migration.id.toLowerCase().includes(query) || migration.status.toLowerCase().includes(query)
-  })
-
-  const openDispatchDialog = React.useCallback((worker: AgentRow) => {
-    setDispatchAgent(worker)
-    setDispatchMigrationId("")
-    setDispatchSearch("")
-    setDispatchMode("repair_and_verify")
-    setDispatchOpen(true)
-    void loadMigrations()
-  }, [loadMigrations])
-
   const updateWorkflowWorkerCount = React.useCallback(async (workflow: AgentRow, count: number) => {
     setAgents((current) => current.map((entry) => entry.id === workflow.id ? { ...entry, workerCount: count } : entry))
     try {
@@ -921,62 +802,6 @@ export default function WorkersPage() {
       toast.error(error instanceof Error ? error.message : "Unable to update worker count")
     }
   }, [])
-
-  const stopWorkflowRun = React.useCallback(async (workflow: AgentRow, runId: string) => {
-    setStoppingRunId(runId)
-    try {
-      const res = await fetch(`/api/workers/${encodeURIComponent(workflow.id)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "stop_run", runId }),
-      })
-      const json: unknown = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        const message = typeof json === "object" && json !== null && "error" in json ? String((json as any).error) : "Unable to stop workflow worker"
-        throw new Error(message)
-      }
-      toast.success("Workflow worker stopped; one capacity slot is now available")
-      await loadAgents()
-      await loadRepairJobs()
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to stop workflow worker")
-    } finally {
-      setStoppingRunId(null)
-    }
-  }, [loadAgents, loadRepairJobs])
-
-  const handleDispatch = React.useCallback(async () => {
-    if (!dispatchAgent) return
-    setDispatchingAgentId(dispatchAgent.id)
-    try {
-      const res = await fetch(`/api/workers/${encodeURIComponent(dispatchAgent.id)}/dispatch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          migrationId: dispatchMigrationId.trim(),
-          mode: dispatchMode,
-        }),
-      })
-      const json: unknown = await res.json().catch(() => ({}))
-      if (!res.ok) {
-        const message =
-          typeof json === "object" && json !== null && "error" in json
-            ? String((json as any).error)
-            : "Unable to dispatch GitHub worker"
-        throw new Error(message)
-      }
-      toast.success("Migration work queued and GitHub workflow dispatched")
-      setDispatchOpen(false)
-      setDispatchMigrationId("")
-      setDispatchAgent(null)
-      await loadAgents()
-      await loadRepairJobs()
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to dispatch GitHub worker")
-    } finally {
-      setDispatchingAgentId(null)
-    }
-  }, [dispatchAgent, dispatchMigrationId, dispatchMode, loadAgents, loadRepairJobs])
 
   if (loading && agents.length === 0 && repairJobs.length === 0) {
     return <WorkerPageSkeleton />
@@ -1339,133 +1164,6 @@ export default function WorkersPage() {
         </Card>
       </div>
 
-          <Dialog open={dispatchOpen} onOpenChange={setDispatchOpen}>
-          <DialogContent className="max-h-[92vh] max-w-4xl overflow-hidden p-0">
-            <div className="flex max-h-[92vh] min-h-0 flex-col">
-              <DialogHeader className="border-b px-6 py-5 pr-16">
-                <DialogTitle>Dispatch GitHub worker</DialogTitle>
-                <DialogDescription>
-                  Queue migration work and trigger the configured workflow for {dispatchAgent?.name || "the selected worker"}.
-                </DialogDescription>
-              </DialogHeader>
-
-              <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                <div className="space-y-5">
-                <div className="space-y-3">
-                  <div className="space-y-1">
-                    <Label>Select migration</Label>
-                    <p className="text-xs text-muted-foreground">Choose from the migration list instead of entering an ID manually.</p>
-                  </div>
-                  <div className="relative">
-                    <Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-                    <Input
-                      value={dispatchSearch}
-                      onChange={(e) => setDispatchSearch(e.target.value)}
-                      placeholder="Search by migration id or status"
-                      className="pl-9"
-                    />
-                  </div>
-                    <div className="overflow-hidden rounded-xl border bg-card">
-                      <Table className="table-fixed border-b">
-                        <colgroup>
-                          <col className="w-[46%]" />
-                          <col className="w-[18%]" />
-                          <col className="w-[36%]" />
-                        </colgroup>
-                        <TableHeader>
-                          <TableRow className="hover:bg-transparent">
-                            <TableHead className="h-9 text-xs">Migration ID</TableHead>
-                            <TableHead className="h-9 text-center text-xs">Status</TableHead>
-                            <TableHead className="h-9 text-center text-xs">Created</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                      </Table>
-                      <div className="max-h-[220px] overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                        <Table className="table-fixed">
-                          <colgroup>
-                            <col className="w-[46%]" />
-                            <col className="w-[18%]" />
-                            <col className="w-[36%]" />
-                          </colgroup>
-                          <TableBody>
-                          {loadingMigrations ? (
-                            <TableRow>
-                              <TableCell colSpan={3} className="py-8 text-center text-sm text-muted-foreground">
-                                Loading migrations...
-                              </TableCell>
-                            </TableRow>
-                          ) : filteredMigrations.length === 0 ? (
-                            <TableRow>
-                              <TableCell colSpan={3} className="py-8 text-center text-sm text-muted-foreground">
-                                No migrations matched your search.
-                              </TableCell>
-                            </TableRow>
-                          ) : (
-                              filteredMigrations.map((migration) => (
-                                <TableRow
-                                  key={migration.id}
-                                  data-state={dispatchMigrationId === migration.id ? "selected" : undefined}
-                                  className="h-11 cursor-pointer"
-                                  onClick={() => setDispatchMigrationId(migration.id)}
-                                >
-                                  <TableCell className="py-2 align-middle">
-                                    <div className="truncate font-mono text-xs" title={migration.id}>
-                                      {migration.id}
-                                    </div>
-                                  </TableCell>
-                                  <TableCell className="py-2 text-center align-middle">
-                                    <Badge variant="outline">{migration.status}</Badge>
-                                  </TableCell>
-                                  <TableCell className="py-2 text-center align-middle text-xs text-muted-foreground">
-                                    <div className="truncate" title={formatDate(migration.createdAt)}>
-                                      {formatDate(migration.createdAt)}
-                                    </div>
-                                  </TableCell>
-                                </TableRow>
-                              ))
-                          )}
-                        </TableBody>
-                      </Table>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  <div className="rounded-xl border bg-muted/30 p-3">
-                    <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Selected migration</div>
-                    <div className="mt-1 break-all font-mono text-xs">{dispatchMigrationId || "No migration selected"}</div>
-                  </div>
-                </div>
-
-                </div>
-              </div>
-
-              <DialogFooter className="border-t px-6 py-4">
-                <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex items-center gap-3">
-                    <Select value={dispatchMode} onValueChange={(value) => setDispatchMode(value as typeof dispatchMode)}>
-                      <SelectTrigger className="h-9 w-[220px]">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="repair_and_verify">Repair and verify</SelectItem>
-                        <SelectItem value="verify_only">Verify only</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Mode</Label>
-                  </div>
-                  <Button
-                    disabled={!dispatchAgent || !dispatchMigrationId.trim() || dispatchingAgentId === dispatchAgent?.id}
-                    onClick={() => void handleDispatch()}
-                  >
-                    {dispatchingAgentId === dispatchAgent?.id ? "Dispatching..." : "Dispatch"}
-                  </Button>
-                </div>
-              </DialogFooter>
-            </div>
-          </DialogContent>
-          </Dialog>
-
       <Card>
         <CardHeader className="flex flex-col gap-3 border-b pb-5 sm:flex-row sm:items-start sm:justify-between">
           <div>
@@ -1494,7 +1192,7 @@ export default function WorkersPage() {
             const effectiveStatus = getEffectiveStatus(worker)
             const summary = worker.latestRun?.summary || worker.lastError || worker.notes || "No notes yet"
             const linkedWorkerJobs = getWorkerLinkedJobs(worker)
-            const activeLinkedWorkerJobs = getWorkerActiveLinkedJobs(worker)
+            const activeLinkedWorkerJobs = linkedWorkerJobs.filter((job) => !["completed", "failed", "canceled"].includes(job.status))
             const activeWorkflowRuns = worker.runs.filter((run) => run.runType === "github_dispatch" && (run.status === "pending" || run.status === "running"))
 
             return (
@@ -1534,16 +1232,6 @@ export default function WorkersPage() {
                         </SelectContent>
                       </Select>
                     ) : null}
-                    {worker.provider === "github_actions" ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => openDispatchDialog(worker)}
-                      >
-                        <Play className="mr-1 h-4 w-4" />
-                        Dispatch job
-                      </Button>
-                    ) : null}
                     <Button
                       variant="outline"
                       size="sm"
@@ -1553,17 +1241,6 @@ export default function WorkersPage() {
                       <Trash2 className="mr-1 h-4 w-4" />
                       {deletingWorkerId === worker.id ? "Deleting..." : "Delete"}
                     </Button>
-                    {worker.provider === "github_actions" ? (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={!canStopWorker(worker) || stoppingWorkerId === worker.id}
-                        onClick={() => setConfirmStopWorker(worker)}
-                      >
-                        <Square className="mr-1 h-4 w-4" />
-                        {stoppingWorkerId === worker.id ? "Stopping..." : "Stop"}
-                      </Button>
-                    ) : null}
                     <Button
                       variant="outline"
                       size="sm"
@@ -1655,10 +1332,6 @@ export default function WorkersPage() {
                                 </div>
                                 <div className="text-xs text-muted-foreground">GitHub run {run.externalRunId || "indexing"} · {run.status}{run.jobReference ? ` · job ${run.jobReference.slice(0, 8)}` : ""}</div>
                               </div>
-                              <Button variant="outline" size="sm" disabled={!run.externalRunId || stoppingRunId === run.id} onClick={() => void stopWorkflowRun(worker, run.id)}>
-                                <Square className="mr-1 h-3.5 w-3.5" />
-                                {stoppingRunId === run.id ? "Stopping..." : "Stop worker"}
-                              </Button>
                             </div>
                           )
                         })}
@@ -1686,7 +1359,7 @@ export default function WorkersPage() {
                       !["completed", "failed", "canceled"].includes(job.status) &&
                       (job.claimedByAgentId === confirmDeleteWorker.id || job.requestedByAgentId === confirmDeleteWorker.id)
                   )
-                  ? "This worker has active jobs. Confirming will abort those jobs first, then stop the GitHub worker run if needed, and finally delete the worker."
+                  ? "This worker has active jobs. First abort the worker-pool attempt from its migration details; deletion is blocked until the Orchestrator confirms it has stopped."
                   : "This will remove the worker from the system." 
                 : "This will remove the worker from the system."}
             </AlertDialogDescription>
@@ -1698,51 +1371,6 @@ export default function WorkersPage() {
                 event.preventDefault()
                 if (!confirmDeleteWorker) return
                 void deleteWorker(confirmDeleteWorker).finally(() => setConfirmDeleteWorker(null))
-              }}
-            >
-              Confirm
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <AlertDialog open={!!confirmStopWorker} onOpenChange={(open: boolean) => !open && setConfirmStopWorker(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Stop GitHub worker?</AlertDialogTitle>
-            <AlertDialogDescription>
-              {confirmStopWorker
-                ? getWorkerActiveLinkedJobs(confirmStopWorker).length > 0
-                  ? "This will abort the active jobs linked to this worker and then stop its GitHub Actions workflow run."
-                  : "This will stop the GitHub Actions workflow run for this worker. No active linked jobs need to be aborted."
-                : "This will stop the GitHub Actions workflow run for this worker."}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          {confirmStopWorker ? (
-            <div className="max-h-64 space-y-3 overflow-y-auto rounded-lg border bg-muted/30 p-3 text-sm">
-              <div className="font-medium">Jobs linked to this worker</div>
-              {getWorkerLinkedJobs(confirmStopWorker).length === 0 ? (
-                <div className="text-muted-foreground">No linked migration work was found for this worker.</div>
-              ) : (
-                getWorkerLinkedJobs(confirmStopWorker).map((job) => (
-                  <div key={job.id} className="rounded-md border bg-background p-3">
-                    <div className="font-mono text-xs">{job.id}</div>
-                    <div className="mt-1">Migration {job.migrationId}</div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      Status: {jobStatusLabel(job.status)} | Mode: {job.mode}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          ) : null}
-          <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => setConfirmStopWorker(null)}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={(event: React.MouseEvent<HTMLButtonElement>) => {
-                event.preventDefault()
-                if (!confirmStopWorker) return
-                void stopGithubWorkerRun(confirmStopWorker).finally(() => setConfirmStopWorker(null))
               }}
             >
               Confirm

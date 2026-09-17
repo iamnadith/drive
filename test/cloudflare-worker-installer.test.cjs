@@ -105,6 +105,11 @@ test("fresh Worker script names migrate their Drive cron trigger within Free-pla
   assert.match(installer, /previousWorker\?\.accountId === accounts\[worker\]\.id \? previousWorker\.scriptName : undefined/)
 })
 
+test("cron exhaustion fails with actionable safe guidance and never removes unrelated triggers", () => {
+  assert.match(installer, /Cloudflare account cron capacity is full \(Workers Free allows five triggers per account\)/)
+  assert.match(installer, /unrelated triggers were left untouched/)
+})
+
 test("release artifacts are immutable checksummed bundles", () => {
   assert.match(installer, /checksum mismatch/)
   assert.match(workflow, /build-worker-release\.mjs/)

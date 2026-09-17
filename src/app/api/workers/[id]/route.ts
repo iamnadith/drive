@@ -299,20 +299,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (!auth.ok) return auth.response
 
     const { id } = await context.params
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>
-    const action = typeof body.action === "string" ? body.action : ""
-    if (action === "stop_run") {
-      const runId = typeof body.runId === "string" ? body.runId.trim() : ""
-      if (!runId) return NextResponse.json({ error: "runId is required" }, { status: 400 })
-      const result = await stopGithubWorkerRun(id, runId)
-      return NextResponse.json({ ok: true, ...result })
-    }
-    if (action !== "stop") {
-      return NextResponse.json({ error: "Unsupported worker action" }, { status: 400 })
-    }
-
-    const result = await stopGithubWorkerById(id)
-    return NextResponse.json({ ok: true, ...result })
+    return NextResponse.json({ error: "GitHub workflow cancellation is owned by the Migration Orchestrator. Abort the worker-pool attempt from its migration details." }, { status: 409 })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to stop worker")
     const status = typeof message === "string" && message.includes("still running") ? 409 : 400
@@ -349,18 +336,18 @@ export async function DELETE(_request: Request, context: { params: Promise<{ id:
     const worker = await getAgentById(id)
     if (!worker) return NextResponse.json({ error: "Worker not found" }, { status: 404 })
 
-    // A pool GitHub run can be between shards with no job reference. Stop the
-    // workflow before deleting its agent record so that an idle runner cannot
-    // keep polling with an identity that no longer exists.
+    const linkedJobs = await listRepairJobs(500)
+    if (linkedJobs.some((job) =>
+      (job.claimedByAgentId === id || job.requestedByAgentId === id) &&
+      (job.status === "pending" || job.status === "claimed" || job.status === "running")
+    )) {
+      return NextResponse.json({ error: "This worker has active migration jobs. Abort the worker-pool attempt through the Migration Orchestrator and wait for shutdown before deleting the workflow." }, { status: 409 })
+    }
+
     if (worker.provider === "github_actions") {
-      try {
-        await stopGithubWorkerById(id)
-      } catch (error) {
-        const message = errorMessage(error, "Unable to stop GitHub worker")
-        const terminalOrMissingRun = /Could not find the GitHub workflow run|completed before it could be canceled|ended as failed instead of canceled/i.test(message)
-        if (!terminalOrMissingRun) {
-          return NextResponse.json({ error: message }, { status: 409 })
-        }
+      const activeRuns = await listAgentRunsByAgentId(id, 100)
+      if (activeRuns.some((run) => run.runType === "github_dispatch" && (run.status === "pending" || run.status === "running"))) {
+        return NextResponse.json({ error: "This workflow has an active GitHub run. Abort its worker-pool attempt through the Migration Orchestrator before deleting the workflow." }, { status: 409 })
       }
     }
 

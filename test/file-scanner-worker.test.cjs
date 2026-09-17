@@ -125,7 +125,7 @@ test('pre-existing worker-pool objects are skipped only when overwrite is disabl
   assert.match(scanner, /j\.result->'items'->0->'integrityProofs'->0->>'sha256' ~ '\^\[0-9a-f\]\{64\}\$'/)
   assert.match(orchestrator, /'transferredObjects',least\(coalesce\(i\.source_objects,0\)/)
   assert.match(orchestrator, /'alreadyPresentObjects',coalesce\(a\.already_present_objects,0\)/)
-  assert.match(orchestrator, /'copiedObjects',coalesce\(a\.transferred_objects,0\)/)
+  assert.match(orchestrator, /'copiedObjects',greatest\(0,coalesce\(a\.transferred_objects,0\)-least\(coalesce\(a\.transferred_objects,0\),coalesce\(a\.skipped_objects,0\)\)\)/)
   assert.match(orchestrator, /j\.status='completed' and case when coalesce\(j\.result->'items'->0->>'transferred'/)
 })
 
