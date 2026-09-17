@@ -2,6 +2,9 @@ import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
 import { createAgent, listAgents, type AgentCapability, type AgentCategory, type AgentProvider } from "@/lib/agents-store"
 import { GITHUB_TOKEN_COOKIE } from "@/lib/github-oauth"
+import { syncGitHubWorkerSecrets } from "@/lib/github-worker-secrets"
+import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
+import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
 import { requireAdmin } from "@/lib/server-auth"
 
 function asString(value: unknown): string {
@@ -62,6 +65,29 @@ export async function POST(request: Request) {
     const cookieStore = await cookies()
     const githubTokenFromCookie = cookieStore.get(GITHUB_TOKEN_COOKIE)?.value ?? ""
     const githubTokenToUse = asString(body.githubToken).trim() || githubTokenFromCookie || undefined
+
+    // A registered workflow is eligible for immediate orchestrator dispatch,
+    // including while a migration is already running. Provision its runtime
+    // contract before saving the row so the orchestrator can never discover
+    // and dispatch a half-configured repository.
+    if (provider === "github_actions") {
+      if (!githubTokenToUse) throw new Error("Reconnect GitHub before adding this workflow")
+      const [orchestrator, workerSettings] = await Promise.all([
+        getMigrationOrchestratorSettings(),
+        getMigrationWorkerSettings(),
+      ])
+      if (!orchestrator.orchestratorUrl) throw new Error("Migration Orchestrator URL is not configured")
+      if (workerSettings.sharedSecret.length < 24 || workerSettings.sharedSecret.length > 512) {
+        throw new Error("Configure the Migration Worker shared secret before adding a GitHub workflow")
+      }
+      await syncGitHubWorkerSecrets({
+        token: githubTokenToUse,
+        owner: asString(body.githubRepoOwner).trim(),
+        repo: asString(body.githubRepoName).trim(),
+        serverUrl: orchestrator.orchestratorUrl,
+        sharedSecret: workerSettings.sharedSecret,
+      })
+    }
 
     const result = await createAgent({
       name,

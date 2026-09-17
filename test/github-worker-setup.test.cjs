@@ -315,6 +315,17 @@ test('workflow compatibility requires the orchestrator URL and shared worker sec
   assert.equal(f.isWorkerWorkflow('name: unrelated\non:\n  workflow_dispatch:\n'), false)
 })
 
+test('workflow registration provisions its runtime secrets before the orchestrator can discover it', () => {
+  const route = fs.readFileSync(path.resolve('src/app/api/agents/route.ts'), 'utf8')
+  const provision = route.indexOf('await syncGitHubWorkerSecrets({')
+  const persist = route.indexOf('const result = await createAgent({')
+  assert.ok(provision > 0 && persist > provision)
+  assert.match(route, /getMigrationOrchestratorSettings/)
+  assert.match(route, /getMigrationWorkerSettings/)
+  assert.match(route, /Reconnect GitHub before adding this workflow/)
+  assert.doesNotMatch(route, /repository_dispatch|\/dispatches/)
+})
+
 test('migration UI exposes both engines while preserving Super Slurper as the default', () => {
   const page = fs.readFileSync(path.resolve('src/app/dashboard/migrations/page.tsx'), 'utf8')
   const details = fs.readFileSync(path.resolve('src/app/dashboard/migrations/[id]/page.tsx'), 'utf8')
