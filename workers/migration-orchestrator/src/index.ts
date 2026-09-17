@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 23
+const BUILD = 24
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -516,7 +516,7 @@ async function migrationLiveState(db: Client, migrationId: string) {
   const [jobsResult, runsResult, aggregateResult, itemsResult] = await Promise.all([
     db.query(`select id,status,claimed_by_agent_id,progress,result,summary,error,created_at,updated_at,last_heartbeat_at from drive_repair_jobs where migration_id=$1 and mode='migration' and work_key like $2 order by updated_at desc limit 500`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`]),
     db.query(`select r.id,r.status,r.job_reference,r.payload,r.created_at,r.updated_at,a.status agent_status,a.last_heartbeat_at agent_heartbeat from drive_agent_runs r left join drive_agents a on a.id=r.agent_id where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=$2 order by r.created_at`, [migrationId, generation]),
-    db.query(`select count(*)::bigint total_jobs,count(*) filter(where status='pending')::bigint queued_jobs,count(*) filter(where status in('claimed','running'))::bigint running_jobs,count(*) filter(where status='completed')::bigint completed_jobs,count(*) filter(where status='failed')::bigint failed_jobs,count(*) filter(where status='canceled')::bigint canceled_jobs,coalesce(sum(case when (result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (result->'items'->0->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint transferred_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then 1 else 0 end),0)::bigint copied_objects,coalesce(sum(case when (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,coalesce(sum(case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' and jsonb_typeof(result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then coalesce(nullif(payload->'inventoryObjects'->0->>'size','')::bigint,0) else 0 end),0)::bigint completed_bytes from drive_repair_jobs where migration_id=$1 and mode='migration' and work_key like $2`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`]),
+    db.query(`select count(*)::bigint total_jobs,count(*) filter(where status='pending')::bigint queued_jobs,count(*) filter(where status in('claimed','running'))::bigint running_jobs,count(*) filter(where status in('pending','claimed','running','canceled') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<3))::bigint remaining_jobs,count(*) filter(where status='completed')::bigint completed_jobs,count(*) filter(where status='failed')::bigint failed_jobs,count(*) filter(where status='canceled')::bigint canceled_jobs,coalesce(sum(case when (result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (result->'items'->0->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint transferred_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then 1 else 0 end),0)::bigint copied_objects,coalesce(sum(case when (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,coalesce(sum(case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' and jsonb_typeof(result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,coalesce(sum(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 then coalesce(nullif(payload->'inventoryObjects'->0->>'size','')::bigint,0) else 0 end),0)::bigint completed_bytes from drive_repair_jobs where migration_id=$1 and mode='migration' and work_key like $2`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`]),
     db.query(`select id,source_bucket,target_bucket,source_objects,source_bytes,slurper_status,progress,updated_at from drive_migration_items where migration_id=$1 order by created_at`, [migrationId]),
   ])
   const jobs = jobsResult.rows
@@ -530,9 +530,7 @@ async function migrationLiveState(db: Client, migrationId: string) {
   const copiedObjects = buckets.reduce((sum, bucket) => sum + bucket.copiedObjects, 0)
   const failedObjects = buckets.reduce((sum, bucket) => sum + bucket.failedObjects, 0)
   const skippedObjects = buckets.reduce((sum, bucket) => sum + bucket.skippedObjects, 0)
-  const aggregateTransferred = Number(aggregate.transferred_objects || 0)
-  const aggregateSkipped = Math.max(0, Number(aggregate.skipped_objects || 0) - aggregateTransferred)
-  const totals = { onlineWorkers: activeRuns.length, activeTransfers: 0, totalJobs: Number(aggregate.total_jobs || 0), queuedJobs: Number(aggregate.queued_jobs || 0), runningJobs: Number(aggregate.running_jobs || 0), completedJobs: Number(aggregate.completed_jobs || 0), failedJobs: Number(aggregate.failed_jobs || 0), canceledJobs: Number(aggregate.canceled_jobs || 0), totalObjects, transferred: transferredObjects || aggregateTransferred, alreadyPresentObjects: alreadyPresentObjects || Number(aggregate.already_present_objects || 0), copiedObjects: copiedObjects || Number(aggregate.copied_objects || 0), failed: failedObjects || Number(aggregate.failed_objects || 0), skipped: skippedObjects || aggregateSkipped, missing: 0, mismatched: 0, processedFiles: Number(aggregate.completed_jobs || 0) + Number(aggregate.failed_jobs || 0) + Number(aggregate.canceled_jobs || 0), totalFiles: Number(aggregate.total_jobs || 0), completedBytes: Number(aggregate.completed_bytes || 0) }
+  const totals = { onlineWorkers: activeRuns.length, activeTransfers: 0, totalJobs: Number(aggregate.total_jobs || 0), queuedJobs: Number(aggregate.queued_jobs || 0), runningJobs: Number(aggregate.running_jobs || 0), remainingJobs: Number(aggregate.remaining_jobs || 0), completedJobs: Number(aggregate.completed_jobs || 0), failedJobs: Number(aggregate.failed_jobs || 0), canceledJobs: Number(aggregate.canceled_jobs || 0), totalObjects, transferred: transferredObjects, alreadyPresentObjects, copiedObjects, failed: failedObjects, skipped: skippedObjects, missing: 0, mismatched: 0, processedFiles: Number(aggregate.completed_jobs || 0) + Number(aggregate.failed_jobs || 0) + Number(aggregate.canceled_jobs || 0), totalFiles: Number(aggregate.total_jobs || 0), completedBytes: Number(aggregate.completed_bytes || 0) }
   for (const job of jobs) {
     const progress = job.progress && typeof job.progress === "object" ? job.progress : {}
     if (["claimed", "running"].includes(String(job.status)) && progress.currentFile && Date.now() - Date.parse(String(job.last_heartbeat_at || "")) < 90_000) totals.activeTransfers += 1
@@ -549,24 +547,24 @@ async function recoverJobs(db: Client, migrationId: string, generation: number, 
   `, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`, `%`])
   return result.rowCount || 0
 }
-async function refreshWorkerItemProgress(db: Client, migration: Row, generation: number) {
+async function refreshWorkerItemProgress(db: Client, migration: Row, generation: number, affectedItemIds?: string[]) {
   await db.query(`
     with aggregate as (
       select i0.id item_id,
-        count(j.*) filter(where j.status='pending')::bigint queued_objects,
+        count(j.*) filter(where j.status in('pending','claimed','running','canceled') or (j.status='failed' and case when j.result->>'retryCount' ~ '^[0-9]+$' then (j.result->>'retryCount')::int else 0 end<3))::bigint queued_objects,
         count(j.*) filter(where j.status='completed')::bigint completed_objects,
         count(j.*) filter(where j.status in('claimed','running'))::bigint active_objects,
-        coalesce(sum(case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end),0)::bigint transferred_objects,
-        coalesce(sum(case when (j.result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (j.result->'items'->0->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,
-        coalesce(sum(case when (j.result->'items'->0->>'skipped') ~ '^[0-9]+$' then (j.result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
-        coalesce(sum(case when (j.result->'items'->0->>'failed') ~ '^[0-9]+$' then (j.result->'items'->0->>'failed')::bigint when j.status='failed' and jsonb_typeof(j.result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,
-        coalesce(sum(case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' and (j.result->'items'->0->>'transferred')::bigint>0 then 1 else 0 end),0)::bigint copied_objects,
+        coalesce(sum(case when j.status='completed' then case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end when j.status in('claimed','running') then greatest(case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end,case when (j.progress->>'transferred') ~ '^[0-9]+$' then (j.progress->>'transferred')::bigint else 0 end) else 0 end),0)::bigint transferred_objects,
+        coalesce(sum(case when j.status='completed' and (j.result->'items'->0->>'alreadyPresent') ~ '^[0-9]+$' then (j.result->'items'->0->>'alreadyPresent')::bigint when j.status in('claimed','running') and (j.progress->>'alreadyPresent') ~ '^[0-9]+$' then (j.progress->>'alreadyPresent')::bigint else 0 end),0)::bigint already_present_objects,
+        coalesce(sum(case when j.status='completed' and (j.result->'items'->0->>'skipped') ~ '^[0-9]+$' then (j.result->'items'->0->>'skipped')::bigint when j.status in('claimed','running') and (j.progress->>'skipped') ~ '^[0-9]+$' then (j.progress->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
+        coalesce(sum(case when j.status='completed' and (j.result->'items'->0->>'failed') ~ '^[0-9]+$' then (j.result->'items'->0->>'failed')::bigint when j.status in('claimed','running') and (j.progress->>'failed') ~ '^[0-9]+$' then (j.progress->>'failed')::bigint when j.status='failed' and jsonb_typeof(j.result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,
+        coalesce(sum(case when j.status='completed' and (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' and (j.result->'items'->0->>'transferred')::bigint>0 then 1 when j.status in('claimed','running') and greatest(case when (j.result->'items'->0->>'transferred') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint else 0 end,case when (j.progress->>'transferred') ~ '^[0-9]+$' then (j.progress->>'transferred')::bigint else 0 end)>0 then 1 else 0 end),0)::bigint copied_objects,
         coalesce(sum((j.payload->'inventoryObjects'->0->>'size')::bigint) filter(where j.status='completed' and case when coalesce(j.result->'items'->0->>'transferred','') ~ '^[0-9]+$' then (j.result->'items'->0->>'transferred')::bigint>0 else false end),0)::bigint completed_bytes
       from drive_migration_items i0
       left join drive_repair_jobs j on j.migration_id=i0.migration_id
         and j.work_key like $2
         and (j.payload->'itemIds'->>0)::uuid=i0.id
-      where i0.migration_id=$1
+      where i0.migration_id=$1 and ($5::uuid[] is null or i0.id=any($5::uuid[]))
       group by i0.id
     )
     update drive_migration_items i set
@@ -585,7 +583,7 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
         else i.slurper_status
       end,
       last_progress_at=now(),updated_at=now(),
-      progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{live}',jsonb_build_object(
+      progress=jsonb_set(coalesce(i.progress,'{}'::jsonb)-'repairWorker'-'repairWorkerStatus','{live}',jsonb_build_object(
         'updatedAt',now(),
         'status',case
           when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status='completed' and v.missing_objects=0 and v.mismatched_objects=0 and (v.extra_objects=0 or $4=false)) then 'completed'
@@ -626,7 +624,7 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
             or coalesce(i.progress->'migrationQueue'->>'status','') <> 'completed' then 'scanning'
           when coalesce(a.active_objects,0)>0 then 'running' else 'queued' end,
         'workerStage',case
-          when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3) then 'verification'
+          when exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$3 and v.status<>'blocked') then 'verification'
           when coalesce(i.progress->'migrationInventory'->>'status','') <> 'completed'
             or coalesce(i.progress->'migrationQueue'->>'status','') <> 'completed' then 'scanning'
           else 'migration' end,
@@ -634,7 +632,7 @@ async function refreshWorkerItemProgress(db: Client, migration: Row, generation:
       ))
     from aggregate a where i.id=a.item_id and i.migration_id=$1
       and exists(select 1 from drive_migrations active where active.id=i.migration_id and active.status in('running','verifying'))
-  `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`, generation, opts(migration).verifyStrictDestination === true])
+  `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`, generation, opts(migration).verifyStrictDestination === true, affectedItemIds?.length ? affectedItemIds : null])
 }
 async function recordItemStageEvents(db: Client, migration: Row, generation: number) {
   await db.query(`
@@ -711,17 +709,37 @@ async function recordItemStageEvents(db: Client, migration: Row, generation: num
   `, [migration.id])
 }
 async function ensureBucketVerification(db: Client, migration: Row, generation: number) {
-  // A bucket is eligible as soon as its own queue is complete and every one
-  // of its file jobs is terminal-success. It must not wait for other buckets.
+  // A migration has a strict global phase order: finish every bucket's scan
+  // and queue materialization, finish every transfer job, then verify.
   await db.query("begin")
   try {
+    const ready = await db.query(`
+      select not exists(select 1 from drive_migration_items i where i.migration_id=$1
+          and (coalesce(i.progress->'migrationInventory'->>'status','')<>'completed'
+            or coalesce(i.progress->'migrationQueue'->>'status','')<>'completed'))
+        and not exists(select 1 from drive_repair_jobs j where j.migration_id=$1 and j.work_key like $2 and j.status<>'completed') ready
+    `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
+    if (ready.rows[0]?.ready !== true) {
+      const stale = await db.query(`select 1 from drive_migration_verification_state where migration_id=$1 and generation=$2 and (status not in('pending','blocked') or phase<>'source' or source_objects<>0 or destination_objects<>0 or missing_objects<>0 or mismatched_objects<>0 or extra_objects<>0) limit 1`, [migration.id, generation])
+      if (stale.rowCount) {
+        await db.query(`update drive_migration_verification_state set status='blocked',lease_owner=null,lease_expires_at=null,updated_at=now() where migration_id=$1 and generation=$2`, [migration.id, generation])
+        await db.query(`delete from drive_bucket_verify_diffs d using drive_migration_verification_state v where d.migration_item_id=v.migration_item_id and v.migration_id=$1 and v.generation=$2`, [migration.id, generation])
+        await db.query(`delete from drive_bucket_scan_objects o using drive_migration_verification_state v,drive_migration_items i where i.id=v.migration_item_id and o.scan_id in(v.source_scan_id,v.destination_scan_id) and o.scan_id is distinct from nullif(i.progress->'migrationInventory'->>'sourceScanId','')::uuid and v.migration_id=$1 and v.generation=$2`, [migration.id, generation])
+        await db.query(`update drive_bucket_scans s set status='completed',lease_owner=null,lease_expires_at=null,completed_at=coalesce(completed_at,now()),updated_at=now() from drive_migration_verification_state v join drive_migration_items i on i.id=v.migration_item_id where s.id in(v.source_scan_id,v.destination_scan_id) and s.id is distinct from nullif(i.progress->'migrationInventory'->>'sourceScanId','')::uuid and v.migration_id=$1 and v.generation=$2`, [migration.id, generation])
+        await db.query(`update drive_migration_verification_state set status='blocked',phase='source',source_scan_id=null,destination_scan_id=null,source_cursor=null,destination_cursor=null,source_objects=0,source_bytes=0,destination_objects=0,destination_bytes=0,missing_objects=0,mismatched_objects=0,extra_objects=0,lease_owner=null,lease_expires_at=null,completed_at=null,attempt_count=0,last_error=null,updated_at=now() where migration_id=$1 and generation=$2`, [migration.id, generation])
+      }
+      await db.query("commit")
+      return
+    }
+    await db.query(`update drive_migration_verification_state set status='pending',updated_at=now() where migration_id=$1 and generation=$2 and status='blocked'`, [migration.id, generation])
     await db.query(`
     insert into drive_migration_verification_state(migration_item_id,migration_id,generation,source_scan_id,status,phase)
-    select i.id,i.migration_id,$2,(i.progress->'migrationInventory'->>'sourceScanId')::uuid,'pending','source'
+    select i.id,i.migration_id,$2,null,'pending','source'
     from drive_migration_items i
     where i.migration_id=$1
       and i.progress->'migrationQueue'->>'status'='completed'
-      and not exists (select 1 from drive_repair_jobs j where j.migration_id=$1 and j.work_key like $3 and (j.payload->'itemIds'->>0)::uuid=i.id and j.status<>'completed')
+      and not exists (select 1 from drive_migration_items scan_item where scan_item.migration_id=$1 and (coalesce(scan_item.progress->'migrationInventory'->>'status','')<>'completed' or coalesce(scan_item.progress->'migrationQueue'->>'status','')<>'completed'))
+      and not exists (select 1 from drive_repair_jobs j where j.migration_id=$1 and j.work_key like $3 and j.status<>'completed')
       and not exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$2)
     on conflict (migration_item_id) do update set
       migration_id=excluded.migration_id,generation=excluded.generation,source_scan_id=excluded.source_scan_id,
@@ -823,7 +841,7 @@ async function finalizeShards(db: Client, migration: Row, generation: number, sh
   try {
     const active = await db.query(`select id from drive_migrations where id=$1 and status in('running','verifying') for update`, [migration.id])
     if (!active.rowCount) { await db.query("commit"); return { complete: false, canceled: true, jobs } }
-    await db.query(`update drive_migration_items set slurper_status='completed',last_progress_at=now(),updated_at=now(),progress=jsonb_set(jsonb_set(coalesce(progress,'{}'::jsonb),'{repairWorkerStatus}','"completed"'::jsonb),'{stage}','"awaiting_independent_verification"'::jsonb) where migration_id=$1 and coalesce(slurper_status,'')<>'worker_bucket_create_failed'`, [migration.id])
+    await db.query(`update drive_migration_items set slurper_status='verifying',last_progress_at=now(),updated_at=now(),progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{stage}','"awaiting_independent_verification"'::jsonb) where migration_id=$1 and coalesce(slurper_status,'')<>'worker_bucket_create_failed'`, [migration.id])
     await db.query(`update drive_migrations set status='verifying',sync_status='running',sync_message='File Scanner verification pending',last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
     await db.query(`
     insert into drive_migration_verification_state(migration_item_id,migration_id,generation,status,phase)
@@ -1145,6 +1163,13 @@ async function activateTargetAndCompleteMigration(db: Client, migration: Row) {
 async function finishOrRepair(db: Client, migration: Row, generation: number) {
   const active = await db.query(`select id from drive_migrations where id=$1 and status in('running','verifying')`, [migration.id])
   if (!active.rowCount) return { verification: "canceled" }
+  const transfers = await db.query(`
+    select not exists(select 1 from drive_migration_items i where i.migration_id=$1
+        and (coalesce(i.progress->'migrationInventory'->>'status','')<>'completed'
+          or coalesce(i.progress->'migrationQueue'->>'status','')<>'completed'))
+      and not exists(select 1 from drive_repair_jobs j where j.migration_id=$1 and j.work_key like $2 and j.status<>'completed') ready
+  `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
+  if (transfers.rows[0]?.ready !== true) return { verification: "waiting_for_transfers" }
   const states = await db.query(`select status,missing_objects,mismatched_objects,extra_objects from drive_migration_verification_state where migration_id=$1 and generation=$2`, [migration.id, generation])
   if (states.rows.some((row) => row.status === "failed")) {
     const failed = await db.query(`select i.source_bucket,v.last_error,v.attempt_count from drive_migration_verification_state v join drive_migration_items i on i.id=v.migration_item_id where v.migration_id=$1 and v.generation=$2 and v.status='failed' order by i.source_bucket`, [migration.id, generation])
@@ -1599,38 +1624,10 @@ async function workerRequest(request: Request, env: Env, path: string) {
     const status = ["pending", "claimed", "running", "completed", "failed", "canceled"].includes(String(body.status)) ? String(body.status) : current.status
     const updated = await db.query(`update drive_repair_jobs set status=$3,progress=coalesce(progress,'{}'::jsonb)||$4::jsonb,result=coalesce(result,'{}'::jsonb)||$5::jsonb,summary=coalesce($6,summary),error=coalesce($7,error),last_heartbeat_at=now(),completed_at=case when $3 in ('completed','failed','canceled') then now() else completed_at end,updated_at=now() where id=$1 and claimed_by_agent_id=$2 and claim_token=$8::uuid returning *`, [jobId, agent.id, status, JSON.stringify(body.progress && typeof body.progress === "object" ? body.progress : {}), JSON.stringify(body.result && typeof body.result === "object" ? body.result : {}), typeof body.summary === "string" ? body.summary.slice(0, 2000) : null, typeof body.error === "string" ? body.error.slice(0, 4000) : null, claimToken])
     if (!updated.rowCount) return json({ error: "This job is no longer owned by this worker" }, 409)
-    if (current.mode === "migration" && Array.isArray(body.items)) {
-      for (const itemUpdate of body.items.slice(0, 100)) {
-        const itemId = typeof itemUpdate?.itemId === "string" ? itemUpdate.itemId : ""
-        if (!/^[0-9a-f-]{36}$/i.test(itemId)) continue
-        const selected = (await db.query(`select progress,slurper_status from drive_migration_items where id=$1 and migration_id=$2 limit 1`, [itemId, current.migration_id])).rows[0]
-        if (!selected) continue
-        const progress = selected.progress && typeof selected.progress === "object" ? selected.progress : {}
-        const live = progress.live && typeof progress.live === "object" ? progress.live : {}
-        const repair = progress.repairWorker && typeof progress.repairWorker === "object" ? progress.repairWorker : {}
-        const stage = typeof itemUpdate.stage === "string" ? itemUpdate.stage.slice(0, 100) : "repair_progress"
-        const itemStatus = typeof itemUpdate.status === "string" ? itemUpdate.status : "running"
-        const details = itemUpdate.details && typeof itemUpdate.details === "object" ? itemUpdate.details : {}
-        const transferred = Number.isFinite(itemUpdate.transferred) ? Math.max(0, Math.trunc(itemUpdate.transferred)) : Number(repair.transferred || 0)
-        const skipped = Number.isFinite(itemUpdate.skipped) ? Math.max(0, Math.trunc(itemUpdate.skipped)) : Number(repair.skipped || 0)
-        const failed = Number.isFinite(itemUpdate.failed) ? Math.max(0, Math.trunc(itemUpdate.failed)) : Number(repair.failed || 0)
-        const slurper = progress.slurperCumulative || progress.slurperNormalized || progress.slurper?.result || {}
-        const slurperTransferred = Math.max(0, Number(slurper.transferredObjects || 0))
-        const slurperSkipped = Math.max(0, Number(slurper.skippedObjects || 0))
-        const sameRepairJob = repair.jobId === jobId
-        const baselineTransferred = sameRepairJob ? Math.max(0, Number(repair.baselineTransferred || 0)) : Math.max(0, Number(repair.cumulativeTransferred ?? (Number(live.transferredObjects || 0) - slurperTransferred)))
-        const baselineSkipped = sameRepairJob ? Math.max(0, Number(repair.baselineSkipped || 0)) : Math.max(0, Number(repair.cumulativeSkipped ?? (Number(live.skippedObjects || 0) - slurperSkipped)))
-        const cumulativeTransferred = baselineTransferred + transferred
-        const cumulativeSkipped = Math.max(baselineSkipped, skipped)
-        const nextRepair = { ...repair, jobId, baselineTransferred, baselineSkipped, cumulativeTransferred, cumulativeSkipped, stage, status: itemStatus, transferred, skipped, failed, updatedAt: now, ...(typeof itemUpdate.summary === "string" ? { summary: itemUpdate.summary.slice(0, 1000) } : {}), details }
-        const nextLiveStatus = itemStatus === "completed" ? "completed" : itemStatus === "failed" ? "failed" : itemStatus === "canceled" ? "aborted" : stage.includes("scan") ? "scanning" : stage.includes("verif") ? "verifying" : "running"
-        const totalObjects = Math.max(0, Number(details.sourceObjectCount ?? live.totalObjects ?? 0))
-        const nextLive = { ...live, updatedAt: now, status: nextLiveStatus, workerStage: stage, workerStatus: itemStatus, repairJobId: jobId, totalObjects, transferredObjects: Math.min(totalObjects || Number.MAX_SAFE_INTEGER, slurperTransferred + cumulativeTransferred), skippedObjects: Math.max(slurperSkipped, cumulativeSkipped), failedObjects: nextLiveStatus === "completed" ? 0 : failed, verifyIssues: Math.max(0, Number(details.finalMissing || 0) + Number(details.finalMismatched || 0)) }
-        const nextProgress = { ...progress, stage, repairWorker: nextRepair, live: nextLive, repairWorkerStatus: itemStatus, ...(typeof itemUpdate.summary === "string" ? { syncMessage: itemUpdate.summary.slice(0, 1000) } : {}) }
-        const nextItemStatus = itemStatus === "completed" ? "completed" : itemStatus === "failed" ? "verification_failed" : selected.slurper_status
-        await db.query(`update drive_migration_items set progress=$3::jsonb,slurper_status=$4,last_progress_at=now(),updated_at=now() where id=$1 and migration_id=$2`, [itemId, current.migration_id, JSON.stringify(nextProgress), nextItemStatus])
-      }
-    }
+    // Migration item phase and counters are projections of the durable job
+    // rows, never of an individual file worker's local scan/copy/verify loop.
+    // That loop is per object and concurrent reports used to race while
+    // overwriting the shared bucket status and totals.
     if (current.mode === "migration" && !["completed", "failed", "canceled"].includes(current.status) && ["completed", "failed"].includes(status)) {
       const objectSize = Number(current.payload?.inventoryObjects?.[0]?.size || 0)
       await db.query(`update drive_agent_runs set payload=payload||jsonb_build_object(
@@ -1640,9 +1637,13 @@ async function workerRequest(request: Request, env: Env, path: string) {
       ),updated_at=now() where job_reference=$1`, [jobId, status, objectSize])
     }
     await db.query(`update drive_agents set last_heartbeat_at=now(),status=case when $2 in ('completed','failed','canceled') then 'offline' else 'online' end,updated_at=now() where id=$1`, [agent.id, status])
-    if (current.mode === "migration" && (status !== current.status || ["completed", "failed", "canceled"].includes(status))) {
+    if (current.mode === "migration") {
       const migration = (await db.query(`select * from drive_migrations where id=$1`, [current.migration_id])).rows[0]
-      if (migration) await refreshWorkerItemProgress(db, migration, integer(opts(migration).workerGeneration, 1, 1, 1000000))
+      if (migration) {
+        const reportedItemIds = Array.isArray(current.payload?.itemIds) ? current.payload.itemIds : []
+        const affectedItemIds = Array.from(new Set<string>(reportedItemIds.filter((itemId: unknown): itemId is string => typeof itemId === "string" && /^[0-9a-f-]{36}$/i.test(itemId))))
+        await refreshWorkerItemProgress(db, migration, integer(opts(migration).workerGeneration, 1, 1, 1000000), affectedItemIds)
+      }
     }
     if (current.mode === "migration") await migrationLiveState(db, current.migration_id)
     return json({ ok: true, job: updated.rows[0] })
@@ -1749,8 +1750,8 @@ async function cycle(env: Env) {
             : "Building migration queue for migration workers"
         await db.query(`update drive_migrations set sync_status='running',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status='running'`, [migration.id, syncMessage])
       }
-      await refreshWorkerItemProgress(db, migration, shards.generation)
       await ensureBucketVerification(db, migration, shards.generation)
+      await refreshWorkerItemProgress(db, migration, shards.generation)
       await finalizeVerifiedBuckets(db, migration, shards.generation)
       // Settings follow each bucket's successful verification instead of
       // waiting for the entire migration to finish.

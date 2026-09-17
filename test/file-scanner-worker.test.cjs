@@ -33,6 +33,17 @@ test('scanner cron and queue drain one small durable page per free-plan invocati
   assert.match(scanner, /make_interval\(mins=>least\(30,power\(2,least\(s\.attempt_count,5\)\)::int\)\)/)
 })
 
+test('bucket verification claim waits for all worker-pool scans, queues, and object jobs', () => {
+  const scanner = read('workers/file-scanner/src/index.ts')
+  const claim = scanner.slice(scanner.indexOf('async function claim('), scanner.indexOf('async function claimGenericScan'))
+  assert.match(claim, /global phase barrier/)
+  assert.match(claim, /executionMode' is distinct from 'migration_workers'/)
+  assert.match(claim, /migrationInventory'->>'status',''\)<>'completed'/)
+  assert.match(claim, /migrationQueue'->>'status',''\)<>'completed'/)
+  assert.match(claim, /j\.status<>'completed'/)
+  assert.match(claim, /v\.status='pending'/)
+})
+
 test('failed concurrent scans use queue backoff instead of immediate continuation loops', () => {
   const scanner = read('workers/file-scanner/src/index.ts')
   const continuation = scanner.slice(scanner.indexOf('async function cycleAndContinue'), scanner.indexOf('export default'))
