@@ -355,14 +355,54 @@ async function uploadWorker(input: { worker: HostedWorker; token: string; accoun
   await cf(token, `/accounts/${accountId}/workers/scripts/${scriptName}/subdomain`, { method: "POST", body: JSON.stringify({ enabled: true, previews_enabled: false }) })
 }
 
-async function setSchedule(token: string, accountId: string, scriptName: string) {
-  await cf(token, `/accounts/${accountId}/workers/scripts/${scriptName}/schedules`, { method: "PUT", body: JSON.stringify([{ cron: "* * * * *" }]) })
+async function workerSchedules(token: string, accountId: string, scriptName: string) {
+  const result = await cf<{ schedules?: Array<{ cron?: string }> } | Array<{ cron?: string }>>(token, `/accounts/${accountId}/workers/scripts/${scriptName}/schedules`)
+  return Array.isArray(result) ? result : Array.isArray(result?.schedules) ? result.schedules : []
 }
 
-async function ensureSchedule(token: string, accountId: string, scriptName: string) {
-  const result = await cf<{ schedules?: Array<{ cron?: string }> } | Array<{ cron?: string }>>(token, `/accounts/${accountId}/workers/scripts/${scriptName}/schedules`)
-  const schedules = Array.isArray(result) ? result : Array.isArray(result?.schedules) ? result.schedules : []
-  if (!schedules.some((schedule) => schedule.cron === "* * * * *")) await setSchedule(token, accountId, scriptName)
+async function replaceWorkerSchedules(token: string, accountId: string, scriptName: string, schedules: Array<{ cron?: string }>) {
+  await cf(token, `/accounts/${accountId}/workers/scripts/${scriptName}/schedules`, {
+    method: "PUT",
+    body: JSON.stringify(schedules.filter((schedule): schedule is { cron: string } => typeof schedule.cron === "string").map(({ cron }) => ({ cron }))),
+  })
+}
+
+function isCronTriggerLimitError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  return /workers free limit of 5 cron triggers per account|cron triggers?.{0,80}(?:limit|quota)|(?:limit|quota).{0,80}cron triggers?/i.test(message)
+}
+
+async function ensureSchedule(token: string, accountId: string, scriptName: string, replacedScriptName?: string) {
+  const schedules = await workerSchedules(token, accountId, scriptName)
+  const hasRequiredSchedule = schedules.some((schedule) => schedule.cron === "* * * * *")
+  const previousScript = replacedScriptName && replacedScriptName !== scriptName ? replacedScriptName : ""
+  const previousExists = previousScript ? await scriptExists(token, accountId, previousScript) : false
+  const previousSchedules = previousExists ? await workerSchedules(token, accountId, previousScript) : []
+  const previousRequired = previousSchedules.some((schedule) => schedule.cron === "* * * * *")
+
+  if (hasRequiredSchedule) {
+    if (previousRequired) await replaceWorkerSchedules(token, accountId, previousScript, previousSchedules.filter((schedule) => schedule.cron !== "* * * * *"))
+    return
+  }
+
+  try {
+    await replaceWorkerSchedules(token, accountId, scriptName, [...schedules, { cron: "* * * * *" }])
+  } catch (error) {
+    // A fresh installation may use a new script suffix while the prior
+    // Drive-owned Worker still holds the account's cron slot. Move just this
+    // install's minutely trigger, then restore it if the replacement fails.
+    if (!previousRequired || !isCronTriggerLimitError(error)) throw error
+    await replaceWorkerSchedules(token, accountId, previousScript, previousSchedules.filter((schedule) => schedule.cron !== "* * * * *"))
+    try {
+      await replaceWorkerSchedules(token, accountId, scriptName, [...schedules, { cron: "* * * * *" }])
+    } catch (replacementError) {
+      await replaceWorkerSchedules(token, accountId, previousScript, previousSchedules).catch(() => undefined)
+      throw replacementError
+    }
+    return
+  }
+
+  if (previousRequired) await replaceWorkerSchedules(token, accountId, previousScript, previousSchedules.filter((schedule) => schedule.cron !== "* * * * *"))
 }
 
 type QueueConsumer = { consumer_id?: string; script_name?: string }
@@ -650,7 +690,11 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
         state.workers[worker].verified = true; state.workers[worker].phase = "verified"; state.workers[worker].verifiedAt = checkedAt; state.workers[worker].lastCheckedAt = checkedAt; state.workers[worker].latencyMs = inspected.latencyMs; state.workers[worker].build = inspected.build; await saveState(state)
       }
       state.step = "schedules_configuring"; await saveState(state)
-      for (const worker of ORDER) await ensureSchedule(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
+      for (const worker of ORDER) {
+        const previousWorker = previous?.workers[worker]
+        const replacedScriptName = previousWorker?.accountId === accounts[worker].id ? previousWorker.scriptName : undefined
+        await ensureSchedule(tokens[worker], accounts[worker].id, state.workers[worker].scriptName, replacedScriptName)
+      }
       state.step = "schedules_ready"; await saveState(state)
       await saveRuntimeConfiguration(state, true)
       await queryDb(`insert into drive_app_settings(key,value,updated_at) values('cloudflare-worker-hosting',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`, [JSON.stringify({ mode: "automatic" })])

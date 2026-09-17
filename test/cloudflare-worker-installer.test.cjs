@@ -83,6 +83,14 @@ test("installer is resumable, locked and keeps secrets on release redeploy", () 
   assert.match(installer, /consumers\.find\(\(consumer\) => consumer\.script_name === scriptName\) \|\| consumers\[0\]/)
 })
 
+test("fresh Worker script names migrate their Drive cron trigger within Free-plan capacity", () => {
+  assert.match(installer, /async function ensureSchedule\(token: string, accountId: string, scriptName: string, replacedScriptName\?: string\)/)
+  assert.match(installer, /isCronTriggerLimitError\(error\)/)
+  assert.match(installer, /previousSchedules\.filter\(\(schedule\) => schedule\.cron !== "\* \* \* \* \*"\)/)
+  assert.match(installer, /await replaceWorkerSchedules\(token, accountId, previousScript, previousSchedules\)\.catch\(\(\) => undefined\)/)
+  assert.match(installer, /previousWorker\?\.accountId === accounts\[worker\]\.id \? previousWorker\.scriptName : undefined/)
+})
+
 test("release artifacts are immutable checksummed bundles", () => {
   assert.match(installer, /checksum mismatch/)
   assert.match(workflow, /build-worker-release\.mjs/)
