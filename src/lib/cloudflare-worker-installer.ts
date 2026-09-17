@@ -506,7 +506,7 @@ async function inspectWorker(url: string, secret: string) {
 }
 
 export async function reconcileCloudflareWorker(worker: HostedWorker, force = false) {
-  return withDbAdvisoryLock("cloudflare-worker-reconcile", "singleton", async () => {
+  return withDbAdvisoryLock("cloudflare-worker-install", "singleton", async () => {
     const state = await loadState()
     if (!state || !state.encryptedTokens) return getCloudflareInstallation()
     // A running or never-finished installation must be resumed by the installer.
