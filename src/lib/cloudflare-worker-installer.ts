@@ -3,6 +3,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 import { queryDb, withDbAdvisoryLock, withDbTransaction } from "@/lib/db"
 import { getBackendOrchestratorSettings } from "@/lib/backend-orchestrator-settings-store"
 import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
+import { runtimeHealthError } from "./cloudflare-worker-health.cjs"
 
 export type HostedWorker = "backend" | "scanner" | "migration"
 export type InstallMode = "single" | "separate"
@@ -446,6 +447,8 @@ async function verify(url: string, secret: string) {
       if (!health.ok) throw new Error(`Health verification failed (${health.status})`)
       const status = await fetch(`${url}/status`, { cache: "no-store", headers: { Authorization: `Bearer ${secret}` }, signal: AbortSignal.timeout(15_000) })
       if (!status.ok) throw new Error(`Authenticated verification failed (${status.status})`)
+      const healthError = runtimeHealthError(await status.json().catch(() => null))
+      if (healthError) throw new Error(`Runtime verification failed: ${healthError}`)
       return
     } catch (error) {
       lastError = error instanceof Error ? error.message : lastError
@@ -478,8 +481,10 @@ async function inspectWorkerOnce(url: string, secret: string) {
   ])
   if (!health.ok) throw new Error(`Health check failed (${health.status})`)
   if (!status.ok) throw new Error(`Authenticated status check failed (${status.status})`)
-  const payload = await status.json().catch(() => ({})) as { build?: string | number }
-  return { latencyMs: Date.now() - started, build: payload.build }
+  const payload = await status.json().catch(() => null) as { build?: string | number } | null
+  const healthError = runtimeHealthError(payload)
+  if (healthError) throw new Error(`Runtime verification failed: ${healthError}`)
+  return { latencyMs: Date.now() - started, build: payload?.build }
 }
 
 async function inspectWorker(url: string, secret: string) {
@@ -506,10 +511,12 @@ export async function reconcileCloudflareWorker(worker: HostedWorker, force = fa
     current.error = undefined
     state.step = `${worker}_verifying`
     await saveState(state)
+    let scriptPresent = false
     try {
       if (!current.accountId || !current.url || !state.encryptedTokens[worker]) throw new Error("Deployment metadata is incomplete")
       const token = decryptToken(state.encryptedTokens[worker]!, state.id, worker)
-      if (!(await scriptExists(token, current.accountId, current.scriptName))) throw new Error("Worker script was not found in Cloudflare")
+      scriptPresent = await scriptExists(token, current.accountId, current.scriptName)
+      if (!scriptPresent) throw new Error("Worker script was not found in Cloudflare")
       const inspected = await inspectWorker(current.url, state.secrets[worker])
       const names = resourceNames()
       if (worker === "scanner") await ensureConsumer(token, current.accountId, names.scannerQueue, names.scannerDlq, current.scriptName, 15)
@@ -518,7 +525,7 @@ export async function reconcileCloudflareWorker(worker: HostedWorker, force = fa
       current.deployed = true; current.verified = true; current.phase = "verified"; current.error = undefined
       current.lastCheckedAt = new Date().toISOString(); current.latencyMs = inspected.latencyMs; current.build = inspected.build
     } catch (error) {
-      current.deployed = false; current.verified = false; current.phase = "failed"
+      current.deployed = scriptPresent; current.verified = false; current.phase = "failed"
       current.error = error instanceof Error ? error.message : "Worker reconciliation failed"; current.lastCheckedAt = new Date().toISOString(); current.latencyMs = undefined; current.build = undefined
     }
     state.lastReconciledAt = new Date().toISOString()

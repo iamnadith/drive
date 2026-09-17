@@ -10,6 +10,18 @@ const workersPage = fs.readFileSync(path.join(root, "src/app/dashboard/workers/p
 const hosting = fs.readFileSync(path.join(root, "src/components/dashboard/cloudflare-worker-hosting.tsx"), "utf8")
 const settingsPage = fs.readFileSync(path.join(root, "src/app/dashboard/settings/page.tsx"), "utf8")
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/worker-release.yml"), "utf8")
+const { runtimeHealthError } = require(path.join(root, "src/lib/cloudflare-worker-health.cjs"))
+
+test("Worker readiness rejects durable runtime errors without confusing them with deployment presence", () => {
+  assert.equal(runtimeHealthError({ ok: true, state: { status: "idle" } }), null)
+  assert.equal(runtimeHealthError({ ok: true, state: null }), null)
+  assert.equal(runtimeHealthError({ ok: true, state: { status: "error", last_error: "Panel reconciliation failed (401)" } }), "Panel reconciliation failed (401)")
+  assert.equal(runtimeHealthError({ ok: true, state: { status: "failed", lastError: "database unavailable" } }), "database unavailable")
+  assert.equal(runtimeHealthError({ ok: false, error: "not configured" }), "not configured")
+  assert.match(runtimeHealthError("not-json"), /invalid status response/)
+  assert.match(installer, /Runtime verification failed: \$\{healthError\}/)
+  assert.match(installer, /current\.deployed = scriptPresent; current\.verified = false/)
+})
 
 test("installer deploys in dependency order and saves configuration before enabling", () => {
   assert.match(installer, /const ORDER: HostedWorker\[\] = \["backend", "scanner", "migration"\]/)
