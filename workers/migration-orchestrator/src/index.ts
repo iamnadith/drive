@@ -1546,23 +1546,42 @@ async function workerRequest(request: Request, env: Env, path: string) {
       if (instanceId) {
         await db.query(`update drive_agent_runs set status='running',updated_at=now() where agent_id=$1 and payload->>'workerInstanceId'=$2 and status in('pending','running')`, [agent.id, instanceId])
       }
+      const currentJobId = typeof body.currentJobId === "string" ? body.currentJobId : ""
+      const claimToken = typeof body.claimToken === "string" ? body.claimToken : ""
+      if (currentJobId && claimToken) {
+        const renewed = await db.query(`update drive_repair_jobs set last_heartbeat_at=now(),updated_at=now() where id=$1 and claimed_by_agent_id=$2 and claim_token=$3::uuid and status in('claimed','running') returning id`, [currentJobId, agent.id, claimToken])
+        if (!renewed.rowCount) {
+          const currentJob = (await db.query(`select status from drive_repair_jobs where id=$1 and claimed_by_agent_id=$2`, [currentJobId, agent.id])).rows[0]
+          if (currentJob?.status === "canceled") return json({ ok: true, agentId: agent.id, canceled: true })
+          return json({ error: "This job is no longer owned by this worker" }, 409)
+        }
+      }
       return json({ ok: true, agentId: agent.id })
     }
     if (action === "claim-job") {
       const migrationId = typeof body.migrationId === "string" ? body.migrationId : ""
-      if (!migrationId || body.pool !== true) return json({ error: "Migration worker claims require a pool migration id" }, 409)
+      const requestedJobId = typeof body.jobId === "string" ? body.jobId : ""
+      if (!migrationId || (body.pool !== true && !requestedJobId)) return json({ error: "Migration worker claims require a migration id and either pool or job id" }, 409)
       if (!Array.isArray(agent.capabilities) || !agent.capabilities.includes("bulk_migrate")) return json({ error: "Worker is not registered for bulk migrations" }, 409)
       await db.query("begin")
       try {
-        const migration = (await db.query(`select options,status from drive_migrations where id=$1 and coalesce(options->>'executionMode','')='migration_workers' for update`, [migrationId])).rows[0]
+        const migration = (await db.query(`select options,status from drive_migrations where id=$1 and ($2::boolean=false or coalesce(options->>'executionMode','')='migration_workers') for update`, [migrationId, body.pool === true])).rows[0]
         if (!migration || !["running", "verifying"].includes(String(migration.status))) {
           await db.query("commit")
           return json({ ok: true, job: null, poolComplete: true, poolStatus: migration?.status || "missing" })
         }
         const generation = integer(migration.options?.workerGeneration, 1, 1, 1000000)
-        const candidate = await db.query(`select * from drive_repair_jobs where migration_id=$1 and status='pending' and work_key like $2 order by created_at for update skip locked limit 1`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`])
+        const candidate = body.pool === true
+          ? await db.query(`select * from drive_repair_jobs where migration_id=$1 and status='pending' and work_key like $2 order by created_at for update skip locked limit 1`, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`])
+          : await db.query(`select * from drive_repair_jobs where id=$2 and migration_id=$1 and status='pending' for update skip locked`, [migrationId, requestedJobId])
         const job = candidate.rows[0]
-        if (!job) { await db.query("commit"); return json({ ok: true, job: null }) }
+        if (!job) {
+          const response = body.pool === true
+            ? { ok: true, job: null }
+            : { ok: true, job: null, poolComplete: true, poolReason: "requested_job_not_claimable" }
+          await db.query("commit")
+          return json(response)
+        }
         const claimed = await db.query(`update drive_repair_jobs set status='running',claimed_by_agent_id=$2,claim_token=gen_random_uuid(),claimed_at=now(),started_at=coalesce(started_at,now()),last_heartbeat_at=now(),summary=$3,payload=coalesce(payload,'{}'::jsonb)||jsonb_build_object('claimedWorkerInstanceId',$4::text),updated_at=now() where id=$1 returning *`, [job.id, agent.id, `Claimed by ${agent.name}`, typeof body.workerInstanceId === "string" ? body.workerInstanceId : null])
         if (typeof body.workerInstanceId === "string") await db.query(`update drive_agent_runs set job_reference=$2,status='running',updated_at=now() where agent_id=$1 and payload->>'workerInstanceId'=$3 and status in('pending','running')`, [agent.id, job.id, body.workerInstanceId])
         await db.query("commit")
@@ -1578,6 +1597,39 @@ async function workerRequest(request: Request, env: Env, path: string) {
     if (current.status === "canceled") return json({ ok: true, canceled: true, job: current })
     const status = ["pending", "claimed", "running", "completed", "failed", "canceled"].includes(String(body.status)) ? String(body.status) : current.status
     const updated = await db.query(`update drive_repair_jobs set status=$3,progress=coalesce(progress,'{}'::jsonb)||$4::jsonb,result=coalesce(result,'{}'::jsonb)||$5::jsonb,summary=coalesce($6,summary),error=coalesce($7,error),last_heartbeat_at=now(),completed_at=case when $3 in ('completed','failed','canceled') then now() else completed_at end,updated_at=now() where id=$1 and claimed_by_agent_id=$2 and claim_token=$8::uuid returning *`, [jobId, agent.id, status, JSON.stringify(body.progress && typeof body.progress === "object" ? body.progress : {}), JSON.stringify(body.result && typeof body.result === "object" ? body.result : {}), typeof body.summary === "string" ? body.summary.slice(0, 2000) : null, typeof body.error === "string" ? body.error.slice(0, 4000) : null, claimToken])
+    if (!updated.rowCount) return json({ error: "This job is no longer owned by this worker" }, 409)
+    if (current.mode === "migration" && Array.isArray(body.items)) {
+      for (const itemUpdate of body.items.slice(0, 100)) {
+        const itemId = typeof itemUpdate?.itemId === "string" ? itemUpdate.itemId : ""
+        if (!/^[0-9a-f-]{36}$/i.test(itemId)) continue
+        const selected = (await db.query(`select progress,slurper_status from drive_migration_items where id=$1 and migration_id=$2 limit 1`, [itemId, current.migration_id])).rows[0]
+        if (!selected) continue
+        const progress = selected.progress && typeof selected.progress === "object" ? selected.progress : {}
+        const live = progress.live && typeof progress.live === "object" ? progress.live : {}
+        const repair = progress.repairWorker && typeof progress.repairWorker === "object" ? progress.repairWorker : {}
+        const stage = typeof itemUpdate.stage === "string" ? itemUpdate.stage.slice(0, 100) : "repair_progress"
+        const itemStatus = typeof itemUpdate.status === "string" ? itemUpdate.status : "running"
+        const details = itemUpdate.details && typeof itemUpdate.details === "object" ? itemUpdate.details : {}
+        const transferred = Number.isFinite(itemUpdate.transferred) ? Math.max(0, Math.trunc(itemUpdate.transferred)) : Number(repair.transferred || 0)
+        const skipped = Number.isFinite(itemUpdate.skipped) ? Math.max(0, Math.trunc(itemUpdate.skipped)) : Number(repair.skipped || 0)
+        const failed = Number.isFinite(itemUpdate.failed) ? Math.max(0, Math.trunc(itemUpdate.failed)) : Number(repair.failed || 0)
+        const slurper = progress.slurperCumulative || progress.slurperNormalized || progress.slurper?.result || {}
+        const slurperTransferred = Math.max(0, Number(slurper.transferredObjects || 0))
+        const slurperSkipped = Math.max(0, Number(slurper.skippedObjects || 0))
+        const sameRepairJob = repair.jobId === jobId
+        const baselineTransferred = sameRepairJob ? Math.max(0, Number(repair.baselineTransferred || 0)) : Math.max(0, Number(repair.cumulativeTransferred ?? (Number(live.transferredObjects || 0) - slurperTransferred)))
+        const baselineSkipped = sameRepairJob ? Math.max(0, Number(repair.baselineSkipped || 0)) : Math.max(0, Number(repair.cumulativeSkipped ?? (Number(live.skippedObjects || 0) - slurperSkipped)))
+        const cumulativeTransferred = baselineTransferred + transferred
+        const cumulativeSkipped = Math.max(baselineSkipped, skipped)
+        const nextRepair = { ...repair, jobId, baselineTransferred, baselineSkipped, cumulativeTransferred, cumulativeSkipped, stage, status: itemStatus, transferred, skipped, failed, updatedAt: now, ...(typeof itemUpdate.summary === "string" ? { summary: itemUpdate.summary.slice(0, 1000) } : {}), details }
+        const nextLiveStatus = itemStatus === "completed" ? "completed" : itemStatus === "failed" ? "failed" : itemStatus === "canceled" ? "aborted" : stage.includes("scan") ? "scanning" : stage.includes("verif") ? "verifying" : "running"
+        const totalObjects = Math.max(0, Number(details.sourceObjectCount ?? live.totalObjects ?? 0))
+        const nextLive = { ...live, updatedAt: now, status: nextLiveStatus, workerStage: stage, workerStatus: itemStatus, repairJobId: jobId, totalObjects, transferredObjects: Math.min(totalObjects || Number.MAX_SAFE_INTEGER, slurperTransferred + cumulativeTransferred), skippedObjects: Math.max(slurperSkipped, cumulativeSkipped), failedObjects: nextLiveStatus === "completed" ? 0 : failed, verifyIssues: Math.max(0, Number(details.finalMissing || 0) + Number(details.finalMismatched || 0)) }
+        const nextProgress = { ...progress, stage, repairWorker: nextRepair, live: nextLive, repairWorkerStatus: itemStatus, ...(typeof itemUpdate.summary === "string" ? { syncMessage: itemUpdate.summary.slice(0, 1000) } : {}) }
+        const nextItemStatus = itemStatus === "completed" ? "completed" : itemStatus === "failed" ? "verification_failed" : selected.slurper_status
+        await db.query(`update drive_migration_items set progress=$3::jsonb,slurper_status=$4,last_progress_at=now(),updated_at=now() where id=$1 and migration_id=$2`, [itemId, current.migration_id, JSON.stringify(nextProgress), nextItemStatus])
+      }
+    }
     if (current.mode === "migration" && !["completed", "failed", "canceled"].includes(current.status) && ["completed", "failed"].includes(status)) {
       const objectSize = Number(current.payload?.inventoryObjects?.[0]?.size || 0)
       await db.query(`update drive_agent_runs set payload=payload||jsonb_build_object(

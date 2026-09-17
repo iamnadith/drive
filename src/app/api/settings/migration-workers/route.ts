@@ -52,16 +52,13 @@ export async function PUT(request: Request) {
       `)
       if (repositories.rows.length) {
         const orchestration = await getMigrationOrchestratorSettings()
-        const postgresUrl = String(process.env.POSTGRES_URL || "").trim()
         if (!orchestration.orchestratorUrl) throw new Error("Migration Orchestrator URL is not configured")
-        if (!postgresUrl) throw new Error("POSTGRES_URL is not configured on the Drive server")
         await Promise.all(repositories.rows.map((repository) => syncGitHubWorkerSecrets({
           token: repository.token,
           owner: repository.owner,
           repo: repository.repo,
           serverUrl: orchestration.orchestratorUrl,
           sharedSecret,
-          postgresUrl,
         })))
       }
       await setMigrationWorkerSecretSyncStatus("ready")

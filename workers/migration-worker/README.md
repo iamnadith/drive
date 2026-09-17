@@ -10,32 +10,28 @@ Standalone worker package for full migrations, recovery, repair, and verificatio
 
 ## Runtime configuration
 
-The worker requires these deployment values:
+The worker requires the Migration Orchestrator URL (`SERVER_URL`) and the shared Migration Worker secret (`TOKEN`). GitHub dispatch also supplies `AGENT_ID`, `DRIVE_MIGRATION_ID`, and a unique `WORKER_INSTANCE_ID`.
 
-- `POSTGRES_URL`
-- `POSTGRES_SSL` (optional compatibility override; TLS is enabled by default; use `?sslmode=disable` in `POSTGRES_URL` when the database requires plaintext)
-- `AGENT_ID`
-
-It loads the shared worker secret and optional panel origin from PostgreSQL. It claims and updates fenced per-file migration jobs directly, so panel downtime does not stop a migration. PostgreSQL is required; the worker does not switch migration synchronization to the panel API or Supabase when the database is unavailable.
+The worker communicates with the Migration Orchestrator for registration, fenced job claims, heartbeat/lease renewal, cancellation, progress, and results. It does not connect to PostgreSQL and must never receive `POSTGRES_URL` or a PostgreSQL SSL setting. Configure `POSTGRES_URL` and `DISABLE_POSTGRES_SSL` on the Migration Orchestrator; the Orchestrator owns database connectivity and worker dispatch.
 
 ## Local run
 
 ```bash
 npm install
-npm start -- --agent-id YOUR_AGENT_ID
+npm start -- --server-url https://YOUR-MIGRATION-ORCHESTRATOR --token YOUR_SHARED_SECRET --agent-id YOUR_AGENT_ID
 ```
 
 The same values can be supplied as environment variables instead of command-line arguments:
 
 ```bash
-POSTGRES_URL=postgresql://...?sslmode=disable AGENT_ID=YOUR_AGENT_ID npm start
+SERVER_URL=https://YOUR-MIGRATION-ORCHESTRATOR TOKEN=YOUR_SHARED_SECRET AGENT_ID=YOUR_AGENT_ID npm start
 ```
 
 PowerShell:
 
 ```powershell
-$env:POSTGRES_URL="postgresql://..."
-$env:POSTGRES_SSL="true" # optional; the URL's sslmode=disable is sufficient for plaintext-only PostgreSQL
+$env:SERVER_URL="https://YOUR-MIGRATION-ORCHESTRATOR"
+$env:TOKEN="YOUR_SHARED_SECRET"
 $env:AGENT_ID="YOUR_AGENT_ID"
 npm start
 ```
@@ -44,17 +40,14 @@ npm start
 
 The root workflow at `.github/workflows/migration-worker.yml` accepts runtime values from the Drive panel and also detects repository secrets or repository variables.
 
-Required repository secret:
+Required repository secrets:
 
-- `POSTGRES_URL`
-
-Optional repository secret:
-
-- `POSTGRES_SSL` (optional compatibility override; TLS is enabled by default; the PostgreSQL URL may set `sslmode=disable`)
+- `DRIVE_MIGRATION_ORCHESTRATOR_URL`
+- `DRIVE_WORKER_SHARED_SECRET`
 
 The agent id is passed per dispatch, so one GitHub account and repository can host many separately identified worker registrations. Non-secret tuning values can be added as repository variables, such as `COPY_CONCURRENCY`, `UPLOAD_QUEUE_SIZE`, and `UPLOAD_PART_SIZE_MB`.
 
-When the panel dispatches a GitHub worker, it passes the migration and unique agent id as workflow inputs and synchronizes the orchestrator URL and shared worker secret. The database URL and SSL setting are repository secrets consumed directly by the worker. The shared worker secret remains in the database and is common to every migration worker; the agent id keeps concurrent workers separately identifiable. A per-claim UUID fences stale processes after recovery. Each worker claims one scanner-generated per-file job at a time and keeps polling for more work. The generation-scoped unique work key gives every source object one durable queue record.
+When the panel dispatches a GitHub worker, it synchronizes only the Orchestrator URL and shared worker secret. Database URL and SSL configuration remain on the Migration Orchestrator and are never exposed to GitHub Actions workers. The agent id keeps concurrent workers separately identifiable. A per-claim UUID fences stale processes after recovery. Each worker claims one scanner-generated per-file job at a time and keeps polling for more work. The generation-scoped unique work key gives every source object one durable queue record.
 
 ## Performance tuning
 
