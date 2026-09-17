@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 25
+const BUILD = 26
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -1295,11 +1295,11 @@ async function abortMigrationWorkers(db: Client, migrationId: string, reason: st
     select r.id,r.status,r.external_run_id,r.payload,a.github_repo_owner,a.github_repo_name,a.github_workflow_file,a.github_ref,a.github_token
     from drive_agent_runs r join drive_agents a on a.id=r.agent_id
     where r.run_type='github_dispatch' and r.status in('pending','running') and (
-      r.payload->>'migrationId'=$1 or exists(select 1 from drive_repair_jobs j where j.id::text=r.job_reference and j.migration_id=$1)
+      r.payload->>'migrationId'=$1::text or exists(select 1 from drive_repair_jobs j where j.id::text=r.job_reference and j.migration_id::text=$1::text)
     )
       and (
         r.payload->>'githubAbortRequestedAt' is not null
-        or exists(select 1 from drive_migrations m where m.id=$1 and m.status in('canceled','completed','aborted','failed','verification_failed'))
+        or exists(select 1 from drive_migrations m where m.id::text=$1::text and m.status in('canceled','completed','aborted','failed','verification_failed'))
       )
       and a.provider='github_actions' and a.github_token is not null
   `, [migrationId])

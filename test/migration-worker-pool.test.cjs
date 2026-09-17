@@ -74,6 +74,15 @@ test('orchestrator reconciles GitHub worker runs whose migration is deleted or t
   assert.match(orchestrator, /idle: true, canceledWorkerJobs, orphanedWorkerRuns/)
 })
 
+test('GitHub cancellation compares migration ids consistently as text', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const abort = orchestrator.slice(orchestrator.indexOf('async function abortMigrationWorkers'), orchestrator.indexOf('async function reconcileCanceledWorkerRepairJobs'))
+  assert.match(abort, /r\.payload->>'migrationId'=\$1::text/)
+  assert.match(abort, /j\.migration_id::text=\$1::text/)
+  assert.match(abort, /m\.id::text=\$1::text/)
+  assert.doesNotMatch(abort, /r\.payload->>'migrationId'=\$1(?!::text)/)
+})
+
 test('worker-pool details hydrate and refresh from PostgreSQL only', () => {
   const route = read('src/app/api/migrations/[id]/worker-pool/route.ts')
   const page = read('src/app/dashboard/migrations/[id]/worker-pool/page.tsx')
