@@ -630,6 +630,7 @@ export async function replaceCloudflareTokens(input: { mode: InstallMode; tokens
 export async function installCloudflareWorkers(input: { mode: InstallMode; tokens: Partial<TokenMap>; restart?: boolean; checkForUpdates?: boolean; forceRedeploy?: boolean }) {
   return withDbAdvisoryLock("cloudflare-worker-install", "singleton", async () => {
     const previous = await loadState()
+    const previousRuntime = await currentRuntimeSnapshot()
     const hasSuppliedToken = ORDER.some((worker) => Boolean(String(input.tokens[worker] || "").trim()))
     if (previous?.status === "ready" && !input.restart && !input.checkForUpdates && !input.forceRedeploy && !hasSuppliedToken) return getCloudflareInstallation()
     const supplied = input.mode === "single"
@@ -708,6 +709,11 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       state.status = "ready"; state.step = "enabled"; await saveState(state)
       return getCloudflareInstallation()
     } catch (error) {
+      // A failed update must not leave a previously working installation
+      // disabled just because one Worker failed its readiness check. Preserve
+      // the exact prior runtime flags/URLs/secrets; the visible install state
+      // still records which Worker needs repair.
+      if (previous?.status === "ready") await writeRuntimeSnapshot(previousRuntime).catch(() => undefined)
       state.status = "failed"; state.error = `${state.step}: ${error instanceof Error ? error.message : "Installation failed"}`
       const active = ORDER.find((worker) => state.step.startsWith(`${worker}_`) && !state.workers[worker].verified)
       if (active) { state.workers[active].phase = "failed"; state.workers[active].error = state.error }
