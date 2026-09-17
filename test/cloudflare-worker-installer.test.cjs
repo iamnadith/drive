@@ -19,6 +19,10 @@ test("installer deploys in dependency order and saves configuration before enabl
   const schedules = installer.indexOf('state.step = "schedules_ready"', verify)
   const enable = installer.indexOf("saveRuntimeConfiguration(state, true)", verify)
   assert.ok(upload > 0 && upload < save && save < verify && verify < schedules && schedules < enable)
+  const scheduling = installer.indexOf('state.step = "schedules_configuring"', verify)
+  const scheduleLoop = installer.indexOf("await ensureSchedule(tokens[worker]", scheduling)
+  assert.ok(scheduling > verify && scheduleLoop > scheduling)
+  assert.doesNotMatch(installer.slice(scheduling, schedules), /await setSchedule\(tokens\[worker\]/)
 })
 
 test("tokens are encrypted at rest, redacted by default and API is superadmin protected", () => {

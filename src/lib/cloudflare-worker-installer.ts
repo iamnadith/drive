@@ -649,7 +649,8 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
         const checkedAt = new Date().toISOString()
         state.workers[worker].verified = true; state.workers[worker].phase = "verified"; state.workers[worker].verifiedAt = checkedAt; state.workers[worker].lastCheckedAt = checkedAt; state.workers[worker].latencyMs = inspected.latencyMs; state.workers[worker].build = inspected.build; await saveState(state)
       }
-      for (const worker of ORDER) await setSchedule(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
+      state.step = "schedules_configuring"; await saveState(state)
+      for (const worker of ORDER) await ensureSchedule(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
       state.step = "schedules_ready"; await saveState(state)
       await saveRuntimeConfiguration(state, true)
       await queryDb(`insert into drive_app_settings(key,value,updated_at) values('cloudflare-worker-hosting',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`, [JSON.stringify({ mode: "automatic" })])
