@@ -677,7 +677,11 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
         const current = state.workers[worker]
         const artifactEntry = manifest.workers[worker]
         const artifactMatches = current.releaseVersion === manifest.version && current.artifactSha256 === artifactEntry.sha256.toLowerCase()
-        if (input.forceRedeploy || !current.deployed || !artifactMatches) {
+        // A failed runtime verification can mean the Worker bindings drifted
+        // from the dashboard's authoritative settings even when the script
+        // checksum is unchanged. Repair must re-upload the script so its
+        // generated secret, database URL, SSL flag, and panel URL are synced.
+        if (input.forceRedeploy || !current.deployed || !current.verified || !artifactMatches) {
           current.deployed = false; current.verified = false; current.verifiedAt = undefined; current.latencyMs = undefined; current.build = undefined
           state.workers[worker].phase = "uploading"; state.workers[worker].error = undefined; state.step = `${worker}_uploading`; await saveState(state)
           await uploadWorker({ worker, token: tokens[worker], accountId: accounts[worker].id, entry: artifactEntry, code: await artifact(artifactEntry), state })

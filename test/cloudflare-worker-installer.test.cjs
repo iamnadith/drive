@@ -56,7 +56,7 @@ test("tokens are encrypted at rest, redacted by default and API is superadmin pr
 
 test("installer is resumable, locked and keeps secrets on release redeploy", () => {
   assert.match(installer, /withDbAdvisoryLock\("cloudflare-worker-install", "singleton"/)
-  assert.match(installer, /if \(input\.forceRedeploy \|\| !current\.deployed \|\| !artifactMatches\)/)
+  assert.match(installer, /if \(input\.forceRedeploy \|\| !current\.deployed \|\| !current\.verified \|\| !artifactMatches\)/)
   assert.match(installer, /state\.secrets = previous\.secrets/)
   assert.match(installer, /status = "failed"/)
   assert.match(installer, /for \(let attempt = 0; attempt < 5/)
@@ -79,7 +79,7 @@ test("installer is resumable, locked and keeps secrets on release redeploy", () 
   assert.match(installer, /state\.workers\[worker\]\.releaseVersion = manifest\.version/)
   assert.match(installer, /checkForUpdates\?: boolean/)
   assert.match(installer, /forceRedeploy\?: boolean/)
-  assert.match(installer, /input\.forceRedeploy \|\| !current\.deployed \|\| !artifactMatches/)
+  assert.match(installer, /input\.forceRedeploy \|\| !current\.deployed \|\| !current\.verified \|\| !artifactMatches/)
   assert.match(installer, /!input\.checkForUpdates/)
   assert.match(route, /checkForUpdates: body\.checkForUpdates === true/)
   assert.match(route, /forceRedeploy: body\.forceRedeploy === true/)
