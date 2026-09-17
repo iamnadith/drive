@@ -70,7 +70,7 @@ export async function sendVerificationEmail(input: {
   purpose?: VerificationPurpose
 }) {
   const apiKey = process.env.RESEND_API_KEY
-  const from = process.env.RESEND_FROM_EMAIL || process.env.RESEND_FROM || "Drive <onboarding@resend.dev>"
+  const from = resolveResendFrom(process.env.RESEND_FROM_EMAIL, process.env.RESEND_FROM)
   if (!apiKey) {
     throw new Error("RESEND_API_KEY is not configured")
   }
@@ -122,6 +122,24 @@ export async function sendVerificationEmail(input: {
         : "Unable to send verification email"
     throw new Error(message)
   }
+}
+
+function resolveResendFrom(...values: Array<string | undefined>) {
+  const validEmail = (value: string) => /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(value)
+  for (const raw of [...values, "Drive <onboarding@resend.dev>"]) {
+    if (!raw) continue
+    const value = raw.trim().replace(/^(["'])(.*)\1$/, "$2").trim()
+    if (validEmail(value)) return value
+
+    const angleAddress = /^(.*?)\s*<\s*([^<>]+)\s*>$/.exec(value)
+    const trailingAddress = angleAddress ? null : /^(.*?)\s+([^\s<>]+@[^\s<>]+)$/.exec(value)
+    const match = angleAddress || trailingAddress
+    if (!match || !validEmail(match[2].trim())) continue
+    const name = match[1].trim().replace(/^["']|["']$/g, "").replace(/[<>\r\n]/g, "").trim()
+    const address = match[2].trim()
+    return name ? `${name} <${address}>` : address
+  }
+  return "Drive <onboarding@resend.dev>"
 }
 
 export async function verifyEmailCode(input: {
