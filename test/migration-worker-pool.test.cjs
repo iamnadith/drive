@@ -87,6 +87,8 @@ test('GitHub worker configuration changes synchronize every repository without t
   const workerSettings = read('src/app/api/settings/migration-workers/route.ts')
   const orchestratorSettings = read('src/app/api/settings/migration-orchestrator/route.ts')
   assert.match(helper, /export async function syncAllGitHubWorkerSecrets/)
+  assert.match(helper, /export async function syncAllGitHubWorkerSecretsWithinInstallerLock/)
+  assert.match(helper, /withDbAdvisoryLock\("github-worker-secret-sync", "all-repositories"/)
   assert.match(helper, /REPOSITORY_SYNC_CONCURRENCY = 4/)
   assert.match(helper, /Promise\.allSettled/)
   assert.match(helper, /synchronizedServerUrl|serverUrl/)

@@ -155,6 +155,7 @@ function isTransientConnectionError(error: unknown): boolean {
   const maybe = error as { code?: unknown; message?: unknown }
   const code = typeof maybe.code === "string" ? maybe.code : ""
   const message = typeof maybe.message === "string" ? maybe.message : ""
+  const normalizedMessage = message.toLowerCase()
 
   return (
     code === "ECONNRESET" ||
@@ -163,10 +164,11 @@ function isTransientConnectionError(error: unknown): boolean {
     code === "57P01" || // admin_shutdown
     code === "57P02" || // crash_shutdown
     code === "57P03" || // cannot_connect_now
-    message.includes("Connection terminated unexpectedly") ||
-    message.includes("Connection terminated due to connection timeout") ||
-    message.includes("terminating connection due to administrator command") ||
-    message.includes("{:shutdown, :db_termination}")
+    normalizedMessage.includes("timeout exceeded when trying to connect") ||
+    normalizedMessage.includes("connection timeout") ||
+    normalizedMessage.includes("connection terminated unexpectedly") ||
+    normalizedMessage.includes("terminating connection due to administrator command") ||
+    normalizedMessage.includes("{:shutdown, :db_termination}")
   )
 }
 

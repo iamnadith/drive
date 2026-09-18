@@ -29,6 +29,19 @@ export async function syncAllGitHubWorkerSecrets(input: {
   serverUrl: string
   sharedSecret: string
 }) {
+  return withDbAdvisoryLock("github-worker-secret-sync", "all-repositories", () =>
+    syncAllGitHubWorkerSecretsWithinInstallerLock(input)
+  )
+}
+
+// The Cloudflare installer already holds its own installation-wide advisory
+// lock. Acquiring another lock through the dedicated one-connection lock pool
+// would deadlock until pg.Pool's connection timeout. Keep the synchronization
+// implementation reusable without nesting a second database lock.
+export async function syncAllGitHubWorkerSecretsWithinInstallerLock(input: {
+  serverUrl: string
+  sharedSecret: string
+}) {
   const serverUrl = input.serverUrl.trim().replace(/\/+$/, "")
   const sharedSecret = input.sharedSecret.trim()
   if (!serverUrl) throw new Error("Migration Orchestrator URL is not configured")
@@ -36,10 +49,9 @@ export async function syncAllGitHubWorkerSecrets(input: {
     throw new Error("Migration Worker shared secret must be between 24 and 512 characters")
   }
 
-  return withDbAdvisoryLock("github-worker-secret-sync", "all-repositories", async () => {
-    await setMigrationWorkerSecretSyncStatus("syncing")
-    try {
-      const repositories = await queryDb<{
+  await setMigrationWorkerSecretSyncStatus("syncing")
+  try {
+    const repositories = await queryDb<{
         owner: string
         repo: string
         token: string | null
@@ -52,36 +64,35 @@ export async function syncAllGitHubWorkerSecrets(input: {
         order by lower(github_repo_owner),lower(github_repo_name),updated_at desc,id
       `)
 
-      for (let offset = 0; offset < repositories.rows.length; offset += REPOSITORY_SYNC_CONCURRENCY) {
-        const batch = repositories.rows.slice(offset, offset + REPOSITORY_SYNC_CONCURRENCY)
-        const results = await Promise.allSettled(batch.map(async (repository) => {
-          try {
-            if (!repository.token) throw new Error("saved GitHub authorization is missing; reconnect this workflow")
-            await syncGitHubWorkerSecrets({
-              token: repository.token,
-              owner: repository.owner,
-              repo: repository.repo,
-              serverUrl,
-              sharedSecret,
-            })
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error)
-            throw new Error(`${repository.owner}/${repository.repo}: ${message}`)
-          }
-        }))
-        const failures = results.flatMap((result) => result.status === "rejected" ? [String(result.reason instanceof Error ? result.reason.message : result.reason)] : [])
-        if (failures.length) throw new Error(failures.join("; "))
-      }
-
-      await setMigrationWorkerSecretSyncStatus("ready", undefined, {
-        serverUrl,
-        secretHash: createHash("sha256").update(sharedSecret).digest("hex"),
-      })
-      return { syncedRepositories: repositories.rows.length }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      await setMigrationWorkerSecretSyncStatus("failed", message).catch(() => undefined)
-      throw error
+    for (let offset = 0; offset < repositories.rows.length; offset += REPOSITORY_SYNC_CONCURRENCY) {
+      const batch = repositories.rows.slice(offset, offset + REPOSITORY_SYNC_CONCURRENCY)
+      const results = await Promise.allSettled(batch.map(async (repository) => {
+        try {
+          if (!repository.token) throw new Error("saved GitHub authorization is missing; reconnect this workflow")
+          await syncGitHubWorkerSecrets({
+            token: repository.token,
+            owner: repository.owner,
+            repo: repository.repo,
+            serverUrl,
+            sharedSecret,
+          })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          throw new Error(`${repository.owner}/${repository.repo}: ${message}`)
+        }
+      }))
+      const failures = results.flatMap((result) => result.status === "rejected" ? [String(result.reason instanceof Error ? result.reason.message : result.reason)] : [])
+      if (failures.length) throw new Error(failures.join("; "))
     }
-  })
+
+    await setMigrationWorkerSecretSyncStatus("ready", undefined, {
+      serverUrl,
+      secretHash: createHash("sha256").update(sharedSecret).digest("hex"),
+    })
+    return { syncedRepositories: repositories.rows.length }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    await setMigrationWorkerSecretSyncStatus("failed", message).catch(() => undefined)
+    throw error
+  }
 }

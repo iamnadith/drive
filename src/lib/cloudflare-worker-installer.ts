@@ -4,7 +4,7 @@ import { queryDb, withDbAdvisoryLock, withDbTransaction } from "@/lib/db"
 import { getBackendOrchestratorSettings } from "@/lib/backend-orchestrator-settings-store"
 import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
 import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
-import { syncAllGitHubWorkerSecrets } from "@/lib/github-worker-secrets"
+import { syncAllGitHubWorkerSecretsWithinInstallerLock } from "@/lib/github-worker-secrets"
 import { runtimeHealthError } from "./cloudflare-worker-health.cjs"
 
 export type HostedWorker = "backend" | "scanner" | "migration"
@@ -735,7 +735,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
         && workerSettings.synchronizedSecretHash === createHash("sha256").update(workerSettings.sharedSecret).digest("hex")
       if (migrationUrlChanged || workerSettings.secretSyncStatus !== "ready" || !synchronizedConfigurationMatches) {
         state.step = "github_worker_secrets_syncing"; await saveState(state)
-        await syncAllGitHubWorkerSecrets({
+        await syncAllGitHubWorkerSecretsWithinInstallerLock({
           serverUrl: state.workers.migration.url || "",
           sharedSecret: workerSettings.sharedSecret,
         })
@@ -753,7 +753,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       // still records which Worker needs repair.
       if (previous?.status === "ready") {
         if (githubSecretsSynchronized && previousRuntime.migration.orchestratorUrl) {
-          await syncAllGitHubWorkerSecrets({
+          await syncAllGitHubWorkerSecretsWithinInstallerLock({
             serverUrl: previousRuntime.migration.orchestratorUrl,
             sharedSecret: workerSharedSecretForSync,
           }).catch(() => undefined)
