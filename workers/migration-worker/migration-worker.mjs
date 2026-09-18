@@ -31,6 +31,11 @@ const REPAIR_JOB_ID = String(getArg("repair-job-id", process.env.DRIVE_REPAIR_JO
 const POOL_MODE = Boolean(MIGRATION_ID && !REPAIR_JOB_ID)
 const GITHUB_RUN_ID = String(process.env.GITHUB_RUN_ID || "")
 const WORKER_INSTANCE_ID = String(process.env.WORKER_INSTANCE_ID || GITHUB_RUN_ID || "").trim()
+// GitHub-hosted jobs have a hard six-hour ceiling. Retire ten minutes early
+// so the current file can be durably released and the run can close cleanly.
+const DEFAULT_MAX_RUNTIME_SECONDS = process.env.GITHUB_ACTIONS === "true" ? "21000" : "0"
+const MAX_RUNTIME_SECONDS = Math.max(0, Number(getArg("max-runtime-seconds", DEFAULT_MAX_RUNTIME_SECONDS)) || 0)
+const RUNTIME_DEADLINE = MAX_RUNTIME_SECONDS > 0 ? Date.now() + MAX_RUNTIME_SECONDS * 1000 : Number.POSITIVE_INFINITY
 // Persistent workers immediately claim again after every completed file. When
 // the scanner is still producing inventory pages, a one-second idle poll
 // bounds hand-off latency without letting large worker pools hammer Postgres.
@@ -64,6 +69,8 @@ const jobUpdateQueues = new Map()
 const jobClaimTokens = new Map()
 let runtimeConfigurationLoadedAt = 0
 let fatalAuthenticationError = false
+let runtimeRotationRequested = false
+let runtimeRotationTimer = null
 const WORKER_STATE_DIR = path.resolve(String(getArg("state-dir", path.join(process.cwd(), ".drive-worker"))))
 const WORKER_IDENTITY_PATH = path.join(WORKER_STATE_DIR, "identity.json")
 
@@ -355,6 +362,34 @@ async function heartbeat(extra = {}) {
     throw new JobAbortedError()
   }
   return result
+}
+
+async function retireWorker(reason) {
+  if (!WORKER_INSTANCE_ID) return
+  await api(`/workers/${encodeURIComponent(AGENT_ID)}/retire`, {
+    token: AGENT_TOKEN,
+    workerInstanceId: WORKER_INSTANCE_ID,
+    reason,
+  })
+}
+
+async function releaseJobForRotation(jobId) {
+  try {
+    await updateJob(jobId, {
+      status: "pending",
+      workerInstanceId: WORKER_INSTANCE_ID || undefined,
+      summary: "Worker runtime window ended; returned to the durable queue for the replacement worker",
+      progress: {
+        active: false,
+        currentFile: null,
+        rotationRequestedAt: new Date().toISOString(),
+        rotationReason: "github_runtime_window",
+      },
+    })
+    jobClaimTokens.delete(jobId)
+  } catch (error) {
+    console.error(`Unable to release job ${jobId} during worker rotation:`, error instanceof Error ? error.message : String(error))
+  }
 }
 
 async function claimJob() {
@@ -1789,7 +1824,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
       integrityProofs: assignedInventory ? finalDestinationObjects.map((object) => ({ key: object.key, size: object.destinationSize ?? object.size, destinationEtag: object.destinationEtag ?? null, sha256: object.sourceSha256 ?? null, verified: object.integrityVerified === true })) : undefined,
     }
   } catch (error) {
-    if (error instanceof JobAbortedError) throw error
+    if (error instanceof JobAbortedError || getJobAbortSignal(jobId)?.aborted) throw new JobAbortedError()
     state.stats.failedBuckets += 1
     pushLog(state, `Worker ${stage.replace("repair_", "")} failed for ${item.sourceBucket}`, {
       itemId: item.id,
@@ -1989,12 +2024,27 @@ async function main() {
     heartbeatLoopStarted = true
     void startHeartbeatLoop()
   }
+  if (Number.isFinite(RUNTIME_DEADLINE) && !runtimeRotationTimer) {
+    runtimeRotationTimer = setTimeout(() => {
+      runtimeRotationRequested = true
+      if (currentJobId) markJobAborted(currentJobId)
+    }, Math.max(0, RUNTIME_DEADLINE - Date.now()))
+    runtimeRotationTimer.unref?.()
+  }
 
   while (!fatalAuthenticationError) {
     try {
+      if (runtimeRotationRequested || Date.now() >= RUNTIME_DEADLINE) {
+        runtimeRotationRequested = true
+        await retireWorker("runtime_window_complete").catch((error) => console.error("Worker retirement sync failed:", error instanceof Error ? error.message : String(error)))
+        console.log("Worker runtime window completed; replacement capacity is now available")
+        stopHeartbeatLoop()
+        return
+      }
       const claimed = await tryClaimJob()
       if (claimed?.poolComplete === true) {
         console.log(`Worker pool is complete (${claimed.poolReason || "terminal"}); stopping worker cleanly`)
+        await retireWorker("pool_complete").catch((error) => console.error("Worker retirement sync failed:", error instanceof Error ? error.message : String(error)))
         stopHeartbeatLoop()
         return
       }
@@ -2010,8 +2060,16 @@ async function main() {
       console.log(`Finished job ${claimed.job.id}`)
       currentJobId = null
       jobAbortControllers.delete(claimed.job.id)
+      if (runtimeRotationRequested || Date.now() >= RUNTIME_DEADLINE) {
+        runtimeRotationRequested = true
+        await retireWorker("runtime_window_complete").catch((error) => console.error("Worker retirement sync failed:", error instanceof Error ? error.message : String(error)))
+        console.log("Worker runtime window completed after the current file; replacement capacity is now available")
+        stopHeartbeatLoop()
+        return
+      }
       if (EXIT_AFTER_JOB) {
         console.log(`Exit-after-job enabled; stopping worker after job ${claimed.job.id}`)
+        await retireWorker("exit_after_job").catch((error) => console.error("Worker retirement sync failed:", error instanceof Error ? error.message : String(error)))
         stopHeartbeatLoop()
         return
       }
@@ -2025,6 +2083,15 @@ async function main() {
       }
       console.error("Worker loop error:", error instanceof Error ? error.message : String(error))
       const failedJobId = currentJobId
+      if (runtimeRotationRequested) {
+        if (failedJobId) await releaseJobForRotation(failedJobId)
+        currentJobId = null
+        if (failedJobId) jobAbortControllers.delete(failedJobId)
+        await retireWorker("runtime_window_complete").catch((retireError) => console.error("Worker retirement sync failed:", retireError instanceof Error ? retireError.message : String(retireError)))
+        console.log("Worker runtime window completed; unfinished work was returned to the durable queue")
+        stopHeartbeatLoop()
+        return
+      }
       if (currentJobId) {
         if (error instanceof JobAbortedError) {
           console.log(`Job ${currentJobId} aborted by user`)

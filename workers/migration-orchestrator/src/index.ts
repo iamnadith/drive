@@ -3,11 +3,12 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 28
+const BUILD = 29
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
 const MAX_GITHUB_WORKFLOW_WORKERS = 5
+const GITHUB_WORKER_MAX_RUNTIME_SECONDS = 21_000
 const MAX_SECRET_LENGTH = 512
 const TRANSIENT_SCAN_SQL_PATTERN = "(connection terminated unexpectedly|connection reset|connection closed|server closed the connection unexpectedly|client has encountered a connection error|not queryable|socket hang up|econnreset|econnrefused|etimedout|timeout|timed out|eai_again|enotfound|enetunreach|epipe|fetch failed|temporar(y|ily) unavailable|too many (requests|connections|clients)|slow down|throttl|HTTP (408|425|429|500|502|503|504)|57P01|57P03|53300|08[0-9A-Z]{3}|40001|40P01)"
 let authCache: { value: string[]; expiresAt: number } | null = null
@@ -1207,6 +1208,17 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
   if (!completion.activated) return { verification: "canceled" }
   return { verification: "completed", missing, mismatched, extra, backendOrchestrator: completion.backendOrchestrator }
 }
+async function releaseWorkerInstanceClaims(db: Client, agentId: string, instanceId: string, reason: string) {
+  if (!instanceId) return 0
+  const released = await db.query(`
+    update drive_repair_jobs set status='pending',claimed_by_agent_id=null,claim_token=null,claimed_at=null,started_at=null,
+      last_heartbeat_at=null,error=null,completed_at=null,summary=$3,
+      progress=coalesce(progress,'{}'::jsonb)||jsonb_build_object('active',false,'currentFile',null,'rotationRequestedAt',now(),'rotationReason','github_runtime_window'),updated_at=now()
+    where mode='migration' and claimed_by_agent_id=$1 and payload->>'claimedWorkerInstanceId'=$2 and status in('claimed','running')
+    returning id
+  `, [agentId, instanceId, reason.slice(0, 2000)])
+  return released.rowCount || 0
+}
 async function dispatchWorkers(db: Client, env: Env, migration: Row) {
   const generation = integer(opts(migration).workerGeneration, 1, 1, 1000000)
   const stopped = await db.query(`
@@ -1257,22 +1269,46 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
     const workflowKey = `${account}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
     if (blockedWorkflows.has(workflowKey)) continue
     const remoteRuns = githubRunsByWorkflow.get(workflowKey) || []
-    const staleRuns = await db.query(`select id,payload,external_run_id from drive_agent_runs where agent_id=$1 and run_type='github_dispatch' and status in('pending','running') and updated_at<now()-interval '3 minutes' and payload->>'migrationId'=$2 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$3`, [agent.id, migration.id, generation])
-    for (const stale of staleRuns.rows) {
-      const instanceId = String(stale.payload?.workerInstanceId || "")
-      const remote = remoteRuns.find((run) => (stale.external_run_id && String(run.id) === String(stale.external_run_id)) || (instanceId && String(run.display_title || "").includes(instanceId)))
+    const trackedRuns = await db.query(`select id,payload,external_run_id,updated_at from drive_agent_runs where agent_id=$1 and run_type='github_dispatch' and status in('pending','running') and payload->>'migrationId'=$2 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$3`, [agent.id, migration.id, generation])
+    for (const tracked of trackedRuns.rows) {
+      const instanceId = String(tracked.payload?.workerInstanceId || "")
+      const remote = remoteRuns.find((run) => (tracked.external_run_id && String(run.id) === String(tracked.external_run_id)) || (instanceId && String(run.display_title || "").includes(instanceId)))
+      if (remote && String(remote.status).toLowerCase() === "completed") {
+        const terminalStatus = String(remote.conclusion).toLowerCase() === "success" ? "completed" : ["cancelled", "canceled"].includes(String(remote.conclusion).toLowerCase()) ? "canceled" : "failed"
+        const releasedJobs = await releaseWorkerInstanceClaims(db, agent.id, instanceId, "GitHub worker stopped; file returned to the durable queue")
+        await db.query(`update drive_agent_runs set status=$2,summary='GitHub worker run reached a terminal state; capacity released',completed_at=now(),external_run_id=coalesce(external_run_id,$3),payload=payload||$4::jsonb,updated_at=now() where id=$1 and status in('pending','running')`, [tracked.id, terminalStatus, String(remote.id || "") || null, JSON.stringify({ githubStatus: remote.status, githubConclusion: remote.conclusion || null, releasedJobs })])
+        activeByWorkflow.get(workflowKey)?.delete(String(remote.id || tracked.external_run_id || ""))
+        continue
+      }
+      const remoteStatus = String(remote?.status || "").toLowerCase()
+      const remoteStartedAt = Date.parse(String(remote?.run_started_at || remote?.created_at || ""))
+      const rotationDue = ["in_progress", "waiting"].includes(remoteStatus)
+        && Number.isFinite(remoteStartedAt)
+        && Date.now() - remoteStartedAt >= GITHUB_WORKER_MAX_RUNTIME_SECONDS * 1000
+      if (remote && rotationDue) {
+        if (!tracked.payload?.rotationRequestedAt) {
+          const cancel = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/runs/${encodeURIComponent(String(remote.id))}/cancel`, { method: "POST", headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" }, signal: AbortSignal.timeout(15_000) }).catch(() => null)
+          if (cancel?.ok || cancel?.status === 202) {
+            await db.query(`update drive_agent_runs set summary='Worker runtime window reached; GitHub cancellation requested before replacement',payload=payload||$2::jsonb,updated_at=now() where id=$1 and status in('pending','running')`, [tracked.id, JSON.stringify({ rotationRequestedAt: new Date().toISOString(), rotationReason: "github_runtime_window" })])
+          }
+        }
+        continue
+      }
+      const heartbeatStale = Date.parse(String(tracked.updated_at || "")) < Date.now() - 3 * 60_000
+      if (!heartbeatStale) continue
       if (remote && ["queued", "in_progress", "waiting", "requested", "pending"].includes(String(remote.status || "").toLowerCase())) {
         const cancel = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/runs/${encodeURIComponent(String(remote.id))}/cancel`, { method: "POST", headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" }, signal: AbortSignal.timeout(15_000) }).catch(() => null)
         if (cancel?.ok || cancel?.status === 202) {
           const check = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/runs/${encodeURIComponent(String(remote.id))}`, { headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" }, signal: AbortSignal.timeout(10_000) }).catch(() => null)
           const state = check?.ok ? await check.json().catch(() => ({})) as Row : null
           const stopped = String(state?.status || "").toLowerCase() === "completed" && ["cancelled", "canceled"].includes(String(state?.conclusion || "").toLowerCase())
-          await db.query(`update drive_agent_runs set status=case when $2 then 'canceled' else status end,summary=$3,completed_at=case when $2 then now() else completed_at end,payload=payload||$4::jsonb,updated_at=now() where id=$1 and status in('pending','running')`, [stale.id, stopped, stopped ? "Stale GitHub worker canceled before replacement dispatch" : "Stale GitHub worker cancellation requested; waiting for its slot to release", JSON.stringify({ githubAbortRequestedAt: new Date().toISOString() })])
+          if (stopped) await releaseWorkerInstanceClaims(db, agent.id, instanceId, "Stale GitHub worker stopped; file returned to the durable queue")
+          await db.query(`update drive_agent_runs set status=case when $2 then 'canceled' else status end,summary=$3,completed_at=case when $2 then now() else completed_at end,payload=payload||$4::jsonb,updated_at=now() where id=$1 and status in('pending','running')`, [tracked.id, stopped, stopped ? "Stale GitHub worker canceled before replacement dispatch" : "Stale GitHub worker cancellation requested; waiting for its slot to release", JSON.stringify({ githubAbortRequestedAt: new Date().toISOString() })])
         }
       } else if (!remote || String(remote.status).toLowerCase() === "completed") {
         const terminalStatus = remote && String(remote.conclusion).toLowerCase() === "success" ? "completed" : remote && ["cancelled", "canceled"].includes(String(remote.conclusion).toLowerCase()) ? "canceled" : "failed"
-        await db.query(`update drive_agent_runs set status=$2,summary='GitHub worker run reconciled after stale heartbeat',completed_at=now(),updated_at=now() where id=$1 and status in('pending','running')`, [stale.id, terminalStatus])
-        activeByWorkflow.get(workflowKey)?.delete(String(remote?.id || stale.external_run_id || ""))
+        await db.query(`update drive_agent_runs set status=$2,summary='GitHub worker run reconciled after stale heartbeat',completed_at=now(),updated_at=now() where id=$1 and status in('pending','running')`, [tracked.id, terminalStatus])
+        activeByWorkflow.get(workflowKey)?.delete(String(remote?.id || tracked.external_run_id || ""))
       }
     }
     const active = await db.query(`
@@ -1501,7 +1537,7 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
     await db.query(`update drive_agent_runs set payload=payload||$2::jsonb,summary='Submitting GitHub workflow dispatch',updated_at=now() where id=$1`, [intent.id, JSON.stringify({ phase: "dispatching", dispatchStartedAt: new Date().toISOString(), dispatchAttempt: attempts })])
     const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(intent.github_repo_owner)}/${encodeURIComponent(intent.github_repo_name)}/dispatches`, {
       method: "POST", headers: { Authorization: `Bearer ${intent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator", "Content-Type": "application/json" },
-      body: JSON.stringify({ event_type: "drive-migration-worker", client_payload: { migration_id: intent.payload.migrationId, agent_id: intent.agent_id, worker_instance_id: workerInstanceId, workflow_file: intent.github_workflow_file || ".github/workflows/migration-worker.yml" } }), signal: AbortSignal.timeout(20_000),
+      body: JSON.stringify({ event_type: "drive-migration-worker", client_payload: { migration_id: intent.payload.migrationId, agent_id: intent.agent_id, worker_instance_id: workerInstanceId, workflow_file: intent.github_workflow_file || ".github/workflows/migration-worker.yml", max_runtime_seconds: GITHUB_WORKER_MAX_RUNTIME_SECONDS } }), signal: AbortSignal.timeout(20_000),
     })
     if (!response.ok) throw new Error(`GitHub dispatch HTTP ${response.status}`)
     await db.query(`update drive_agent_runs set payload=payload||$2::jsonb,summary='GitHub accepted workflow dispatch; awaiting run reconciliation',updated_at=now() where id=$1`, [intent.id, JSON.stringify({ phase: "accepted", acceptedAt: new Date().toISOString() })])
@@ -1612,7 +1648,7 @@ async function workerRequest(request: Request, env: Env, path: string) {
       return json({ ok: true, agentId })
     })
   }
-  const match = /^\/workers\/([0-9a-f-]{36})(?:\/(heartbeat|claim-job|jobs\/([0-9a-f-]{36})))?$/i.exec(path)
+  const match = /^\/workers\/([0-9a-f-]{36})(?:\/(heartbeat|retire|claim-job|jobs\/([0-9a-f-]{36})))?$/i.exec(path)
   if (!match) return json({ error: "Not found" }, 404)
   return database(env, async (db) => {
     const agent = await workerAuthorized(db, match[1], body.token)
@@ -1636,6 +1672,18 @@ async function workerRequest(request: Request, env: Env, path: string) {
         }
       }
       return json({ ok: true, agentId: agent.id })
+    }
+    if (action === "retire") {
+      const instanceId = typeof body.workerInstanceId === "string" ? body.workerInstanceId : ""
+      if (!instanceId) return json({ error: "workerInstanceId is required" }, 400)
+      const reason = String(body.reason || "worker_exit").slice(0, 120)
+      const retired = await db.query(`
+        update drive_agent_runs set status='completed',summary=$3,completed_at=now(),
+          payload=payload||jsonb_build_object('phase','retired','retiredAt',now(),'retireReason',$3::text),updated_at=now()
+        where agent_id=$1 and payload->>'workerInstanceId'=$2 and status in('pending','running')
+        returning id
+      `, [agent.id, instanceId, `Worker retired cleanly: ${reason}`])
+      return json({ ok: true, agentId: agent.id, retiredRuns: retired.rowCount || 0 })
     }
     if (action === "claim-job") {
       const migrationId = typeof body.migrationId === "string" ? body.migrationId : ""
@@ -1686,7 +1734,11 @@ async function workerRequest(request: Request, env: Env, path: string) {
     if (!current) return json({ error: "This job is no longer owned by this worker" }, 409)
     if (current.status === "canceled") return json({ ok: true, canceled: true, job: current })
     const status = ["pending", "claimed", "running", "completed", "failed", "canceled"].includes(String(body.status)) ? String(body.status) : current.status
-    const updated = await db.query(`update drive_repair_jobs set status=$3,progress=coalesce(progress,'{}'::jsonb)||$4::jsonb,result=coalesce(result,'{}'::jsonb)||$5::jsonb,summary=coalesce($6,summary),error=coalesce($7,error),last_heartbeat_at=now(),completed_at=case when $3 in ('completed','failed','canceled') then now() else completed_at end,updated_at=now() where id=$1 and claimed_by_agent_id=$2 and claim_token=$8::uuid returning *`, [jobId, agent.id, status, JSON.stringify(body.progress && typeof body.progress === "object" ? body.progress : {}), JSON.stringify(body.result && typeof body.result === "object" ? body.result : {}), typeof body.summary === "string" ? body.summary.slice(0, 2000) : null, typeof body.error === "string" ? body.error.slice(0, 4000) : null, claimToken])
+    const releaseForRotation = current.mode === "migration" && status === "pending" && current.status !== "pending"
+    const updated = await db.query(`update drive_repair_jobs set status=$3,progress=coalesce(progress,'{}'::jsonb)||$4::jsonb,result=coalesce(result,'{}'::jsonb)||$5::jsonb,summary=coalesce($6,summary),error=case when $9 then null else coalesce($7,error) end,last_heartbeat_at=case when $9 then null else now() end,completed_at=case when $3 in ('completed','failed','canceled') then now() when $9 then null else completed_at end,claimed_by_agent_id=case when $9 then null else claimed_by_agent_id end,claim_token=case when $9 then null else claim_token end,claimed_at=case when $9 then null else claimed_at end,started_at=case when $9 then null else started_at end,updated_at=now() where id=$1 and claimed_by_agent_id=$2 and claim_token=$8::uuid returning *`, [jobId, agent.id, status, JSON.stringify(body.progress && typeof body.progress === "object" ? body.progress : {}), JSON.stringify(body.result && typeof body.result === "object" ? body.result : {}), typeof body.summary === "string" ? body.summary.slice(0, 2000) : null, typeof body.error === "string" ? body.error.slice(0, 4000) : null, claimToken, releaseForRotation])
+    if (releaseForRotation && typeof body.workerInstanceId === "string" && body.workerInstanceId) {
+      await db.query(`update drive_agent_runs set status='completed',summary='Worker runtime window completed; unfinished file returned to queue',completed_at=now(),payload=payload||jsonb_build_object('phase','retired','retiredAt',now(),'retireReason','github_runtime_window'),updated_at=now() where agent_id=$1 and payload->>'workerInstanceId'=$2 and status in('pending','running')`, [agent.id, body.workerInstanceId])
+    }
     if (!updated.rowCount) return json({ error: "This job is no longer owned by this worker" }, 409)
     // Migration item phase and counters are projections of the durable job
     // rows, never of an individual file worker's local scan/copy/verify loop.

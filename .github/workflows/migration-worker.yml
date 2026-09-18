@@ -60,4 +60,5 @@ jobs:
           DRIVE_REPAIR_JOB_ID: ${{ github.event.client_payload.repair_job_id || '' }}
           TOKEN: ${{ secrets.DRIVE_WORKER_SHARED_SECRET }}
           EXIT_AFTER_JOB: ${{ github.event.client_payload.repair_job_id && 'true' || 'false' }}
+          MAX_RUNTIME_SECONDS: ${{ github.event.client_payload.max_runtime_seconds || '21000' }}
         run: npm start
