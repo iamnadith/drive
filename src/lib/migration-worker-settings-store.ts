@@ -107,9 +107,15 @@ export async function setMigrationWorkerSecretSyncStatus(
   await ensureDriveSchema()
   await queryDb(`
     insert into drive_app_settings(key,value,updated_at)
-    values($1,jsonb_build_object('secretSyncStatus',$2,'secretSyncError',$3,'secretSyncAt',now(),'synchronizedServerUrl',$4,'synchronizedSecretHash',$5),now())
+    values($1::text,jsonb_build_object(
+      'secretSyncStatus',$2::text,
+      'secretSyncError',$3::text,
+      'secretSyncAt',now(),
+      'synchronizedServerUrl',$4::text,
+      'synchronizedSecretHash',$5::text
+    ),now())
     on conflict(key) do update set
-      value=coalesce(drive_app_settings.value,'{}'::jsonb)||jsonb_build_object('secretSyncStatus',$2,'secretSyncError',$3,'secretSyncAt',now(),'synchronizedServerUrl',$4,'synchronizedSecretHash',$5),
+      value=coalesce(drive_app_settings.value,'{}'::jsonb)||excluded.value,
       updated_at=now()
   `, [SETTINGS_KEY, status, error?.slice(0, 800) || null, synchronized?.serverUrl || null, synchronized?.secretHash || null])
 }

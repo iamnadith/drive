@@ -84,6 +84,7 @@ test('GitHub pool workers rotate before the six-hour limit and release unfinishe
 
 test('GitHub worker configuration changes synchronize every repository without taking over dispatch', () => {
   const helper = read('src/lib/github-worker-secrets.ts')
+  const settingsStore = read('src/lib/migration-worker-settings-store.ts')
   const workerSettings = read('src/app/api/settings/migration-workers/route.ts')
   const orchestratorSettings = read('src/app/api/settings/migration-orchestrator/route.ts')
   assert.match(helper, /export async function syncAllGitHubWorkerSecrets/)
@@ -91,6 +92,11 @@ test('GitHub worker configuration changes synchronize every repository without t
   assert.match(helper, /withDbAdvisoryLock\("github-worker-secret-sync", "all-repositories"/)
   assert.match(helper, /REPOSITORY_SYNC_CONCURRENCY = 4/)
   assert.match(helper, /Promise\.allSettled/)
+  assert.match(settingsStore, /'secretSyncStatus',\$2::text/)
+  assert.match(settingsStore, /'secretSyncError',\$3::text/)
+  assert.match(settingsStore, /'synchronizedServerUrl',\$4::text/)
+  assert.match(settingsStore, /'synchronizedSecretHash',\$5::text/)
+  assert.match(settingsStore, /\|\|excluded\.value/)
   assert.match(helper, /synchronizedServerUrl|serverUrl/)
   assert.match(helper, /createHash\("sha256"\)/)
   assert.match(workerSettings, /syncAllGitHubWorkerSecrets/)
