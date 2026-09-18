@@ -31,9 +31,9 @@ const REPAIR_JOB_ID = String(getArg("repair-job-id", process.env.DRIVE_REPAIR_JO
 const POOL_MODE = Boolean(MIGRATION_ID && !REPAIR_JOB_ID)
 const GITHUB_RUN_ID = String(process.env.GITHUB_RUN_ID || "")
 const WORKER_INSTANCE_ID = String(process.env.WORKER_INSTANCE_ID || GITHUB_RUN_ID || "").trim()
-// GitHub-hosted jobs have a hard six-hour ceiling. Retire ten minutes early
+// GitHub-hosted jobs have a hard six-hour ceiling. Retire five minutes early
 // so the current file can be durably released and the run can close cleanly.
-const DEFAULT_MAX_RUNTIME_SECONDS = process.env.GITHUB_ACTIONS === "true" ? "21000" : "0"
+const DEFAULT_MAX_RUNTIME_SECONDS = process.env.GITHUB_ACTIONS === "true" ? "21300" : "0"
 const MAX_RUNTIME_SECONDS = Math.max(0, Number(getArg("max-runtime-seconds", DEFAULT_MAX_RUNTIME_SECONDS)) || 0)
 const RUNTIME_DEADLINE = MAX_RUNTIME_SECONDS > 0 ? Date.now() + MAX_RUNTIME_SECONDS * 1000 : Number.POSITIVE_INFINITY
 // Persistent workers immediately claim again after every completed file. When

@@ -3,12 +3,12 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 29
+const BUILD = 30
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
 const MAX_GITHUB_WORKFLOW_WORKERS = 5
-const GITHUB_WORKER_MAX_RUNTIME_SECONDS = 21_000
+const GITHUB_WORKER_MAX_RUNTIME_SECONDS = 21_300
 const MAX_SECRET_LENGTH = 512
 const TRANSIENT_SCAN_SQL_PATTERN = "(connection terminated unexpectedly|connection reset|connection closed|server closed the connection unexpectedly|client has encountered a connection error|not queryable|socket hang up|econnreset|econnrefused|etimedout|timeout|timed out|eai_again|enotfound|enetunreach|epipe|fetch failed|temporar(y|ily) unavailable|too many (requests|connections|clients)|slow down|throttl|HTTP (408|425|429|500|502|503|504)|57P01|57P03|53300|08[0-9A-Z]{3}|40001|40P01)"
 let authCache: { value: string[]; expiresAt: number } | null = null
@@ -1269,15 +1269,43 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
     const workflowKey = `${account}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
     if (blockedWorkflows.has(workflowKey)) continue
     const remoteRuns = githubRunsByWorkflow.get(workflowKey) || []
-    const trackedRuns = await db.query(`select id,payload,external_run_id,updated_at from drive_agent_runs where agent_id=$1 and run_type='github_dispatch' and status in('pending','running') and payload->>'migrationId'=$2 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$3`, [agent.id, migration.id, generation])
+    const trackedRuns = await db.query(`select id,payload,external_run_id,created_at,updated_at from drive_agent_runs where agent_id=$1 and run_type='github_dispatch' and status in('pending','running') and payload->>'migrationId'=$2 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$3`, [agent.id, migration.id, generation])
+    let agentOccupancy = 0
     for (const tracked of trackedRuns.rows) {
       const instanceId = String(tracked.payload?.workerInstanceId || "")
-      const remote = remoteRuns.find((run) => (tracked.external_run_id && String(run.id) === String(tracked.external_run_id)) || (instanceId && String(run.display_title || "").includes(instanceId)))
+      let remote = remoteRuns.find((run) => (tracked.external_run_id && String(run.id) === String(tracked.external_run_id)) || (instanceId && String(run.display_title || "").includes(instanceId)))
+      // The workflow listing is bounded and can briefly omit a known run. Ask
+      // GitHub for that exact run before deciding whether its slot is free.
+      if (!remote && tracked.external_run_id) {
+        const lookup = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/runs/${encodeURIComponent(String(tracked.external_run_id))}`, { headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" }, signal: AbortSignal.timeout(10_000) }).catch(() => null)
+        if (lookup?.ok) {
+          remote = await lookup.json().catch(() => undefined) as Row | undefined
+          if (remote?.id && ["queued", "in_progress", "waiting", "requested", "pending"].includes(String(remote.status || "").toLowerCase())) activeByWorkflow.get(workflowKey)?.add(String(remote.id))
+        } else if (!lookup || lookup.status !== 404) {
+          // Unknown is not stopped. Preserve the slot until GitHub can answer,
+          // preventing two workers from owning the same configured capacity.
+          agentOccupancy += 1
+          continue
+        }
+      }
       if (remote && String(remote.status).toLowerCase() === "completed") {
         const terminalStatus = String(remote.conclusion).toLowerCase() === "success" ? "completed" : ["cancelled", "canceled"].includes(String(remote.conclusion).toLowerCase()) ? "canceled" : "failed"
         const releasedJobs = await releaseWorkerInstanceClaims(db, agent.id, instanceId, "GitHub worker stopped; file returned to the durable queue")
         await db.query(`update drive_agent_runs set status=$2,summary='GitHub worker run reached a terminal state; capacity released',completed_at=now(),external_run_id=coalesce(external_run_id,$3),payload=payload||$4::jsonb,updated_at=now() where id=$1 and status in('pending','running')`, [tracked.id, terminalStatus, String(remote.id || "") || null, JSON.stringify({ githubStatus: remote.status, githubConclusion: remote.conclusion || null, releasedJobs })])
         activeByWorkflow.get(workflowKey)?.delete(String(remote.id || tracked.external_run_id || ""))
+        continue
+      }
+      if (!remote) {
+        // A repository_dispatch can take a few seconds to appear in GitHub's
+        // run list. This grace applies only before a run id has ever resolved;
+        // known runs use their exact GitHub state above and release at once.
+        const unresolvedAgeMs = Date.now() - Date.parse(String(tracked.payload?.acceptedAt || tracked.payload?.dispatchStartedAt || tracked.created_at || tracked.updated_at || ""))
+        if (Number.isFinite(unresolvedAgeMs) && unresolvedAgeMs < 60_000) {
+          agentOccupancy += 1
+          continue
+        }
+        const releasedJobs = await releaseWorkerInstanceClaims(db, agent.id, instanceId, "GitHub no longer reports this worker run; file returned to the durable queue")
+        await db.query(`update drive_agent_runs set status='failed',summary='GitHub no longer reports this worker as queued or running; capacity released',completed_at=now(),payload=payload||$2::jsonb,updated_at=now() where id=$1 and status in('pending','running')`, [tracked.id, JSON.stringify({ releasedJobs, githubRunMissingAt: new Date().toISOString() })])
         continue
       }
       const remoteStatus = String(remote?.status || "").toLowerCase()
@@ -1286,6 +1314,7 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
         && Number.isFinite(remoteStartedAt)
         && Date.now() - remoteStartedAt >= GITHUB_WORKER_MAX_RUNTIME_SECONDS * 1000
       if (remote && rotationDue) {
+        agentOccupancy += 1
         if (!tracked.payload?.rotationRequestedAt) {
           const cancel = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/runs/${encodeURIComponent(String(remote.id))}/cancel`, { method: "POST", headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" }, signal: AbortSignal.timeout(15_000) }).catch(() => null)
           if (cancel?.ok || cancel?.status === 202) {
@@ -1295,7 +1324,10 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
         continue
       }
       const heartbeatStale = Date.parse(String(tracked.updated_at || "")) < Date.now() - 3 * 60_000
-      if (!heartbeatStale) continue
+      if (!heartbeatStale) {
+        agentOccupancy += 1
+        continue
+      }
       if (remote && ["queued", "in_progress", "waiting", "requested", "pending"].includes(String(remote.status || "").toLowerCase())) {
         const cancel = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/runs/${encodeURIComponent(String(remote.id))}/cancel`, { method: "POST", headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" }, signal: AbortSignal.timeout(15_000) }).catch(() => null)
         if (cancel?.ok || cancel?.status === 202) {
@@ -1304,21 +1336,17 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
           const stopped = String(state?.status || "").toLowerCase() === "completed" && ["cancelled", "canceled"].includes(String(state?.conclusion || "").toLowerCase())
           if (stopped) await releaseWorkerInstanceClaims(db, agent.id, instanceId, "Stale GitHub worker stopped; file returned to the durable queue")
           await db.query(`update drive_agent_runs set status=case when $2 then 'canceled' else status end,summary=$3,completed_at=case when $2 then now() else completed_at end,payload=payload||$4::jsonb,updated_at=now() where id=$1 and status in('pending','running')`, [tracked.id, stopped, stopped ? "Stale GitHub worker canceled before replacement dispatch" : "Stale GitHub worker cancellation requested; waiting for its slot to release", JSON.stringify({ githubAbortRequestedAt: new Date().toISOString() })])
+          if (!stopped) agentOccupancy += 1
+        } else {
+          agentOccupancy += 1
         }
-      } else if (!remote || String(remote.status).toLowerCase() === "completed") {
-        const terminalStatus = remote && String(remote.conclusion).toLowerCase() === "success" ? "completed" : remote && ["cancelled", "canceled"].includes(String(remote.conclusion).toLowerCase()) ? "canceled" : "failed"
-        await db.query(`update drive_agent_runs set status=$2,summary='GitHub worker run reconciled after stale heartbeat',completed_at=now(),updated_at=now() where id=$1 and status in('pending','running')`, [tracked.id, terminalStatus])
-        activeByWorkflow.get(workflowKey)?.delete(String(remote?.id || tracked.external_run_id || ""))
+      } else {
+        agentOccupancy += 1
       }
     }
-    const active = await db.query(`
-      select count(*)::int count from drive_agent_runs r
-      where r.agent_id=$1 and r.status in('pending','running')
-        and r.updated_at>now()-interval '3 minutes'
-    `, [agent.id])
     const workflowRuns = activeByWorkflow.get(workflowKey) || new Set<string>()
     const workflowVacancies = Math.max(0, MAX_GITHUB_WORKFLOW_WORKERS - workflowRuns.size)
-    const vacancies = Math.min(workflowVacancies, Math.max(0, Number(agent.worker_count || 1) - Number(active.rows[0]?.count || 0)))
+    const vacancies = Math.min(workflowVacancies, Math.max(0, Number(agent.worker_count || 1) - agentOccupancy))
     for (let slot = 0; slot < vacancies && queued < budget; slot += 1) {
       const workerInstanceId = crypto.randomUUID()
       const intent = await db.query(`
