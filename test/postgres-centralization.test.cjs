@@ -222,6 +222,17 @@ test("runtime PostgreSQL uses only POSTGRES_URL and keeps the process pool bound
   assert.match(schemaInstaller, /searchParams\.get\("sslmode"\).*=== "disable"/)
 })
 
+test("cross-request advisory locks cannot leak through a transaction pooler", () => {
+  const db = read("src/lib/db.ts")
+  const lock = db.slice(db.indexOf("export async function withDbAdvisoryLock"), db.indexOf("export async function withDbTransaction"))
+  assert.match(lock, /begin read only/)
+  assert.match(lock, /pg_try_advisory_xact_lock/)
+  assert.match(lock, /pg_advisory_xact_lock/)
+  assert.match(lock, /if \(transactionOpen\) await client\.query\(`rollback`\)/)
+  assert.doesNotMatch(lock, /pg_try_advisory_lock\(/)
+  assert.doesNotMatch(lock, /pg_advisory_unlock\(/)
+})
+
 test("users page is server-paginated with safe columns and analytics reads only user aggregates", () => {
   const usersStore = read("src/lib/users-store.ts")
   const pagedUsers = usersStore.match(/export async function listUsersPage\([\s\S]*?\n}\n\nexport async function hasAnyUsers/)

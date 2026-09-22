@@ -226,22 +226,26 @@ export async function withDbAdvisoryLock<T>(namespace: string, resource: string,
   // Advisory locks may span slow Cloudflare calls. Reserve their connection
   // separately so those waits cannot consume the dashboard query pool.
   const client = await global.__drivePgAdvisoryLockPool.connect()
-  let locked = false
+  let transactionOpen = false
   try {
+    // Supabase's port 6543 is a transaction pooler. Session advisory locks can
+    // outlive the client that acquired them because the backend session is
+    // returned to Supavisor, leaving a phantom lock behind. Keep a dedicated
+    // read-only transaction open so the lock is pinned to one backend and is
+    // released automatically even if the operation or connection fails.
+    await client.query(`begin read only`)
+    transactionOpen = true
     if (options.wait === false) {
-      const result = await client.query<{ locked: boolean }>(`select pg_try_advisory_lock(hashtext($1), hashtext($2)) as locked`, [namespace, resource])
+      const result = await client.query<{ locked: boolean }>(`select pg_try_advisory_xact_lock(hashtext($1), hashtext($2)) as locked`, [namespace, resource])
       if (!result.rows[0]?.locked) {
         throw Object.assign(new Error("A Cloudflare Worker operation is already running; wait for it to finish, then refresh status"), { code: "DRIVE_ADVISORY_LOCK_BUSY" })
       }
     } else {
-      await client.query(`select pg_advisory_lock(hashtext($1), hashtext($2))`, [namespace, resource])
+      await client.query(`select pg_advisory_xact_lock(hashtext($1), hashtext($2))`, [namespace, resource])
     }
-    locked = true
     return await operation()
   } finally {
-    if (locked) {
-      await client.query(`select pg_advisory_unlock(hashtext($1), hashtext($2))`, [namespace, resource]).catch(() => undefined)
-    }
+    if (transactionOpen) await client.query(`rollback`).catch(() => undefined)
     client.release()
   }
 }

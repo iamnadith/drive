@@ -68,7 +68,8 @@ test("tokens are encrypted at rest, redacted by default and API is superadmin pr
 
 test("installer is resumable, locked and keeps secrets on release redeploy", () => {
   assert.match(installer, /withDbAdvisoryLock\("cloudflare-worker-install", "singleton"/)
-  assert.match(db, /pg_try_advisory_lock/)
+  assert.match(db, /pg_try_advisory_xact_lock/)
+  assert.doesNotMatch(db, /pg_try_advisory_lock\(/)
   assert.match(installer, /\{ wait: false \}/)
   const reconciliation = installer.slice(installer.indexOf("export async function reconcileCloudflareWorker("), installer.indexOf("export async function reconcileCloudflareWorkers("))
   assert.match(reconciliation, /withDbAdvisoryLock\("cloudflare-worker-install", "singleton"/)
