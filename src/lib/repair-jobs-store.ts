@@ -408,11 +408,11 @@ export async function reconcileRepairJobs(input?: { jobId?: string; migrationId?
 
     const refreshedAgents = await listAgents()
     const activeAgentById = new Map(refreshedAgents.map((agent) => [agent.id, agent]))
-    // A worker migration can have up to MAX_WORKER_SHARD_COUNT active shard
-    // records. Reconcile the full bounded queue so a larger pool is never
-    // partially treated as healthy simply because the newest 100 rows were
-    // selected.
-    const activeJobs = await listRepairJobsRaw(500)
+    // Only claimed/running ownership can be reconciled here. Reading 500 full
+    // queue rows once per orchestrator tick amplified PostgreSQL egress while
+    // thousands of pending migration files were waiting; the narrow query
+    // retains every field used by the offline-worker safety checks.
+    const activeJobs = await listClaimedActiveRepairJobs(500)
 
     for (const job of activeJobs) {
       if (!job.claimedByAgentId) continue

@@ -59,6 +59,9 @@ test('public repair-job polling excludes migration queue rows inside PostgreSQL'
   assert.doesNotMatch(workersRoute, /listRepairJobs\(500\)/)
   assert.match(workersPage, /ACTIVE_REFRESH_MS = 15_000/)
   assert.match(workersPage, /document\.visibilityState !== "visible"/)
+  const reconciliation = queue.slice(queue.indexOf('export async function reconcileRepairJobs'), queue.indexOf('async function listRepairJobsRaw'))
+  assert.match(reconciliation, /listClaimedActiveRepairJobs\(500\)/)
+  assert.doesNotMatch(reconciliation, /listRepairJobsRaw\(500\)/)
 })
 
 test('migration orchestrator repairs legacy lease schema with pooler-safe statements', () => {
