@@ -95,7 +95,7 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   // connections. Ten buckets per durable cursor and three buckets in flight
   // for settings (six provider requests) keep the scheduler within that cap.
   assert.match(orchestrator, /const BUCKET_BATCH_SIZE = 10/)
-  assert.match(orchestrator, /const WORKER_BUILD = 22/)
+  assert.match(orchestrator, /const WORKER_BUILD = 23/)
   assert.match(orchestrator, /async function mapWithConcurrency/)
   assert.match(orchestrator, /mapWithConcurrency\(buckets, 3/)
   assert.match(orchestrator, /build: WORKER_BUILD/)
@@ -139,7 +139,7 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   assert.match(orchestrator, /stats\.bucket_name \|\| ':' \|\| stats\.objects::text \|\| ':' \|\| stats\.bytes::text/)
   assert.match(orchestrator, /remove_reverted_day/)
   assert.match(orchestrator, /where captured_day < current_date/)
-  assert.equal((orchestrator.match(/await recordDailyAccountSnapshot\(db, account\.id\)/g) || []).length, 2)
+  assert.equal((orchestrator.match(/await recordDailyAccountSnapshot\(db, account\.id\)/g) || []).length, 3)
   assert.match(orchestrator, /drive_backend_orchestrator_metric_candidates/)
   assert.match(orchestrator, /async function pendingMetricDecreases/)
   assert.match(orchestrator, /confirmations < 2/)
@@ -170,10 +170,23 @@ test("worker sync is aggregate-only and resumable across CPU-limited invocations
   assert.match(orchestrator, /on conflict \(id\) do update set/)
   assert.match(orchestrator, /r2StorageAdaptiveGroups/)
   assert.match(orchestrator, /bucketName_in: \$bucketNames/)
-  assert.match(orchestrator, /const metrics = await getBucketMetrics\(account, batch\)/)
+  assert.match(orchestrator, /metrics = await getBucketMetrics\(account, batch\)/)
   assert.match(orchestrator, /metrics_incomplete boolean not null default false/)
   assert.match(orchestrator, /pending_decreases boolean not null default false/)
   assert.doesNotMatch(orchestrator, /ListObjectsV2Command|S3Client|ContinuationToken/)
+})
+
+test("backend orchestrator falls back to published totals when only per-bucket analytics is unauthorized", () => {
+  const orchestrator = read("workers/backend-orchestrator/src/index.ts")
+  const syncAccount = orchestrator.slice(orchestrator.indexOf("async function syncNextAccount"), orchestrator.indexOf("async function deleteRetentionBatch"))
+
+  assert.match(orchestrator, /function isPerBucketAnalyticsAuthorizationError/)
+  assert.match(orchestrator, /not authorized for that account/i)
+  assert.match(syncAccount, /if \(!isPerBucketAnalyticsAuthorizationError\(error\)\) throw error/)
+  assert.match(syncAccount, /const publishedMetrics = await getPublishedAccountMetrics\(account\)/)
+  assert.match(syncAccount, /sync_status='ok'/)
+  assert.match(syncAccount, /warning: "per_bucket_analytics_unavailable"/)
+  assert.match(syncAccount, /refreshedSettings: buckets\.length/)
 })
 
 test("worker packages and GitHub workflow use their permanent names", () => {

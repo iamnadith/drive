@@ -126,7 +126,8 @@ test('pre-existing worker-pool objects are skipped only when overwrite is disabl
   assert.match(orchestrator, /'transferredObjects',least\(coalesce\(i\.source_objects,0\)/)
   assert.match(orchestrator, /'alreadyPresentObjects',coalesce\(a\.already_present_objects,0\)/)
   assert.match(orchestrator, /'copiedObjects',greatest\(0,coalesce\(a\.transferred_objects,0\)-least\(coalesce\(a\.transferred_objects,0\),coalesce\(a\.skipped_objects,0\)\)\)/)
-  assert.match(orchestrator, /j\.status='completed' and case when coalesce\(j\.result->'items'->0->>'transferred'/)
+  assert.match(orchestrator, /j\.status='completed' and j\.result_transferred>0/)
+  assert.match(orchestrator, /case when \(result->'items'->0->>'transferred'\) ~ '\^\[0-9\]\+\$'/)
 })
 
 test('retention preserves scanner inventory and verification rows while their migration is active', () => {

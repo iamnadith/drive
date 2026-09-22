@@ -57,7 +57,7 @@ type BucketSettings = {
 const BUCKET_BATCH_SIZE = 10
 const EXTERNAL_REQUEST_TIMEOUT_MS = 8_000
 const METRICS_CACHE_TTL_MS = 10_000
-const WORKER_BUILD = 22
+const WORKER_BUILD = 23
 const REQUIRED_SCHEMA_VERSION = 2026091303
 const RETENTION_BATCH_SIZE = 250
 const metricsCache = new Map<string, { expiresAt: number; metrics: BucketMetric[] }>()
@@ -488,6 +488,10 @@ async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Pro
   metricsCache.set(cacheKey, { expiresAt: Date.now() + METRICS_CACHE_TTL_MS, metrics })
   while (metricsCache.size > 64) metricsCache.delete(metricsCache.keys().next().value as string)
   return metrics
+}
+
+function isPerBucketAnalyticsAuthorizationError(error: unknown) {
+  return /not authorized for that account/i.test(error instanceof Error ? error.message : String(error))
 }
 
 async function getPublishedAccountMetrics(account: AccountRow): Promise<PublishedAccountMetrics> {
@@ -937,7 +941,19 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
       return { account: account.label, status: "completed", buckets: 0 }
     }
     const batch = buckets.slice(bucketOffset, bucketOffset + BUCKET_BATCH_SIZE)
-    const metrics = await getBucketMetrics(account, batch)
+    let analyticsAuthorizationError: string | null = null
+    let metrics: BucketMetric[] = []
+    try {
+      metrics = await getBucketMetrics(account, batch)
+    } catch (error) {
+      if (!isPerBucketAnalyticsAuthorizationError(error)) throw error
+      // Some otherwise-valid R2 tokens can list buckets, read settings, and
+      // read published account totals without the separate per-bucket
+      // Analytics permission. Keep the durable sync moving and use the
+      // authoritative published total at the end instead of failing the
+      // entire account forever.
+      analyticsAuthorizationError = error instanceof Error ? error.message : String(error)
+    }
     const settingsErrors = await syncBucketSettingsBatch(db, account, batch)
     const pendingDecreases = await pendingMetricDecreases(db, account.id, metrics)
     const missingMetrics = Math.max(0, batch.length - metrics.length)
@@ -958,6 +974,25 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
     }
     if (nextMetricsIncomplete || nextPendingDecreases) {
       await clearSyncProgress(db)
+      if (analyticsAuthorizationError && !nextPendingDecreases) {
+        const publishedMetrics = await getPublishedAccountMetrics(account)
+        const message = `R2 published totals and settings synced for ${buckets.length} buckets; per-bucket analytics unavailable (${analyticsAuthorizationError})`
+        await db.query(`
+          update drive_accounts set total_buckets=$2,total_objects=$3,total_bytes=$4,
+            sync_status='ok',sync_message=$5,last_synced_at=now(),updated_at=now()
+          where id=$1
+        `, [account.id, buckets.length, publishedMetrics.objects, publishedMetrics.bytes, message])
+        await recordDailyAccountSnapshot(db, account.id)
+        return {
+          account: account.label,
+          status: "completed",
+          warning: "per_bucket_analytics_unavailable",
+          buckets: buckets.length,
+          publishedMetrics,
+          refreshedSettings: buckets.length,
+          settingsErrors,
+        }
+      }
       const messages = [
         nextMetricsIncomplete ? "R2 analytics missing for one or more buckets" : null,
         nextPendingDecreases ? "R2 decreases are awaiting a second provider observation" : null,
