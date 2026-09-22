@@ -3,7 +3,7 @@ import { Client } from "pg"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 31
+const BUILD = 32
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -554,7 +554,15 @@ async function refreshMigrationSnapshot(db: Client, migrationId: string) {
 async function migrationLiveState(db: Client, migrationId: string) {
   const live = await refreshMigrationSnapshot(db, migrationId)
   const [jobsResult, runsResult] = await Promise.all([
-    db.query(`select id,status,claimed_by_agent_id,progress,result,summary,error,created_at,updated_at,last_heartbeat_at from drive_repair_jobs where migration_id=$1 and mode='migration' and work_key like $2 order by updated_at desc limit 100`, [migrationId, `migration:${migrationId}:generation:${live.workerGeneration}:inventory:%`]),
+    db.query(`select id,status,claimed_by_agent_id,
+      (coalesce(progress,'{}'::jsonb)-'logs'-'fileEvents')||jsonb_build_object(
+        'logs',coalesce((select jsonb_agg(entry.value order by entry.ordinality) from (select value,ordinality from jsonb_array_elements(case when jsonb_typeof(progress->'logs')='array' then progress->'logs' else '[]'::jsonb end) with ordinality order by ordinality desc limit 3) entry),'[]'::jsonb),
+        'fileEvents',coalesce((select jsonb_agg(event.value order by event.ordinality) from (select value,ordinality from jsonb_array_elements(case when jsonb_typeof(progress->'fileEvents')='array' then progress->'fileEvents' else '[]'::jsonb end) with ordinality order by ordinality desc limit 3) event),'[]'::jsonb)
+      ) progress,
+      (coalesce(result,'{}'::jsonb)-'logs'-'fileEvents')||jsonb_build_object(
+        'fileEvents',coalesce((select jsonb_agg(event.value order by event.ordinality) from (select value,ordinality from jsonb_array_elements(case when jsonb_typeof(result->'fileEvents')='array' then result->'fileEvents' else '[]'::jsonb end) with ordinality order by ordinality desc limit 3) event),'[]'::jsonb)
+      ) result,
+      summary,error,created_at,updated_at,last_heartbeat_at from drive_repair_jobs where migration_id=$1 and mode='migration' and work_key like $2 order by updated_at desc limit 20`, [migrationId, `migration:${migrationId}:generation:${live.workerGeneration}:inventory:%`]),
     db.query(`select r.id,r.status,r.job_reference,r.payload,r.created_at,r.updated_at,a.status agent_status,a.last_heartbeat_at agent_heartbeat from drive_agent_runs r left join drive_agents a on a.id=r.agent_id where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=$2 order by r.created_at limit 100`, [migrationId, live.workerGeneration]),
   ])
   const jobs = jobsResult.rows

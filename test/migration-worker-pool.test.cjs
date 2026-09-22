@@ -25,6 +25,40 @@ test('migration telemetry stays bounded and progress updates do not amplify data
   assert.match(runtime, /TELEMETRY_LOG_LIMIT = 100/)
   assert.match(runtime, /TELEMETRY_FILE_EVENT_LIMIT = 100/)
   assert.match(runtime, /nowTs - lastLiveProgressSyncAt < LIVE_PROGRESS_SYNC_MS/)
+  const liveState = orchestrator.slice(orchestrator.indexOf('async function migrationLiveState'), orchestrator.indexOf('async function sha256Hex'))
+  assert.match(liveState, /order by updated_at desc limit 20/)
+  assert.match(liveState, /order by ordinality desc limit 3/g)
+  assert.doesNotMatch(liveState, /order by updated_at desc limit (?:100|500)/)
+})
+
+test('stale-job recovery reads only actionable rows and never falls back from a scoped tick', () => {
+  const queue = read('src/lib/repair-jobs-store.ts')
+  const candidates = queue.slice(queue.indexOf('async function listMigrationRequeueCandidatesRaw'), queue.indexOf('async function listWorkerShardJobsByMigrationRaw'))
+  const recovery = queue.slice(queue.indexOf('export async function requeueStaleMigrationWorkerJobs'), queue.indexOf('export async function buildRepairJobExecutionPayload'))
+  assert.match(candidates, /status in \('failed','claimed','running'\)/g)
+  assert.doesNotMatch(candidates, /select \*/i)
+  assert.doesNotMatch(candidates, /\bpayload\b[^\n]*,\s*progress\b/i)
+  assert.match(recovery, /if \(input\?\.migrationId && \(!scopedMigration \|\| scopedMigration\.options\.executionMode !== "migration_workers"\)\) return 0/)
+  assert.match(recovery, /listMigrationRequeueCandidatesRaw\(input\?\.migrationId, 500\)/)
+  assert.doesNotMatch(recovery, /listRepairJobs(?:ByMigration)?Raw/)
+})
+
+test('public repair-job polling excludes migration queue rows inside PostgreSQL', () => {
+  const queue = read('src/lib/repair-jobs-store.ts')
+  const route = read('src/app/api/repair-jobs/route.ts')
+  const workersRoute = read('src/app/api/workers/route.ts')
+  const workersPage = read('src/app/dashboard/workers/page.tsx')
+  const liveJobs = queue.slice(queue.indexOf('export async function listLiveRepairJobs'), queue.indexOf('export async function listRepairJobsByMigration'))
+  const claimedJobs = queue.slice(queue.indexOf('export async function listClaimedActiveRepairJobs'), queue.indexOf('export async function listLiveRepairJobs'))
+  assert.match(liveJobs, /\(\$3::text is null or mode<>\$3\)/g)
+  assert.match(route, /listLiveRepairJobs\(500, 50, "migration"\)/)
+  assert.doesNotMatch(route, /\.filter\(\(job\) => job\.mode !== "migration"\)/)
+  assert.match(claimedJobs, /claimed_by_agent_id is not null and status in \('pending','claimed','running'\)/)
+  assert.doesNotMatch(claimedJobs, /select \*/i)
+  assert.match(workersRoute, /listClaimedActiveRepairJobs\(100\)/)
+  assert.doesNotMatch(workersRoute, /listRepairJobs\(500\)/)
+  assert.match(workersPage, /ACTIVE_REFRESH_MS = 15_000/)
+  assert.match(workersPage, /document\.visibilityState !== "visible"/)
 })
 
 test('migration orchestrator repairs legacy lease schema with pooler-safe statements', () => {
@@ -379,7 +413,8 @@ test('worker file records stay internal while workflow instances carry current w
   assert.doesNotMatch(workerPage, /Migration Worker Pool/)
   assert.match(workerPage, /currentWork/)
   assert.match(workerApi, /currentWork:/)
-  assert.match(repairApi, /filter\(\(job\) => job\.mode !== "migration"\)/)
+  assert.match(repairApi, /listLiveRepairJobs\(500, 50, "migration"\)/)
+  assert.doesNotMatch(repairApi, /filter\(\(job\) => job\.mode !== "migration"\)/)
 })
 
 test('active worker migrations cannot be frozen by historical read-only markers', () => {

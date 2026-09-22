@@ -311,7 +311,7 @@ function readLogLines(job: RepairJobRow): string[] {
 }
 
 export default function WorkersPage() {
-  const ACTIVE_REFRESH_MS = 8_000
+  const ACTIVE_REFRESH_MS = 15_000
   const IDLE_REFRESH_MS = 20_000
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -420,6 +420,7 @@ export default function WorkersPage() {
     void refreshAll()
     const refreshIntervalMs = shouldLiveRefresh ? ACTIVE_REFRESH_MS : IDLE_REFRESH_MS
     const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return
       void refreshAll()
     }, refreshIntervalMs)
 

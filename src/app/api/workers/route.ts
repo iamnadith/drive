@@ -3,7 +3,7 @@ import { NextResponse } from "next/server"
 import { POST as createWorker } from "@/app/api/agents/route"
 import { getAgentGithubToken, listAgents, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { GITHUB_TOKEN_COOKIE, getGitHubWorkflowRun, listGitHubWorkflowRunJobs, listGitHubWorkflowRuns } from "@/lib/github-oauth"
-import { listRepairJobs, getRepairJob, updateRepairJob } from "@/lib/repair-jobs-store"
+import { listClaimedActiveRepairJobs, getRepairJob, updateRepairJob } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
 
 function errorMessage(error: unknown, fallback: string) {
@@ -318,7 +318,7 @@ export async function GET() {
       }
     }
 
-    const activeJobs = await listRepairJobs(500)
+    const activeJobs = await listClaimedActiveRepairJobs(100)
     const activeAgentById = new Map(agents.map((agent) => [agent.id, agent]))
 
     for (const job of activeJobs) {

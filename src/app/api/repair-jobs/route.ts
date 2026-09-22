@@ -37,7 +37,7 @@ export async function GET() {
     // Scanner-derived migration files are internal queue records, not
     // user-facing repair jobs. Migration pages expose their aggregate and
     // workflow-instance progress instead.
-    const jobs = (await listLiveRepairJobs(500, 50)).filter((job) => job.mode !== "migration")
+    const jobs = await listLiveRepairJobs(500, 50, "migration")
     return NextResponse.json({ jobs })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to load repair jobs") }, { status: 400 })

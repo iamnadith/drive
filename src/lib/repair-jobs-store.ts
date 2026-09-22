@@ -474,6 +474,28 @@ async function listRepairJobsByMigrationRaw(migrationId: string, limit = 20): Pr
   return rows.map(mapJobRow)
 }
 
+async function listMigrationRequeueCandidatesRaw(migrationId?: string, limit = 500): Promise<DriveRepairJob[]> {
+  const boundedLimit = Math.max(1, Math.min(500, limit))
+  const { rows } = migrationId
+    ? await queryDb<DriveRepairJobRow>(`
+        select id,migration_id,work_key,requested_by_agent_id,claimed_by_agent_id,status,mode,
+          '{}'::jsonb payload,'{}'::jsonb progress,result,summary,error,claimed_at,started_at,
+          completed_at,last_heartbeat_at,created_at,updated_at
+        from ${REPAIR_JOBS_TABLE}
+        where migration_id=$1 and status in ('failed','claimed','running')
+        order by updated_at desc limit $2
+      `, [migrationId, boundedLimit])
+    : await queryDb<DriveRepairJobRow>(`
+        select id,migration_id,work_key,requested_by_agent_id,claimed_by_agent_id,status,mode,
+          '{}'::jsonb payload,'{}'::jsonb progress,result,summary,error,claimed_at,started_at,
+          completed_at,last_heartbeat_at,created_at,updated_at
+        from ${REPAIR_JOBS_TABLE}
+        where status in ('failed','claimed','running')
+        order by updated_at desc limit $1
+      `, [boundedLimit])
+  return rows.map(mapJobRow)
+}
+
 async function listWorkerShardJobsByMigrationRaw(
   migrationId: string,
   generation: number,
@@ -491,13 +513,27 @@ export async function listRepairJobs(limit = 50): Promise<DriveRepairJob[]> {
   return listRepairJobsRaw(limit)
 }
 
-export async function listLiveRepairJobs(activeLimit = 500, recentLimit = 50): Promise<DriveRepairJob[]> {
+export async function listClaimedActiveRepairJobs(limit = 100): Promise<DriveRepairJob[]> {
   const { rows } = await queryDb<DriveRepairJobRow>(`
-    (select * from ${REPAIR_JOBS_TABLE} where status in ('pending','claimed','running') order by updated_at desc limit $1)
+    select id,migration_id,work_key,requested_by_agent_id,claimed_by_agent_id,status,mode,
+      '{}'::jsonb payload,'{}'::jsonb progress,'{}'::jsonb result,summary,error,
+      claimed_at,started_at,completed_at,last_heartbeat_at,created_at,updated_at
+    from ${REPAIR_JOBS_TABLE}
+    where claimed_by_agent_id is not null and status in ('pending','claimed','running')
+    order by updated_at desc limit $1
+  `, [Math.max(1, Math.min(500, limit))])
+  return rows.map(mapJobRow)
+}
+
+export async function listLiveRepairJobs(activeLimit = 500, recentLimit = 50, excludedMode?: RepairJobMode): Promise<DriveRepairJob[]> {
+  const { rows } = await queryDb<DriveRepairJobRow>(`
+    (select * from ${REPAIR_JOBS_TABLE} where status in ('pending','claimed','running')
+      and ($3::text is null or mode<>$3) order by updated_at desc limit $1)
     union all
-    (select * from ${REPAIR_JOBS_TABLE} where status in ('completed','failed','canceled') order by updated_at desc limit $2)
+    (select * from ${REPAIR_JOBS_TABLE} where status in ('completed','failed','canceled')
+      and ($3::text is null or mode<>$3) order by updated_at desc limit $2)
     order by updated_at desc
-  `, [Math.max(1, Math.min(5000, activeLimit)), Math.max(1, Math.min(500, recentLimit))])
+  `, [Math.max(1, Math.min(5000, activeLimit)), Math.max(1, Math.min(500, recentLimit)), excludedMode ?? null])
   return rows.map(mapJobRow)
 }
 
@@ -989,10 +1025,10 @@ export async function getMigrationWorkerPoolState(migrationId: string): Promise<
 /** Requeue a claimed migration file after its worker has disappeared. */
 export async function requeueStaleMigrationWorkerJobs(input?: { migrationId?: string }): Promise<number> {
   const scopedMigration = input?.migrationId ? await getMigration(input.migrationId) : null
-  const jobs =
-    input?.migrationId && scopedMigration && scopedMigration.options.executionMode === "migration_workers"
-      ? await listRepairJobsByMigrationRaw(input.migrationId, 500)
-      : await listRepairJobsRaw(500)
+  // A scoped coordinator tick must never degrade into a global 500-row scan
+  // when the migration disappears or changes execution mode between reads.
+  if (input?.migrationId && (!scopedMigration || scopedMigration.options.executionMode !== "migration_workers")) return 0
+  const jobs = await listMigrationRequeueCandidatesRaw(input?.migrationId, 500)
   const agents = await listAgents()
   const agentById = new Map(agents.map((agent) => [agent.id, agent]))
   let requeued = 0
