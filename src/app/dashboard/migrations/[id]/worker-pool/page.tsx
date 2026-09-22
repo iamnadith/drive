@@ -115,7 +115,7 @@ export default function MigrationWorkerPoolDetailsPage() {
   }, [migrationId, pagination.pageIndex, pagination.pageSize, selectedGeneration, selectedJobId])
 
   React.useEffect(() => { void load() }, [load])
-  React.useEffect(() => { const timer = window.setInterval(() => void load({ background: true }), 5_000); return () => window.clearInterval(timer) }, [load])
+  React.useEffect(() => { const timer = window.setInterval(() => void load({ background: true }), 10_000); return () => window.clearInterval(timer) }, [load])
 
   const openJob = React.useCallback(async (id: string) => {
     setSelectedJobId(id); setSelectedJob(null); setTab("jobs")
@@ -208,7 +208,7 @@ export default function MigrationWorkerPoolDetailsPage() {
   const overallPercent = percentage(attemptProcessedJobs, attemptTotalJobs)
 
   return <DashboardPage className="dashboard-motion-stage">
-    <DashboardPageHeader title="Migration worker pools" description={`${formatLastSyncedAt(snapshot.updatedAt)} - automatically refreshes every 5 seconds`} actions={<div className="flex w-full gap-2 sm:w-auto"><Button asChild variant="outline" size="sm" className="flex-1 rounded-xl sm:flex-none"><Link href={`/dashboard/migrations/${encodeURIComponent(migrationId)}`}><ArrowLeft data-icon="inline-start" />Back</Link></Button><Button variant="outline" size="sm" className="flex-1 rounded-xl sm:flex-none" onClick={() => void load({ manual: true })} disabled={refreshing}><RefreshCw data-icon="inline-start" className={refreshing ? "animate-spin" : undefined} />Refresh</Button></div>} />
+    <DashboardPageHeader title="Migration worker pools" description={`${formatLastSyncedAt(snapshot.updatedAt)} - automatically refreshes every 10 seconds`} actions={<div className="flex w-full gap-2 sm:w-auto"><Button asChild variant="outline" size="sm" className="flex-1 rounded-xl sm:flex-none"><Link href={`/dashboard/migrations/${encodeURIComponent(migrationId)}`}><ArrowLeft data-icon="inline-start" />Back</Link></Button><Button variant="outline" size="sm" className="flex-1 rounded-xl sm:flex-none" onClick={() => void load({ manual: true })} disabled={refreshing}><RefreshCw data-icon="inline-start" className={refreshing ? "animate-spin" : undefined} />Refresh</Button></div>} />
     <Card className="gap-0 overflow-hidden py-0">
       <CardHeader className="border-b px-4 py-4 sm:px-5"><div className="flex flex-col gap-1"><CardTitle className="text-base">Worker-pool attempts</CardTitle><CardDescription>Each tab is one dispatched pool generation, including retries and aborted attempts.</CardDescription></div></CardHeader>
       <CardContent className="p-3 sm:p-4"><Tabs value={String(selectedGeneration || selectedAttempt?.generation || 1)} onValueChange={(value) => { selectedGenerationRef.current = Number(value); setSelectedGeneration(Number(value)); setPagination((current) => ({ ...current, pageIndex: 0 })); setSelectedJobId(null); setSelectedJob(null) }}><TabsList>{attempts.map((attempt, index) => <TabsTrigger key={attempt.generation} value={String(attempt.generation)}><span>{index === attempts.length - 1 ? "Initial pool" : `Retry ${attempt.generation - 1}`}</span>{statusBadge(attempt.status)}</TabsTrigger>)}</TabsList></Tabs></CardContent>

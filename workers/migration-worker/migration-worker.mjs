@@ -41,6 +41,9 @@ const RUNTIME_DEADLINE = MAX_RUNTIME_SECONDS > 0 ? Date.now() + MAX_RUNTIME_SECO
 // bounds hand-off latency without letting large worker pools hammer Postgres.
 const POLL_MS = Math.max(500, Number(getArg("poll-ms", "1000")) || 1_000)
 const HEARTBEAT_MS = Math.max(10_000, Number(getArg("heartbeat-ms", "20000")) || 20_000)
+const LIVE_PROGRESS_SYNC_MS = Math.max(5_000, Number(getArg("live-progress-sync-ms", "10000")) || 10_000)
+const TELEMETRY_LOG_LIMIT = 100
+const TELEMETRY_FILE_EVENT_LIMIT = 100
 const MAX_OBJECTS = Math.max(1, Math.min(10_000_000, Number(getArg("max-objects", "2000000")) || 2_000_000))
 const API_TIMEOUT_MS = Math.max(5_000, Number(getArg("api-timeout-ms", "30000")) || 30_000)
 const API_RETRIES = Math.max(1, Math.min(6, Number(getArg("api-retries", "3")) || 3))
@@ -731,7 +734,7 @@ function pushLog(state, message, extra = {}) {
     message: String(message),
     ...extra,
   }
-  state.logs = [...state.logs.slice(-199), line]
+  state.logs = [...state.logs.slice(-(TELEMETRY_LOG_LIMIT - 1)), line]
 }
 
 function upsertItemProgress(state, patch) {
@@ -755,7 +758,7 @@ function upsertFileEvent(state, patch) {
     ...patch,
   }
   const index = state.fileEvents.findIndex((entry) => entry?.itemId === itemId && entry?.key === key)
-  if (index < 0) state.fileEvents = [...state.fileEvents.slice(-4999), next]
+  if (index < 0) state.fileEvents = [...state.fileEvents.slice(-(TELEMETRY_FILE_EVENT_LIMIT - 1)), next]
   else state.fileEvents = [...state.fileEvents.slice(0, index), { ...state.fileEvents[index], ...next }, ...state.fileEvents.slice(index + 1)]
 }
 
@@ -1024,7 +1027,7 @@ async function processItem(jobId, payload, item, completedResults, state) {
 
   const syncLiveProgress = (extra = {}) => {
     const nowTs = Date.now()
-    if (nowTs - lastLiveProgressSyncAt < 3000) return
+    if (nowTs - lastLiveProgressSyncAt < LIVE_PROGRESS_SYNC_MS) return
     lastLiveProgressSyncAt = nowTs
     void safeUpdateJob(jobId, {
       status: "running",

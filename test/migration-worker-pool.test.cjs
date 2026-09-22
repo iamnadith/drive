@@ -4,6 +4,39 @@ const fs = process.getBuiltinModule('node:fs')
 
 const read = (file) => fs.readFileSync(file, 'utf8')
 
+test('migration telemetry stays bounded and progress updates do not amplify database egress', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const poolRoute = read('src/app/api/migrations/[id]/worker-pool/route.ts')
+  const poolPage = read('src/app/dashboard/migrations/[id]/worker-pool/page.tsx')
+  const runtime = read('workers/migration-worker/migration-worker.mjs')
+
+  assert.match(orchestrator, /async function refreshMigrationSnapshot/)
+  assert.match(orchestrator, /if \(current\.mode === "migration" && projectionChanged\) await refreshMigrationSnapshot/)
+  assert.doesNotMatch(orchestrator, /if \(current\.mode === "migration"\) await migrationLiveState/)
+  assert.match(orchestrator, /select id,migration_id,mode,status,payload,progress \? 'currentFile' had_current_file from drive_repair_jobs/)
+  assert.match(orchestrator, /const projectionChanged = releaseForRotation \|\| terminalTransition \|\| Boolean\(firstActiveFile\)/)
+  assert.match(orchestrator, /returning id,status,claimed_by_agent_id,last_heartbeat_at,updated_at/)
+  assert.doesNotMatch(orchestrator, /where id=\$1 and claimed_by_agent_id=\$2 and claim_token=\$3::uuid limit 1`[\s\S]{0,80}select \*/i)
+  assert.doesNotMatch(orchestrator, /where id=\$1 and claimed_by_agent_id=\$2[\s\S]{0,500}returning \*/i)
+  assert.match(poolRoute, /recent_jobs as materialized \([\s\S]*?limit 20/)
+  assert.match(poolRoute, /order by ordinality desc limit 3/g)
+  assert.match(poolPage, /window\.setInterval\([\s\S]*?10_000/)
+  assert.match(runtime, /LIVE_PROGRESS_SYNC_MS = Math\.max\(5_000,[\s\S]*?"10000"/)
+  assert.match(runtime, /TELEMETRY_LOG_LIMIT = 100/)
+  assert.match(runtime, /TELEMETRY_FILE_EVENT_LIMIT = 100/)
+  assert.match(runtime, /nowTs - lastLiveProgressSyncAt < LIVE_PROGRESS_SYNC_MS/)
+})
+
+test('migration orchestrator repairs legacy lease schema with pooler-safe statements', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const schema = read('supabase/drive_schema.sql')
+
+  assert.match(orchestrator, /let schemaReady: Promise<void> \| null = null/)
+  assert.match(orchestrator, /await db\.query\(`alter table if exists drive_migration_orchestrator_state add column if not exists lease_expires_at timestamptz`\)/)
+  assert.doesNotMatch(orchestrator, /lease_expires_at timestamptz;\s*create table if not exists drive_migration_verification_state/)
+  assert.match(schema, /alter table if exists drive_migration_orchestrator_state add column if not exists lease_expires_at timestamptz;/)
+})
+
 test('worker pool claims are generation-scoped and can signal clean completion', () => {
   const claimRoute = read('src/app/api/agents/[id]/claim-job/route.ts')
   const queue = read('src/lib/repair-jobs-store.ts')
@@ -182,7 +215,8 @@ test('worker-pool details hydrate and refresh from PostgreSQL only', () => {
   assert.doesNotMatch(route, /payload->>'migrationId'=\$1\b/)
   assert.match(route, /ensureDriveSchema\(\)/)
   assert.match(route, /limit 100/)
-  assert.match(route, /limit 25/)
+  assert.match(route, /limit 20/)
+  assert.match(route, /limit 3/)
   assert.match(route, /jsonb_array_elements/)
   assert.match(route, /fallback_needed as materialized/)
   assert.match(route, /and \(select needs_legacy from fallback_needed\)/)
@@ -192,7 +226,7 @@ test('worker-pool details hydrate and refresh from PostgreSQL only', () => {
   assert.doesNotMatch(route, /getMigrationOrchestratorSettings|fetch\(/)
   assert.match(route, /source: "database"/)
   assert.match(route, /catch \(error\)[\s\S]*?status: 500/)
-  assert.match(page, /setInterval\(\(\) => void load\(\{ background: true \}\), 5_000\)/)
+  assert.match(page, /setInterval\(\(\) => void load\(\{ background: true \}\), 10_000\)/)
   assert.match(page, /inFlight\.current/)
   assert.match(page, /DashboardDataTable/)
   assert.match(page, /serverPagination/)

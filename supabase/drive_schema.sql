@@ -1006,6 +1006,7 @@ create table if not exists drive_migration_orchestrator_state (
   updated_at timestamptz not null default now()
 );
 alter table if exists drive_migration_orchestrator_state add column if not exists lease_owner text;
+alter table if exists drive_migration_orchestrator_state add column if not exists lease_expires_at timestamptz;
 
 -- Durable page cursors for the independent inventory verifier. Exact object
 -- rows are stored in drive_bucket_scan_objects and compared in PostgreSQL.

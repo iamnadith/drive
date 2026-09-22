@@ -115,7 +115,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       where migration_id=$1 and mode='migration'
         and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=(select generation from selected_generation)
       order by created_at desc,id desc
-      limit 100
+      limit 20
     ), telemetry as (
       select coalesce(jsonb_agg(jsonb_build_object(
         'id',id,
@@ -127,7 +127,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
             from (
               select value,ordinality
               from jsonb_array_elements(case when jsonb_typeof(progress->'fileEvents')='array' then progress->'fileEvents' else '[]'::jsonb end) with ordinality
-              order by ordinality desc limit 25
+              order by ordinality desc limit 3
             ) event
           ),'[]'::jsonb),
           'logs',coalesce((
@@ -135,7 +135,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
             from (
               select value,ordinality
               from jsonb_array_elements(case when jsonb_typeof(progress->'logs')='array' then progress->'logs' else '[]'::jsonb end) with ordinality
-              order by ordinality desc limit 25
+              order by ordinality desc limit 3
             ) entry
           ),'[]'::jsonb)
         ),
@@ -144,7 +144,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
           from (
             select value,ordinality
             from jsonb_array_elements(case when jsonb_typeof(result->'fileEvents')='array' then result->'fileEvents' else '[]'::jsonb end) with ordinality
-            order by ordinality desc limit 25
+            order by ordinality desc limit 3
           ) event
         ),'[]'::jsonb))
       ) order by created_at desc,id desc),'[]'::jsonb) jobs

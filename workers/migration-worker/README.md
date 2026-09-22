@@ -62,6 +62,9 @@ Optional environment variables:
 - `HEARTBEAT_MS`: worker heartbeat interval. Default: `20000`; heartbeat
   requests are bounded so a network outage cannot hold a lease renewal for
   several minutes.
+- `LIVE_PROGRESS_SYNC_MS`: minimum interval for non-terminal progress snapshots.
+  Default: `10000`. Multipart checkpoints and terminal outcomes remain immediate;
+  only replaceable UI telemetry is throttled to protect the database pooler.
 - `MAX_OBJECTS`: maximum objects inventoried per bucket. Default: `2000000`; if
   the limit would truncate an assigned inventory, the worker fails the file job explicitly
   and asks you to increase the value instead of silently completing a partial
