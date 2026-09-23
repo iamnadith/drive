@@ -9,6 +9,7 @@ import {
 } from "@/lib/github-oauth"
 import { abortRepairJob, deleteRepairJob, getRepairJob, getRepairJobDetail } from "@/lib/repair-jobs-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { recordUserActivity } from "@/lib/activity-audit"
 import { queryDb } from "@/lib/db"
 
 function errorMessage(error: unknown, fallback: string) {
@@ -154,6 +155,17 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const agentId = job.claimedByAgentId || job.requestedByAgentId
     const agent = agentId ? await getAgentById(agentId).catch(() => null) : null
     const locallyAbortedJob = await abortRepairJob(id)
+    if (locallyAbortedJob) {
+      await recordUserActivity(request, auth.user.id, {
+        action: "repair_job.abort_requested",
+        entityType: "repair_job",
+        entityId: id,
+        entityLabel: job.mode === "migration" ? "Migration worker job" : "Repair job",
+        summary: `Requested stop for ${job.mode === "migration" ? "migration worker" : "repair"} job`,
+        before: { status: job.status },
+        after: { status: locallyAbortedJob.status, remoteCancellationPending: job.mode === "migration" },
+      })
+    }
 
     // Migration worker pools are controlled by Migration Orchestrator. The
     // dashboard records the canceled durable job; the orchestrator reconciles
@@ -393,6 +405,14 @@ export async function DELETE(_request: Request, context: { params: Promise<{ id:
       await abortRepairJob(id)
     }
     await deleteRepairJob(id)
+    await recordUserActivity(_request, auth.user.id, {
+      action: "repair_job.deleted",
+      entityType: "repair_job",
+      entityId: id,
+      entityLabel: job.mode === "migration" ? "Migration worker job" : "Repair job",
+      summary: `Deleted ${job.mode === "migration" ? "migration worker" : "repair"} job`,
+      before: { status: job.status, mode: job.mode, migrationId: job.migrationId },
+    })
     return NextResponse.json({ ok: true })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to delete repair job") }, { status: 400 })

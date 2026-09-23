@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { verifyEmailCode } from "@/lib/email-verification"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -17,6 +18,7 @@ export async function POST(request: Request) {
     }
 
     const user = await verifyEmailCode({ email, code, purpose: "signup" })
+    await recordActivity({ actorUserId: user.id, action: "security.email_verified", entityType: "user", entityId: user.id, entityLabel: user.email, summary: "Verified account email", ...getRequestActivityContext(request) })
     const response = NextResponse.json({ user })
     response.cookies.set("sessionUserId", user.id, {
       httpOnly: true,

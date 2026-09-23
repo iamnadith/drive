@@ -16,6 +16,7 @@ import {
 import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
 import { requireAdmin } from "@/lib/server-auth"
 import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
+import { recordUserActivity } from "@/lib/activity-audit"
 
 export const runtime = "nodejs"
 
@@ -125,6 +126,11 @@ export async function POST(
           : 1
         const verificationAttemptId = await queueMigrationItemVerification(id, item.id, verificationGeneration)
         await wakeMigrationOrchestrator()
+        await recordUserActivity(request, auth.user.id, {
+          action: "migration.bucket.verification_queued", entityType: "migration_bucket", entityId: item.id,
+          entityLabel: item.sourceBucket, summary: `Queued verification for bucket ${item.sourceBucket}`,
+          after: { migrationId: id, attemptId: verificationAttemptId },
+        })
 
         return NextResponse.json({ ok: true, attemptId: verificationAttemptId }, { status: 200 })
       }
@@ -137,6 +143,7 @@ export async function POST(
           progress: { ...item.progress, stage: "aborted_without_job", live: { ...live, status: "aborted", updatedAt: abortedAt }, abortRequest: { status: "confirmed", at: abortedAt }, lastAction: { action, at: abortedAt } },
           lastProgressAt: abortedAt,
         })
+        await recordUserActivity(request, auth.user.id, { action: "migration.bucket.abort_requested", entityType: "migration_bucket", entityId: item.id, entityLabel: item.sourceBucket, summary: `Stopped bucket ${item.sourceBucket}`, after: { migrationId: id } })
         return NextResponse.json({ ok: true }, { status: 200 })
       }
       if (action === "retry") {
@@ -183,6 +190,7 @@ export async function POST(
           options: { ...migration.options, manualCompleted: false, targetActivatedAt: undefined },
         })
         await wakeMigrationOrchestrator()
+        await recordUserActivity(request, auth.user.id, { action: "migration.bucket.retried", entityType: "migration_bucket", entityId: item.id, entityLabel: item.sourceBucket, summary: `Retried bucket ${item.sourceBucket}`, after: { migrationId: id } })
         return NextResponse.json({ ok: true }, { status: 200 })
       }
 
@@ -198,6 +206,7 @@ export async function POST(
         progress: { ...item.progress, stage: "paused", lastAction: { action, at: new Date().toISOString() } },
         lastProgressAt: new Date().toISOString(),
       })
+      await recordUserActivity(request, auth.user.id, { action: "migration.bucket.paused", entityType: "migration_bucket", entityId: item.id, entityLabel: item.sourceBucket, summary: `Paused bucket ${item.sourceBucket}`, after: { migrationId: id } })
       return NextResponse.json({ ok: true, result: res }, { status: 200 })
     }
 
@@ -208,6 +217,7 @@ export async function POST(
         progress: { ...item.progress, stage: "resumed", lastAction: { action, at: new Date().toISOString() } },
         lastProgressAt: new Date().toISOString(),
       })
+      await recordUserActivity(request, auth.user.id, { action: "migration.bucket.resumed", entityType: "migration_bucket", entityId: item.id, entityLabel: item.sourceBucket, summary: `Resumed bucket ${item.sourceBucket}`, after: { migrationId: id } })
       return NextResponse.json({ ok: true, result: res }, { status: 200 })
     }
 
@@ -220,6 +230,7 @@ export async function POST(
         progress: { ...item.progress, stage: "aborted", live: { ...live, status: "aborted", updatedAt: abortedAt }, abortRequest: { status: "confirmed", at: abortedAt }, lastAction: { action, at: abortedAt } },
         lastProgressAt: abortedAt,
       })
+      await recordUserActivity(request, auth.user.id, { action: "migration.bucket.abort_requested", entityType: "migration_bucket", entityId: item.id, entityLabel: item.sourceBucket, summary: `Stopped bucket ${item.sourceBucket}`, after: { migrationId: id } })
       return NextResponse.json({ ok: true, result: res }, { status: 200 })
     }
 

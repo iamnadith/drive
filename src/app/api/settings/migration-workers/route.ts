@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { requireAdmin } from "@/lib/server-auth"
+import { recordUserActivity } from "@/lib/activity-audit"
 import {
   getMigrationWorkerSettings,
   publicMigrationWorkerSettings,
@@ -41,6 +42,11 @@ export async function PUT(request: Request) {
         sharedSecret,
       })
       const settings = await getMigrationWorkerSettings()
+      await recordUserActivity(request, auth.user.id, {
+        action: "settings.migration_workers.secret_updated", entityType: "settings", entityId: "migration-workers",
+        entityLabel: "Migration Worker credentials", summary: "Updated Migration Worker credentials",
+        after: { configured: true, syncedRepositories: synchronization.syncedRepositories },
+      })
       return NextResponse.json({ settings: publicMigrationWorkerSettings(settings), syncedRepositories: synchronization.syncedRepositories })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)

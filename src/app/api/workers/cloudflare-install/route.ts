@@ -3,17 +3,18 @@ import { deleteCloudflareWorkers, getCloudflareHostingPreference, getCloudflareI
 import { requireSuperAdmin } from "@/lib/server-auth"
 import { hasSuperAdminUser } from "@/lib/users-store"
 import { getSystemReadiness } from "@/lib/system-readiness"
+import { recordUserActivity } from "@/lib/activity-audit"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
 
 async function authorizeBootstrap() {
   const session = await requireSuperAdmin()
-  if (session.ok) return { ok: true as const, bootstrap: false }
+  if (session.ok) return { ok: true as const, bootstrap: false, userId: session.user.id }
   if (!(await hasSuperAdminUser())) {
     const readiness = await getSystemReadiness()
     if (!readiness.ready) return { ok: false as const, response: NextResponse.json({ error: "Complete required environment setup first" }, { status: 409 }) }
-    return { ok: true as const, bootstrap: true }
+    return { ok: true as const, bootstrap: true, userId: null }
   }
   return { ok: false as const, response: session.response }
 }
@@ -35,16 +36,26 @@ export async function PATCH(request: NextRequest) {
     if (body.action === "replace_tokens") {
       if (auth.bootstrap) return NextResponse.json({ error: "Create the Super Admin before replacing saved tokens" }, { status: 403 })
       const mode = body.mode === "separate" ? "separate" : "single"
-      return NextResponse.json({ installation: await replaceCloudflareTokens({ mode, tokens: { backend: String(mode === "single" ? body.token || "" : body.backendToken || ""), scanner: String(body.scannerToken || ""), migration: String(body.migrationToken || "") } }) })
+      const installation = await replaceCloudflareTokens({ mode, tokens: { backend: String(mode === "single" ? body.token || "" : body.backendToken || ""), scanner: String(body.scannerToken || ""), migration: String(body.migrationToken || "") } })
+      if (auth.userId) await recordUserActivity(request, auth.userId, { action: "cloudflare_workers.credentials_replaced", entityType: "worker_installation", entityId: "cloudflare", entityLabel: "Cloudflare Workers", summary: "Replaced Cloudflare Worker credentials", after: { mode } })
+      return NextResponse.json({ installation })
     }
-    if (body.action === "delete_workers") return NextResponse.json({ installation: await deleteCloudflareWorkers() })
+    if (body.action === "delete_workers") {
+      const installation = await deleteCloudflareWorkers()
+      if (auth.userId) await recordUserActivity(request, auth.userId, { action: "cloudflare_workers.deleted", entityType: "worker_installation", entityId: "cloudflare", entityLabel: "Cloudflare Workers", summary: "Deleted Cloudflare Workers" })
+      return NextResponse.json({ installation })
+    }
     if (body.action === "reconcile_worker") {
       const worker = body.worker === "backend" || body.worker === "scanner" || body.worker === "migration" ? body.worker : null
       if (!worker) throw new Error("A valid Worker is required")
-      return NextResponse.json({ installation: await reconcileCloudflareWorker(worker) })
+      const installation = await reconcileCloudflareWorker(worker)
+      if (auth.userId) await recordUserActivity(request, auth.userId, { action: "cloudflare_worker.reconciled", entityType: "worker", entityId: worker, entityLabel: `${worker} Worker`, summary: `Reconciled ${worker} Worker` })
+      return NextResponse.json({ installation })
     }
     if (body.mode !== "automatic") throw new Error("Manual Worker hosting has been removed; use automatic hosting")
-    return NextResponse.json({ hosting: await setCloudflareHostingMode("automatic") })
+    const hosting = await setCloudflareHostingMode("automatic")
+    if (auth.userId) await recordUserActivity(request, auth.userId, { action: "cloudflare_workers.hosting_updated", entityType: "worker_installation", entityId: "cloudflare", entityLabel: "Cloudflare Workers", summary: "Set Cloudflare Worker hosting to automatic" })
+    return NextResponse.json({ hosting })
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to change hosting mode" }, { status: 400 })
   }
@@ -59,6 +70,7 @@ export async function POST(request: NextRequest) {
       backend: String(mode === "single" ? body.token || "" : body.backendToken || ""),
       scanner: String(body.scannerToken || ""), migration: String(body.migrationToken || ""),
     } })
+    if (auth.userId) await recordUserActivity(request, auth.userId, { action: "cloudflare_workers.deployed", entityType: "worker_installation", entityId: "cloudflare", entityLabel: "Cloudflare Workers", summary: `${body.restart === true ? "Restarted" : "Deployed"} Cloudflare Workers`, after: { mode, checkForUpdates: body.checkForUpdates === true, forceRedeploy: body.forceRedeploy === true } })
     return NextResponse.json({ installation })
   } catch (error) {
     const code = error && typeof error === "object" && "code" in error ? String(error.code) : ""

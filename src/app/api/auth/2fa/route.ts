@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { findUserById, toPublicUser, updateUser } from "@/lib/users-store"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -20,6 +21,9 @@ export async function PATCH(request: Request) {
     if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 })
 
     const updated = await updateUser(user.id, { twoFactorEnabled: enabled })
+    if (user.twoFactorEnabled !== enabled) {
+      await recordActivity({ actorUserId: user.id, action: enabled ? "security.2fa_enabled" : "security.2fa_disabled", entityType: "user", entityId: user.id, entityLabel: user.email, summary: enabled ? "Enabled two-factor authentication" : "Disabled two-factor authentication", before: { enabled: user.twoFactorEnabled }, after: { enabled }, ...getRequestActivityContext(request) })
+    }
     return NextResponse.json({ user: toPublicUser(updated) })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to update 2FA") }, { status: 400 })

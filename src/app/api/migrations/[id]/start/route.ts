@@ -3,6 +3,7 @@ import { getMigration, listMigrationItems, updateMigration } from "@/lib/migrati
 import { requireAdmin } from "@/lib/server-auth"
 import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
 import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 
 export const runtime = "nodejs"
 
@@ -22,7 +23,7 @@ async function wakeMigrationOrchestrator(): Promise<void> {
 }
 
 export async function POST(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
   try {
@@ -51,11 +52,29 @@ export async function POST(
     // This endpoint records the user's start command and wakes the durable
     // control plane. Bucket discovery/creation, scanning, copying, settings
     // sync, worker dispatch, and verification are performed by the workers.
-    await wakeMigrationOrchestrator()
+    let wakeError: string | null = null
+    try {
+      await wakeMigrationOrchestrator()
+    } catch (error) {
+      wakeError = error instanceof Error ? error.message : "Unable to wake Migration Orchestrator"
+    }
+    await recordActivity({
+      actorUserId: auth.user.id,
+      action: migration.startedAt ? "migration.resumed" : "migration.started",
+      entityType: "migration",
+      entityId: id,
+      summary: migration.startedAt ? "Resumed migration" : "Started migration",
+      detail: wakeError ? `Migration is queued, but orchestrator wake-up failed: ${wakeError}` : "Migration Orchestrator was notified.",
+      outcome: wakeError ? "warning" : "success",
+      before: { status: migration.status },
+      after: { status: "running" },
+      ...getRequestActivityContext(request),
+    })
 
     return NextResponse.json({
       migration: await getMigration(id),
       items: await listMigrationItems(id),
+      ...(wakeError ? { warning: wakeError } : {}),
     })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unable to start migration"

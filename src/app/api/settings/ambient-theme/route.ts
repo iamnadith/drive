@@ -6,6 +6,7 @@ import {
   saveAmbientThemeSettings,
 } from "@/lib/ambient-theme-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { recordUserActivity } from "@/lib/activity-audit"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -35,6 +36,14 @@ export async function PUT(request: Request) {
 
     const settings = normalizeAmbientThemeSettings(body)
     const saved = await saveAmbientThemeSettings(settings)
+    await recordUserActivity(request, auth.user.id, {
+      action: "settings.ambient_theme.updated",
+      entityType: "settings",
+      entityId: "ambient-theme",
+      entityLabel: "Ambient theme",
+      summary: "Updated ambient theme settings",
+      after: { activeThemeId: saved.activeThemeId, themeCount: saved.themes.length },
+    })
     return NextResponse.json({ settings: saved })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to save ambient theme settings")

@@ -3,6 +3,7 @@ import { verifyEmailCode } from "@/lib/email-verification"
 import { findUserByEmail, hashPassword, updateUser } from "@/lib/users-store"
 import { verifySmsCode } from "@/lib/sms-verification"
 import { consumeUserTotpCode } from "@/lib/totp-verification"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -67,6 +68,15 @@ export async function POST(request: Request) {
       passwordSource: "local",
       emailVerified: true,
       emailVerifiedAt: user.emailVerifiedAt ?? new Date().toISOString(),
+    })
+    await recordActivity({
+      actorUserId: user.id,
+      action: "security.password_reset",
+      entityType: "user",
+      entityId: user.id,
+      entityLabel: user.email,
+      summary: "Reset account password",
+      ...getRequestActivityContext(request),
     })
 
     return NextResponse.json({ ok: true })

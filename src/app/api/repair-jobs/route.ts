@@ -3,6 +3,7 @@ import { createRepairJob, listLiveRepairJobs, type RepairJobMode } from "@/lib/r
 import { getAgentById } from "@/lib/agents-store"
 import { listMigrationItems } from "@/lib/migrations-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { recordUserActivity } from "@/lib/activity-audit"
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
@@ -77,6 +78,14 @@ export async function POST(request: Request) {
       }
     }
     const job = await createRepairJob({ migrationId, mode, requestedByAgentId })
+    await recordUserActivity(request, auth.user.id, {
+      action: "repair_job.created",
+      entityType: "repair_job",
+      entityId: job.id,
+      entityLabel: `Migration repair (${mode.replaceAll("_", " ")})`,
+      summary: `Started migration repair job using ${mode.replaceAll("_", " ")}`,
+      after: { migrationId, mode, requestedByAgentId: requestedByAgentId ?? null },
+    })
     return NextResponse.json({ job }, { status: 201 })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to create repair job") }, { status: 400 })

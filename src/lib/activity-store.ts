@@ -1,7 +1,7 @@
 import crypto from "crypto"
-import { queryDb } from "./db"
+import type { PoolClient } from "pg"
+import { queryDb, withDbTransaction } from "./db"
 import { getAllAccounts, updateAccount, type CloudflareAccountStatus } from "./accounts-store"
-import { findUserById } from "./users-store"
 
 export type ActivityOutcome = "success" | "failed" | "warning" | "info"
 export type ActivityUndoStatus = "not_undoable" | "available" | "undone" | "expired" | "failed"
@@ -76,6 +76,22 @@ export type ListActivityInput = {
 
 type CountRow = {
   total: string | number
+}
+
+type ActivityFacets = { actions: string[]; entityTypes: string[] }
+let activityFacetsCache: { at: number; value: ActivityFacets } | null = null
+
+async function getActivityFacets(): Promise<ActivityFacets> {
+  if (activityFacetsCache && Date.now() - activityFacetsCache.at < 60_000) return activityFacetsCache.value
+  const { rows } = await queryDb<{ action: string; entity_type: string }>(
+    `select distinct action, entity_type from ${TABLE}`
+  )
+  const value = {
+    actions: [...new Set(rows.map((row) => row.action))].sort(),
+    entityTypes: [...new Set(rows.map((row) => row.entity_type))].sort(),
+  }
+  activityFacetsCache = { at: Date.now(), value }
+  return value
 }
 
 export type RecordActivityInput = {
@@ -222,17 +238,20 @@ export function ensureActivitySchema(): Promise<void> {
 
 export function getRequestActivityContext(request: Request) {
   const forwardedFor = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+  const bounded = (value: string | null | undefined, limit: number) => value ? value.slice(0, limit) : null
   return {
-    ipAddress: forwardedFor || request.headers.get("x-real-ip") || null,
-    userAgent: request.headers.get("user-agent") || null,
-    requestId: request.headers.get("x-request-id") || crypto.randomUUID(),
+    ipAddress: bounded(forwardedFor || request.headers.get("x-real-ip"), 64),
+    userAgent: bounded(request.headers.get("user-agent"), 512),
+    requestId: bounded(request.headers.get("x-request-id"), 128) || crypto.randomUUID(),
   }
 }
 
-export async function recordActivity(input: RecordActivityInput): Promise<ActivityRecord | null> {
-  try {
-    await ensureActivitySchema()
-    const actor = input.actorUserId ? await findUserById(input.actorUserId).catch(() => undefined) : undefined
+export async function recordActivityInTransaction(client: PoolClient, input: RecordActivityInput): Promise<ActivityRecord> {
+    const actor = input.actorUserId
+      ? (await client.query<{ name: string; email: string; role: string }>(
+          "select name,email,role from drive_users where id=$1::uuid limit 1", [input.actorUserId]
+        )).rows[0]
+      : undefined
     const enriched = {
       ...input,
       actorName: actor?.name,
@@ -242,7 +261,7 @@ export async function recordActivity(input: RecordActivityInput): Promise<Activi
     }
     const undoable = Boolean(input.undoable)
     const undoStatus = input.undoStatus ?? (undoable ? "available" : "not_undoable")
-    const { rows } = await queryDb<ActivityRow>(
+    const { rows } = await client.query<ActivityRow>(
       `
         insert into ${TABLE}
           (actor_user_id, actor_name, actor_email, actor_role, action, entity_type, entity_id, entity_label,
@@ -278,7 +297,15 @@ export async function recordActivity(input: RecordActivityInput): Promise<Activi
         toJson(input.undoPayload),
       ]
     )
-    return rows[0] ? mapRow(rows[0]) : null
+    if (!rows[0]) throw new Error("Activity insert did not return a record")
+    activityFacetsCache = null
+    return mapRow(rows[0])
+}
+
+export async function recordActivity(input: RecordActivityInput): Promise<ActivityRecord | null> {
+  try {
+    await ensureActivitySchema()
+    return await withDbTransaction((client) => recordActivityInTransaction(client, input))
   } catch (error) {
     console.error("Unable to record activity:", error)
     return null
@@ -301,7 +328,12 @@ export async function listActivity(input: ListActivityInput) {
   if (input.action) baseClauses.push(`action = ${add(input.action)}`)
   if (input.entityType) baseClauses.push(`entity_type = ${add(input.entityType)}`)
   if (input.outcome) baseClauses.push(`outcome = ${add(input.outcome)}`)
-  if (input.undoable !== undefined) baseClauses.push(`undoable = ${add(input.undoable)}`)
+  if (input.undoable !== undefined) {
+    const available = `(undoable = true and undo_status = 'available' and (action <> 'migration.created' or exists (
+      select 1 from public.drive_migrations m where m.id::text = entity_id and m.status = 'draft' and m.started_at is null
+    )))`
+    baseClauses.push(input.undoable ? available : `not ${available}`)
+  }
   if (input.from) baseClauses.push(`occurred_at >= ${add(input.from)}`)
   if (input.to) baseClauses.push(`occurred_at <= ${add(input.to)}`)
 
@@ -314,12 +346,20 @@ export async function listActivity(input: ListActivityInput) {
   const totalQuery = input.includeTotal === false
     ? Promise.resolve({ rows: [] as CountRow[] })
     : queryDb<CountRow>(`select count(*)::bigint as total from ${TABLE} ${baseWhere}`, countParams)
-  const [{ rows: countRows }, { rows }] = await Promise.all([
+  const [{ rows: countRows }, { rows }, facets] = await Promise.all([
     totalQuery,
     queryDb<ActivityRow>(
-      `select * from ${TABLE} ${where} order by occurred_at desc, id desc limit ${add(limit + 1)}`,
+      `select e.*,
+        case when e.action = 'migration.created' and e.undo_status = 'available'
+          and not exists (select 1 from public.drive_migrations m where m.id::text = e.entity_id and m.status = 'draft' and m.started_at is null)
+          then 'expired' else e.undo_status end as undo_status,
+        case when e.action = 'migration.created' and e.undo_status = 'available'
+          and not exists (select 1 from public.drive_migrations m where m.id::text = e.entity_id and m.status = 'draft' and m.started_at is null)
+          then 'Only an unstarted draft migration can be undone' else e.undo_reason end as undo_reason
+       from ${TABLE} e ${where} order by occurred_at desc, id desc limit ${add(limit + 1)}`,
       params
     ),
+    getActivityFacets(),
   ])
   const pageRows = rows.slice(0, limit)
   const totalCount = input.includeTotal === false ? undefined : Number(countRows[0]?.total ?? 0)
@@ -327,6 +367,7 @@ export async function listActivity(input: ListActivityInput) {
     events: pageRows.map(mapRow),
     nextCursor: rows.length > limit && pageRows.length > 0 ? encodeCursor(pageRows[pageRows.length - 1]) : null,
     hasMore: rows.length > limit,
+    facets,
     ...(typeof totalCount === "number"
       ? { totalCount, totalPages: Math.max(1, Math.ceil(totalCount / limit)) }
       : {}),
@@ -347,6 +388,40 @@ export async function undoActivity(id: string, actorUserId?: string | null, requ
   }
 
   const payload = event.undo_payload
+  if (payload?.type === "delete_draft_migration") {
+    if (typeof payload.migrationId !== "string" || payload.migrationId !== event.entity_id) {
+      throw new Error("Undo payload does not match this migration")
+    }
+    const migrationId = payload.migrationId
+    await withDbTransaction(async (client) => {
+      const lockedEvent = await client.query<ActivityRow>(
+        `select * from ${TABLE} where id = $1::uuid for update`, [id]
+      )
+      if (lockedEvent.rows[0]?.undo_status !== "available") throw new Error("This activity can no longer be undone")
+      const migration = await client.query<{ id: string }>(
+        `select id from public.drive_migrations where id = $1::uuid and status = 'draft' and started_at is null for update`,
+        [migrationId]
+      )
+      if (!migration.rows[0]) throw new Error("Only an unstarted draft migration can be undone")
+      await client.query(`delete from public.drive_migrations where id = $1::uuid`, [migrationId])
+      await client.query(
+        `update ${TABLE} set undo_status = 'undone', undone_at = now(), undone_by_user_id = $2::uuid where id = $1::uuid`,
+        [id, actorUserId ?? null]
+      )
+      await recordActivityInTransaction(client, {
+        actorUserId,
+        action: "activity.undo",
+        entityType: "migration",
+        entityId: migrationId,
+        entityLabel: event.entity_label,
+        summary: `Undid: ${event.summary}`,
+        detail: "Deleted the unstarted draft migration and its bucket selections.",
+        metadata: { undoneActivityId: id },
+        ...getRequestActivityContext(request ?? new Request("http://local")),
+      })
+    })
+    return
+  }
   if (!payload || payload.type !== "restore_account_statuses" || !Array.isArray(payload.accounts)) {
     throw new Error("Undo payload is not supported")
   }
@@ -364,8 +439,8 @@ export async function undoActivity(id: string, actorUserId?: string | null, requ
   }
 
   const orderedRestoreAccounts = [...restoreAccounts].sort((a, b) => {
-    if (a.status === "active") return -1
-    if (b.status === "active") return 1
+    if (a.status === "active") return 1
+    if (b.status === "active") return -1
     return 0
   })
 

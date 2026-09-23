@@ -16,6 +16,7 @@ import {
   r2PutObject,
 } from "@/lib/r2-s3"
 import { requireAdmin } from "@/lib/server-auth"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 
 type ActiveAccount = Awaited<ReturnType<typeof getAllAccounts>>[number] & {
   cloudflareAccountId: string
@@ -93,6 +94,7 @@ export async function GET(
       )
 
       if (action === "open" || action === "download") {
+        await recordActivity({ actorUserId: auth.user.id, action: action === "open" ? "storage.object_opened" : "storage.object_downloaded", entityType: "object", entityId: `${name}/${key}`, entityLabel: key, summary: action === "open" ? `Opened object from ${name}` : `Downloaded object from ${name}`, metadata: { bucket: name }, ...getRequestActivityContext(request) })
         return new Response(null, { status: 307, headers: { Location: signedUrl, "Cache-Control": "private, no-store" } })
       }
       return NextResponse.json({ url: signedUrl, key, expiresAt: Date.now() + 900_000 }, { headers: { "Cache-Control": "private, no-store" } })
@@ -225,6 +227,7 @@ export async function POST(
         )
       }
 
+      await recordActivity({ actorUserId: auth.user.id, action: "storage.object_uploaded", entityType: "object", entityId: `${name}/${key}`, entityLabel: key, summary: `Uploaded object to ${name}`, metadata: { bucket: name, bytes: file.size }, ...getRequestActivityContext(request) })
       return NextResponse.json({ ok: true, key })
     }
 
@@ -286,6 +289,7 @@ export async function POST(
       )
     }
 
+    await recordActivity({ actorUserId: auth.user.id, action: action === "folder" ? "storage.folder_created" : "storage.object_created", entityType: action === "folder" ? "folder" : "object", entityId: `${name}/${key}`, entityLabel: key, summary: action === "folder" ? `Created folder in ${name}` : `Created object in ${name}`, metadata: { bucket: name }, ...getRequestActivityContext(request) })
     return NextResponse.json({ ok: true, key })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to modify bucket objects")
@@ -338,11 +342,13 @@ export async function DELETE(
       keys.push(prefix)
       await r2DeleteObjects(config, name, keys)
       await markTrackedBucketPrefixDeleted({ bucketName: name, prefix }).catch(() => undefined)
+      await recordActivity({ actorUserId: auth.user.id, action: "storage.folder_deleted", entityType: "folder", entityId: `${name}/${prefix}`, entityLabel: prefix, summary: `Deleted folder from ${name}`, metadata: { bucket: name, deletedObjects: keys.length }, ...getRequestActivityContext(request) })
       return NextResponse.json({ ok: true, deleted: keys.length })
     }
 
     await r2DeleteObject(config, name, key)
     await markTrackedBucketObjectDeleted({ bucketName: name, key }).catch(() => undefined)
+    await recordActivity({ actorUserId: auth.user.id, action: "storage.object_deleted", entityType: "object", entityId: `${name}/${key}`, entityLabel: key, summary: `Deleted object from ${name}`, metadata: { bucket: name }, ...getRequestActivityContext(request) })
     return NextResponse.json({ ok: true, deleted: 1 })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to delete bucket object")

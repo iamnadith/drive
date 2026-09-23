@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { findUserById, toPublicUser, updateUser } from "@/lib/users-store"
 import { buildTotpUri, generateTotpSecret, verifyTotpCodeWithCounter } from "@/lib/totp"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -9,7 +10,7 @@ function errorMessage(error: unknown, fallback: string) {
     : fallback
 }
 
-export async function POST() {
+export async function POST(request: Request) {
   try {
     const cookieStore = await cookies()
     const userId = cookieStore.get("sessionUserId")?.value
@@ -20,6 +21,7 @@ export async function POST() {
 
     const secret = generateTotpSecret()
     await updateUser(user.id, { totpSecret: secret, totpEnabled: false })
+    await recordActivity({ actorUserId: user.id, action: "security.totp_setup_started", entityType: "user", entityId: user.id, entityLabel: user.email, summary: "Started authenticator setup", ...getRequestActivityContext(request) })
 
     return NextResponse.json({
       secret,
@@ -50,13 +52,14 @@ export async function PATCH(request: Request) {
       twoFactorEnabled: true,
       totpLastUsedCounter: result.counter,
     })
+    await recordActivity({ actorUserId: user.id, action: "security.totp_enabled", entityType: "user", entityId: user.id, entityLabel: user.email, summary: "Enabled authenticator sign-in", ...getRequestActivityContext(request) })
     return NextResponse.json({ user: toPublicUser(updated) })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to enable 2FA") }, { status: 400 })
   }
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
   try {
     const cookieStore = await cookies()
     const userId = cookieStore.get("sessionUserId")?.value
@@ -70,6 +73,7 @@ export async function DELETE() {
       totpSecret: "",
       totpLastUsedCounter: null,
     })
+    await recordActivity({ actorUserId: user.id, action: "security.totp_disabled", entityType: "user", entityId: user.id, entityLabel: user.email, summary: "Disabled authenticator sign-in", ...getRequestActivityContext(request) })
     return NextResponse.json({ user: toPublicUser(updated) })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to disable 2FA") }, { status: 400 })

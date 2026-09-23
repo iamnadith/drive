@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { getAgentById, getAgentGithubToken, getLatestAgentRunByJobReference, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { activateAccountForCompletedMigration, getAllAccounts } from "@/lib/accounts-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+import { recordUserActivity } from "@/lib/activity-audit"
 import { slurperAbortJob, slurperPauseJob, slurperResumeJob } from "@/lib/cloudflare-r2-super-slurper"
 import { cancelGitHubWorkflowRun, forceCancelGitHubWorkflowRun, getGitHubWorkflowRun } from "@/lib/github-oauth"
 import { getMigration, listMigrationItems, updateMigration, updateMigrationItem } from "@/lib/migrations-store"
@@ -388,6 +389,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
 
     const now = new Date().toISOString()
+    const migrationLabel = `Migration ${id.slice(0, 8)}`
     const jobArgsBase = { accountId: target?.cloudflareAccountId || "", apiToken: target?.apiToken || "" }
 
     if (action === "pause_all") {
@@ -401,6 +403,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         })
       }
       await updateMigration(id, { syncStatus: "ok", syncMessage: `Paused ${candidates.length} job(s)`, lastSyncedAt: now })
+      await recordUserActivity(request, auth.user.id, { action: "migration.paused", entityType: "migration", entityId: id, entityLabel: migrationLabel, summary: `Paused ${migrationLabel}`, after: { pausedBuckets: candidates.length } })
       return NextResponse.json({ ok: true, paused: candidates.length }, { status: 200 })
     }
 
@@ -415,6 +418,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         })
       }
       await updateMigration(id, { syncStatus: "ok", syncMessage: `Resumed ${candidates.length} job(s)`, lastSyncedAt: now })
+      await recordUserActivity(request, auth.user.id, { action: "migration.resumed", entityType: "migration", entityId: id, entityLabel: migrationLabel, summary: `Resumed ${migrationLabel}`, after: { resumedBuckets: candidates.length } })
       return NextResponse.json({ ok: true, resumed: candidates.length }, { status: 200 })
     }
 
@@ -482,6 +486,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           : `Migration canceled${cancelRepairResult.abortedJobs > 0 ? `; aborted ${cancelRepairResult.abortedJobs} worker job(s)` : ""}`,
         lastSyncedAt: new Date().toISOString(),
       })
+      await recordUserActivity(request, auth.user.id, { action: "migration.canceled", entityType: "migration", entityId: id, entityLabel: migrationLabel, summary: `Canceled ${migrationLabel}`, before: { status: migration.status }, after: { status: "canceled", stoppedBuckets: candidates.length } })
       return NextResponse.json({
         ok: true,
         abortedRepairJobs: cancelRepairResult.abortedJobs,
@@ -682,6 +687,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           lastSyncedAt: now,
         })
         await wakeMigrationOrchestrator({ requireFileScanner: true })
+        await recordUserActivity(request, auth.user.id, { action: "migration.verification_queued", entityType: "migration", entityId: id, entityLabel: migrationLabel, summary: `Queued File Scanner verification for ${migrationLabel}`, after: { verifyingBuckets: verifying, scanner: true } })
         return NextResponse.json({ ok: true, verifying, scanner: true }, { status: 200 })
       }
       const prefix =
@@ -714,6 +720,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       })
 
       await wakeMigrationOrchestrator()
+
+      await recordUserActivity(request, auth.user.id, { action: "migration.verification_queued", entityType: "migration", entityId: id, entityLabel: migrationLabel, summary: `Queued bucket verification for ${migrationLabel}`, after: { verifyingBuckets: candidates.length } })
 
       return NextResponse.json({ ok: true, verifying: candidates.length }, { status: 200 })
     }
@@ -774,6 +782,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         },
       })
       await wakeMigrationOrchestrator()
+      await recordUserActivity(request, auth.user.id, { action: "migration.repair_started", entityType: "migration", entityId: id, entityLabel: migrationLabel, summary: `Started worker-pool repair for ${migrationLabel}`, after: { repairedBuckets: items.length, generation: nextGeneration } })
       return NextResponse.json({ ok: true, repairing: items.length, generation: nextGeneration, executionMode: "migration_workers" }, { status: 200 })
     }
 
@@ -858,6 +867,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       })
 
       await wakeMigrationOrchestrator()
+
+      await recordUserActivity(request, auth.user.id, { action: "migration.retried", entityType: "migration", entityId: id, entityLabel: migrationLabel, summary: `Retried ${migrationLabel}`, after: { retriedBuckets: candidates.length, ...(workerMode ? { generation: workerGeneration } : {}) } })
 
       return NextResponse.json({ ok: true, retried: candidates.length, ...(workerMode ? { generation: workerGeneration, executionMode: "migration_workers" } : {}) }, { status: 200 })
     }

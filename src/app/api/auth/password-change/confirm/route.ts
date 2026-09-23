@@ -4,6 +4,7 @@ import { verifyEmailCode } from "@/lib/email-verification"
 import { findUserById, hashPassword, toPublicUser, updateUser } from "@/lib/users-store"
 import { verifySmsCode } from "@/lib/sms-verification"
 import { consumeUserTotpCode } from "@/lib/totp-verification"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -59,6 +60,15 @@ export async function POST(request: Request) {
     const updated = await updateUser(user.id, {
       passwordHash: hashPassword(password),
       passwordSource: "local",
+    })
+    await recordActivity({
+      actorUserId: user.id,
+      action: "security.password_changed",
+      entityType: "user",
+      entityId: user.id,
+      entityLabel: user.email,
+      summary: "Changed account password",
+      ...getRequestActivityContext(request),
     })
 
     return NextResponse.json({ user: toPublicUser(updated) })

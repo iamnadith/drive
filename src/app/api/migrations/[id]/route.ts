@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { deleteMigration, getMigration, getMigrationDetailBootstrap } from "@/lib/migrations-store"
 import { requireAdmin } from "@/lib/server-auth"
 import { getMigrationReadOnlyState } from "@/lib/migration-read-only"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 
 export async function GET(
   _request: Request,
@@ -34,7 +35,7 @@ export async function GET(
 }
 
 export async function DELETE(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
   try {
@@ -47,6 +48,16 @@ export async function DELETE(
       return NextResponse.json({ error: "Migration not found" }, { status: 404 })
     }
     await deleteMigration(id)
+    await recordActivity({
+      actorUserId: auth.user.id,
+      action: "migration.deleted",
+      entityType: "migration",
+      entityId: id,
+      summary: "Deleted migration",
+      detail: `Removed a migration in ${migration.status} status.`,
+      before: { status: migration.status },
+      ...getRequestActivityContext(request),
+    })
     return NextResponse.json({ ok: true }, { status: 200 })
   } catch (error: unknown) {
     const message =

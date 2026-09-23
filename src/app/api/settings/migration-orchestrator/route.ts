@@ -8,6 +8,7 @@ import {
 import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
 import { syncAllGitHubWorkerSecrets } from "@/lib/github-worker-secrets"
 import { workerFailureResponse } from "@/lib/worker-failure-response"
+import { recordUserActivity } from "@/lib/activity-audit"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -62,6 +63,14 @@ export async function PUT(request: Request) {
       })
       syncedRepositories = synchronization.syncedRepositories
     }
+    await recordUserActivity(request, auth.user.id, {
+      action: "settings.migration_workers.updated",
+      entityType: "settings",
+      entityId: body.worker === "file" ? "file-scanner" : "migration-orchestrator",
+      entityLabel: body.worker === "file" ? "File Scanner" : "Migration Orchestrator",
+      summary: `Updated ${body.worker === "file" ? "File Scanner" : "Migration Orchestrator"} connection settings`,
+      after: { configured: body.worker === "file" ? Boolean(settings.fileScannerUrl) : Boolean(settings.orchestratorUrl), syncedRepositories },
+    })
     return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings), syncedRepositories })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -84,6 +93,15 @@ export async function PATCH(request: Request) {
     const worker = body.worker as "migration" | "file"
     if (body.enabled) await callWorker(current, worker, "/status", "GET")
     const settings = await saveMigrationOrchestratorSettings(worker === "migration" ? { migrationEnabled: body.enabled } : { fileScannerEnabled: body.enabled })
+    await recordUserActivity(request, auth.user.id, {
+      action: `settings.${worker === "migration" ? "migration_orchestrator" : "file_scanner"}.${body.enabled ? "enabled" : "disabled"}`,
+      entityType: "settings",
+      entityId: worker === "migration" ? "migration-orchestrator" : "file-scanner",
+      entityLabel: worker === "migration" ? "Migration Orchestrator" : "File Scanner",
+      summary: `${body.enabled ? "Enabled" : "Disabled"} ${worker === "migration" ? "Migration Orchestrator" : "File Scanner"}`,
+      before: { enabled: worker === "migration" ? current.migrationEnabled : current.fileScannerEnabled },
+      after: { enabled: body.enabled },
+    })
     return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings) })
   } catch (error) {
     return workerFailureResponse(error)

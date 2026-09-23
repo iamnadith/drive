@@ -39,7 +39,8 @@ function handler(file, overrides = {}) {
     "next/server": {
       NextResponse: { json: (body, init) => Response.json(body, init) },
     },
-    "@/lib/server-auth": { requireAdmin: async () => ({ ok: true }) },
+    "@/lib/server-auth": { requireAdmin: async () => ({ ok: true, user: { id: "test-admin" } }) },
+    "@/lib/activity-store": { getRequestActivityContext: () => ({}), recordActivity: async () => ({}) },
     "@/lib/accounts-store": {
       getAllAccounts: async () => [account],
       getActiveAccount: async () => account,

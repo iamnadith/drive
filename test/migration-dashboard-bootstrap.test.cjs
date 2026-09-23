@@ -16,6 +16,7 @@ function loadStore(row) {
     crypto: require("node:crypto"),
     "./database-maintenance": { compactPreviousMigrationDetails: async () => {} },
     "./migration-worker-runs": { mapMigrationWorkerRun: (row) => row },
+    "./activity-store": { ensureActivitySchema: async () => {}, recordActivityInTransaction: async () => {} },
     "./db": {
       queryDb: async (sql, params) => {
         calls.push({ sql, params })

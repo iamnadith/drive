@@ -10,6 +10,7 @@ import {
   GITHUB_TOKEN_COOKIE,
 } from "@/lib/github-oauth"
 import { requireAdmin } from "@/lib/server-auth"
+import { recordUserActivity } from "@/lib/activity-audit"
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
@@ -321,6 +322,11 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       return NextResponse.json({ error: "Worker count must be an integer from 1 to 5" }, { status: 400 })
     }
     const updated = await updateAgent(id, { workerCount })
+    await recordUserActivity(request, auth.user.id, {
+      action: "worker.configuration.updated", entityType: "worker", entityId: id,
+      entityLabel: worker.name, summary: `Updated worker count for ${worker.name}`,
+      before: { workerCount: worker.workerCount }, after: { workerCount: updated.workerCount },
+    })
     return NextResponse.json({ ok: true, agent: updated })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to update workflow worker count") }, { status: 400 })
@@ -352,6 +358,10 @@ export async function DELETE(_request: Request, context: { params: Promise<{ id:
     }
 
     await deleteAgent(id)
+    await recordUserActivity(_request, auth.user.id, {
+      action: "worker.deleted", entityType: "worker", entityId: id, entityLabel: worker.name,
+      summary: `Deleted worker ${worker.name}`, before: { provider: worker.provider, status: worker.status },
+    })
     return NextResponse.json({ ok: true })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to delete worker") }, { status: 400 })

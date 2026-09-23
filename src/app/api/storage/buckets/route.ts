@@ -3,6 +3,7 @@ import { getActiveAccountR2Credentials, getActiveDashboardAccountSummary } from 
 import { r2CreateBucket } from "@/lib/r2-s3"
 import { requireAdmin } from "@/lib/server-auth"
 import { ensureBucketStatsRows, listBucketStats } from "@/lib/bucket-stats-store"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
@@ -158,6 +159,16 @@ export async function POST(request: Request) {
       console.error("Unable to register created drive statistics:", errorMessage(error, "Unknown error"))
       warning = "Drive created. Its usage will appear after the next account sync."
     }
+    await recordActivity({
+      actorUserId: auth.user.id,
+      action: "storage.bucket_created",
+      entityType: "bucket",
+      entityId: `${active.id}/${safeName}`,
+      entityLabel: safeName,
+      summary: `Created bucket ${safeName}`,
+      metadata: { accountId: active.id },
+      ...getRequestActivityContext(request),
+    })
     return NextResponse.json({ ok: true, name: safeName, warning })
   } catch (error: unknown) {
     const message = errorMessage(error, "Unable to create bucket")

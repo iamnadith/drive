@@ -1,8 +1,6 @@
 "use client"
 
 import * as React from "react"
-import * as DialogPrimitive from "@radix-ui/react-dialog"
-import { AnimatePresence, motion } from "framer-motion"
 import {
   AlertTriangle,
   ChevronLeft,
@@ -17,14 +15,24 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import {
   Dialog,
-  DialogClose,
+  DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Label } from "@/components/ui/label"
+import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { DashboardActivitySkeleton } from "@/components/dashboard/loading-skeletons"
 import {
@@ -50,6 +58,8 @@ type ActivityEvent = {
   detail?: string
   outcome: "success" | "failed" | "warning" | "info"
   ipAddress?: string
+  requestId?: string
+  userAgent?: string
   before?: Record<string, unknown>
   after?: Record<string, unknown>
   metadata?: Record<string, unknown>
@@ -60,6 +70,7 @@ type ActivityEvent = {
 
 type ActivityResponse = {
   events: ActivityEvent[]
+  facets?: { actions: string[]; entityTypes: string[] }
   nextCursor: string | null
   hasMore: boolean
   totalCount: number
@@ -136,45 +147,10 @@ function DetailRow({ label, value }: { label: string; value: React.ReactNode }) 
   )
 }
 
-const popupContentVariants = {
-  closed: {
-    opacity: 0,
-    y: 18,
-    scale: 0.982,
-    filter: "saturate(0.92)",
-  },
-  open: {
-    opacity: 1,
-    y: 0,
-    scale: 1,
-    filter: "saturate(1)",
-    transition: {
-      type: "spring" as const,
-      stiffness: 280,
-      damping: 28,
-      mass: 0.9,
-      staggerChildren: 0.035,
-      delayChildren: 0.02,
-    },
-  },
-}
-
-const popupSectionVariants = {
-  closed: { opacity: 0, y: 10 },
-  open: {
-    opacity: 1,
-    y: 0,
-    transition: {
-      duration: 0.22,
-      ease: [0.22, 1, 0.36, 1] as const,
-    },
-  },
-}
-
 export default function ActivityPage() {
   const [selected, setSelected] = React.useState<ActivityEvent | null>(null)
   const [detailOpen, setDetailOpen] = React.useState(false)
-  const [detailOpening, setDetailOpening] = React.useState(false)
+  const [undoConfirmation, setUndoConfirmation] = React.useState<ActivityEvent | null>(null)
   const [activeRowId, setActiveRowId] = React.useState<string | null>(null)
   const [undoingId, setUndoingId] = React.useState<string | null>(null)
   const [cursorStack, setCursorStack] = React.useState<string[]>([])
@@ -191,19 +167,11 @@ export default function ActivityPage() {
   })
   const deferredQuery = React.useDeferredValue(filters.q.trim())
   const clearSelectedTimeoutRef = React.useRef<number | null>(null)
-  const openDetailTimeoutRef = React.useRef<number | null>(null)
 
   const clearSelectedCleanup = React.useCallback(() => {
     if (clearSelectedTimeoutRef.current === null) return
     window.clearTimeout(clearSelectedTimeoutRef.current)
     clearSelectedTimeoutRef.current = null
-  }, [])
-
-  const clearOpenDetailTimeout = React.useCallback(() => {
-    if (openDetailTimeoutRef.current === null) return
-    window.clearTimeout(openDetailTimeoutRef.current)
-    openDetailTimeoutRef.current = null
-    setDetailOpening(false)
   }, [])
 
   React.useEffect(() => {
@@ -223,22 +191,21 @@ export default function ActivityPage() {
 
   React.useEffect(() => {
     clearSelectedCleanup()
-    if (detailOpen || detailOpening || !selected) return
+    if (detailOpen || !selected) return
 
     clearSelectedTimeoutRef.current = window.setTimeout(() => {
       setSelected((current) => (current?.id === selected.id ? null : current))
       clearSelectedTimeoutRef.current = null
-    }, 140)
+    }, 220)
 
     return () => clearSelectedCleanup()
-  }, [clearSelectedCleanup, detailOpen, detailOpening, selected])
+  }, [clearSelectedCleanup, detailOpen, selected])
 
   React.useEffect(() => {
     return () => {
       clearSelectedCleanup()
-      clearOpenDetailTimeout()
     }
-  }, [clearOpenDetailTimeout, clearSelectedCleanup])
+  }, [clearSelectedCleanup])
 
   const queryString = React.useMemo(() => {
     const params = new URLSearchParams()
@@ -305,6 +272,9 @@ export default function ActivityPage() {
         throw new Error(message)
       }
       toast.success("Undo completed")
+      setSelected((current) => current?.id === event.id
+        ? { ...current, undoable: false, undoStatus: "undone", undoReason: "This activity has already been undone." }
+        : current)
       await refresh({ background: true, force: true })
     } catch (caught) {
       const message =
@@ -318,8 +288,8 @@ export default function ActivityPage() {
   }
 
   const events = data?.events ?? []
-  const actions = Array.from(new Set(events.map((event) => event.action))).sort()
-  const entityTypes = Array.from(new Set(events.map((event) => event.entityType))).sort()
+  const actions = data?.facets?.actions ?? Array.from(new Set(events.map((event) => event.action))).sort()
+  const entityTypes = data?.facets?.entityTypes ?? Array.from(new Set(events.map((event) => event.entityType))).sort()
   const activityFilters: SearchFilterOption[] = [
     { key: "action", label: "Action", type: "select", defaultValue: ALL, options: [{ value: ALL, label: "All actions" }, ...actions.map((action) => ({ value: action, label: formatAction(action) }))] },
     { key: "entityType", label: "Entity", type: "select", defaultValue: ALL, options: [{ value: ALL, label: "All entities" }, ...entityTypes.map((entity) => ({ value: entity, label: formatAction(entity) }))] },
@@ -472,15 +442,9 @@ export default function ActivityPage() {
                     type="button"
                     onClick={() => {
                       clearSelectedCleanup()
-                      clearOpenDetailTimeout()
                       setActiveRowId(event.id)
                       setSelected(event)
-                      setDetailOpening(true)
-                      openDetailTimeoutRef.current = window.setTimeout(() => {
-                        setDetailOpen(true)
-                        setDetailOpening(false)
-                        openDetailTimeoutRef.current = null
-                      }, 140)
+                      setDetailOpen(true)
                     }}
                     className={`group block w-full px-4 pt-2.5 pb-0 text-left transition-[background-color,border-color,box-shadow,transform] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:bg-muted/35 focus-visible:bg-muted/35 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-inset md:px-0 md:pt-3 md:pb-3 ${
                       index === events.length - 1 ? "-mb-4 md:mb-0" : ""
@@ -684,7 +648,6 @@ export default function ActivityPage() {
         open={detailOpen}
         onOpenChange={(open) => {
           clearSelectedCleanup()
-          clearOpenDetailTimeout()
           if (open) {
             if (selected) setActiveRowId(selected.id)
             setDetailOpen(true)
@@ -693,106 +656,126 @@ export default function ActivityPage() {
           setDetailOpen(false)
         }}
       >
-        <AnimatePresence>
-          {selected ? (
-            <DialogPrimitive.Portal forceMount>
-              <DialogPrimitive.Overlay asChild>
-                <motion.div
-                  key="activity-overlay"
-                  initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
-                  animate={{ opacity: 1, backdropFilter: "blur(12px)" }}
-                  exit={{ opacity: 0, backdropFilter: "blur(0px)" }}
-                  transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-                  className="fixed inset-0 z-50 bg-black/55"
-                />
-              </DialogPrimitive.Overlay>
-              <DialogPrimitive.Content
-                asChild
-                onCloseAutoFocus={(event) => event.preventDefault()}
-              >
-                <motion.div
-                  key={`activity-dialog-${selected.id}`}
-                  variants={popupContentVariants}
-                  initial="closed"
-                  animate="open"
-                  exit="closed"
-                  transition={{
-                    type: "spring",
-                    stiffness: 280,
-                    damping: 30,
-                    mass: 0.88,
-                  }}
-                  className="fixed top-[50%] left-[50%] z-50 grid max-h-[90vh] w-[calc(100vw-1rem)] max-w-3xl translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto overscroll-contain rounded-3xl border border-white/10 bg-background/70 p-4 shadow-[0_18px_48px_rgba(0,0,0,0.16)] backdrop-blur-[32px] sm:w-full sm:p-6 supports-[backdrop-filter]:bg-background/52"
-                >
-                  <DialogClose className="absolute top-3 right-3 inline-flex size-9 items-center justify-center rounded-full border border-border/65 bg-background/40 text-muted-foreground shadow-sm ring-1 ring-inset ring-white/10 backdrop-blur-sm transition-[border-color,background-color,box-shadow,color] hover:border-border hover:bg-muted/45 hover:text-foreground focus:outline-hidden disabled:pointer-events-none disabled:opacity-50 sm:top-4 sm:right-4">
-                    <X className="size-4" />
-                    <span className="sr-only">Close</span>
-                  </DialogClose>
-          {selected ? (
-            <motion.div variants={popupSectionVariants} className="contents">
-              <DialogHeader>
-                <DialogTitle>{selected.summary}</DialogTitle>
-                <DialogDescription>
-                  {formatAction(selected.action)} / {formatDateTime(selected.occurredAt)}
-                </DialogDescription>
+        {selected ? (
+          <DialogContent className="flex max-h-[min(88dvh,52rem)] max-w-3xl flex-col gap-0 overflow-hidden p-0">
+            <div className="min-h-0 overflow-y-auto p-5 sm:p-6">
+              <DialogHeader className="gap-3 pr-8">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="outline">{formatAction(selected.action)}</Badge>
+                  <Badge variant={outcomeVariant(selected.outcome)}>{formatAction(selected.outcome)}</Badge>
+                  <Badge variant="secondary">{formatAction(selected.entityType)}</Badge>
+                </div>
+                <div className="grid gap-1">
+                  <DialogTitle className="text-xl">{selected.summary}</DialogTitle>
+                  <DialogDescription>
+                    {formatDateTime(selected.occurredAt)} · {formatRelative(selected.occurredAt)}
+                  </DialogDescription>
+                </div>
               </DialogHeader>
 
-              <motion.dl variants={popupSectionVariants} className="grid gap-3 sm:grid-cols-2">
-                <DetailRow label="Actor" value={selected.actorName ?? "System"} />
-                <DetailRow label="Contact" value={selected.actorEmail ?? selected.ipAddress ?? "Background process"} />
-                <DetailRow label="Entity" value={selected.entityLabel ?? selected.entityType} />
-                <DetailRow label="Entity type" value={selected.entityType} />
-                <DetailRow label="Status" value={<Badge variant={outcomeVariant(selected.outcome)}>{selected.outcome}</Badge>} />
-                <DetailRow label="Undo" value={`${undoLabel(selected)}${selected.undoReason ? `: ${selected.undoReason}` : ""}`} />
-              </motion.dl>
+              <div className="mt-5 rounded-lg border bg-card p-4">
+                <h3 className="text-sm font-medium">Activity details</h3>
+                {selected.detail ? (
+                  <p className="mt-2 whitespace-pre-wrap break-words text-sm text-muted-foreground">{selected.detail}</p>
+                ) : (
+                  <p className="mt-2 text-sm text-muted-foreground">No additional description was recorded.</p>
+                )}
+              </div>
 
-              <motion.div variants={popupSectionVariants} className="rounded-md border bg-muted/25 p-3 text-sm">
-                {selected.detail ?? "No additional detail."}
-              </motion.div>
+              <section className="mt-5">
+                <h3 className="text-sm font-medium">Who and what</h3>
+                <dl className="mt-3 grid gap-x-6 gap-y-4 rounded-lg border bg-card p-4 sm:grid-cols-2">
+                  <DetailRow label="User" value={selected.actorName ?? "System or worker"} />
+                  <DetailRow label="Email" value={selected.actorEmail ?? "Not recorded"} />
+                  <DetailRow label="Role" value={selected.actorRole ?? "Not recorded"} />
+                  <DetailRow label="Entity" value={selected.entityLabel ?? selected.entityType} />
+                  <DetailRow label="Entity ID" value={selected.entityId ?? "Not recorded"} />
+                  <DetailRow label="IP address" value={selected.ipAddress ?? "Not recorded"} />
+                  <DetailRow label="Request ID" value={selected.requestId ?? "Not recorded"} />
+                  <DetailRow label="User agent" value={selected.userAgent ?? "Not recorded"} />
+                </dl>
+              </section>
 
-              <motion.div variants={popupSectionVariants} className="grid gap-3 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label>Before</Label>
-                  <pre className="max-h-64 overflow-auto rounded-md border bg-muted/25 p-3 text-xs">
-                    {compactJson(selected.before)}
-                  </pre>
+              <section className="mt-5">
+                <h3 className="text-sm font-medium">Change record</h3>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <div className="min-w-0 rounded-lg border bg-card p-4">
+                    <p className="text-sm font-medium">Before</p>
+                    <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">{compactJson(selected.before)}</pre>
+                  </div>
+                  <div className="min-w-0 rounded-lg border bg-card p-4">
+                    <p className="text-sm font-medium">After</p>
+                    <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">{compactJson(selected.after)}</pre>
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <Label>After</Label>
-                  <pre className="max-h-64 overflow-auto rounded-md border bg-muted/25 p-3 text-xs">
-                    {compactJson(selected.after)}
-                  </pre>
-                </div>
-              </motion.div>
+              </section>
 
-              <motion.div variants={popupSectionVariants}>
-                <DialogFooter>
+              {selected.metadata && Object.keys(selected.metadata).length > 0 ? (
+                <section className="mt-5">
+                  <h3 className="text-sm font-medium">Additional context</h3>
+                  <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-lg border bg-muted/30 p-4 text-xs text-muted-foreground">{compactJson(selected.metadata)}</pre>
+                </section>
+              ) : null}
+
+              <section className="mt-5 rounded-lg border bg-muted/20 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-medium">Undo</h3>
+                  <Badge variant={selected.undoStatus === "available" ? "secondary" : "outline"}>{undoLabel(selected)}</Badge>
+                </div>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {selected.undoReason ?? (selected.undoStatus === "available"
+                    ? "This change can be reversed while its current state still matches the recorded change."
+                    : "No safe undo action is available for this activity.")}
+                </p>
+              </section>
+            </div>
+
+            <Separator />
+            <DialogFooter className="p-4 sm:px-6">
+              {selected.undoStatus === "available" ? (
                 <Button
-                  variant="outline"
-                  className="border border-border/70 bg-background/70 shadow-sm ring-1 ring-inset ring-white/10 backdrop-blur-sm hover:bg-muted/55"
-                  onClick={() => setDetailOpen(false)}
+                  variant="destructive"
+                  disabled={undoingId === selected.id}
+                  onClick={() => setUndoConfirmation(selected)}
                 >
-                  Close
+                  <RotateCcw data-icon="inline-start" />
+                  Undo change
                 </Button>
-                <Button
-                  loading={undoingId === selected.id}
-                  disabled={selected.undoStatus !== "available"}
-                  className="border border-border/60 shadow-sm ring-1 ring-inset ring-white/10"
-                  onClick={() => void undoActivity(selected)}
-                >
-                  {undoingId !== selected.id ? <RotateCcw className="h-4 w-4" /> : null}
-                  Undo
-                </Button>
-                </DialogFooter>
-              </motion.div>
-            </motion.div>
-          ) : null}
-                </motion.div>
-              </DialogPrimitive.Content>
-            </DialogPrimitive.Portal>
-          ) : null}
-        </AnimatePresence>
+              ) : null}
+              <Button variant="outline" onClick={() => setDetailOpen(false)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        ) : null}
       </Dialog>
+
+      <AlertDialog open={Boolean(undoConfirmation)} onOpenChange={(open) => !open && setUndoConfirmation(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Undo this activity?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {undoConfirmation?.action === "migration.created"
+                ? "This permanently removes the draft migration and its bucket rows. This cannot be undone."
+                : "This will reverse the recorded change if the current data still matches the state required for a safe undo."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={Boolean(undoingId)}>Keep change</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={Boolean(undoingId)}
+              onClick={(event) => {
+                event.preventDefault()
+                if (!undoConfirmation) return
+                const eventToUndo = undoConfirmation
+                setUndoConfirmation(null)
+                void undoActivity(eventToUndo)
+              }}
+            >
+              Confirm undo
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </DashboardPage>
   )
 }

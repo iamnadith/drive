@@ -6,6 +6,7 @@ import { syncGitHubWorkerSecrets } from "@/lib/github-worker-secrets"
 import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
 import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { recordUserActivity } from "@/lib/activity-audit"
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value : ""
@@ -104,6 +105,15 @@ export async function POST(request: Request) {
       githubToken: githubTokenToUse,
       workerCount: provider === "github_actions" ? Number(body.workerCount) : 1,
       notes: asString(body.notes).trim() || undefined,
+    })
+
+    await recordUserActivity(request, auth.user.id, {
+      action: "worker.created",
+      entityType: "worker",
+      entityId: result.agent?.id,
+      entityLabel: name,
+      summary: `Created ${category === "worker" ? "worker" : "agent"} ${name}`,
+      after: { category, provider, capabilities },
     })
 
     return NextResponse.json(result, { status: 201 })

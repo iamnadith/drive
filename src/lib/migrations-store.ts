@@ -1,6 +1,7 @@
 import crypto from "crypto"
 import { compactPreviousMigrationDetails } from "./database-maintenance"
 import { queryDb, withDbTransaction } from "./db"
+import { ensureActivitySchema, recordActivityInTransaction, type RecordActivityInput } from "./activity-store"
 import { mapMigrationWorkerRun, type MigrationWorkerRun, type MigrationWorkerRunRow } from "./migration-worker-runs"
 
 export type MigrationStatus = "draft" | "running" | "verifying" | "completed" | "failed" | "verification_failed" | "canceled"
@@ -699,7 +700,9 @@ export async function createMigration(input: {
     sourceObjects?: number
     sourceBytes?: number
   }>
+  activity?: Pick<RecordActivityInput, "actorUserId" | "ipAddress" | "userAgent" | "requestId"> & { sourceLabel: string; targetLabel: string }
 }): Promise<{ migration: DriveMigration; items: DriveMigrationItem[] }> {
+  if (input.activity) await ensureActivitySchema()
   const now = new Date().toISOString()
   const migrationId = crypto.randomUUID()
 
@@ -741,6 +744,23 @@ export async function createMigration(input: {
         values
       )
       createdItems = inserted.rows
+    }
+    if (input.activity) {
+      await recordActivityInTransaction(client, {
+        actorUserId: input.activity.actorUserId,
+        ipAddress: input.activity.ipAddress,
+        userAgent: input.activity.userAgent,
+        requestId: input.activity.requestId,
+        action: "migration.created",
+        entityType: "migration",
+        entityId: migrationId,
+        entityLabel: `${input.activity.sourceLabel} → ${input.activity.targetLabel}`,
+        summary: `Created migration from ${input.activity.sourceLabel} to ${input.activity.targetLabel}`,
+        detail: `${itemRows.length} bucket${itemRows.length === 1 ? "" : "s"} selected.`,
+        after: { status: "draft", bucketCount: itemRows.length, executionMode: input.options?.executionMode ?? "super_slurper" },
+        undoable: true,
+        undoPayload: { type: "delete_draft_migration", migrationId },
+      })
     }
     return {
       migration: mapMigrationRow(createdMigration.rows[0]),

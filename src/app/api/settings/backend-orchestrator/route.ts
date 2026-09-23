@@ -6,6 +6,7 @@ import {
   saveBackendOrchestratorSettings,
 } from "@/lib/backend-orchestrator-settings-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { recordUserActivity } from "@/lib/activity-audit"
 import { scheduleWorkerRepair, workerFailureResponse } from "@/lib/worker-failure-response"
 
 export const runtime = "nodejs"
@@ -66,6 +67,11 @@ export async function PUT(request: Request) {
       sharedSecret: body.sharedSecret,
       syncIntervalMinutes: body.syncIntervalMinutes,
     })
+    await recordUserActivity(request, auth.user.id, {
+      action: "settings.backend_orchestrator.updated", entityType: "settings", entityId: "backend-orchestrator",
+      entityLabel: "Backend Orchestrator", summary: "Updated Backend Orchestrator connection settings",
+      after: { configured: Boolean(saved.orchestratorUrl), syncIntervalMinutes: saved.syncIntervalMinutes },
+    })
     return NextResponse.json({ settings: publicBackendOrchestratorSettings(saved), state: await state() })
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 })
@@ -81,6 +87,12 @@ export async function PATCH(request: Request) {
     const current = await getBackendOrchestratorSettings()
     if (body.enabled) await callOrchestrator(current, { path: "/status", method: "GET" })
     const saved = await saveBackendOrchestratorSettings({ enabled: body.enabled })
+    await recordUserActivity(request, auth.user.id, {
+      action: `settings.backend_orchestrator.${body.enabled ? "enabled" : "disabled"}`,
+      entityType: "settings", entityId: "backend-orchestrator", entityLabel: "Backend Orchestrator",
+      summary: `${body.enabled ? "Enabled" : "Disabled"} Backend Orchestrator`,
+      before: { enabled: current.enabled }, after: { enabled: body.enabled },
+    })
     return NextResponse.json({ settings: publicBackendOrchestratorSettings(saved), state: await state() })
   } catch (error) {
     return workerFailureResponse(error)
@@ -98,6 +110,11 @@ export async function POST(request: Request) {
     const payload = await callOrchestrator(settings, {
       path: action === "test" ? "/status" : "/run",
       method: action === "test" ? "GET" : "POST",
+    })
+    await recordUserActivity(request, auth.user.id, {
+      action: action === "test" ? "backend_orchestrator.connection_tested" : "backend_orchestrator.run_requested",
+      entityType: "backend_orchestrator", entityId: "backend-orchestrator",
+      entityLabel: "Backend Orchestrator", summary: action === "test" ? "Tested Backend Orchestrator connection" : "Requested Backend Orchestrator run",
     })
     return NextResponse.json({ ok: true, action, result: payload, state: await state() })
   } catch (error) {

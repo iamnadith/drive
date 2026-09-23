@@ -3,6 +3,7 @@ import { cookies } from "next/headers"
 import { findUserById, toPublicUser, updateUser } from "@/lib/users-store"
 import { normalizeSriLankaMobile, sendSmsVerificationCode, verifySmsCode } from "@/lib/sms-verification"
 import { authCapabilities } from "@/lib/system-readiness"
+import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
 
 function errorMessage(error: unknown, fallback: string) {
   return typeof error === "object" && error !== null && "message" in error
@@ -42,13 +43,22 @@ export async function PATCH(request: Request) {
     const mobileNumber = normalizeSriLankaMobile(typeof body.mobileNumber === "string" ? body.mobileNumber : "")
     const code = typeof body.code === "string" ? body.code : ""
     const user = await verifySmsCode({ userId, mobileNumber, code, purpose: "mobile-setup" })
+    await recordActivity({
+      actorUserId: user.id,
+      action: "security.mobile_verified",
+      entityType: "user",
+      entityId: user.id,
+      entityLabel: user.email,
+      summary: "Verified mobile sign-in number",
+      ...getRequestActivityContext(request),
+    })
     return NextResponse.json({ user })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to verify SMS code") }, { status: 400 })
   }
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
   try {
     const cookieStore = await cookies()
     const userId = cookieStore.get("sessionUserId")?.value
@@ -60,6 +70,17 @@ export async function DELETE() {
       mobileVerified: false,
       mobileVerifiedAt: "",
     })
+    if (user.mobileNumber || user.mobileVerified) {
+      await recordActivity({
+        actorUserId: user.id,
+        action: "security.mobile_removed",
+        entityType: "user",
+        entityId: user.id,
+        entityLabel: user.email,
+        summary: "Removed mobile sign-in number",
+        ...getRequestActivityContext(request),
+      })
+    }
     return NextResponse.json({ user: toPublicUser(updated) })
   } catch (error: unknown) {
     return NextResponse.json({ error: errorMessage(error, "Unable to remove mobile number") }, { status: 400 })

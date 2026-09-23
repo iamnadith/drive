@@ -4,6 +4,7 @@ import { r2ListBuckets } from "@/lib/cloudflare-r2-buckets"
 import { createMigration, getMigrationDashboardBootstrap } from "@/lib/migrations-store"
 import { getBucketStatsMap } from "@/lib/bucket-stats-store"
 import { requireAdmin } from "@/lib/server-auth"
+import { getRequestActivityContext } from "@/lib/activity-store"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
@@ -110,6 +111,7 @@ export async function POST(request: Request) {
 
     if (hasIncludeBuckets && includeBuckets?.length === 0) {
       const { migration, items } = await createMigration({
+        activity: { actorUserId: auth.user.id, sourceLabel: source.label, targetLabel: target.label, ...getRequestActivityContext(request) },
         sourceAccountId: source.id,
         targetAccountId: target.id,
         options: {
@@ -156,6 +158,7 @@ export async function POST(request: Request) {
     const cachedStats = await getBucketStatsMap(source.id)
 
     const { migration, items } = await createMigration({
+      activity: { actorUserId: auth.user.id, sourceLabel: source.label, targetLabel: target.label, ...getRequestActivityContext(request) },
       sourceAccountId: source.id,
       targetAccountId: target.id,
       // Both engines use the same account and bucket snapshot. The worker lane
