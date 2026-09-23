@@ -1775,7 +1775,7 @@ export default function MigrationDetailsPage() {
               const hasVerificationFailure = failedBuckets.some((item) =>
                 normalizeStatus(getBucketSnapshot(item).displayStatus) === "verification_failed"
               ) || migration.syncMessage?.toLowerCase().includes("verification failed") === true
-              const showCancel = !allBucketsTerminal && !["completed", "failed", "canceled"].includes(String(effectiveMigrationStatus))
+              const showCancel = !workerPoolMigration && !allBucketsTerminal && !["completed", "failed", "canceled"].includes(String(effectiveMigrationStatus))
               const settingsSyncFailed =
                 (migration.syncStatus === "error" && migration.syncMessage?.toLowerCase().includes("settings sync failed")) ||
                 items.some((item) => {
@@ -1790,25 +1790,38 @@ export default function MigrationDetailsPage() {
 
               return (
                 <>
-                  {effectiveMigrationStatus !== "verification_failed" ? (
-                  <Button
-                    onClick={() => {
-                      if (effectiveMigrationStatus === "failed") {
-                        void runMigrationAction("retry_migration")
-                      } else {
-                        void startMigration()
-                      }
-                    }}
-                    loading={busyAction === "start" || busyAction === "retry_migration"}
-                    disabled={Boolean(busyAction) || (effectiveMigrationStatus !== "draft" && effectiveMigrationStatus !== "failed")}
-                    variant={effectiveMigrationStatus === "draft" || effectiveMigrationStatus === "failed" ? "default" : "secondary"}
-                  >
-                    {busyAction !== "start" && busyAction !== "retry_migration" ? (
-                      <Play className="h-4 w-4 mr-0" />
-                    ) : null}
-                    {effectiveMigrationStatus === "failed" ? workerPoolMigration ? "Retry with worker pool" : "Retry" : "Start"}
-                  </Button>
-                  ) : null}
+                  {(() => {
+                    const paused = !workerPoolMigration && anyPaused && !anyRunning
+                    const active = ["running", "verifying"].includes(String(effectiveMigrationStatus))
+                    const primaryAction = effectiveMigrationStatus === "draft"
+                      ? "start"
+                      : paused
+                        ? "resume_all"
+                        : active
+                          ? workerPoolMigration || !anyRunning ? "cancel_migration" : "pause_all"
+                          : ["failed", "canceled", "aborted", "verification_failed"].includes(String(effectiveMigrationStatus)) ? "retry_migration" : null
+                    if (!primaryAction) return null
+                    const loading = busyAction === primaryAction
+                    const label = primaryAction === "start"
+                      ? "Start"
+                      : primaryAction === "pause_all" || primaryAction === "cancel_migration"
+                        ? "Stop"
+                        : primaryAction === "resume_all" ? "Resume" : workerPoolMigration ? "Restart" : "Rerun"
+                    return (
+                      <Button
+                        onClick={() => {
+                          if (primaryAction === "start") void startMigration()
+                          else void runMigrationAction(primaryAction as "pause_all" | "resume_all" | "cancel_migration" | "retry_migration")
+                        }}
+                        loading={loading}
+                        disabled={Boolean(busyAction)}
+                        variant={label === "Stop" ? "outline" : "default"}
+                      >
+                        {!loading ? (label === "Stop" ? <Square className="h-4 w-4 mr-0" /> : <Play className="h-4 w-4 mr-0" />) : null}
+                        {label}
+                      </Button>
+                    )
+                  })()}
 
                   <Button onClick={syncNow} loading={busyAction === "sync"} disabled={Boolean(busyAction)} variant="outline">
                     {busyAction !== "sync" ? <RefreshCw className="h-4 w-4 mr-0" /> : null}
@@ -1858,32 +1871,8 @@ export default function MigrationDetailsPage() {
                     >
                       {busyAction !== "repair_migration" ? <RefreshCw className="h-4 w-4 mr-0" /> : null}
                       {workerPoolMigration
-                        ? ["failed", "verification_failed", "canceled", "aborted"].includes(effectiveMigrationStatus) ? "Retry with worker pool" : "Repair with worker pool"
-                        : "Repair with worker pool"}
-                    </Button>
-                  ) : null}
-
-                  {!workerPoolMigration && !allBucketsTerminal && anyRunning ? (
-                    <Button
-                      onClick={() => void runMigrationAction("pause_all")}
-                      loading={busyAction === "pause_all"}
-                      disabled={Boolean(busyAction)}
-                      variant="outline"
-                    >
-                      {busyAction !== "pause_all" ? <Pause className="h-4 w-4 mr-0" /> : null}
-                      Pause
-                    </Button>
-                  ) : null}
-
-                  {!workerPoolMigration && !allBucketsTerminal && anyPaused ? (
-                    <Button
-                      onClick={() => void runMigrationAction("resume_all")}
-                      loading={busyAction === "resume_all"}
-                      disabled={Boolean(busyAction)}
-                      variant="outline"
-                    >
-                      {busyAction !== "resume_all" ? <Play className="h-4 w-4 mr-0" /> : null}
-                      Resume
+                        ? ["failed", "verification_failed", "canceled", "aborted"].includes(effectiveMigrationStatus) ? "Restart" : "Use worker pool"
+                        : "Use worker pool"}
                     </Button>
                   ) : null}
 

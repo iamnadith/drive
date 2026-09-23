@@ -341,7 +341,7 @@ test('migration UI exposes both engines while preserving Super Slurper as the de
   assert.match(details, /dashboard-motion-stage space-y-6 max-w-full/)
   assert.match(details, /<DashboardDataTable/)
   assert.doesNotMatch(details, /scanner-indexed per-file queue/)
-  assert.match(details, /Repair with worker pool/)
+  assert.match(details, /Use worker pool/)
   assert.doesNotMatch(details, /Run with worker|workersOpen|repair_and_verify/)
   assert.doesNotMatch(details, /Migration transfer|Current files/)
   assert.match(details, /Queue remaining/)

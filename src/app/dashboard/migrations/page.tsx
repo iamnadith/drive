@@ -5,6 +5,7 @@ import {
   ExternalLink,
   Plus,
   Play,
+  Square,
   Trash2,
   X,
 } from "lucide-react"
@@ -747,6 +748,28 @@ export default function MigrationsPage() {
     return <DashboardPageSkeleton cards={4} rows={8} />
   }
 
+  const runMigrationAction = async (action: "cancel_migration" | "retry_migration") => {
+    if (!activeMigration?.id) return
+    setBusyAction(action)
+    setError(null)
+    try {
+      const res = await postJsonWithTimeout({
+        url: `/api/migrations/${encodeURIComponent(activeMigration.id)}/action`,
+        body: { action },
+        timeoutMs: 12_000,
+      })
+      const json: unknown = await res.json().catch(() => ({}))
+      const errorMessage = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to update migration"
+      if (!res.ok) throw new Error(errorMessage)
+      await loadAll()
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "Unable to update migration"
+      setError(message)
+    } finally {
+      setBusyAction(null)
+    }
+  }
+
   return (
     <DashboardPage className="dashboard-motion-stage">
       <div className="dashboard-motion-item">
@@ -1070,16 +1093,30 @@ export default function MigrationsPage() {
               </div>
 
               <div className="flex flex-wrap gap-2">
-                <Button
-                  onClick={activeMigration?.status === "failed" ? retryMigration : startMigration}
-                  loading={busyAction === "start" || busyAction === "retry_migration"}
-                  disabled={Boolean(busyAction) || (activeMigration?.status !== "draft" && activeMigration?.status !== "failed")}
-                >
-                  {busyAction !== "start" && busyAction !== "retry_migration" ? (
-                    <Play className="h-4 w-4 mr-0" />
-                  ) : null}
-                  {activeMigration?.status === "failed" ? "Retry" : "Start"}
-                </Button>
+                {activeMigration ? (() => {
+                  const workerPool = activeMigration.options.executionMode === "migration_workers"
+                  const action = activeMigration.status === "draft"
+                    ? "start"
+                    : ["running", "verifying"].includes(activeMigration.status)
+                      ? "cancel_migration"
+                      : ["failed", "canceled", "verification_failed"].includes(activeMigration.status)
+                        ? "retry_migration"
+                        : null
+                  if (!action) return null
+                  const loading = busyAction === action
+                  const label = action === "start" ? "Start" : action === "cancel_migration" ? "Stop" : workerPool ? "Restart" : "Rerun"
+                  return (
+                    <Button
+                      onClick={() => action === "start" ? void startMigration() : void runMigrationAction(action)}
+                      loading={loading}
+                      disabled={Boolean(busyAction)}
+                      variant={label === "Stop" ? "outline" : "default"}
+                    >
+                      {!loading ? (label === "Stop" ? <Square className="h-4 w-4 mr-0" /> : <Play className="h-4 w-4 mr-0" />) : null}
+                      {label}
+                    </Button>
+                  )
+                })() : null}
                 {activeMigration ? (
                   <Button
                     onClick={() => router.push(`/dashboard/migrations/${encodeURIComponent(activeMigration.id)}`)}
