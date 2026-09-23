@@ -1,4 +1,5 @@
 import { Client } from "pg"
+import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3"
 
 type Env = {
   PANEL_URL: string
@@ -25,6 +26,8 @@ type AccountRow = {
   email: string
   api_token: string
   cloudflare_account_id: string | null
+  r2_access_key_id: string | null
+  r2_secret_access_key: string | null
   status: string
   last_synced_at: string | null
 }
@@ -57,7 +60,7 @@ type BucketSettings = {
 const BUCKET_BATCH_SIZE = 10
 const EXTERNAL_REQUEST_TIMEOUT_MS = 8_000
 const METRICS_CACHE_TTL_MS = 10_000
-const WORKER_BUILD = 23
+const WORKER_BUILD = 24
 const REQUIRED_SCHEMA_VERSION = 2026091303
 const RETENTION_BATCH_SIZE = 250
 const metricsCache = new Map<string, { expiresAt: number; metrics: BucketMetric[] }>()
@@ -490,6 +493,42 @@ async function getBucketMetrics(account: AccountRow, buckets: BucketInfo[]): Pro
   return metrics
 }
 
+async function getBucketMetricsFromR2(account: AccountRow, buckets: BucketInfo[]): Promise<BucketMetric[]> {
+  if (!account.cloudflare_account_id || !account.r2_access_key_id || !account.r2_secret_access_key) {
+    throw new Error(`R2 S3 credentials are required to calculate per-bucket usage for ${account.label}`)
+  }
+  const client = new S3Client({
+    region: "auto",
+    endpoint: `https://${account.cloudflare_account_id}.r2.cloudflarestorage.com`,
+    credentials: { accessKeyId: account.r2_access_key_id, secretAccessKey: account.r2_secret_access_key },
+    maxAttempts: 3,
+  })
+  try {
+    return await mapWithConcurrency(buckets, 3, async (bucket) => {
+      let continuationToken: string | undefined
+      let objects = 0
+      let bytes = 0
+      do {
+        const page = await client.send(new ListObjectsV2Command({
+          Bucket: bucket.name,
+          ContinuationToken: continuationToken,
+        }))
+        for (const object of page.Contents ?? []) {
+          objects += 1
+          bytes += Math.max(0, Math.trunc(Number(object.Size) || 0))
+        }
+        if (page.IsTruncated && !page.NextContinuationToken) {
+          throw new Error(`R2 object listing for ${bucket.name} was truncated without a continuation token`)
+        }
+        continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined
+      } while (continuationToken)
+      return { bucket: bucket.name, objects, bytes, observedAt: new Date().toISOString() }
+    })
+  } finally {
+    client.destroy()
+  }
+}
+
 function isPerBucketAnalyticsAuthorizationError(error: unknown) {
   return /not authorized for that account/i.test(error instanceof Error ? error.message : String(error))
 }
@@ -663,7 +702,7 @@ async function syncBucketSettingsBatch(db: Client, account: AccountRow, buckets:
 
 async function selectNextAccount(db: Client, syncIntervalMinutes: number) {
   const account = await db.query<AccountRow>(`
-    select id,label,email,api_token,cloudflare_account_id,status,last_synced_at
+    select id,label,email,api_token,cloudflare_account_id,r2_access_key_id,r2_secret_access_key,status,last_synced_at
     from drive_accounts
     where api_token<>''
       and status in ('active', 'available')
@@ -718,7 +757,7 @@ async function loadSyncProgress(db: Client) {
 
 async function selectAccountById(db: Client, accountId: string) {
   const result = await db.query<AccountRow>(`
-    select id,label,email,api_token,cloudflare_account_id,status,last_synced_at
+    select id,label,email,api_token,cloudflare_account_id,r2_access_key_id,r2_secret_access_key,status,last_synced_at
     from drive_accounts where id=$1 and api_token<>'' and status in ('active','available') limit 1
   `, [accountId])
   return result.rows[0] ?? null
@@ -942,17 +981,18 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
     }
     const batch = buckets.slice(bucketOffset, bucketOffset + BUCKET_BATCH_SIZE)
     let analyticsAuthorizationError: string | null = null
+    let metricsSource: "analytics" | "r2_s3_listing" = "analytics"
     let metrics: BucketMetric[] = []
     try {
       metrics = await getBucketMetrics(account, batch)
     } catch (error) {
       if (!isPerBucketAnalyticsAuthorizationError(error)) throw error
-      // Some otherwise-valid R2 tokens can list buckets, read settings, and
-      // read published account totals without the separate per-bucket
-      // Analytics permission. Keep the durable sync moving and use the
-      // authoritative published total at the end instead of failing the
-      // entire account forever.
+      // The token used to manage the R2 account may lack the separate
+      // per-bucket Analytics permission. List objects through the account's
+      // S3 credentials so bucket rows still receive exact counts and sizes.
       analyticsAuthorizationError = error instanceof Error ? error.message : String(error)
+      metrics = await getBucketMetricsFromR2(account, batch)
+      metricsSource = "r2_s3_listing"
     }
     const settingsErrors = await syncBucketSettingsBatch(db, account, batch)
     const pendingDecreases = await pendingMetricDecreases(db, account.id, metrics)
@@ -976,7 +1016,7 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
       await clearSyncProgress(db)
       if (analyticsAuthorizationError && !nextPendingDecreases) {
         const publishedMetrics = await getPublishedAccountMetrics(account)
-        const message = `R2 published totals and settings synced for ${buckets.length} buckets; per-bucket analytics unavailable (${analyticsAuthorizationError})`
+        const message = `R2 published totals and settings synced for ${buckets.length} buckets; per-bucket metrics read from R2 S3 because Analytics permission is unavailable`
         await db.query(`
           update drive_accounts set total_buckets=$2,total_objects=$3,total_bytes=$4,
             sync_status='ok',sync_message=$5,last_synced_at=now(),updated_at=now()
@@ -987,6 +1027,7 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
           account: account.label,
           status: "completed",
           warning: "per_bucket_analytics_unavailable",
+          metricsSource,
           buckets: buckets.length,
           publishedMetrics,
           refreshedSettings: buckets.length,
@@ -1026,9 +1067,9 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
       account.id,
       publishedMetrics.objects,
       publishedMetrics.bytes,
-      staleSettingsCount > 0
-        ? `R2 metrics synced; settings need retry for ${staleSettingsCount} bucket(s)`
-        : `R2 published metrics and settings synced for ${buckets.length} buckets`,
+        staleSettingsCount > 0
+        ? `R2 metrics synced${metricsSource === "r2_s3_listing" ? " from S3 object listings" : ""}; settings need retry for ${staleSettingsCount} bucket(s)`
+        : `R2 ${metricsSource === "r2_s3_listing" ? "S3 object listings" : "published metrics"} and settings synced for ${buckets.length} buckets`,
     ])
     await recordDailyAccountSnapshot(db, account.id)
     return {
@@ -1036,6 +1077,7 @@ async function syncNextAccount(db: Client, config: RuntimeConfig) {
       status: "completed",
       buckets: buckets.length,
       metrics: metrics.length,
+      metricsSource,
       missingMetrics: buckets.length - metrics.length,
       staleSettings: staleSettingsCount,
       latestObservedAt: metrics.reduce<string | null>((latest, metric) => !latest || metric.observedAt > latest ? metric.observedAt : latest, null),

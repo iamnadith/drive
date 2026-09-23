@@ -11,6 +11,7 @@
     "deploy:local": "node --env-file=.env scripts/deploy.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1138.0",
     "pg": "^8.16.3"
   },
   "devDependencies": {
