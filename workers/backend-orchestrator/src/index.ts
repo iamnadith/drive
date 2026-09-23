@@ -1,5 +1,5 @@
 import { Client } from "pg"
-import { ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3"
+import { AwsClient } from "aws4fetch"
 
 type Env = {
   PANEL_URL: string
@@ -497,36 +497,53 @@ async function getBucketMetricsFromR2(account: AccountRow, buckets: BucketInfo[]
   if (!account.cloudflare_account_id || !account.r2_access_key_id || !account.r2_secret_access_key) {
     throw new Error(`R2 S3 credentials are required to calculate per-bucket usage for ${account.label}`)
   }
-  const client = new S3Client({
+  const signer = new AwsClient({
+    accessKeyId: account.r2_access_key_id,
+    secretAccessKey: account.r2_secret_access_key,
+    service: "s3",
     region: "auto",
-    endpoint: `https://${account.cloudflare_account_id}.r2.cloudflarestorage.com`,
-    credentials: { accessKeyId: account.r2_access_key_id, secretAccessKey: account.r2_secret_access_key },
-    maxAttempts: 3,
+    retries: 2,
   })
-  try {
-    return await mapWithConcurrency(buckets, 3, async (bucket) => {
-      let continuationToken: string | undefined
-      let objects = 0
-      let bytes = 0
-      do {
-        const page = await client.send(new ListObjectsV2Command({
-          Bucket: bucket.name,
-          ContinuationToken: continuationToken,
-        }))
-        for (const object of page.Contents ?? []) {
-          objects += 1
-          bytes += Math.max(0, Math.trunc(Number(object.Size) || 0))
-        }
-        if (page.IsTruncated && !page.NextContinuationToken) {
-          throw new Error(`R2 object listing for ${bucket.name} was truncated without a continuation token`)
-        }
-        continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined
-      } while (continuationToken)
-      return { bucket: bucket.name, objects, bytes, observedAt: new Date().toISOString() }
-    })
-  } finally {
-    client.destroy()
+  const readXmlTag = (xml: string, tag: string) => {
+    const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    const match = xml.match(new RegExp(`<${escapedTag}>([\\s\\S]*?)</${escapedTag}>`))
+    return match?.[1]
+      ?.replace(/&#x([\da-f]+);/gi, (_entity, value: string) => String.fromCodePoint(Number.parseInt(value, 16)))
+      .replace(/&#(\d+);/g, (_entity, value: string) => String.fromCodePoint(Number.parseInt(value, 10)))
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, "&")
   }
+  return mapWithConcurrency(buckets, 3, async (bucket) => {
+    let continuationToken: string | undefined
+    let objects = 0
+    let bytes = 0
+    do {
+      const url = new URL(`https://${account.cloudflare_account_id}.r2.cloudflarestorage.com/${bucket.name}`)
+      url.searchParams.set("list-type", "2")
+      url.searchParams.set("max-keys", "1000")
+      if (continuationToken) url.searchParams.set("continuation-token", continuationToken)
+      const response = await signer.fetch(url, { signal: AbortSignal.timeout(25_000) })
+      const xml = await response.text()
+      if (!response.ok) {
+        throw new Error(`R2 object listing failed for ${bucket.name} (${response.status}): ${readXmlTag(xml, "Message") || "unknown S3 error"}`)
+      }
+      for (const entry of xml.matchAll(/<Contents(?:\s[^>]*)?>([\s\S]*?)<\/Contents>/g)) {
+        const size = readXmlTag(entry[1], "Size")
+        if (size === undefined || !/^\d+$/.test(size)) throw new Error(`R2 returned an invalid object size for ${bucket.name}`)
+        objects += 1
+        bytes += Number(size)
+      }
+      const truncated = readXmlTag(xml, "IsTruncated") === "true"
+      continuationToken = truncated ? readXmlTag(xml, "NextContinuationToken") : undefined
+      if (truncated && !continuationToken) {
+        throw new Error(`R2 object listing for ${bucket.name} was truncated without a continuation token`)
+      }
+    } while (continuationToken)
+    return { bucket: bucket.name, objects, bytes, observedAt: new Date().toISOString() }
+  })
 }
 
 function isPerBucketAnalyticsAuthorizationError(error: unknown) {
