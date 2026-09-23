@@ -330,8 +330,8 @@ test('migration pool abort and job deletion preserve orchestrator ownership and 
 
 test('migration worker card matches the overview layout and shows durable queue progress', () => {
   const details = read('src/app/dashboard/migrations/[id]/page.tsx')
-  assert.match(details, /<CardTitle>Worker pool<\/CardTitle>/)
-  assert.match(details, /<dl className="grid gap-y-4 border-y py-4 sm:grid-cols-2 lg:grid-cols-4">/)
+  assert.match(details, /<CardTitle className="text-base">Worker pool<\/CardTitle>/)
+  assert.match(details, /<dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">/)
   assert.match(details, /const queueRemaining = items\.reduce\(\(sum, item\) => sum \+ getBucketSnapshot\(item\)\.queued, 0\)/)
   assert.match(details, /formatNumber\(overviewProgress\.transferred\)/)
   assert.match(details, /Queue remaining/)
@@ -562,9 +562,14 @@ test('file scanner comparison binds UUID and text parameters explicitly', () => 
   const scanner = read('workers/file-scanner/src/index.ts')
   assert.match(scanner, /migration_item_id=\$1::uuid/)
   assert.match(scanner, /j\.payload->'itemIds'->>0=\$1::text/)
-  assert.match(scanner, /j\.migration_id=\$9::uuid/)
+  assert.match(scanner, /j\.migration_id=\$7::uuid/)
   assert.match(scanner, /not s\.is_dir_marker/)
   assert.match(scanner, /not d\.is_dir_marker/)
+  const compare = scanner.slice(scanner.indexOf('const completed = await db.query(`'), scanner.indexOf('if (!completed.rowCount)'))
+  const query = compare.slice(compare.indexOf('`') + 1, compare.lastIndexOf('`, ['))
+  const parameters = [...query.matchAll(/\$(\d+)/g)].map((match) => Number(match[1]))
+  assert.deepEqual([...new Set(parameters)].sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8])
+  assert.match(compare, /task\.lease_owner, task\.execution_mode \|\| null, task\.migration_id, task\.overwrite !== false/)
 })
 
 test('worker verification can be rerun for failed buckets while migration continues', () => {
@@ -625,7 +630,7 @@ test('verification failure stays distinct from transfer failure and is recoverab
   assert.match(migrationAction, /isCompletedStatus\(i\.slurperStatus\) \|\| normalizeStatus\(i\.slurperStatus\) === "verification_failed"/)
   assert.match(details, /!settingsSyncFailed && effectiveMigrationStatus !== "completed" && \(hasVerificationFailure \|\| overviewProgress\.verifyIssues > 0\)/)
   assert.match(details, /allBucketsTerminal && !\["completed", "failed"\]\.includes\(String\(effectiveMigrationStatus\)\)/)
-  assert.match(details, /migration\.status !== "completed" && \(workerPoolMigration/)
+  assert.match(details, /migration\.status !== "completed" && !workerPoolMigration/)
   assert.match(action, /!isCompletedStatus\(item\.slurperStatus\) && normalizeStatus\(item\.slurperStatus\) !== "verification_failed"/)
 })
 
@@ -692,7 +697,7 @@ test('worker-pool repair stays queued until the orchestrator durably creates a s
   assert.match(reservation, /r\.status in\('pending','running'\)/)
   assert.match(reservation, /drive_migration_orchestrator_state/)
   assert.match(details, /Restart/)
-  assert.match(details, /effectiveMigrationStatus === "canceled"/)
+  assert.match(details, /\["failed", "canceled", "aborted", "verification_failed"\]\.includes\(String\(effectiveMigrationStatus\)\) \? "retry_migration"/)
 })
 
 test('worker-pool queue failures cannot be mistaken for an empty successful migration', () => {

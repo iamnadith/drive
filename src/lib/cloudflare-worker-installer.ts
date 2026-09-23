@@ -662,7 +662,6 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
     }
     state.encryptedTokens = Object.fromEntries(ORDER.map((worker) => [worker, encryptToken(tokens[worker], state!.id, worker)]))
     state.status = "running"; state.error = undefined; await saveState(state)
-    await setCloudflareHostingMode("automatic")
     try {
       const names = resourceNames()
       const accounts = {} as Record<HostedWorker, Account>
@@ -747,20 +746,29 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       state.status = "ready"; state.step = "enabled"; await saveState(state)
       return getCloudflareInstallation()
     } catch (error) {
-      // A failed update must not leave a previously working installation
-      // disabled just because one Worker failed its readiness check. Preserve
-      // the exact prior runtime flags/URLs/secrets; the visible install state
-      // still records which Worker needs repair.
-      if (previous?.status === "ready") {
-        if (githubSecretsSynchronized && previousRuntime.migration.orchestratorUrl) {
-          await syncAllGitHubWorkerSecretsWithinInstallerLock({
-            serverUrl: previousRuntime.migration.orchestratorUrl,
-            sharedSecret: workerSharedSecretForSync,
-          }).catch(() => undefined)
+      // Restore the runtime configuration that existed before this attempt,
+      // including when a prior deployment already has a failed install record.
+      // Verification may fail after saveRuntimeConfiguration(false), but that
+      // must not leave unrelated running migrations switched off indefinitely.
+      let runtimeRestoreError: string | null = null
+      if (githubSecretsSynchronized && previousRuntime.migration.orchestratorUrl) {
+        await syncAllGitHubWorkerSecretsWithinInstallerLock({
+          serverUrl: previousRuntime.migration.orchestratorUrl,
+          sharedSecret: workerSharedSecretForSync,
+        }).catch(() => undefined)
+      }
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await writeRuntimeSnapshot(previousRuntime)
+          runtimeRestoreError = null
+          break
+        } catch (restoreError) {
+          runtimeRestoreError = restoreError instanceof Error ? restoreError.message : String(restoreError)
+          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt))
         }
-        await writeRuntimeSnapshot(previousRuntime).catch(() => undefined)
       }
       state.status = "failed"; state.error = `${state.step}: ${error instanceof Error ? error.message : "Installation failed"}`
+      if (runtimeRestoreError) state.error += `; previous runtime settings could not be restored: ${runtimeRestoreError}`
       const active = ORDER.find((worker) => state.step.startsWith(`${worker}_`) && !state.workers[worker].verified)
       if (active) { state.workers[active].phase = "failed"; state.workers[active].error = state.error }
       await saveState(state); throw error

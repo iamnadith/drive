@@ -300,11 +300,11 @@ async function compare(db: Client, task: Row) {
         select gen_random_uuid(),$1::uuid,$2::uuid,$3::uuid,case when d.key is null then 'missing' else 'size_mismatch' end,s.key,s.size,d.size
         from drive_bucket_scan_objects s left join drive_bucket_scan_objects d on d.scan_id=$3::uuid and d.key=s.key
         where s.scan_id=$2::uuid and not s.is_dir_marker and (
-          d.key is null or ($10::boolean and (d.size<>s.size or
+          d.key is null or ($8::boolean and (d.size<>s.size or
           (trim(both '"' from coalesce(s.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from coalesce(d.etag,'')) ~ '^[0-9a-fA-F]{32}$' and trim(both '"' from s.etag)<>trim(both '"' from d.etag)) or
-          ($8='migration_workers' and not exists (
+          ($6='migration_workers' and not exists (
             select 1 from drive_repair_jobs j
-            where j.migration_id=$9::uuid and j.status='completed'
+            where j.migration_id=$7::uuid and j.status='completed'
               and j.payload->>'workerGeneration'=$4::text
               and j.payload->'itemIds'->>0=$1::text
               and j.payload->'inventoryObjects'->0->>'key'=s.key
@@ -339,7 +339,7 @@ async function compare(db: Client, task: Row) {
           )), '{stage}','"file_verification_completed"'::jsonb)
         from state_done s where i.id=$1::uuid returning i.id
       ) select missing,mismatched,extra from state_done
-    `, [task.migration_item_id, task.source_scan_id, task.destination_scan_id, task.generation, task.lease_owner, task.source_objects, task.source_bytes, task.execution_mode || null, task.migration_id, task.overwrite !== false])
+    `, [task.migration_item_id, task.source_scan_id, task.destination_scan_id, task.generation, task.lease_owner, task.execution_mode || null, task.migration_id, task.overwrite !== false])
     if (!completed.rowCount) throw new Error("File Scanner task lease was lost")
     await db.query("commit")
     const value = completed.rows[0]
