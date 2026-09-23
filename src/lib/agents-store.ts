@@ -486,3 +486,16 @@ export async function recordAgentHeartbeat(input: {
   if (!rows[0]) throw new Error("Worker was disabled while registering its heartbeat")
   return mapAgentRow(rows[0])
 }
+
+export async function recordMigrationWorkerInstanceHeartbeat(agentId: string, workerInstanceId: string, heartbeatAt: string): Promise<void> {
+  await queryDb(
+    `update public.${AGENT_RUNS_TABLE}
+     set payload = jsonb_set(coalesce(payload, '{}'::jsonb), '{workerHeartbeatAt}', to_jsonb($3::text), true),
+         updated_at = now()
+     where agent_id = $1
+       and run_type = 'github_dispatch'
+       and status = 'running'
+       and payload->>'workerInstanceId' = $2`,
+    [agentId, workerInstanceId, heartbeatAt]
+  )
+}

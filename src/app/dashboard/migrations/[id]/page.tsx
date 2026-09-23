@@ -1860,9 +1860,9 @@ export default function MigrationDetailsPage() {
                     </Button>
                   ) : null}
 
-                  {migration.status !== "completed" && (workerPoolMigration
-                    ? !settingsSyncInProgress && effectiveMigrationStatus !== "completed" && (failedBuckets.length > 0 || overviewProgress.verifyIssues > 0 || effectiveMigrationStatus === "failed" || effectiveMigrationStatus === "canceled")
-                    : !settingsSyncInProgress && effectiveMigrationStatus !== "completed" && items.length > 0 && migration.status !== "draft" && !hasActiveSuperSlurper) ? (
+                  {migration.status !== "completed" && !workerPoolMigration &&
+                    !settingsSyncInProgress && effectiveMigrationStatus !== "completed" &&
+                    items.length > 0 && migration.status !== "draft" && !hasActiveSuperSlurper ? (
                     <Button
                       onClick={() => void runMigrationAction("repair_migration")}
                       loading={busyAction === "repair_migration"}
@@ -1870,9 +1870,7 @@ export default function MigrationDetailsPage() {
                       variant="outline"
                     >
                       {busyAction !== "repair_migration" ? <RefreshCw className="h-4 w-4 mr-0" /> : null}
-                      {workerPoolMigration
-                        ? ["failed", "verification_failed", "canceled", "aborted"].includes(effectiveMigrationStatus) ? "Restart" : "Use worker pool"
-                        : "Use worker pool"}
+                      Use worker pool
                     </Button>
                   ) : null}
 
@@ -1959,16 +1957,16 @@ export default function MigrationDetailsPage() {
                             : "Waiting for workers to claim queued files."
 
               return (
-                <Card>
-                  <CardHeader className="gap-4 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <CardTitle>Worker pool</CardTitle>
+                <Card className="overflow-hidden border-border/70">
+                  <CardHeader className="gap-5 border-b bg-muted/20 pb-5 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0 space-y-2">
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <CardTitle className="text-base">Worker pool</CardTitle>
                         {migrationWorkerBadge(status)}
                       </div>
-                      <CardDescription className="mt-1 leading-relaxed">{statusMessage}</CardDescription>
+                      <CardDescription className="max-w-2xl leading-relaxed">{statusMessage}</CardDescription>
                     </div>
-                    <div className="flex w-full flex-wrap items-start justify-end gap-2 lg:w-auto">
+                    <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
                       {canAbortPool ? (
                         <Button
                           variant="destructive"
@@ -1988,31 +1986,31 @@ export default function MigrationDetailsPage() {
                       </Button>
                     </div>
                   </CardHeader>
-                  <CardContent>
-                    <dl className="grid gap-y-4 border-y py-4 sm:grid-cols-2 lg:grid-cols-4">
-                      <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:border-r lg:first:pl-0">
-                        <Users className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  <CardContent className="p-4 sm:p-5">
+                    <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                      <div className="flex min-w-0 items-start gap-3 rounded-xl border bg-background/70 p-3.5">
+                        <Users className="mt-0.5 size-4 shrink-0 text-primary" />
                         <div className="min-w-0">
                           <dt className="text-xs font-medium text-muted-foreground">Online workers</dt>
                           <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatNumber(activeRuns.length)}</dd>
                         </div>
                       </div>
-                      <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:border-r">
-                        <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                      <div className="flex min-w-0 items-start gap-3 rounded-xl border bg-background/70 p-3.5">
+                        <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" />
                         <div className="min-w-0">
                           <dt className="text-xs font-medium text-muted-foreground">Transferred</dt>
                           <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatNumber(overviewProgress.transferred)}</dd>
                         </div>
                       </div>
-                      <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:border-r">
-                        <ListTodo className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                      <div className="flex min-w-0 items-start gap-3 rounded-xl border bg-background/70 p-3.5">
+                        <ListTodo className="mt-0.5 size-4 shrink-0 text-primary" />
                         <div className="min-w-0">
                           <dt className="text-xs font-medium text-muted-foreground">Queue remaining</dt>
                           <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatNumber(queueRemaining)}</dd>
                         </div>
                       </div>
-                      <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:pr-0">
-                        <Clock className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                      <div className="flex min-w-0 items-start gap-3 rounded-xl border bg-background/70 p-3.5">
+                        <Clock className="mt-0.5 size-4 shrink-0 text-primary" />
                         <div className="min-w-0">
                           <dt className="text-xs font-medium text-muted-foreground">Last activity</dt>
                           <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatDate(lastActivityAt)}</dd>

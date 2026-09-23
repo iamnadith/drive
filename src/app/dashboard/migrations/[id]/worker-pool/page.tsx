@@ -158,12 +158,12 @@ export default function MigrationWorkerPoolDetailsPage() {
     { accessorKey: "sourceBucket", header: "Source", cell: ({ row }) => <div><div className="font-medium">{row.original.sourceBucket}</div><div className="text-xs text-muted-foreground">{formatBytes(num(row.original.sourceBytes))}</div></div> },
     { accessorKey: "targetBucket", header: "Target", cell: ({ row }) => <span className="font-medium">{row.original.targetBucket}</span> },
     { accessorKey: "status", header: "Status", cell: ({ row }) => statusBadge(row.original.status) },
-    { id: "queue", header: "Queue", cell: ({ row }) => <span className="tabular-nums">{formatNumber(num(row.original.queuedObjects))}</span> },
+    ...(snapshot.buckets?.some((bucket) => num(bucket.queuedObjects) > 0) ? [{ id: "queue", header: "Queue", cell: ({ row }: { row: { original: BucketStat } }) => <span className="tabular-nums">{formatNumber(num(row.original.queuedObjects))}</span> }] : []),
     { id: "transferred", header: "Transferred", cell: ({ row }) => <span className="tabular-nums">{formatNumber(num(row.original.transferredObjects))}</span> },
     { id: "skipped", header: "Skipped", cell: ({ row }) => <span className="tabular-nums">{formatNumber(num(row.original.skippedObjects))}</span> },
     { id: "failed", header: "Failed", cell: ({ row }) => <span className="tabular-nums text-destructive">{formatNumber(num(row.original.failedObjects))}</span> },
     { id: "progress", header: "Progress", cell: ({ row }) => { const done = num(row.original.transferredObjects) + num(row.original.skippedObjects); const value = percentage(done, num(row.original.totalObjects)); return <div className="flex min-w-40 flex-col gap-1.5"><Progress value={value} className="h-2" /><span className="text-xs text-muted-foreground">{value.toFixed(1)}% · {formatNumber(done)} / {formatNumber(num(row.original.totalObjects))}</span></div> } },
-  ], [])
+  ], [snapshot.buckets])
 
   const fileColumns = React.useMemo<ColumnDef<Record<string, unknown>, unknown>[]>(() => [
     { id: "object", header: "Object", cell: ({ row }) => <div className="max-w-[420px]"><div className="truncate font-mono text-xs">{String(row.original.key ?? "—")}</div><div className="text-xs text-muted-foreground">{String(row.original.bucket ?? "—")}</div></div> },
@@ -209,12 +209,12 @@ export default function MigrationWorkerPoolDetailsPage() {
 
   return <DashboardPage className="dashboard-motion-stage">
     <DashboardPageHeader title="Migration worker pools" description={`${formatLastSyncedAt(snapshot.updatedAt)} - automatically refreshes every 10 seconds`} actions={<div className="flex w-full gap-2 sm:w-auto"><Button asChild variant="outline" size="sm" className="flex-1 rounded-xl sm:flex-none"><Link href={`/dashboard/migrations/${encodeURIComponent(migrationId)}`}><ArrowLeft data-icon="inline-start" />Back</Link></Button><Button variant="outline" size="sm" className="flex-1 rounded-xl sm:flex-none" onClick={() => void load({ manual: true })} disabled={refreshing}><RefreshCw data-icon="inline-start" className={refreshing ? "animate-spin" : undefined} />Refresh</Button></div>} />
-    <Card className="gap-0 overflow-hidden py-0">
-      <CardHeader className="border-b px-4 py-4 sm:px-5"><div className="flex flex-col gap-1"><CardTitle className="text-base">Worker-pool attempts</CardTitle><CardDescription>Each tab is one dispatched pool generation, including retries and aborted attempts.</CardDescription></div></CardHeader>
-      <CardContent className="p-3 sm:p-4"><Tabs value={String(selectedGeneration || selectedAttempt?.generation || 1)} onValueChange={(value) => { selectedGenerationRef.current = Number(value); setSelectedGeneration(Number(value)); setPagination((current) => ({ ...current, pageIndex: 0 })); setSelectedJobId(null); setSelectedJob(null) }}><TabsList>{attempts.map((attempt, index) => <TabsTrigger key={attempt.generation} value={String(attempt.generation)}><span>{index === attempts.length - 1 ? "Initial pool" : `Retry ${attempt.generation - 1}`}</span>{statusBadge(attempt.status)}</TabsTrigger>)}</TabsList></Tabs></CardContent>
-    </Card>
     <Tabs value={tab} onValueChange={setTab} className="gap-5">
-      <TabsList><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="jobs">File queue <Badge variant="outline">{formatNumber(pagination.total)}</Badge></TabsTrigger></TabsList>
+      <TabsList>
+        <TabsTrigger value="overview">Overview</TabsTrigger>
+        <TabsTrigger value="jobs">File Queue</TabsTrigger>
+        {attempts.length > 1 ? <TabsTrigger value="pool-jobs">Worker pool jobs <Badge variant="outline">{formatNumber(attempts.length)}</Badge></TabsTrigger> : null}
+      </TabsList>
       <TabsContent value="overview" className="flex flex-col gap-4">
         <div className="grid grid-cols-2 gap-4 xl:grid-cols-5"><MetricCard label="Migration objects" value={formatNumber(num(snapshot.totalObjects))} detail={`${formatNumber(buckets.length)} buckets`} icon={Files} /><MetricCard label="File queue" value={formatNumber(attemptTotalJobs)} detail={`${formatNumber(attemptQueuedJobs)} queued - ${formatNumber(attemptRunningJobs)} running`} icon={Clock3} /><MetricCard label="Transferred" value={formatNumber(num(snapshot.transferred))} detail={`${formatBytes(num(snapshot.completedBytes))} copied`} icon={CircleCheck} /><MetricCard label="Skipped" value={formatNumber(num(snapshot.skipped))} detail="Existing objects preserved" icon={Files} /><MetricCard label="Pool workers" value={formatNumber(num(selectedAttempt?.workerCount))} detail={`${formatNumber(num(selectedAttempt?.onlineWorkers))} online`} icon={Workflow} /></div>
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(280px,0.45fr)]"><Card className="gap-0 py-0"><CardHeader className="border-b px-5 py-4"><div className="flex items-center justify-between gap-4"><div><CardTitle className="text-base">Attempt progress</CardTitle><CardDescription>Durable queue completion for the selected worker pool.</CardDescription></div><span className="font-mono text-sm font-semibold tabular-nums">{overallPercent.toFixed(1)}%</span></div></CardHeader><CardContent className="flex flex-col gap-5 px-5 py-5"><Progress value={overallPercent} className="h-2.5" /><div className="grid grid-cols-2 gap-4 sm:grid-cols-4">{[["Processed", attemptProcessedJobs], ["Completed", num(selectedAttempt?.completedJobs)], ["Failed", num(selectedAttempt?.failedJobs)], ["Canceled", num(selectedAttempt?.canceledJobs)]].map(([label, value]) => <div key={String(label)}><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 text-lg font-semibold tabular-nums">{formatNumber(Number(value))}</p></div>)}</div></CardContent></Card><Card className="gap-0 py-0"><CardHeader className="border-b px-4 py-4"><CardTitle className="text-base">Attempt activity</CardTitle><CardDescription>Selected pool generation.</CardDescription></CardHeader><CardContent className="flex flex-col gap-3 px-4 py-4 text-sm">{[["Online workers", num(selectedAttempt?.onlineWorkers)], ["Running workflows", num(selectedAttempt?.runningWorkers)], ["Queue remaining", attemptRemainingJobs]].map(([label, value]) => <div key={String(label)} className="flex items-center justify-between"><span className="text-muted-foreground">{label}</span><span className="font-semibold tabular-nums">{formatNumber(Number(value))}</span></div>)}<div className="flex items-center justify-between gap-4"><span className="text-muted-foreground">Last update</span><span className="text-right text-xs">{formatDate(selectedAttempt?.updatedAt || snapshot.updatedAt)}</span></div></CardContent></Card></div>
@@ -227,6 +227,50 @@ export default function MigrationWorkerPoolDetailsPage() {
         <DashboardDataTable data={jobPage} columns={jobColumns} pageSize={pagination.pageSize} minWidth="1120px" serverPagination={{ pageIndex: pagination.pageIndex, pageCount: pagination.pageCount, onPageChange: (page) => { setPagination((current) => ({ ...current, pageIndex: page })); void load({ page }) } }} header={<div><CardTitle className="text-base">Durable file queue</CardTitle><CardDescription>Files created by File Scanner for this selected pool attempt.</CardDescription></div>} emptyState="No file jobs were materialized for this attempt." />
         {selectedJobId ? <Card className="gap-0 overflow-hidden py-0"><CardHeader className="border-b px-5 py-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><CardTitle className="text-base">Job details</CardTitle>{selectedJob ? statusBadge(selectedJob.status) : <Badge variant="outline">Loading</Badge>}</div><CardDescription className="mt-1 truncate font-mono">{selectedJobId}</CardDescription></div>{selectedJob ? <div className="flex flex-wrap gap-2">{selectedActive ? <Button variant="destructive" size="sm" onClick={() => void mutateSelected("POST")} disabled={mutating}><XCircle data-icon="inline-start" />Abort</Button> : null}<Button variant="outline" size="sm" onClick={() => setDeleteOpen(true)} disabled={mutating || Boolean(selectedActive)}><Trash2 data-icon="inline-start" />Delete</Button></div> : null}</div></CardHeader><CardContent className="p-5">{selectedJob ? <div className="flex flex-col gap-5"><div className="grid gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-2 xl:grid-cols-4">{[["Transferred", num(selectedTotals?.transferred)], ["Skipped", num(selectedTotals?.skipped)], ["Failed", num(selectedTotals?.failed)], ["Worker", selectedJob.claimedByAgentId || "—"]].map(([label, value]) => <div key={String(label)} className="bg-background p-4"><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 truncate font-medium tabular-nums">{typeof value === "number" ? formatNumber(value) : value}</p></div>)}</div>{selectedJob.summary || selectedJob.error ? <div className="rounded-xl border bg-muted/25 p-4"><p className="text-sm font-medium">{selectedJob.summary || "Worker job update"}</p>{selectedJob.error ? <p className="mt-2 text-sm text-destructive">{selectedJob.error}</p> : null}</div> : null}<div className="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4"><div><p className="text-xs text-muted-foreground">Mode</p><p className="mt-1 font-medium">{selectedJob.mode}</p></div><div><p className="text-xs text-muted-foreground">Created</p><p className="mt-1 font-medium">{formatDate(selectedJob.createdAt)}</p></div><div><p className="text-xs text-muted-foreground">Updated</p><p className="mt-1 font-medium">{formatDate(selectedJob.updatedAt)}</p></div><div><p className="text-xs text-muted-foreground">Migration</p><p className="mt-1 truncate font-mono text-xs">{selectedJob.migrationId}</p></div></div></div> : <Skeleton className="h-40 w-full" />}</CardContent></Card> : null}
       </TabsContent>
+      {attempts.length > 1 ? (
+        <TabsContent value="pool-jobs" className="flex flex-col gap-4">
+          <Card className="gap-0 overflow-hidden py-0">
+            <CardHeader className="border-b px-5 py-4">
+              <CardTitle className="text-base">Worker pool jobs</CardTitle>
+              <CardDescription>Each row is a dispatched pool generation, including retries and canceled runs. File queue jobs are listed separately.</CardDescription>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="divide-y">
+                {[...attempts].sort((a, b) => b.generation - a.generation).map((attempt) => (
+                  <div key={attempt.generation} className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-medium">{attempt.generation === 1 ? "Initial pool" : `Retry ${attempt.generation - 1}`}</p>
+                        {statusBadge(attempt.status)}
+                        {attempt.generation === selectedGeneration ? <Badge variant="secondary">Selected</Badge> : null}
+                      </div>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {formatNumber(num(attempt.workerCount))} workers · {formatNumber(num(attempt.completedJobs))} completed · {formatNumber(num(attempt.failedJobs))} failed · {formatNumber(num(attempt.canceledJobs))} canceled
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">Updated {formatDate(attempt.updatedAt || attempt.createdAt)}</p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0 self-start sm:self-center"
+                      onClick={() => {
+                        selectedGenerationRef.current = attempt.generation
+                        setSelectedGeneration(attempt.generation)
+                        setPagination((current) => ({ ...current, pageIndex: 0 }))
+                        setSelectedJobId(null)
+                        setSelectedJob(null)
+                        setTab("overview")
+                      }}
+                    >
+                      View pool
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      ) : null}
     </Tabs>
     <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete this worker job?</AlertDialogTitle><AlertDialogDescription>This removes the terminal job record. Active jobs must be aborted and fully stopped first.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={mutating}>Keep job</AlertDialogCancel><AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={(event) => { event.preventDefault(); void mutateSelected("DELETE") }} disabled={mutating}>Delete job</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </DashboardPage>

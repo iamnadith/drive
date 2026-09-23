@@ -197,7 +197,10 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
             count(*) filter(where r.status='completed')::bigint completed_workers,
             count(*) filter(where r.status='failed')::bigint failed_workers,
             count(*) filter(where r.status='canceled')::bigint canceled_workers,
-            count(*) filter(where r.status='running' and a.status='online' and a.last_heartbeat_at>now()-interval '90 seconds')::bigint online_workers,
+            count(*) filter(where r.status='running' and (
+              (r.payload->>'workerInstanceId' is not null and coalesce(nullif(r.payload->>'workerHeartbeatAt','')::timestamptz,'-infinity'::timestamptz)>now()-interval '90 seconds')
+              or (r.payload->>'workerInstanceId' is null and a.status='online' and a.last_heartbeat_at>now()-interval '90 seconds')
+            ))::bigint online_workers,
             min(r.created_at) created_at,max(r.updated_at) updated_at
           from public.drive_agent_runs r left join public.drive_agents a on a.id=r.agent_id
           where r.run_type='github_dispatch' and r.payload->>'migrationId'=($1::uuid)::text
@@ -222,9 +225,15 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
         'id',run.id,'agentId',run.agent_id,'status',case
           when (select status from migration_meta) in('canceled','aborted')
             and run.payload->>'githubAbortRequestedAt' is not null
-            and not (run.status='running' and run.agent_status='online' and run.agent_heartbeat>now()-interval '90 seconds')
+            and not (run.status='running' and (
+              (run.payload->>'workerInstanceId' is not null and coalesce(nullif(run.payload->>'workerHeartbeatAt','')::timestamptz,'-infinity'::timestamptz)>now()-interval '90 seconds')
+              or (run.payload->>'workerInstanceId' is null and run.agent_status='online' and run.agent_heartbeat>now()-interval '90 seconds')
+            ))
           then 'canceled' else run.status end,
-        'online',run.status='running' and run.agent_status='online' and run.agent_heartbeat>now()-interval '90 seconds',
+        'online',run.status='running' and (
+          (run.payload->>'workerInstanceId' is not null and coalesce(nullif(run.payload->>'workerHeartbeatAt','')::timestamptz,'-infinity'::timestamptz)>now()-interval '90 seconds')
+          or (run.payload->>'workerInstanceId' is null and run.agent_status='online' and run.agent_heartbeat>now()-interval '90 seconds')
+        ),
         'abortRequested',(run.payload->>'githubAbortRequestedAt') is not null,
         'externalRunId',run.external_run_id,'instanceId',run.payload->>'workerInstanceId',
         'jobId',run.job_reference,'currentStatus',job.status,'lastHeartbeatAt',job.last_heartbeat_at,
@@ -296,10 +305,13 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       ) j on true
       where i.migration_id=$1
     ), worker_counts as (
-      select count(*) filter(where r.status='running' and a.status='online'
-          and a.last_heartbeat_at > now() - interval '90 seconds')::bigint online_workers,
+      select count(*) filter(where r.status='running' and (
+          (r.payload->>'workerInstanceId' is not null and coalesce(nullif(r.payload->>'workerHeartbeatAt','')::timestamptz,'-infinity'::timestamptz)>now()-interval '90 seconds')
+          or (r.payload->>'workerInstanceId' is null and a.status='online' and a.last_heartbeat_at>now()-interval '90 seconds')
+        ))::bigint online_workers,
         count(*) filter(where r.status='running' and j.progress ? 'currentFile'
-          and a.status='online' and a.last_heartbeat_at > now() - interval '90 seconds')::bigint active_transfers
+          and ((r.payload->>'workerInstanceId' is not null and coalesce(nullif(r.payload->>'workerHeartbeatAt','')::timestamptz,'-infinity'::timestamptz)>now()-interval '90 seconds')
+            or (r.payload->>'workerInstanceId' is null and a.status='online' and a.last_heartbeat_at>now()-interval '90 seconds')))::bigint active_transfers
       from public.drive_agent_runs r
       join public.drive_agents a on a.id=r.agent_id
       left join public.drive_repair_jobs j on j.id::text=r.job_reference

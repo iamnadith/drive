@@ -270,7 +270,8 @@ test('worker-pool details hydrate and refresh from PostgreSQL only', () => {
   assert.match(route, /attempt_generations as materialized/)
   assert.match(route, /selected_worker_runs as/)
   assert.match(route, /selected_generation/)
-  assert.match(page, /Worker-pool attempts/)
+  assert.match(page, /attempts\.length > 1 \? <TabsTrigger value="pool-jobs">Worker pool jobs/)
+  assert.doesNotMatch(page, /Worker-pool attempts/)
   assert.match(page, /Dispatched workers/)
   assert.match(page, /File queue/)
   assert.doesNotMatch(page, /\?live=1/)
@@ -698,6 +699,15 @@ test('worker-pool repair stays queued until the orchestrator durably creates a s
   assert.match(reservation, /drive_migration_orchestrator_state/)
   assert.match(details, /Restart/)
   assert.match(details, /\["failed", "canceled", "aborted", "verification_failed"\]\.includes\(String\(effectiveMigrationStatus\)\) \? "retry_migration"/)
+})
+
+test('migration completion demotes the old active account before promoting the target', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const completion = orchestrator.slice(orchestrator.indexOf('async function activateTargetAndCompleteMigration'), orchestrator.indexOf('async function finishOrRepair'))
+  assert.match(completion, /update drive_accounts set status='available'[\s\S]*where status='active' and id<>\$1/)
+  assert.match(completion, /update drive_accounts set[\s\S]*status='active'[\s\S]*where id=\$1 returning id/)
+  assert.ok(completion.indexOf("set status='available'") < completion.indexOf("status='active',last_migrated"))
+  assert.match(completion, /await db\.query\("commit"\)/)
 })
 
 test('worker-pool queue failures cannot be mistaken for an empty successful migration', () => {

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { recordAgentHeartbeat, type AgentCapability } from "@/lib/agents-store"
+import { recordAgentHeartbeat, recordMigrationWorkerInstanceHeartbeat, type AgentCapability } from "@/lib/agents-store"
 
 function getRemoteIp(request: Request): string | null {
   const forwarded = request.headers.get("x-forwarded-for")
@@ -35,6 +35,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       capabilities: parseCapabilities(body.capabilities),
       metadata: typeof body.metadata === "object" && body.metadata !== null ? (body.metadata as Record<string, unknown>) : {},
     })
+
+    const metadata = typeof body.metadata === "object" && body.metadata !== null ? body.metadata as Record<string, unknown> : {}
+    const workerInstanceId = typeof metadata.workerInstanceId === "string" ? metadata.workerInstanceId.trim() : ""
+    if (workerInstanceId) {
+      await recordMigrationWorkerInstanceHeartbeat(id, workerInstanceId, new Date().toISOString())
+    }
 
     return NextResponse.json({ ok: true, agent })
   } catch (error: any) {
