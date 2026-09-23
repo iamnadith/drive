@@ -118,7 +118,7 @@ test('pre-existing worker-pool objects are skipped only when overwrite is disabl
   assert.match(worker, /if \(!overwrite && !isMismatch && latestTargetSize === objectSize\)/)
   assert.match(worker, /const completed = finalMissing === 0 && \(!overwrite \|\| finalMismatched === 0\)/)
   assert.match(scanner, /coalesce\(\(m\.options->>'overwrite'\)::boolean,true\) overwrite/)
-  assert.match(scanner, /d\.key is null or \(\$10::boolean and \(d\.size<>s\.size/)
+  assert.match(scanner, /d\.key is null or \(\$8::boolean and \(d\.size<>s\.size/)
   assert.match(worker, /integrityProofs: assignedInventory \? finalDestinationObjects\.map/)
   assert.match(worker, /integrityVerified: sourceSha256 === destinationSha256/)
   assert.match(scanner, /where s\.scan_id=\$2::uuid and not s\.is_dir_marker/)
@@ -160,7 +160,8 @@ test('empty migrations complete in the orchestrator without requiring scanner or
 test('empty and verified migrations share the existing target activation and completion transaction', () => {
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   const activation = orchestrator.slice(orchestrator.indexOf('async function activateTargetAndCompleteMigration'), orchestrator.indexOf('async function finishOrRepair'))
-  assert.match(activation, /status=case when a\.id=\$1 then 'active' when a\.status='active' then 'available'/)
+  assert.match(activation, /update drive_accounts set status='available'[\s\S]*where status='active' and id<>\$1/)
+  assert.match(activation, /update drive_accounts set[\s\S]*status='active'[\s\S]*where id=\$1 returning id/)
   assert.match(activation, /status='completed',completed_at=now\(\),sync_status='synced'/)
   assert.match(activation, /summary_item_count=\(select count\(\*\) from drive_migration_items/)
   assert.match(activation, /await wakeBackendOrchestrator\(db\)/)

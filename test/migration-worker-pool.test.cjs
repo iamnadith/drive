@@ -710,6 +710,13 @@ test('migration completion demotes the old active account before promoting the t
   assert.match(completion, /await db\.query\("commit"\)/)
 })
 
+test('shard finalization does not revert independently verified buckets to verifying', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const finalization = orchestrator.slice(orchestrator.indexOf('async function finalizeShards'), orchestrator.indexOf('async function activateTargetAndCompleteMigration'))
+  assert.match(finalization, /update drive_migration_items i set slurper_status='verifying'/)
+  assert.match(finalization, /not exists\(select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=\$2 and v.status='completed'\)/)
+})
+
 test('worker-pool queue failures cannot be mistaken for an empty successful migration', () => {
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   assert.match(orchestrator, /if \(objects > 0\)[\s\S]*?queue_materialization_failed[\s\S]*?status='failed'[\s\S]*?terminalFailure: true/)
