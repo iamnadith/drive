@@ -12,6 +12,23 @@ function load(path) {
   return context.exports
 }
 
+test('pool bucket status describes transfer completion without verification or settings', () => {
+  const { poolBucketTransferStatus } = load('src/lib/migration-pool-transfer-status.ts')
+  const bucket = { status: 'running', totalObjects: 177, transferredObjects: 177, skippedObjects: 0, failedObjects: 0, queuedObjects: 0 }
+  assert.equal(poolBucketTransferStatus(bucket), 'completed')
+  assert.equal(poolBucketTransferStatus({ ...bucket, totalObjects: 6474, transferredObjects: 6471, queuedObjects: 1 }), 'running')
+  assert.equal(poolBucketTransferStatus({ ...bucket, transferredObjects: 176, skippedObjects: 1 }), 'completed')
+  for (const status of ['verifying', 'verification_failed', 'settings_syncing', 'settings_failed']) {
+    assert.equal(poolBucketTransferStatus({ ...bucket, status }), 'completed')
+    assert.equal(poolBucketTransferStatus({ ...bucket, status, transferredObjects: 176, queuedObjects: 1 }), 'queued')
+  }
+  assert.equal(poolBucketTransferStatus({ ...bucket, status: 'completed', transferredObjects: 176 }), 'pending')
+  assert.equal(poolBucketTransferStatus({ ...bucket, status: 'aborted', transferredObjects: 176 }), 'aborted')
+  assert.notEqual(poolBucketTransferStatus({ ...bucket, transferredObjects: 176, failedObjects: 1 }), 'completed')
+  assert.notEqual(poolBucketTransferStatus({ ...bucket, transferredObjects: Infinity }), 'completed')
+  assert.equal(poolBucketTransferStatus({ ...bucket, status: undefined, transferredObjects: 0 }), 'pending')
+})
+
 test('live activity excludes finished, stale, malformed and future-dated files', () => {
   const { currentMigrationFiles } = load('src/lib/migration-live-files.ts')
   const now = Date.parse('2026-09-26T12:00:00Z')

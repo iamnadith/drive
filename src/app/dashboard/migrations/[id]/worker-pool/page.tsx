@@ -12,6 +12,7 @@ import { DashboardPage, DashboardPageHeader } from "@/components/dashboard/page-
 import { formatLastSyncedAt } from "@/lib/dashboard-format"
 import { currentMigrationFiles } from "@/lib/migration-live-files"
 import { formatLogStage } from "@/lib/dashboard-log-format"
+import { poolBucketTransferStatus } from "@/lib/migration-pool-transfer-status"
 import { migrationProgressPercent } from "@/lib/migration-progress"
 import { DashboardLogsCard } from "@/components/dashboard/logs-card"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
@@ -188,11 +189,11 @@ export default function MigrationWorkerPoolDetailsPage() {
       </div>,
     },
     { accessorKey: "targetBucket", header: "Target", meta: { width: "min-w-[200px]", align: "center" }, cell: ({ row }) => <span className="break-all text-[13px] font-medium">{row.original.targetBucket}</span> },
-    { accessorKey: "status", header: "Status", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }) => <div className="flex min-h-10 items-center justify-center">{statusBadge(row.original.status)}</div> },
+    { accessorKey: "status", header: "Status", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }) => <div className="flex min-h-10 items-center justify-center">{statusBadge(poolBucketTransferStatus(row.original))}</div> },
     ...(snapshot.buckets?.some((bucket) => num(bucket.queuedObjects) > 0) ? [{ id: "queue", header: "Queue", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }: { row: { original: BucketStat } }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.queuedObjects))}</span> }] : []),
     { id: "transferred", header: "Transferred", meta: { width: "min-w-[130px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.transferredObjects))}</span> },
-    { id: "skipped", header: "Skipped", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.skippedObjects))}</span> },
-    { id: "failed", header: "Failed", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums text-destructive">{formatNumber(num(row.original.failedObjects))}</span> },
+    ...(snapshot.buckets?.some((bucket) => num(bucket.skippedObjects) > 0) ? [{ id: "skipped", header: "Skipped", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }: { row: { original: BucketStat } }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.skippedObjects))}</span> }] : []),
+    ...(snapshot.buckets?.some((bucket) => num(bucket.failedObjects) > 0) ? [{ id: "failed", header: "Failed", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }: { row: { original: BucketStat } }) => <span className="text-[13px] font-medium tabular-nums text-destructive">{formatNumber(num(row.original.failedObjects))}</span> }] : []),
     { id: "progress", header: "Progress", meta: { width: "min-w-[180px]", align: "center", divider: false }, cell: ({ row }) => { const done = num(row.original.transferredObjects) + num(row.original.skippedObjects); const value = migrationProgressPercent(done, num(row.original.totalObjects)); return <div className="flex min-h-10 flex-col justify-center gap-1.5"><Progress value={value} className="h-1.5" /><span className="text-[11px] tabular-nums text-muted-foreground">{value.toFixed(1)}% · {formatNumber(done)} / {formatNumber(num(row.original.totalObjects))}</span></div> } },
   ], [snapshot.buckets])
 
@@ -241,12 +242,24 @@ export default function MigrationWorkerPoolDetailsPage() {
   ], [])
 
   const jobColumns = React.useMemo<ColumnDef<JobRow, unknown>[]>(() => [
-    { id: "object", header: "Object", cell: ({ row }) => <div className="max-w-[440px]"><div className="truncate font-mono text-xs">{row.original.objectKey || row.original.id}</div><div className="text-xs text-muted-foreground">{row.original.sourceBucket || "Unknown bucket"} · {formatBytes(num(row.original.objectSize))}</div></div> },
-    { accessorKey: "status", header: "Status", cell: ({ row }) => statusBadge(row.original.status) },
-    { id: "outcome", header: "Outcome", cell: ({ row }) => <div className="text-xs tabular-nums"><span>{num(row.original.transferred)} transferred</span><span className="mx-1 text-muted-foreground">·</span><span>{num(row.original.skipped)} skipped</span>{num(row.original.failed) > 0 ? <><span className="mx-1 text-muted-foreground">·</span><span className="text-destructive">{num(row.original.failed)} failed</span></> : null}</div> },
-    { id: "worker", header: "Worker", cell: ({ row }) => <span className="font-mono text-xs">{row.original.claimedByAgentId || "—"}</span> },
-    { id: "updated", header: "Updated", cell: ({ row }) => <span className="text-xs">{formatDate(row.original.updatedAt)}</span> },
-    { id: "actions", header: "Actions", cell: ({ row }) => <Button variant="outline" size="sm" onClick={() => void openJob(row.original.id)}>Details</Button> },
+    {
+      id: "object", header: "Object", meta: { width: "min-w-[280px]" },
+      cell: ({ row }) => <div className="flex min-h-10 items-center gap-1.5">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border bg-background"><Files className="size-3 text-muted-foreground" /></span>
+        <div className="min-w-0 max-w-[320px]">
+          <div className="truncate text-[13px] font-medium leading-4" title={row.original.objectKey || row.original.id}>{row.original.objectKey || row.original.id}</div>
+          <div className="truncate font-mono text-[10px] leading-3.5 text-muted-foreground" title={row.original.sourceBucket}>{row.original.sourceBucket || "Unknown bucket"}</div>
+        </div>
+      </div>,
+    },
+    { accessorKey: "status", header: "Status", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }) => <div className="flex min-h-10 items-center justify-center">{statusBadge(row.original.status)}</div> },
+    { id: "size", header: "Size", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatBytes(num(row.original.objectSize))}</span> },
+    { id: "transferred", header: "Transferred", meta: { width: "min-w-[130px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.transferred))}</span> },
+    { id: "skipped", header: "Skipped", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.skipped))}</span> },
+    { id: "failed", header: "Failed", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums text-destructive">{formatNumber(num(row.original.failed))}</span> },
+    { id: "worker", header: "Worker", meta: { width: "min-w-[240px]", align: "center" }, cell: ({ row }) => <span className="break-all font-mono text-[10px] text-muted-foreground">{row.original.claimedByAgentId || "\u2014"}</span> },
+    { id: "updated", header: "Updated", meta: { width: "min-w-[160px]", align: "center" }, cell: ({ row }) => <WorkerTableDate value={row.original.updatedAt} /> },
+    { id: "actions", header: "Actions", meta: { width: "min-w-[100px]", align: "center", divider: false }, cell: ({ row }) => <Button variant="outline" size="sm" onClick={() => void openJob(row.original.id)}>Details</Button> },
   ], [openJob])
 
   const workerRunColumns = React.useMemo<ColumnDef<PoolWorkerRun, unknown>[]>(() => [
@@ -319,19 +332,11 @@ export default function MigrationWorkerPoolDetailsPage() {
       <TabsList>
         <TabsTrigger value="overview">Overview</TabsTrigger>
         <TabsTrigger value="jobs">File Queue</TabsTrigger>
-        {attempts.length > 1 ? <TabsTrigger value="pool-jobs">Worker pool jobs <Badge variant="outline">{formatNumber(attempts.length)}</Badge></TabsTrigger> : null}
+        <TabsTrigger value="pool-jobs">Worker pool jobs <Badge variant="outline">{formatNumber(attempts.length)}</Badge></TabsTrigger>
       </TabsList>
       <TabsContent value="overview" className="flex flex-col gap-4">
         <div className="grid grid-cols-2 gap-4 xl:grid-cols-5"><MetricCard label="Migration objects" value={formatNumber(num(snapshot.totalObjects))} detail={`${formatNumber(buckets.length)} buckets`} icon={Files} /><MetricCard label="File queue" value={formatNumber(attemptTotalJobs)} detail={`${formatNumber(attemptQueuedJobs)} queued - ${formatNumber(attemptRunningJobs)} running`} icon={Clock3} /><MetricCard label="Transferred" value={formatNumber(num(snapshot.transferred))} detail={`${formatBytes(num(snapshot.completedBytes))} copied`} icon={CircleCheck} /><MetricCard label="Skipped" value={formatNumber(num(snapshot.skipped))} detail="Existing objects preserved" icon={Files} /><MetricCard label="Pool workers" value={formatNumber(num(selectedAttempt?.workerCount))} detail={`${formatNumber(num(selectedAttempt?.onlineWorkers))} online`} icon={Workflow} /></div>
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(280px,0.45fr)]"><Card className="gap-0 py-0"><CardHeader className="border-b px-5 py-4"><div className="flex items-center justify-between gap-4"><div><CardTitle className="text-base">Attempt progress</CardTitle><CardDescription>Durable queue completion for the selected worker pool.</CardDescription></div><span className="font-mono text-sm font-semibold tabular-nums">{overallPercent.toFixed(1)}%</span></div></CardHeader><CardContent className="flex flex-col gap-5 px-5 py-5"><Progress value={overallPercent} className="h-2.5" /><div className="grid grid-cols-2 gap-4 sm:grid-cols-4">{[["Processed", attemptProcessedJobs], ["Completed", num(selectedAttempt?.completedJobs)], ["Failed", num(selectedAttempt?.failedJobs)], ["Canceled", num(selectedAttempt?.canceledJobs)]].map(([label, value]) => <div key={String(label)}><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 text-lg font-semibold tabular-nums">{formatNumber(Number(value))}</p></div>)}</div></CardContent></Card><Card className="gap-0 py-0"><CardHeader className="border-b px-4 py-4"><CardTitle className="text-base">Attempt activity</CardTitle><CardDescription>Selected pool generation.</CardDescription></CardHeader><CardContent className="flex flex-col gap-3 px-4 py-4 text-sm">{[["Online workers", num(selectedAttempt?.onlineWorkers)], ["Running workflows", num(selectedAttempt?.runningWorkers)], ["Queue remaining", attemptRemainingJobs]].map(([label, value]) => <div key={String(label)} className="flex items-center justify-between"><span className="text-muted-foreground">{label}</span><span className="font-semibold tabular-nums">{formatNumber(Number(value))}</span></div>)}<div className="flex items-center justify-between gap-4"><span className="text-muted-foreground">Last update</span><span className="text-right text-xs">{formatDate(selectedAttempt?.updatedAt || snapshot.updatedAt)}</span></div></CardContent></Card></div>
-        <DashboardDataTable
-          data={workerRuns}
-          columns={workerRunColumns}
-          pageSize={10}
-          minWidth="1020px"
-          resetKey={selectedGeneration}
-          emptyState="No workers were dispatched for this attempt."
-        />
         <DashboardDataTable
           data={buckets}
           columns={bucketColumns}
@@ -340,6 +345,7 @@ export default function MigrationWorkerPoolDetailsPage() {
           resetKey={`${migrationId}:${selectedGeneration}`}
           emptyState="Bucket statistics are not available yet."
         />
+        {activeFiles.length > 0 ? (
         <DashboardDataTable
           data={activeFiles}
           columns={fileColumns}
@@ -347,6 +353,15 @@ export default function MigrationWorkerPoolDetailsPage() {
           minWidth="1250px"
           resetKey={`${migrationId}:${selectedGeneration}`}
           emptyState="No files are currently transferring."
+        />
+        ) : null}
+        <DashboardDataTable
+          data={workerRuns}
+          columns={workerRunColumns}
+          pageSize={10}
+          minWidth="1020px"
+          resetKey={selectedGeneration}
+          emptyState="No workers were dispatched for this attempt."
         />
         <DashboardLogsCard
           key={selectedGeneration}
@@ -357,10 +372,9 @@ export default function MigrationWorkerPoolDetailsPage() {
         />
       </TabsContent>
       <TabsContent value="jobs" className="flex flex-col gap-4">
-        <DashboardDataTable data={jobPage} columns={jobColumns} pageSize={pagination.pageSize} minWidth="1120px" serverPagination={{ pageIndex: pagination.pageIndex, pageCount: pagination.pageCount, onPageChange: (page) => { setPagination((current) => ({ ...current, pageIndex: page })); void load({ page }) } }} header={<div><CardTitle className="text-base">Durable file queue</CardTitle><CardDescription>Files created by File Scanner for this selected pool attempt.</CardDescription></div>} emptyState="No file jobs were materialized for this attempt." />
+        <DashboardDataTable data={jobPage} columns={jobColumns} pageSize={pagination.pageSize} minWidth="1390px" serverPagination={{ pageIndex: pagination.pageIndex, pageCount: pagination.pageCount, onPageChange: (page) => { setPagination((current) => ({ ...current, pageIndex: page })); void load({ page }) } }} emptyState="No file jobs were materialized for this attempt." />
         {selectedJobId ? <Card className="gap-0 overflow-hidden py-0"><CardHeader className="border-b px-5 py-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><CardTitle className="text-base">Job details</CardTitle>{selectedJob ? statusBadge(selectedJob.status) : <Badge variant="outline">Loading</Badge>}</div><CardDescription className="mt-1 truncate font-mono">{selectedJobId}</CardDescription></div>{selectedJob ? <div className="flex flex-wrap gap-2">{selectedActive ? <Button variant="destructive" size="sm" onClick={() => void mutateSelected("POST")} disabled={mutating}><XCircle data-icon="inline-start" />Abort</Button> : null}<Button variant="outline" size="sm" onClick={() => setDeleteOpen(true)} disabled={mutating || Boolean(selectedActive)}><Trash2 data-icon="inline-start" />Delete</Button></div> : null}</div></CardHeader><CardContent className="p-5">{selectedJob ? <div className="flex flex-col gap-5"><div className="grid gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-2 xl:grid-cols-4">{[["Transferred", num(selectedTotals?.transferred)], ["Skipped", num(selectedTotals?.skipped)], ["Failed", num(selectedTotals?.failed)], ["Worker", selectedJob.claimedByAgentId || "—"]].map(([label, value]) => <div key={String(label)} className="bg-background p-4"><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 truncate font-medium tabular-nums">{typeof value === "number" ? formatNumber(value) : value}</p></div>)}</div>{selectedJob.summary || selectedJob.error ? <div className="rounded-xl border bg-muted/25 p-4"><p className="text-sm font-medium">{selectedJob.summary || "Worker job update"}</p>{selectedJob.error ? <p className="mt-2 text-sm text-destructive">{selectedJob.error}</p> : null}</div> : null}<div className="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4"><div><p className="text-xs text-muted-foreground">Mode</p><p className="mt-1 font-medium">{selectedJob.mode}</p></div><div><p className="text-xs text-muted-foreground">Created</p><p className="mt-1 font-medium">{formatDate(selectedJob.createdAt)}</p></div><div><p className="text-xs text-muted-foreground">Updated</p><p className="mt-1 font-medium">{formatDate(selectedJob.updatedAt)}</p></div><div><p className="text-xs text-muted-foreground">Migration</p><p className="mt-1 truncate font-mono text-xs">{selectedJob.migrationId}</p></div></div></div> : <Skeleton className="h-40 w-full" />}</CardContent></Card> : null}
       </TabsContent>
-      {attempts.length > 1 ? (
         <TabsContent value="pool-jobs" className="flex flex-col gap-4">
           <Card className="gap-0 overflow-hidden py-0">
             <CardHeader className="border-b px-5 py-4">
@@ -403,7 +417,6 @@ export default function MigrationWorkerPoolDetailsPage() {
             </CardContent>
           </Card>
         </TabsContent>
-      ) : null}
     </Tabs>
     <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete this worker job?</AlertDialogTitle><AlertDialogDescription>This removes the terminal job record. Active jobs must be aborted and fully stopped first.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={mutating}>Keep job</AlertDialogCancel><AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={(event) => { event.preventDefault(); void mutateSelected("DELETE") }} disabled={mutating}>Delete job</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </DashboardPage>
