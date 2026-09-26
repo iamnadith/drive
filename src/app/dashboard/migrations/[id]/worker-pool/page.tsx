@@ -34,6 +34,17 @@ function formatDate(value?: string) { if (!value) return "—"; const date = new
 function formatBytes(value: number) { if (value <= 0) return "0 B"; const units = ["B", "KB", "MB", "GB", "TB"]; let size = value; let unit = 0; while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1 } return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unit]}` }
 function percentage(done: number, total: number) { return total > 0 ? Math.max(0, Math.min(100, (done / total) * 100)) : 0 }
 
+function WorkerTableDate({ value }: { value?: string }) {
+  const date = value ? new Date(value) : null
+  if (!date || Number.isNaN(date.getTime())) return <span className="text-muted-foreground">—</span>
+  return (
+    <time dateTime={date.toISOString()} title={date.toLocaleString()} className="flex min-h-10 flex-col items-center justify-center gap-0.5 text-center text-[11px] text-muted-foreground">
+      <span>{date.toLocaleDateString()}</span>
+      <span>{date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+    </time>
+  )
+}
+
 function statusBadge(status?: string) {
   const value = String(status || "").toLowerCase()
   if (["completed", "copied", "verified"].includes(value)) return <Badge>Completed</Badge>
@@ -184,12 +195,52 @@ export default function MigrationWorkerPoolDetailsPage() {
   ], [openJob])
 
   const workerRunColumns = React.useMemo<ColumnDef<PoolWorkerRun, unknown>[]>(() => [
-    { id: "worker", header: "Worker", cell: ({ row }) => <div><div className="font-mono text-xs">{row.original.agentId}</div><div className="text-xs text-muted-foreground">{row.original.instanceId || "Worker instance"}</div></div> },
-    { accessorKey: "status", header: "Status", cell: ({ row }) => statusBadge(row.original.online ? "running" : row.original.status) },
-    { id: "heartbeat", header: "Last heartbeat", cell: ({ row }) => <span className="text-xs">{formatDate(row.original.lastHeartbeatAt)}</span> },
-    { id: "completed", header: "Transferred", cell: ({ row }) => <span className="tabular-nums">{formatNumber(num(row.original.completedFiles))}</span> },
-    { id: "failed", header: "Failed", cell: ({ row }) => <span className="tabular-nums text-destructive">{formatNumber(num(row.original.failedFiles))}</span> },
-    { id: "updated", header: "Updated", cell: ({ row }) => <span className="text-xs">{formatDate(row.original.updatedAt)}</span> },
+    {
+      id: "worker",
+      header: "Worker",
+      meta: { width: "min-w-[280px]" },
+      cell: ({ row }) => (
+        <div className="flex min-h-10 items-center gap-1.5">
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border bg-background">
+            <Workflow className="size-3 text-muted-foreground" />
+          </span>
+          <div className="min-w-0 max-w-[280px]">
+            <div className="truncate text-[13px] font-medium leading-4" title={row.original.agentId}>{row.original.agentId}</div>
+            <div className="break-all font-mono text-[10px] leading-3.5 text-muted-foreground">{row.original.instanceId || "Worker instance"}</div>
+          </div>
+        </div>
+      ),
+    },
+    {
+      accessorKey: "status",
+      header: "Status",
+      meta: { width: "min-w-[120px]", align: "center" },
+      cell: ({ row }) => <div className="flex min-h-10 items-center justify-center">{statusBadge(row.original.online ? "running" : row.original.status)}</div>,
+    },
+    {
+      id: "heartbeat",
+      header: "Last heartbeat",
+      meta: { width: "min-w-[160px]", align: "center" },
+      cell: ({ row }) => <WorkerTableDate value={row.original.lastHeartbeatAt} />,
+    },
+    {
+      id: "completed",
+      header: "Transferred",
+      meta: { width: "min-w-[130px]", align: "center" },
+      cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.completedFiles))}</span>,
+    },
+    {
+      id: "failed",
+      header: "Failed",
+      meta: { width: "min-w-[130px]", align: "center" },
+      cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums text-destructive">{formatNumber(num(row.original.failedFiles))}</span>,
+    },
+    {
+      id: "updated",
+      header: "Updated",
+      meta: { width: "min-w-[160px]", align: "center", divider: false },
+      cell: ({ row }) => <WorkerTableDate value={row.original.updatedAt} />,
+    },
   ], [])
 
   if (loading) return <PageSkeleton />
@@ -218,7 +269,14 @@ export default function MigrationWorkerPoolDetailsPage() {
       <TabsContent value="overview" className="flex flex-col gap-4">
         <div className="grid grid-cols-2 gap-4 xl:grid-cols-5"><MetricCard label="Migration objects" value={formatNumber(num(snapshot.totalObjects))} detail={`${formatNumber(buckets.length)} buckets`} icon={Files} /><MetricCard label="File queue" value={formatNumber(attemptTotalJobs)} detail={`${formatNumber(attemptQueuedJobs)} queued - ${formatNumber(attemptRunningJobs)} running`} icon={Clock3} /><MetricCard label="Transferred" value={formatNumber(num(snapshot.transferred))} detail={`${formatBytes(num(snapshot.completedBytes))} copied`} icon={CircleCheck} /><MetricCard label="Skipped" value={formatNumber(num(snapshot.skipped))} detail="Existing objects preserved" icon={Files} /><MetricCard label="Pool workers" value={formatNumber(num(selectedAttempt?.workerCount))} detail={`${formatNumber(num(selectedAttempt?.onlineWorkers))} online`} icon={Workflow} /></div>
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(280px,0.45fr)]"><Card className="gap-0 py-0"><CardHeader className="border-b px-5 py-4"><div className="flex items-center justify-between gap-4"><div><CardTitle className="text-base">Attempt progress</CardTitle><CardDescription>Durable queue completion for the selected worker pool.</CardDescription></div><span className="font-mono text-sm font-semibold tabular-nums">{overallPercent.toFixed(1)}%</span></div></CardHeader><CardContent className="flex flex-col gap-5 px-5 py-5"><Progress value={overallPercent} className="h-2.5" /><div className="grid grid-cols-2 gap-4 sm:grid-cols-4">{[["Processed", attemptProcessedJobs], ["Completed", num(selectedAttempt?.completedJobs)], ["Failed", num(selectedAttempt?.failedJobs)], ["Canceled", num(selectedAttempt?.canceledJobs)]].map(([label, value]) => <div key={String(label)}><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 text-lg font-semibold tabular-nums">{formatNumber(Number(value))}</p></div>)}</div></CardContent></Card><Card className="gap-0 py-0"><CardHeader className="border-b px-4 py-4"><CardTitle className="text-base">Attempt activity</CardTitle><CardDescription>Selected pool generation.</CardDescription></CardHeader><CardContent className="flex flex-col gap-3 px-4 py-4 text-sm">{[["Online workers", num(selectedAttempt?.onlineWorkers)], ["Running workflows", num(selectedAttempt?.runningWorkers)], ["Queue remaining", attemptRemainingJobs]].map(([label, value]) => <div key={String(label)} className="flex items-center justify-between"><span className="text-muted-foreground">{label}</span><span className="font-semibold tabular-nums">{formatNumber(Number(value))}</span></div>)}<div className="flex items-center justify-between gap-4"><span className="text-muted-foreground">Last update</span><span className="text-right text-xs">{formatDate(selectedAttempt?.updatedAt || snapshot.updatedAt)}</span></div></CardContent></Card></div>
-        <DashboardDataTable data={workerRuns} columns={workerRunColumns} pageSize={10} minWidth="980px" resetKey={selectedGeneration} header={<div><CardTitle className="text-base">Dispatched workers</CardTitle><CardDescription>GitHub Actions workers belonging only to this pool attempt.</CardDescription></div>} emptyState="No workers were dispatched for this attempt." />
+        <DashboardDataTable
+          data={workerRuns}
+          columns={workerRunColumns}
+          pageSize={10}
+          minWidth="1020px"
+          resetKey={selectedGeneration}
+          emptyState="No workers were dispatched for this attempt."
+        />
         <DashboardDataTable data={buckets} columns={bucketColumns} pageSize={10} minWidth="980px" resetKey={`${migrationId}:${selectedGeneration}`} header={<div><CardTitle className="text-base">Bucket progress</CardTitle><CardDescription>The same bucket table flow used by migration details.</CardDescription></div>} emptyState="Bucket statistics are not available yet." />
         <DashboardDataTable data={telemetry.files} columns={fileColumns} pageSize={25} minWidth="1060px" resetKey={snapshot.updatedAt} header={<div><CardTitle className="text-base">Live file activity</CardTitle><CardDescription>Latest synchronized events reported by the worker pool.</CardDescription></div>} emptyState="No file activity captured yet." />
         <Card className="gap-0 py-0"><CardHeader className="border-b px-5 py-4"><CardTitle className="text-base">Recent worker logs</CardTitle><CardDescription>Lifecycle and error messages from the latest jobs.</CardDescription></CardHeader><CardContent className="max-h-[420px] overflow-auto p-3"><div className="flex flex-col gap-2">{telemetry.logs.length ? telemetry.logs.map((entry, index) => <div key={`${index}-${String(entry.at ?? "")}`} className="rounded-xl border bg-muted/25 p-3"><div className="flex items-start justify-between gap-4"><span className="text-xs font-medium">{String(entry.message ?? "—")}</span><span className="shrink-0 text-[11px] text-muted-foreground">{formatDate(typeof entry.at === "string" ? entry.at : undefined)}</span></div></div>) : <p className="p-4 text-center text-sm text-muted-foreground">No worker logs captured yet.</p>}</div></CardContent></Card>
