@@ -10,6 +10,10 @@ import { toast } from "sonner"
 import { DashboardDataTable } from "@/components/dashboard/data-table"
 import { DashboardPage, DashboardPageHeader } from "@/components/dashboard/page-shell"
 import { formatLastSyncedAt } from "@/lib/dashboard-format"
+import { currentMigrationFiles } from "@/lib/migration-live-files"
+import { formatLogStage } from "@/lib/dashboard-log-format"
+import { migrationProgressPercent } from "@/lib/migration-progress"
+import { DashboardLogsCard } from "@/components/dashboard/logs-card"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -18,7 +22,7 @@ import { Progress } from "@/components/ui/progress"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
-type WorkerJob = { id: string; status: string; claimedByAgentId?: string; claimed_by_agent_id?: string; progress?: Record<string, unknown>; result?: Record<string, unknown> }
+type WorkerJob = { id: string; status: string; mode?: string; claimedByAgentId?: string; claimed_by_agent_id?: string; progress?: Record<string, unknown>; result?: Record<string, unknown> }
 type JobRow = { id: string; status: string; claimedByAgentId?: string; summary?: string; error?: string; createdAt?: string; updatedAt?: string; lastHeartbeatAt?: string; completedAt?: string; objectKey?: string; objectSize?: number; sourceBucket?: string; targetBucket?: string; transferred?: number; skipped?: number; failed?: number }
 type RepairJob = { id: string; migrationId: string; status: string; mode: string; claimedByAgentId?: string; payload: Record<string, unknown>; progress: Record<string, unknown>; result: Record<string, unknown>; summary?: string; error?: string; createdAt?: string; updatedAt?: string }
 type BucketStat = { id: string; sourceBucket: string; targetBucket: string; status: string; totalObjects: number; queuedObjects?: number; transferredObjects: number; skippedObjects: number; failedObjects: number; sourceBytes: number }
@@ -68,6 +72,8 @@ export default function MigrationWorkerPoolDetailsPage() {
   const params = useParams<{ id: string }>()
   const migrationId = typeof params?.id === "string" ? params.id : ""
   const [jobs, setJobs] = React.useState<WorkerJob[]>([])
+  const [liveFiles, setLiveFiles] = React.useState<Array<Record<string, unknown>>>([])
+  const [liveNow, setLiveNow] = React.useState(() => Date.now())
   const [jobPage, setJobPage] = React.useState<JobRow[]>([])
   const [pagination, setPagination] = React.useState<Pagination>({ pageIndex: 0, pageSize: 25, pageCount: 1, total: 0 })
   const [snapshot, setSnapshot] = React.useState<PoolSnapshot>({})
@@ -99,6 +105,8 @@ export default function MigrationWorkerPoolDetailsPage() {
       if (!poolResponse.ok) throw new Error(data.error || "Unable to load migration worker pool")
       if (selectedGenerationRef.current > 0 && Number(data.selectedGeneration) !== selectedGenerationRef.current) return
       setJobs(Array.isArray(data.jobs) ? data.jobs : [])
+      setLiveFiles(Array.isArray(data.liveFiles) ? data.liveFiles.filter(isRecord) : [])
+      setLiveNow(Date.now())
       setJobPage(Array.isArray(data.jobPage) ? data.jobPage : [])
       setSnapshot((previous) => {
         const incoming = isRecord(data.snapshot) ? data.snapshot as PoolSnapshot : {}
@@ -117,6 +125,7 @@ export default function MigrationWorkerPoolDetailsPage() {
         else if (detailResponse.status === 404) { setSelectedJobId(null); setSelectedJob(null) }
       }
     } catch (error) {
+      setLiveFiles([])
       if (!options?.background) toast.error(error instanceof Error ? error.message : "Unable to load migration worker pool")
     } finally {
       inFlight.current = false
@@ -126,7 +135,8 @@ export default function MigrationWorkerPoolDetailsPage() {
   }, [migrationId, pagination.pageIndex, pagination.pageSize, selectedGeneration, selectedJobId])
 
   React.useEffect(() => { void load() }, [load])
-  React.useEffect(() => { const timer = window.setInterval(() => void load({ background: true }), 10_000); return () => window.clearInterval(timer) }, [load])
+  React.useEffect(() => { const timer = window.setInterval(() => { setLiveNow(Date.now()); void load({ background: true }) }, 10_000); return () => window.clearInterval(timer) }, [load])
+  React.useEffect(() => { setLiveFiles([]) }, [migrationId, selectedGeneration])
 
   const openJob = React.useCallback(async (id: string) => {
     setSelectedJobId(id); setSelectedJob(null); setTab("jobs")
@@ -153,36 +163,81 @@ export default function MigrationWorkerPoolDetailsPage() {
   }, [load, selectedJobId])
 
   const telemetry = React.useMemo(() => {
-    const files: Array<Record<string, unknown>> = []; const logs: Array<Record<string, unknown>> = []
+    const logs: Array<Record<string, unknown>> = []
     for (const job of jobs) {
-      const events = Array.isArray(job.progress?.fileEvents) ? job.progress.fileEvents : Array.isArray(job.result?.fileEvents) ? job.result.fileEvents : []
-      for (const entry of events) if (isRecord(entry)) files.push({ ...entry, workerId: job.claimedByAgentId || job.claimed_by_agent_id || "—" })
       const entries = Array.isArray(job.progress?.logs) ? job.progress.logs : []
-      for (const entry of entries) if (isRecord(entry)) logs.push(entry)
+      for (const entry of entries) if (isRecord(entry)) logs.push({ ...entry, operation: job.mode, bucket: entry.bucket || snapshot.buckets?.find(bucket => bucket.id === entry.itemId)?.sourceBucket })
     }
-    files.sort((a, b) => String(b.updatedAt || b.completedAt || b.startedAt || "").localeCompare(String(a.updatedAt || a.completedAt || a.startedAt || "")))
-    logs.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")))
-    return { files: files.slice(0, 100), logs: logs.slice(0, 100) }
-  }, [jobs])
+    logs.sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")))
+    return { logs: logs.slice(-100).map(entry => ({
+      at: String(entry.at || ""), context: String(entry.bucket || ""), stage: String(entry.stage || ""),
+      operation: String(entry.operation || ""), status: String(entry.status || ""), message: String(entry.message || ""),
+    })) }
+  }, [jobs, snapshot.buckets])
+  const activeFiles = React.useMemo(() => currentMigrationFiles(liveFiles, liveNow), [liveFiles, liveNow])
 
   const bucketColumns = React.useMemo<ColumnDef<BucketStat, unknown>[]>(() => [
-    { accessorKey: "sourceBucket", header: "Source", cell: ({ row }) => <div><div className="font-medium">{row.original.sourceBucket}</div><div className="text-xs text-muted-foreground">{formatBytes(num(row.original.sourceBytes))}</div></div> },
-    { accessorKey: "targetBucket", header: "Target", cell: ({ row }) => <span className="font-medium">{row.original.targetBucket}</span> },
-    { accessorKey: "status", header: "Status", cell: ({ row }) => statusBadge(row.original.status) },
-    ...(snapshot.buckets?.some((bucket) => num(bucket.queuedObjects) > 0) ? [{ id: "queue", header: "Queue", cell: ({ row }: { row: { original: BucketStat } }) => <span className="tabular-nums">{formatNumber(num(row.original.queuedObjects))}</span> }] : []),
-    { id: "transferred", header: "Transferred", cell: ({ row }) => <span className="tabular-nums">{formatNumber(num(row.original.transferredObjects))}</span> },
-    { id: "skipped", header: "Skipped", cell: ({ row }) => <span className="tabular-nums">{formatNumber(num(row.original.skippedObjects))}</span> },
-    { id: "failed", header: "Failed", cell: ({ row }) => <span className="tabular-nums text-destructive">{formatNumber(num(row.original.failedObjects))}</span> },
-    { id: "progress", header: "Progress", cell: ({ row }) => { const done = num(row.original.transferredObjects) + num(row.original.skippedObjects); const value = percentage(done, num(row.original.totalObjects)); return <div className="flex min-w-40 flex-col gap-1.5"><Progress value={value} className="h-2" /><span className="text-xs text-muted-foreground">{value.toFixed(1)}% · {formatNumber(done)} / {formatNumber(num(row.original.totalObjects))}</span></div> } },
+    {
+      accessorKey: "sourceBucket", header: "Source", meta: { width: "min-w-[240px]" },
+      cell: ({ row }) => <div className="flex min-h-10 items-center gap-1.5">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border bg-background"><Files className="size-3 text-muted-foreground" /></span>
+        <div className="min-w-0 max-w-[260px]">
+          <div className="truncate text-[13px] font-medium leading-4" title={row.original.sourceBucket}>{row.original.sourceBucket}</div>
+          <div className="text-[10px] leading-3.5 text-muted-foreground">{formatBytes(num(row.original.sourceBytes))}</div>
+        </div>
+      </div>,
+    },
+    { accessorKey: "targetBucket", header: "Target", meta: { width: "min-w-[200px]", align: "center" }, cell: ({ row }) => <span className="break-all text-[13px] font-medium">{row.original.targetBucket}</span> },
+    { accessorKey: "status", header: "Status", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }) => <div className="flex min-h-10 items-center justify-center">{statusBadge(row.original.status)}</div> },
+    ...(snapshot.buckets?.some((bucket) => num(bucket.queuedObjects) > 0) ? [{ id: "queue", header: "Queue", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }: { row: { original: BucketStat } }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.queuedObjects))}</span> }] : []),
+    { id: "transferred", header: "Transferred", meta: { width: "min-w-[130px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.transferredObjects))}</span> },
+    { id: "skipped", header: "Skipped", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.skippedObjects))}</span> },
+    { id: "failed", header: "Failed", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums text-destructive">{formatNumber(num(row.original.failedObjects))}</span> },
+    { id: "progress", header: "Progress", meta: { width: "min-w-[180px]", align: "center", divider: false }, cell: ({ row }) => { const done = num(row.original.transferredObjects) + num(row.original.skippedObjects); const value = migrationProgressPercent(done, num(row.original.totalObjects)); return <div className="flex min-h-10 flex-col justify-center gap-1.5"><Progress value={value} className="h-1.5" /><span className="text-[11px] tabular-nums text-muted-foreground">{value.toFixed(1)}% · {formatNumber(done)} / {formatNumber(num(row.original.totalObjects))}</span></div> } },
   ], [snapshot.buckets])
 
   const fileColumns = React.useMemo<ColumnDef<Record<string, unknown>, unknown>[]>(() => [
-    { id: "object", header: "Object", cell: ({ row }) => <div className="max-w-[420px]"><div className="truncate font-mono text-xs">{String(row.original.key ?? "—")}</div><div className="text-xs text-muted-foreground">{String(row.original.bucket ?? "—")}</div></div> },
-    { id: "stage", header: "Stage", cell: ({ row }) => String(row.original.stage ?? "—") },
-    { id: "status", header: "Status", cell: ({ row }) => statusBadge(typeof row.original.status === "string" ? row.original.status : undefined) },
-    { id: "size", header: "Size", cell: ({ row }) => formatBytes(num(row.original.size ?? row.original.bytesTotal)) },
-    { id: "worker", header: "Worker", cell: ({ row }) => <span className="font-mono text-xs">{String(row.original.workerId ?? "—")}</span> },
-    { id: "updated", header: "Updated", cell: ({ row }) => <span className="text-xs">{formatDate(String(row.original.updatedAt ?? row.original.completedAt ?? row.original.startedAt ?? ""))}</span> },
+    {
+      id: "object", header: "Object", meta: { width: "min-w-[280px]" },
+      cell: ({ row }) => (
+        <div className="flex min-h-10 items-center gap-1.5">
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border bg-background"><Files className="size-3 text-muted-foreground" /></span>
+          <div className="min-w-0 max-w-[320px]">
+            <div className="truncate text-[13px] font-medium leading-4" title={String(row.original.key)}>{String(row.original.key)}</div>
+            <div className="truncate font-mono text-[10px] leading-3.5 text-muted-foreground" title={String(row.original.bucket || "")}>{String(row.original.bucket || "—")}</div>
+          </div>
+        </div>
+      ),
+    },
+    {
+      id: "stage", header: "Stage", meta: { width: "min-w-[150px]", align: "center" },
+      cell: ({ row }) => <span className="text-[11px] text-muted-foreground">{formatLogStage(String(row.original.stage || ""), String(row.original.operation || ""))}</span>,
+    },
+    {
+      id: "status", header: "Status", meta: { width: "min-w-[120px]", align: "center" },
+      cell: ({ row }) => <div className="flex min-h-10 items-center justify-center">{statusBadge(String(row.original.status))}</div>,
+    },
+    {
+      id: "progress", header: "Transferred", meta: { width: "min-w-[180px]", align: "center" },
+      cell: ({ row }) => (
+        <div className="flex min-h-10 flex-col justify-center gap-1.5">
+          <Progress value={percentage(num(row.original.bytesTransferred), num(row.original.bytesTotal ?? row.original.size))} className="h-1.5" />
+          <span className="text-[11px] tabular-nums text-muted-foreground">{formatBytes(num(row.original.bytesTransferred))} / {formatBytes(num(row.original.bytesTotal ?? row.original.size))}</span>
+        </div>
+      ),
+    },
+    {
+      id: "size", header: "Size", meta: { width: "min-w-[120px]", align: "center" },
+      cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatBytes(num(row.original.size ?? row.original.bytesTotal))}</span>,
+    },
+    {
+      id: "worker", header: "Worker", meta: { width: "min-w-[240px]", align: "center" },
+      cell: ({ row }) => <span className="break-all font-mono text-[10px] text-muted-foreground">{String(row.original.workerId || "—")}</span>,
+    },
+    {
+      id: "updated", header: "Updated", meta: { width: "min-w-[160px]", align: "center", divider: false },
+      cell: ({ row }) => <WorkerTableDate value={String(row.original.updatedAt || row.original.startedAt || row.original.lastHeartbeatAt || "")} />,
+    },
   ], [])
 
   const jobColumns = React.useMemo<ColumnDef<JobRow, unknown>[]>(() => [
@@ -277,9 +332,29 @@ export default function MigrationWorkerPoolDetailsPage() {
           resetKey={selectedGeneration}
           emptyState="No workers were dispatched for this attempt."
         />
-        <DashboardDataTable data={buckets} columns={bucketColumns} pageSize={10} minWidth="980px" resetKey={`${migrationId}:${selectedGeneration}`} header={<div><CardTitle className="text-base">Bucket progress</CardTitle><CardDescription>The same bucket table flow used by migration details.</CardDescription></div>} emptyState="Bucket statistics are not available yet." />
-        <DashboardDataTable data={telemetry.files} columns={fileColumns} pageSize={25} minWidth="1060px" resetKey={snapshot.updatedAt} header={<div><CardTitle className="text-base">Live file activity</CardTitle><CardDescription>Latest synchronized events reported by the worker pool.</CardDescription></div>} emptyState="No file activity captured yet." />
-        <Card className="gap-0 py-0"><CardHeader className="border-b px-5 py-4"><CardTitle className="text-base">Recent worker logs</CardTitle><CardDescription>Lifecycle and error messages from the latest jobs.</CardDescription></CardHeader><CardContent className="max-h-[420px] overflow-auto p-3"><div className="flex flex-col gap-2">{telemetry.logs.length ? telemetry.logs.map((entry, index) => <div key={`${index}-${String(entry.at ?? "")}`} className="rounded-xl border bg-muted/25 p-3"><div className="flex items-start justify-between gap-4"><span className="text-xs font-medium">{String(entry.message ?? "—")}</span><span className="shrink-0 text-[11px] text-muted-foreground">{formatDate(typeof entry.at === "string" ? entry.at : undefined)}</span></div></div>) : <p className="p-4 text-center text-sm text-muted-foreground">No worker logs captured yet.</p>}</div></CardContent></Card>
+        <DashboardDataTable
+          data={buckets}
+          columns={bucketColumns}
+          pageSize={10}
+          minWidth="1120px"
+          resetKey={`${migrationId}:${selectedGeneration}`}
+          emptyState="Bucket statistics are not available yet."
+        />
+        <DashboardDataTable
+          data={activeFiles}
+          columns={fileColumns}
+          pageSize={25}
+          minWidth="1250px"
+          resetKey={`${migrationId}:${selectedGeneration}`}
+          emptyState="No files are currently transferring."
+        />
+        <DashboardLogsCard
+          key={selectedGeneration}
+          title="Worker Logs"
+          entries={telemetry.logs}
+          storageKey="drive:workerPoolLogsCols:v1"
+          emptyState="No worker logs captured yet."
+        />
       </TabsContent>
       <TabsContent value="jobs" className="flex flex-col gap-4">
         <DashboardDataTable data={jobPage} columns={jobColumns} pageSize={pagination.pageSize} minWidth="1120px" serverPagination={{ pageIndex: pagination.pageIndex, pageCount: pagination.pageCount, onPageChange: (page) => { setPagination((current) => ({ ...current, pageIndex: page })); void load({ page }) } }} header={<div><CardTitle className="text-base">Durable file queue</CardTitle><CardDescription>Files created by File Scanner for this selected pool attempt.</CardDescription></div>} emptyState="No file jobs were materialized for this attempt." />
