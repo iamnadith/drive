@@ -253,3 +253,18 @@ test('genuinely unindexed workflow stays blocked after activation is attempted',
   assert.ok(f.calls.some(c => c.pathname.endsWith('/enable')))
   assert.ok(!f.calls.some(c => c.pathname.endsWith('/dispatches')))
 }))
+
+test('scheduled tick only enqueues a durable scheduling cycle without opening the database', async () => {
+  const vm = require('node:vm')
+  const source = fs.readFileSync('workers/migration-orchestrator/src/index.ts', 'utf8')
+  const method = source.slice(source.indexOf('  async scheduled('), source.indexOf('  async queue('))
+  const context = { exports: {}, cycle: () => { throw new Error('cron must not run database cycle') } }
+  vm.runInNewContext(ts.transpileModule('exports.handler = {' + method + '}', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context)
+  const messages = [], pending = []
+  await context.exports.handler.scheduled({}, { GITHUB_DISPATCH_QUEUE: { send: async (body, options) => messages.push({ body, options }) } }, { waitUntil: promise => pending.push(promise) })
+  await Promise.all(pending)
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].body.control, 'cycle')
+  assert.equal(messages[0].options.contentType, 'json')
+  await assert.rejects(context.exports.handler.scheduled({}, { GITHUB_DISPATCH_QUEUE: { send: async () => { throw new Error('queue unavailable') } } }, { waitUntil: promise => pending.push(promise) }).then(() => Promise.all(pending)), /queue unavailable/)
+})

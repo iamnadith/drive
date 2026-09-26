@@ -4,7 +4,7 @@ import { syncWorkerRepository } from "../../../src/lib/github-worker-sync"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_WORKER_SOURCE_REPO?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 33
+const BUILD = 34
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -1300,9 +1300,13 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
         const response = await fetch(url, { headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" }, signal: AbortSignal.timeout(15_000) })
         if (!response.ok) throw new Error(`GitHub workflow capacity check HTTP ${response.status}`)
         const payload = await response.json() as { workflow_runs?: Row[] }
-        githubRunsByWorkflow.set(workflowKey, payload.workflow_runs || [])
-      } catch {
+        if (!Array.isArray(payload.workflow_runs)) throw new Error("GitHub returned an incomplete workflow run list")
+        githubRunsByWorkflow.set(workflowKey, payload.workflow_runs)
+        await db.query(`update drive_agents set last_error=null,updated_at=now() where id=$1 and last_error like 'GitHub dispatch capacity check failed:%'`, [agent.id])
+      } catch (error) {
         blockedWorkflows.add(workflowKey)
+        const message = error instanceof Error ? error.message : String(error)
+        await db.query(`update drive_agents set last_error=$2,updated_at=now() where id=$1`, [agent.id, `GitHub dispatch capacity check failed: ${message}`])
       }
     }
     if (blockedWorkflows.has(workflowKey)) continue
@@ -2010,7 +2014,13 @@ export default {
     if (url.pathname === "/run" && request.method === "POST") { try { return json(await cycle(env)) } catch (error) { return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 503) } }
     return json({ error: "Not found" }, 404)
   },
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) { ctx.waitUntil(cycle(env).then(() => undefined).catch((error) => console.error(error))) },
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    // Free-plan cron invocations have a 10 ms CPU budget. Opening PostgreSQL
+    // and reconciling a growing fleet here can terminate the invocation after
+    // acquiring its lease, starving new workflows indefinitely. Keep the timer
+    // lightweight; the durable queue consumer owns the full scheduling cycle.
+    ctx.waitUntil(env.GITHUB_DISPATCH_QUEUE.send({ control: "cycle" }, { contentType: "json" }))
+  },
   async queue(batch: MessageBatch<DispatchMessage>, env: Env) {
     for (const message of batch.messages) {
       try {
