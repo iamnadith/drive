@@ -15,7 +15,7 @@ type Repo = {
 }
 type State = {
   expires: number; source: Repo; page: number; matches: Repo[]
-  phase: "scan" | "fork" | "ready"; selected?: Repo; scanned: number; forkRequested?: boolean; forkSuffix?: number
+  phase: "scan" | "fork" | "ready"; selected?: Repo; scanned: number; forkRequested?: boolean; forkSuffix?: number; workflowWaitStarted?: number; workflowWaitAttempts?: number
 }
 export type WorkerRepository = {
   id: string; owner: string; name: string; fullName: string; defaultBranch: string
@@ -242,7 +242,14 @@ export async function advanceWorkerSetup(token: string, cursor?: string, selecte
     }
     if (workflow.state !== "active") throw new Error(`Worker workflow ${workflow.path} is disabled. Enable it in GitHub Actions and retry.`)
   } catch (error) {
-    if (error instanceof WorkerSyncPendingError) return pending(error.message)
+    if (error instanceof WorkerSyncPendingError) {
+      state.workflowWaitStarted ??= Date.now()
+      state.workflowWaitAttempts = (state.workflowWaitAttempts || 0) + 1
+      if (state.workflowWaitAttempts >= 6 || Date.now() - state.workflowWaitStarted >= 90_000) {
+        throw new Error(`Repository ${repo.full_name} is forked and its worker files are synchronized, but GitHub Actions is not ready. Open https://github.com/${repo.full_name}/actions and complete any fork activation prompt, then continue setup. If Actions is already enabled, check the workflow validation errors and the connected token's Actions access.`)
+      }
+      return pending(error.message)
+    }
     if ((error instanceof GitHubApiError && (error.status === 404 || error.status === 409)) || error instanceof WorkerWorkflowPendingError) {
       return pending("Waiting for GitHub to prepare the synchronized worker files and workflow...")
     }

@@ -122,20 +122,64 @@ export async function syncWorkerRepository(input: {
       if (comparison.behind_by !== 0) throw new Error("Worker repository is still missing upstream commits; dispatch stopped")
     }
     if (await head(sourcePath, source.default_branch) !== sourceSha || await head(targetPath, target.default_branch) !== targetSha) continue
-    const workflowPath = `${targetPath}/actions/workflows/${encodeURIComponent(input.workflow.split("/").pop()!)}`
-    let action: { state: string; path: string }
-    try { action = await api(workflowPath) }
-    catch (error) {
-      if (error instanceof SyncError && error.status === 404) throw new WorkerSyncPendingError("Waiting for GitHub to index the synchronized worker workflow")
-      throw error
+    let workflowPath = `${targetPath}/actions/workflows/${encodeURIComponent(input.workflow.split("/").pop()!)}`
+    type Action = { id?: number; state: string; path: string }
+    const lookup = async (): Promise<Action | undefined> => {
+      try { return await api<Action>(workflowPath) }
+      catch (error) { if (error instanceof SyncError && error.status === 404) return undefined; throw error }
     }
-    if (action.path !== input.workflow) throw new WorkerSyncPendingError("Waiting for GitHub to index the synchronized worker workflow")
+    let action = await lookup()
+    if (!action || action.path !== input.workflow) {
+      // Fresh forks can have real workflow files but no Actions records while
+      // repository-level Actions is disabled. Waiting cannot enable it.
+      let permissions: { enabled: boolean; allowed_actions?: string; sha_pinning_required?: boolean }
+      try { permissions = await api(`${targetPath}/actions/permissions`) }
+      catch (error) {
+        if (error instanceof SyncError && [403, 404].includes(error.status)) {
+          throw new Error(`Cannot check GitHub Actions permissions for ${input.owner}/${input.repo}. Reconnect GitHub with repository administration and Actions access, or enable Actions at https://github.com/${input.owner}/${input.repo}/actions`)
+        }
+        throw error
+      }
+      if (typeof permissions.enabled !== "boolean") throw new Error("GitHub returned invalid Actions permissions; setup stopped")
+      // Reassert enablement even when the policy already reports enabled:
+      // repository policy and activation of inherited fork workflows differ.
+      // Carry forward restriction fields instead of relaxing repository policy.
+      await api(`${targetPath}/actions/permissions`, "PUT", {
+        enabled: true,
+        ...(permissions.allowed_actions ? { allowed_actions: permissions.allowed_actions } : {}),
+        ...(typeof permissions.sha_pinning_required === "boolean" ? { sha_pinning_required: permissions.sha_pinning_required } : {}),
+      })
+      permissions = await api(`${targetPath}/actions/permissions`)
+      if (permissions.enabled !== true) throw new Error("GitHub Actions remains disabled by repository or organization policy")
+      action = await lookup()
+      if (!action || action.path !== input.workflow) {
+        // Resolve by exact path and numeric ID when filename lookup is absent.
+        action = undefined
+        for (let page = 1; ; page++) {
+          const listing = await api<{ workflows: Action[] }>(`${targetPath}/actions/workflows?per_page=100&page=${page}`)
+          if (!Array.isArray(listing.workflows)) throw new Error("GitHub returned an incomplete workflow list")
+          action = listing.workflows.find(entry => entry.path === input.workflow)
+          if (action || listing.workflows.length < 100) break
+          if (page >= 100) throw new Error("GitHub workflow listing exceeded the supported size; setup stopped")
+        }
+      }
+      if (action?.id) workflowPath = `${targetPath}/actions/workflows/${action.id}`
+      if (!action) {
+        // GitHub may resolve an unactivated fork workflow at the enable endpoint
+        // before exposing it in workflow listings. Never send a worker dispatch here.
+        try { await api(`${workflowPath}/enable`, "PUT") }
+        catch (error) { if (!(error instanceof SyncError && error.status === 404)) throw error }
+        action = await lookup()
+      }
+    }
+    if (!action || action.path !== input.workflow) throw new WorkerSyncPendingError(`GitHub Actions is enabled, but has not exposed ${input.workflow} in ${input.owner}/${input.repo} yet`)
+    if (action.id) workflowPath = `${targetPath}/actions/workflows/${action.id}`
     if (action.state === "disabled_fork") {
       await api(`${workflowPath}/enable`, "PUT")
-      action = await api<{ state: string; path: string }>(workflowPath)
-      if (action.state === "disabled_fork") throw new WorkerSyncPendingError("Waiting for GitHub to enable the synchronized worker workflow")
+      action = await lookup()
+      if (!action || action.state === "disabled_fork") throw new WorkerSyncPendingError("Waiting for GitHub to enable the synchronized worker workflow")
     }
-    if (action.state !== "active") throw new Error("Worker workflow is disabled or still being enabled; enable it in GitHub Actions and retry")
+    if (action.path !== input.workflow || action.state !== "active") throw new Error("Worker workflow is disabled or still being enabled; enable it in GitHub Actions and retry")
     return { sourceSha, targetSha, defaultBranch: target.default_branch }
   }
   throw new Error("Repository changed repeatedly during synchronization; retry worker dispatch")

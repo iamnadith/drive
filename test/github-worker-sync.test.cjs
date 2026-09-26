@@ -50,6 +50,8 @@ function fixture(options = {}) {
   let behind = options.merge ? 2 : 0
   let currentSource = sourceSha
   let actionState = options.actionState || 'active'
+  let actionsEnabled = !options.actionsDisabled
+  let activated = false
   let nextTree
   let raced = false
   const calls = []
@@ -99,8 +101,20 @@ function fixture(options = {}) {
       if (options.sourceMoves) currentSource = 'f'.repeat(40)
       return response({ object: { sha: targetSha } })
     }
-    if (pathname.endsWith('/enable')) { actionState = 'active'; return response(null, 204) }
-    if (pathname.includes('/actions/workflows/')) return response({ path: selectedWorkflow, state: actionState })
+    if (pathname.endsWith('/actions/permissions')) {
+      if (options.permissionsDenied) return response({ message: 'Not Found' }, 404)
+      if (method === 'PUT') { assert.deepEqual(body, { enabled: true, allowed_actions: 'selected' }); actionsEnabled = true; return response(null, 204) }
+      return response({ enabled: actionsEnabled, allowed_actions: 'selected' })
+    }
+    if (pathname.endsWith('/actions/workflows')) return response({ workflows: options.numericWorkflow ? [{ id: 123, path: selectedWorkflow, state: actionState }] : [] })
+    if (pathname.endsWith('/enable')) {
+      if (options.neverIndexed) return response({ message: 'Not Found' }, 404)
+      activated = true; actionState = 'active'; return response(null, 204)
+    }
+    if (pathname.includes('/actions/workflows/')) {
+      if (!actionsEnabled || options.neverIndexed || (options.activateFirst && !activated) || (options.numericWorkflow && !pathname.endsWith('/123'))) return response({ message: 'Not Found' }, 404)
+      return response({ path: selectedWorkflow, state: actionState })
+    }
     throw new Error(`Unhandled ${method} ${pathname}`)
   }
   return { calls, fetch, entries: () => targetEntries, input: { token: 'test', owner: 'me', repo: 'renamed', workflow: selectedWorkflow } }
@@ -215,3 +229,27 @@ test('queued dispatch does not contact GitHub dispatch when code sync fails', as
     }
   }
 })
+
+test('fresh fork with workflow files and disabled repository Actions is enabled before checking the workflow', () => run({ actionsDisabled: true, actionState: 'disabled_fork' }, async f => {
+  await syncWorkerRepository(f.input)
+  const enableRepository = f.calls.findIndex(c => c.pathname.endsWith('/actions/permissions') && c.method === 'PUT')
+  const enableWorkflow = f.calls.findIndex(c => c.pathname.endsWith('/enable'))
+  assert.ok(enableRepository >= 0 && enableWorkflow > enableRepository)
+  assert.ok(!f.calls.some(c => c.pathname.endsWith('/dispatches')))
+}))
+test('unlisted fork workflow is activated directly rather than waiting before attempting enablement', () => run({ activateFirst: true }, async f => {
+  await syncWorkerRepository(f.input)
+  assert.ok(f.calls.some(c => c.pathname.endsWith('/enable') && c.method === 'PUT'))
+}))
+test('workflow filename lookup failure resolves the exact listed path by numeric ID', () => run({ numericWorkflow: true, actionState: 'disabled_fork' }, async f => {
+  await syncWorkerRepository(f.input)
+  assert.ok(f.calls.some(c => c.pathname.endsWith('/workflows/123/enable')))
+}))
+test('inaccessible Actions permissions report an actionable error rather than indexing pending', () => run({ neverIndexed: true, permissionsDenied: true }, async f => {
+  await assert.rejects(syncWorkerRepository(f.input), /Reconnect GitHub.*administration and Actions access/)
+}))
+test('genuinely unindexed workflow stays blocked after activation is attempted', () => run({ neverIndexed: true }, async f => {
+  await assert.rejects(syncWorkerRepository(f.input), /Actions is enabled, but has not exposed/)
+  assert.ok(f.calls.some(c => c.pathname.endsWith('/enable')))
+  assert.ok(!f.calls.some(c => c.pathname.endsWith('/dispatches')))
+}))

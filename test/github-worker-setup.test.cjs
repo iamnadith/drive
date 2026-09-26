@@ -25,7 +25,8 @@ function loadOAuth() {
   return mod.exports
 }
 
-function loadSetup(api) {
+function loadSetup(api, syncPending = false) {
+  class WorkerSyncPendingError extends Error {}
   const filename = path.resolve('src/lib/github-worker-setup.ts')
   const mod = new Module(filename, module)
   mod.filename = filename
@@ -33,7 +34,7 @@ function loadSetup(api) {
   class GitHubApiError extends Error { constructor(message, status) { super(message); this.status = status } }
   mod.require = (name) => {
     if (name === './github-worker-workflow') return loadWorkflowContract()
-    if (name === './github-worker-sync') return { syncWorkerRepository: async () => ({}), WorkerSyncPendingError: class extends Error {} }
+    if (name === './github-worker-sync') return { syncWorkerRepository: async () => { if (syncPending) throw new WorkerSyncPendingError('waiting for indexing'); return {} }, WorkerSyncPendingError }
     if (name === './github-oauth') return {
       githubApi: api,
       GitHubApiError,
@@ -85,7 +86,7 @@ function fixture(repos, options = {}) {
     if (url === '/repos/me/renamed-500') return repo(500, { fork: true, source: { id: 1 } })
     throw new setup.GitHubApiError('Not found', 404)
   }
-  setup = loadSetup(api)
+  setup = loadSetup(api, options.syncPending)
   return { ...setup, calls }
 }
 test('detects a renamed marker repository beyond the first hundred among unrelated repositories', async () => {
@@ -496,5 +497,13 @@ test('source owner reuses the original repository instead of attempting an impos
   const f = fixture([source], { login: 'iamnadith', source: { permissions: { admin: true, push: true } } })
   const pending = await f.advanceWorkerSetup('token')
   assert.equal((await f.advanceWorkerSetup('token', pending.cursor)).repo.fullName, 'iamnadith/Drive')
+  assert.ok(!f.calls.some(c => c.method === 'POST'))
+})
+
+test('workflow indexing waits are bounded and preserve the existing fork', async () => {
+  const f = fixture([repo(9, { fork: true, source: { id: 1 } })], { syncPending: true })
+  let result = await f.advanceWorkerSetup('token')
+  for (let attempt = 1; attempt < 5; attempt++) result = await f.advanceWorkerSetup('token', result.cursor)
+  await assert.rejects(f.advanceWorkerSetup('token', result.cursor), /forked and its worker files are synchronized.*github.com\/me\/renamed-9\/actions/)
   assert.ok(!f.calls.some(c => c.method === 'POST'))
 })
