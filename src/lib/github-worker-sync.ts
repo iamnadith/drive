@@ -13,7 +13,7 @@ export class WorkerSyncPendingError extends Error {}
 
 // Runtime-neutral: both the panel and the queue consumer use this exact gate.
 export async function syncWorkerRepository(input: {
-  token: string; owner: string; repo: string; workflow: string; sourceRepo?: string
+  token: string; owner: string; repo: string; workflow: string; sourceRepo?: string; activateActions?: boolean
 }) {
   const sourceName = input.sourceRepo?.trim() || DEFAULT_WORKER_SOURCE
   if (!/^[\w.-]+\/[\w.-]+$/.test(sourceName)) throw new Error("Invalid GITHUB_WORKER_SOURCE_REPO")
@@ -129,7 +129,7 @@ export async function syncWorkerRepository(input: {
       catch (error) { if (error instanceof SyncError && error.status === 404) return undefined; throw error }
     }
     let action = await lookup()
-    if (!action || action.path !== input.workflow) {
+    if (!action || action.path !== input.workflow || (input.activateActions && action.state === "active")) {
       // Fresh forks can have real workflow files but no Actions records while
       // repository-level Actions is disabled. Waiting cannot enable it.
       let permissions: { enabled: boolean; allowed_actions?: string; sha_pinning_required?: boolean }
@@ -174,7 +174,7 @@ export async function syncWorkerRepository(input: {
     }
     if (!action || action.path !== input.workflow) throw new WorkerSyncPendingError(`GitHub Actions is enabled, but has not exposed ${input.workflow} in ${input.owner}/${input.repo} yet`)
     if (action.id) workflowPath = `${targetPath}/actions/workflows/${action.id}`
-    if (action.state === "disabled_fork") {
+    if (action.state === "disabled_fork" || (input.activateActions && action.state === "active")) {
       await api(`${workflowPath}/enable`, "PUT")
       action = await lookup()
       if (!action || action.state === "disabled_fork") throw new WorkerSyncPendingError("Waiting for GitHub to enable the synchronized worker workflow")

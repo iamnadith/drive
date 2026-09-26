@@ -253,7 +253,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         { status: 409 }
       )
     }
-    const codeSync = await syncWorkerRepository({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, workflow: githubWorkflowFile, sourceRepo: process.env.GITHUB_WORKER_SOURCE_REPO })
+    const codeSync = await syncWorkerRepository({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, workflow: githubWorkflowFile, sourceRepo: process.env.GITHUB_WORKER_SOURCE_REPO, activateActions: agent.status === "dispatch_ready" })
     await assertWorkerWorkflow({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, ref: codeSync.targetSha, workflow: githubWorkflowFile })
     await updateAgent(id, { githubRef: codeSync.defaultBranch })
     const dispatchRequestedAt = new Date().toISOString()

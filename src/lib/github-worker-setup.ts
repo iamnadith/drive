@@ -230,7 +230,7 @@ export async function advanceWorkerSetup(token: string, cursor?: string, selecte
       // the actual source workflow rather than polling stale files forever.
       workflow = await detectWorkerWorkflow(state.source, token)
     }
-    await syncWorkerRepository({ token, owner: repo.owner.login, repo: repo.name, workflow: workflow.path, sourceRepo: state.source.full_name })
+    await syncWorkerRepository({ token, owner: repo.owner.login, repo: repo.name, workflow: workflow.path, sourceRepo: state.source.full_name, activateActions: true })
     workflow = await detectWorkerWorkflow({ ...repo, workerWorkflowHint: workflow.path }, token)
     for (const path of [`${workflow.path}`, `${WORKFLOW_DIRECTORY}/package.json`, `${WORKFLOW_DIRECTORY}/package-lock.json`, `${WORKFLOW_DIRECTORY}/migration-worker.mjs`]) {
       const file = await githubApi<{ type?: string; encoding?: string; content?: string }>(`${repoPath(repo)}/contents/${contentPath(path)}?ref=${encodeURIComponent(repo.default_branch)}`, token)

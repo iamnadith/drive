@@ -4,7 +4,7 @@ import { syncWorkerRepository } from "../../../src/lib/github-worker-sync"
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_WORKER_SOURCE_REPO?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
-const BUILD = 34
+const BUILD = 35
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -1614,7 +1614,7 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
     const dispatchStartedAt = Date.parse(String(intent.payload?.dispatchStartedAt || ""))
     if (phase === "accepted" || (phase === "dispatching" && Number.isFinite(dispatchStartedAt) && Date.now() - dispatchStartedAt < 5 * 60_000)) { await db.query("commit"); transactionOpen = false; return "awaiting_reconciliation" }
     const workerInstanceId = String(intent.payload.workerInstanceId)
-    const codeSync = await syncWorkerRepository({ token: intent.github_token, owner: intent.github_repo_owner, repo: intent.github_repo_name, workflow: intent.github_workflow_file || ".github/workflows/migration-worker.yml", sourceRepo: env.GITHUB_WORKER_SOURCE_REPO })
+    const codeSync = await syncWorkerRepository({ token: intent.github_token, owner: intent.github_repo_owner, repo: intent.github_repo_name, workflow: intent.github_workflow_file || ".github/workflows/migration-worker.yml", sourceRepo: env.GITHUB_WORKER_SOURCE_REPO, activateActions: intent.agent_status === "dispatch_ready" })
     await db.query(`update drive_agents set github_ref=$2,updated_at=now() where id=$1`, [intent.agent_id, codeSync.defaultBranch])
     await db.query(`update drive_agent_runs set payload=payload||$2::jsonb where id=$1`, [intent.id, JSON.stringify({ sourceCommit: codeSync.sourceSha, workerCommit: codeSync.targetSha, ref: codeSync.defaultBranch })])
     await db.query(`update drive_agent_runs set payload=payload||$2::jsonb,summary='Submitting GitHub workflow dispatch',updated_at=now() where id=$1`, [intent.id, JSON.stringify({ phase: "dispatching", dispatchStartedAt: new Date().toISOString(), dispatchAttempt: attempts })])

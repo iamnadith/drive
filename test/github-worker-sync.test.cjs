@@ -268,3 +268,15 @@ test('scheduled tick only enqueues a durable scheduling cycle without opening th
   assert.equal(messages[0].options.contentType, 'json')
   await assert.rejects(context.exports.handler.scheduled({}, { GITHUB_DISPATCH_QUEUE: { send: async () => { throw new Error('queue unavailable') } } }, { waitUntil: promise => pending.push(promise) }).then(() => Promise.all(pending)), /queue unavailable/)
 })
+
+test('newly registered fork reasserts repository and workflow activation even when GitHub reports active', () => run({}, async f => {
+  await syncWorkerRepository({ ...f.input, activateActions: true })
+  assert.ok(f.calls.some(c => c.pathname.endsWith('/actions/permissions') && c.method === 'PUT'))
+  assert.ok(f.calls.some(c => c.pathname.endsWith('/workflows/migration-worker.yml/enable') && c.method === 'PUT'))
+}))
+test('registration activates and synchronizes before the workflow becomes eligible for automatic dispatch', () => {
+  const route = fs.readFileSync('src/app/api/agents/route.ts', 'utf8')
+  assert.ok(route.indexOf('await syncWorkerRepository({') < route.indexOf('await createAgent({'))
+  assert.match(route, /activateActions: true/)
+  assert.match(route, /githubRef = codeSync.defaultBranch/)
+})
