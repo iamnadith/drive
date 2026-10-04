@@ -372,11 +372,13 @@ async function ensureHyperdrive(token: string, accountId: string, state: Install
       && existing.origin.user === origin.user
       && Number(existing.origin.port || 5432) === origin.port
       && ["postgres", "postgresql"].includes(String(existing.origin.scheme || "postgres"))
-    if (saved?.id !== existing.id || saved.originFingerprint !== fingerprint || !originMatches || existing.origin_connection_limit !== 5) {
+    const needsUpdate = saved?.id !== existing.id || saved.originFingerprint !== fingerprint || !originMatches || existing.origin_connection_limit !== 5
+    if (needsUpdate) {
       await cf(token, `/accounts/${accountId}/hyperdrive/configs/${existing.id}`, {
         method: "PATCH",
         body: JSON.stringify({ name, origin, origin_connection_limit: 5, caching: { disabled: true }, mtls: { sslmode: "require" } }),
       })
+      await cf(token, `/accounts/${accountId}/hyperdrive/configs/${existing.id}/restart`, { method: "POST" })
     }
   } else {
     config = await cf<{ id: string; name: string }>(token, `/accounts/${accountId}/hyperdrive/configs`, {
