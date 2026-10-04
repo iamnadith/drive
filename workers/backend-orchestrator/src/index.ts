@@ -1245,18 +1245,7 @@ export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url)
     if (url.pathname === "/health") {
-      let db: Client | null = null
-      try {
-        const config = runtimeConfig(env)
-        db = dbClient(config.postgresUrl, config.disablePostgresSsl, config.hyperdrive)
-        await db.connect()
-        await db.query("select 1")
-        return json({ ok: true, configured: true, build: WORKER_BUILD, panel: new URL(env.PANEL_URL).origin })
-      } catch {
-        return json({ ok: false, configured: false }, 503)
-      } finally {
-        await db?.end().catch(() => undefined)
-      }
+      return json({ ok: true, service: "backend-orchestrator", build: WORKER_BUILD })
     }
     if (!authorized(request, env)) return json({ error: "Unauthorized" }, 401)
     if (url.pathname === "/run" && request.method === "POST") {

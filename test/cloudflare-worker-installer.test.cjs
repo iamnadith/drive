@@ -22,6 +22,7 @@ test("Worker readiness rejects durable runtime errors without confusing them wit
   assert.equal(runtimeHealthError({ ok: false, error: "not configured" }), "not configured")
   assert.match(runtimeHealthError("not-json"), /invalid status response/)
   assert.match(installer, /Runtime verification failed: \$\{healthError\}/)
+  assert.match(installer, /Authenticated verification failed \(\$\{status\.status\}\)\$\{detail\}/)
   assert.match(installer, /current\.deployed = scriptPresent; current\.verified = false/)
 })
 

@@ -512,8 +512,14 @@ async function verify(url: string, secret: string) {
       const health = await fetch(`${url}/health`, { cache: "no-store", signal: AbortSignal.timeout(10_000) })
       if (!health.ok) throw new Error(`Health verification failed (${health.status})`)
       const status = await fetch(`${url}/status`, { cache: "no-store", headers: { Authorization: `Bearer ${secret}` }, signal: AbortSignal.timeout(15_000) })
-      if (!status.ok) throw new Error(`Authenticated verification failed (${status.status})`)
-      const healthError = runtimeHealthError(await status.json().catch(() => null))
+      const payload = await status.json().catch(() => null)
+      if (!status.ok) {
+        const detail = payload && typeof payload === "object" && typeof (payload as { error?: unknown }).error === "string"
+          ? `: ${(payload as { error: string }).error}`
+          : ""
+        throw new Error(`Authenticated verification failed (${status.status})${detail}`)
+      }
+      const healthError = runtimeHealthError(payload)
       if (healthError) throw new Error(`Runtime verification failed: ${healthError}`)
       return
     } catch (error) {
