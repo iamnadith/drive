@@ -4,6 +4,19 @@ import { r2CreateBucket } from "@/lib/r2-s3"
 import { requireAdmin } from "@/lib/server-auth"
 import { ensureBucketStatsRows, listBucketStats } from "@/lib/bucket-stats-store"
 import { getRequestActivityContext, recordActivity } from "@/lib/activity-store"
+import { isPostgresConnectionCapacityError } from "@/lib/db"
+
+const DATABASE_CAPACITY_MESSAGE = "The database is temporarily at connection capacity. Wait a few seconds, then try again."
+
+function databaseErrorResponse(error: unknown, fallback: string, extra: Record<string, unknown> = {}) {
+  if (isPostgresConnectionCapacityError(error)) {
+    return NextResponse.json(
+      { error: DATABASE_CAPACITY_MESSAGE, ...extra },
+      { status: 503, headers: { "Retry-After": "5" } }
+    )
+  }
+  return NextResponse.json({ error: errorMessage(error, fallback), ...extra }, { status: 500 })
+}
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
@@ -63,11 +76,7 @@ export async function GET() {
       source: "database",
     })
   } catch (error: unknown) {
-    const message = errorMessage(error, "Unable to list buckets")
-    return NextResponse.json(
-      { error: message, buckets: [], totalBytes: 0 },
-      { status: 500 }
-    )
+    return databaseErrorResponse(error, "Unable to list buckets", { buckets: [], totalBytes: 0 })
   }
 }
 
@@ -171,7 +180,6 @@ export async function POST(request: Request) {
     })
     return NextResponse.json({ ok: true, name: safeName, warning })
   } catch (error: unknown) {
-    const message = errorMessage(error, "Unable to create bucket")
-    return NextResponse.json({ error: message }, { status: 500 })
+    return databaseErrorResponse(error, "Unable to create bucket")
   }
 }

@@ -86,12 +86,20 @@ function buildSslConfig(): false | {
 function getPoolMax(): number {
   const raw = getEnv("POSTGRES_POOL_MAX")
   const parsed = raw ? Number(raw) : NaN
-  if (Number.isFinite(parsed) && parsed > 0) return parsed
-  // Each serverless instance owns one process-local pool. Keeping the implicit
-  // production pool small prevents horizontal scale-out from multiplying the
-  // database connection count; raise it only when the provider's pooler and
-  // measured query concurrency justify it.
-  return process.env.NODE_ENV === "production" ? 2 : 1
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return process.env.NODE_ENV === "production" ? 1 : Math.max(1, Math.floor(parsed))
+  }
+  // Each serverless instance owns one process-local pool, so production stays
+  // at one client even when an oversized pool setting is present.
+  return 1
+}
+
+export function isPostgresConnectionCapacityError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false
+  const maybe = error as { code?: unknown; message?: unknown }
+  const code = typeof maybe.code === "string" ? maybe.code : ""
+  const message = typeof maybe.message === "string" ? maybe.message.toLowerCase() : ""
+  return code === "53300" || message.includes("remaining connection slots are reserved")
 }
 
 function getSlowQueryThresholdMs(): number {
@@ -211,7 +219,7 @@ export async function withDbAdvisoryLock<T>(namespace: string, resource: string,
       ssl: buildSslConfig(),
       keepAlive: true,
       connectionTimeoutMillis: 10_000,
-      idleTimeoutMillis: 30_000,
+      idleTimeoutMillis: 5_000,
       max: 1,
     })
     global.__drivePgAdvisoryLockPool = pool
@@ -279,7 +287,7 @@ export function getDbPool(): Pool {
       ssl: buildSslConfig(),
       keepAlive: true,
       connectionTimeoutMillis: 10_000,
-      idleTimeoutMillis: 30_000,
+      idleTimeoutMillis: 5_000,
       max: getPoolMax(),
     })
     attachPoolErrorHandler(global.__drivePgPool)
