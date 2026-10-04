@@ -173,7 +173,10 @@ test("dashboard data stores use the shared PostgreSQL layer without Supabase cli
   assert.match(emailVerification, /angleAddress[\s\S]*trailingAddress/)
   assert.match(emailVerification, /Drive <onboarding@resend\.dev>/)
   assert.match(smsVerification, /crypto\.timingSafeEqual/)
-  assert.match(read("src/app/layout.tsx"), /const ambientThemeSettings = await getAmbientThemeSettings\(\)/)
+  const layout = read("src/app/layout.tsx")
+  assert.doesNotMatch(layout, /getAmbientThemeSettings|ambientThemeSettings/)
+  assert.match(layout, /<AmbientThemeProvider>/)
+  assert.match(read("src/components/ambient-theme-provider.tsx"), /Keep defaults when the shared settings are temporarily unavailable/)
 })
 
 test("repair worker claims are atomic and dashboard reads do not reconcile against GitHub", () => {
