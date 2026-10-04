@@ -715,10 +715,11 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       }
       const previousSecrets = previous?.secrets
       for (const worker of ORDER) {
+        const previousSecret = previousSecrets?.[worker] || ""
         state.secrets[worker] = configuredSecrets[worker].length >= 24
           ? configuredSecrets[worker]
-          : previousSecrets?.[worker]?.length >= 24
-            ? previousSecrets[worker]
+          : previousSecret.length >= 24
+            ? previousSecret
             : state.secrets[worker]
       }
     }
