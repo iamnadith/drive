@@ -6,7 +6,7 @@ if (!(globalThis as { DOMParser?: unknown }).DOMParser) (globalThis as { DOMPars
 if (!(globalThis as { Node?: unknown }).Node) (globalThis as { Node?: unknown }).Node = { ELEMENT_NODE: 1, TEXT_NODE: 3 }
 
 type ScanMessage = { reason: "continue" }
-type Env = { POSTGRES_URL?: string; FILE_SCANNER_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; FILE_SCAN_QUEUE: Queue<ScanMessage> }
+type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; FILE_SCANNER_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; FILE_SCAN_QUEUE: Queue<ScanMessage> }
 type Row = Record<string, any>
 type ClaimedTask = { kind: "migration" | "generic"; task: Row }
 type ClaimedCycle = { ok: true; owner: string; tasks: ClaimedTask[] } | { ok: true; skipped: string } | { ok: true; idle: true }
@@ -60,12 +60,13 @@ async function authorized(request: Request, env: Env) {
   }).catch(() => false)
 }
 async function database<T>(env: Env, operation: (client: Client) => Promise<T>): Promise<T> {
-  const connectionString = String(env.POSTGRES_URL || "").trim()
-  if (!connectionString) throw new Error("POSTGRES_URL is not configured")
+  const hyperdrive = Boolean(env.HYPERDRIVE?.connectionString?.trim())
+  const connectionString = hyperdrive ? env.HYPERDRIVE!.connectionString.trim() : String(env.POSTGRES_URL || "").trim()
+  if (!connectionString) throw new Error("Neither HYPERDRIVE nor POSTGRES_URL is configured")
   const hostname = new URL(connectionString).hostname
   const sslMode = new URL(connectionString).searchParams.get("sslmode")?.trim().toLowerCase()
   const disableSsl = ["1", "true"].includes(String(env.DISABLE_POSTGRES_SSL || "").toLowerCase()) || sslMode === "disable"
-  const client = new Client({ connectionString, ssl: disableSsl || ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false }, connectionTimeoutMillis: 8_000, query_timeout: DATABASE_QUERY_TIMEOUT_MS, statement_timeout: DATABASE_QUERY_TIMEOUT_MS })
+  const client = new Client({ connectionString, ...(hyperdrive ? {} : { ssl: disableSsl || ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false } }), connectionTimeoutMillis: 8_000, query_timeout: DATABASE_QUERY_TIMEOUT_MS, statement_timeout: DATABASE_QUERY_TIMEOUT_MS })
   await client.connect()
   try { return await operation(client) } finally { await client.end().catch(() => undefined) }
 }

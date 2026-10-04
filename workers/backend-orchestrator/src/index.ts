@@ -4,7 +4,8 @@ import { AwsClient } from "aws4fetch"
 type Env = {
   PANEL_URL: string
   BACKEND_ORCHESTRATOR_SECRET: string
-  POSTGRES_URL: string
+  POSTGRES_URL?: string
+  HYPERDRIVE?: Hyperdrive
   SYNC_INTERVAL_MINUTES: string
   API_EVENTS_RETENTION_DAYS: string
   OBJECT_CHANGES_RETENTION_DAYS: string
@@ -18,7 +19,10 @@ type RuntimeConfig = {
   syncIntervalMinutes: number
   retention: { apiEventsDays: number; objectChangesDays: number; scanDetailsDays: number }
   disablePostgresSsl: boolean
+  hyperdrive: boolean
 }
+
+type Hyperdrive = { connectionString: string }
 
 type AccountRow = {
   id: string
@@ -102,25 +106,28 @@ function envFlag(value: string | undefined) {
 }
 
 function runtimeConfig(env: Env): RuntimeConfig {
-  if (!env.POSTGRES_URL?.trim()) throw new Error("POSTGRES_URL was not injected during deployment")
+  const hyperdrive = Boolean(env.HYPERDRIVE?.connectionString?.trim())
+  const postgresUrl = hyperdrive ? env.HYPERDRIVE!.connectionString.trim() : env.POSTGRES_URL?.trim()
+  if (!postgresUrl) throw new Error("Neither HYPERDRIVE nor POSTGRES_URL was injected during deployment")
   return {
     version: 2,
-    postgresUrl: env.POSTGRES_URL.trim(),
+    postgresUrl,
     syncIntervalMinutes: boundedInteger(env.SYNC_INTERVAL_MINUTES, 1, 1, 60),
     retention: {
       apiEventsDays: boundedInteger(env.API_EVENTS_RETENTION_DAYS, 7, 1, 365),
       objectChangesDays: boundedInteger(env.OBJECT_CHANGES_RETENTION_DAYS, 7, 1, 365),
       scanDetailsDays: boundedInteger(env.SCAN_DETAILS_RETENTION_DAYS, 7, 1, 365),
     },
-    disablePostgresSsl: envFlag(env.DISABLE_POSTGRES_SSL),
+    disablePostgresSsl: !hyperdrive && envFlag(env.DISABLE_POSTGRES_SSL),
+    hyperdrive,
   }
 }
 
-function dbClient(connectionString: string, disablePostgresSsl: boolean) {
+function dbClient(connectionString: string, disablePostgresSsl: boolean, hyperdrive = false) {
   const sslMode = new URL(connectionString).searchParams.get("sslmode")?.trim().toLowerCase()
   return new Client({
     connectionString,
-    ssl: disablePostgresSsl || sslMode === "disable" ? false : { rejectUnauthorized: false },
+    ...(hyperdrive ? {} : { ssl: disablePostgresSsl || sslMode === "disable" ? false : { rejectUnauthorized: false } }),
     connectionTimeoutMillis: 10_000,
     query_timeout: 20_000,
     statement_timeout: 20_000,
@@ -1188,7 +1195,7 @@ async function claimCycle(db: Client, orchestratorUrl?: string) {
 
 async function runCycle(env: Env, orchestratorUrl?: string) {
   const config = runtimeConfig(env)
-  const db = dbClient(config.postgresUrl, config.disablePostgresSsl)
+  const db = dbClient(config.postgresUrl, config.disablePostgresSsl, config.hyperdrive)
   await db.connect()
   let claimed = false
   try {
@@ -1241,7 +1248,7 @@ export default {
       let db: Client | null = null
       try {
         const config = runtimeConfig(env)
-        db = dbClient(config.postgresUrl, config.disablePostgresSsl)
+        db = dbClient(config.postgresUrl, config.disablePostgresSsl, config.hyperdrive)
         await db.connect()
         await db.query("select 1")
         return json({ ok: true, configured: true, build: WORKER_BUILD, panel: new URL(env.PANEL_URL).origin })
@@ -1259,7 +1266,7 @@ export default {
       let db: Client | null = null
       try {
         const config = runtimeConfig(env)
-        db = dbClient(config.postgresUrl, config.disablePostgresSsl)
+        db = dbClient(config.postgresUrl, config.disablePostgresSsl, config.hyperdrive)
         await db.connect()
         const state = await db.query(`select * from drive_backend_orchestrator_state where id=true limit 1`)
         return json({ ok: true, build: WORKER_BUILD, state: state.rows[0] ?? null })

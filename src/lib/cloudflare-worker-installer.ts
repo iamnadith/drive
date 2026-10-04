@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto"
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto"
 
 import { queryDb, withDbAdvisoryLock, withDbTransaction } from "@/lib/db"
 import { getBackendOrchestratorSettings } from "@/lib/backend-orchestrator-settings-store"
@@ -15,6 +15,7 @@ type Account = { id: string; name: string }
 type Artifact = { url: string; sha256: string; compatibilityDate: string; compatibilityFlags?: string[] }
 type Manifest = { version: string; workers: Record<HostedWorker, Artifact> }
 type WorkerState = { accountId?: string; accountName?: string; scriptName: string; url?: string; deployed?: boolean; verified?: boolean; phase?: "queued" | "uploading" | "configuring" | "deployed" | "deleting" | "verifying" | "verified" | "failed"; deployedAt?: string; verifiedAt?: string; lastCheckedAt?: string; latencyMs?: number; build?: string | number; releaseVersion?: string; artifactSha256?: string; error?: string }
+type HyperdriveState = { id: string; name: string; accountId: string; originFingerprint: string }
 type InstallState = {
   id: string
   mode: InstallMode
@@ -23,6 +24,7 @@ type InstallState = {
   step: string
   secrets: Record<HostedWorker, string>
   encryptedTokens?: Partial<TokenMap>
+  hyperdrives?: Record<string, HyperdriveState>
   workers: Record<HostedWorker, WorkerState>
   error?: string
   lastReconciledAt?: string
@@ -107,6 +109,7 @@ function resourceNames() {
     scannerDlq: `drive-file-scan-dlq-${suffix}`,
     migrationQueue: `drive-github-dispatch-${suffix}`,
     migrationDlq: `drive-github-dispatch-dlq-${suffix}`,
+    hyperdrive: `drive-postgres-${suffix}`,
   }
 }
 
@@ -337,17 +340,66 @@ async function ensureQueue(token: string, accountId: string, name: string) {
   return existing || cf<{ queue_id: string; queue_name: string }>(token, `/accounts/${accountId}/queues`, { method: "POST", body: JSON.stringify({ queue_name: name }) })
 }
 
-async function uploadWorker(input: { worker: HostedWorker; token: string; accountId: string; entry: Artifact; code: Uint8Array; state: InstallState }) {
+async function ensureHyperdrive(token: string, accountId: string, state: InstallState) {
+  const postgresUrl = String(process.env.POSTGRES_URL || "").trim()
+  let parsed: URL
+  try { parsed = new URL(postgresUrl) } catch { throw new Error("POSTGRES_URL is not a valid PostgreSQL connection URL") }
+  if (!["postgres:", "postgresql:"].includes(parsed.protocol) || !parsed.hostname || !parsed.pathname.slice(1)) throw new Error("POSTGRES_URL must include a PostgreSQL host and database")
+  const origin = {
+    database: decodeURIComponent(parsed.pathname.slice(1)),
+    host: parsed.hostname,
+    password: decodeURIComponent(parsed.password),
+    port: Number(parsed.port || 5432),
+    scheme: "postgres",
+    user: decodeURIComponent(parsed.username),
+  }
+  if (!origin.user || !origin.password || !Number.isInteger(origin.port)) throw new Error("POSTGRES_URL must include valid database credentials")
+  const fingerprint = createHmac("sha256", primaryEncryptionKey()).update(JSON.stringify(origin)).digest("hex")
+  const name = resourceNames().hyperdrive
+  const saved = state.hyperdrives?.[accountId]
+  const configs: Array<{ id: string; name: string; origin?: { host?: string; database?: string; user?: string; port?: number; scheme?: string } }> = []
+  for (let page = 1; page <= 100; page += 1) {
+    const batch = await cf<Array<{ id: string; name: string; origin?: { host?: string; database?: string; user?: string; port?: number; scheme?: string } }>>(token, `/accounts/${accountId}/hyperdrive/configs?per_page=100&page=${page}`)
+    configs.push(...batch)
+    if (batch.length < 100) break
+  }
+  const existing = configs.find((config) => config.name === name) || configs.find((config) => config.id === saved?.id)
+  let config: { id: string; name: string }
+  if (existing) {
+    config = existing
+    const originMatches = existing.origin?.host === origin.host
+      && existing.origin.database === origin.database
+      && existing.origin.user === origin.user
+      && Number(existing.origin.port || 5432) === origin.port
+      && ["postgres", "postgresql"].includes(String(existing.origin.scheme || "postgres"))
+    if (saved?.id !== existing.id || saved.originFingerprint !== fingerprint || !originMatches) {
+      await cf(token, `/accounts/${accountId}/hyperdrive/configs/${existing.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name, origin, origin_connection_limit: 10, caching: { disabled: true }, mtls: { sslmode: "require" } }),
+      })
+    }
+  } else {
+    config = await cf<{ id: string; name: string }>(token, `/accounts/${accountId}/hyperdrive/configs`, {
+      method: "POST",
+      body: JSON.stringify({ name, origin, origin_connection_limit: 10, caching: { disabled: true }, mtls: { sslmode: "require" } }),
+    })
+  }
+  if (!config?.id) throw new Error("Cloudflare did not return a Hyperdrive configuration ID")
+  state.hyperdrives = { ...(state.hyperdrives || {}), [accountId]: { id: config.id, name, accountId, originFingerprint: fingerprint } }
+  return config.id
+}
+
+async function uploadWorker(input: { worker: HostedWorker; token: string; accountId: string; hyperdriveId: string; entry: Artifact; code: Uint8Array; state: InstallState }) {
   const { worker, token, accountId, entry, code, state } = input
   const publicPanelUrl = panelUrl()
   const postgresUrl = String(process.env.POSTGRES_URL || "").trim()
-  if (!/^https:\/\//i.test(publicPanelUrl) || !postgresUrl) throw new Error("Panel URL or PostgreSQL URL is not configured")
+  if (!/^https:\/\//i.test(publicPanelUrl) || !postgresUrl || !input.hyperdriveId) throw new Error("Panel URL, PostgreSQL URL, or Hyperdrive binding is not configured")
   const postgresSsl = String(process.env.POSTGRES_SSL || "").trim().toLowerCase()
   let sslMode = ""
   try { sslMode = new URL(postgresUrl).searchParams.get("sslmode")?.trim().toLowerCase() || "" } catch { /* POSTGRES_URL validation is handled by the database connection. */ }
   const disablePostgresSsl = postgresSsl === "0" || postgresSsl === "false" || ["1", "true"].includes(String(process.env.DISABLE_POSTGRES_SSL || "").trim().toLowerCase()) || sslMode === "disable"
   const bindings: Array<Record<string, unknown>> = [
-    { type: "secret_text", name: "POSTGRES_URL", text: postgresUrl },
+    { type: "hyperdrive", name: "HYPERDRIVE", id: input.hyperdriveId },
     { type: "secret_text", name: worker === "backend" ? "BACKEND_ORCHESTRATOR_SECRET" : worker === "scanner" ? "FILE_SCANNER_SECRET" : "MIGRATION_ORCHESTRATOR_SECRET", text: state.secrets[worker] },
     { type: "plain_text", name: "PANEL_URL", text: publicPanelUrl },
     { type: "plain_text", name: "DISABLE_POSTGRES_SSL", text: disablePostgresSsl ? "1" : "0" },
@@ -656,10 +708,19 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
     let state = input.restart ? null : previous
     if (!state || (state.status === "ready" && !input.checkForUpdates) || state.mode !== input.mode) {
       state = freshState(input.mode)
-      // Releases rotate code, not credentials. Preserving the already-generated
-      // role secrets keeps the database and peer authentication synchronized
-      // even if a redeploy is interrupted between Workers.
-      if (previous?.status === "ready") state.secrets = previous.secrets
+      const configuredSecrets = {
+        backend: previousRuntime.backend.sharedSecret,
+        scanner: previousRuntime.migration.fileScannerSecret,
+        migration: previousRuntime.migration.sharedSecret,
+      }
+      const previousSecrets = previous?.secrets
+      for (const worker of ORDER) {
+        state.secrets[worker] = configuredSecrets[worker].length >= 24
+          ? configuredSecrets[worker]
+          : previousSecrets?.[worker]?.length >= 24
+            ? previousSecrets[worker]
+            : state.secrets[worker]
+      }
     }
     state.encryptedTokens = Object.fromEntries(ORDER.map((worker) => [worker, encryptToken(tokens[worker], state!.id, worker)]))
     state.status = "running"; state.error = undefined; await saveState(state)
@@ -675,6 +736,10 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
         state.workers[worker].accountName = accounts[worker].name
       }
       state.step = "accounts_validated"; await saveState(state)
+      const accountTokens = new Map<string, string>()
+      for (const worker of ORDER) if (!accountTokens.has(accounts[worker].id)) accountTokens.set(accounts[worker].id, tokens[worker])
+      for (const [accountId, token] of accountTokens) await ensureHyperdrive(token, accountId, state)
+      state.step = "hyperdrive_ready"; await saveState(state)
       await adoptExistingWorkers(state, tokens, accounts); state.step = "existing_workers_checked"; await saveState(state)
       const manifest = await getManifest(); state.releaseVersion = manifest.version
       await saveState(state)
@@ -701,7 +766,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
         if (input.forceRedeploy || !current.deployed || !current.verified || !artifactMatches) {
           current.deployed = false; current.verified = false; current.verifiedAt = undefined; current.latencyMs = undefined; current.build = undefined
           state.workers[worker].phase = "uploading"; state.workers[worker].error = undefined; state.step = `${worker}_uploading`; await saveState(state)
-          await uploadWorker({ worker, token: tokens[worker], accountId: accounts[worker].id, entry: artifactEntry, code: releaseArtifacts[worker], state })
+          await uploadWorker({ worker, token: tokens[worker], accountId: accounts[worker].id, hyperdriveId: state.hyperdrives![accounts[worker].id].id, entry: artifactEntry, code: releaseArtifacts[worker], state })
           state.workers[worker].phase = "configuring"; state.step = `${worker}_configuring`; await saveState(state)
           state.workers[worker].url = await workersDevUrl(tokens[worker], accounts[worker].id, state.workers[worker].scriptName)
           state.workers[worker].deployed = true; state.workers[worker].phase = "deployed"; state.workers[worker].deployedAt = new Date().toISOString()

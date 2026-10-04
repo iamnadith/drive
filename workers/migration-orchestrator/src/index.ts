@@ -2,7 +2,7 @@ import { Client } from "pg"
 import { syncWorkerRepository } from "../../../src/lib/github-worker-sync"
 
 type DispatchMessage = { intentId: string } | { control: "cycle" }
-type Env = { POSTGRES_URL?: string; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_WORKER_SOURCE_REPO?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
+type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_WORKER_SOURCE_REPO?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
 type Row = Record<string, any>
 const BUILD = 36
 const MIN_QUEUE_BATCH_SIZE = 500
@@ -47,12 +47,13 @@ async function authorized(request: Request, env: Env) {
   }).catch(() => false)
 }
 async function database<T>(env: Env, operation: (client: Client) => Promise<T>): Promise<T> {
-  const connectionString = String(env.POSTGRES_URL || "").trim()
-  if (!connectionString) throw new Error("POSTGRES_URL is not configured")
+  const hyperdrive = Boolean(env.HYPERDRIVE?.connectionString?.trim())
+  const connectionString = hyperdrive ? env.HYPERDRIVE!.connectionString.trim() : String(env.POSTGRES_URL || "").trim()
+  if (!connectionString) throw new Error("Neither HYPERDRIVE nor POSTGRES_URL is configured")
   const hostname = new URL(connectionString).hostname
   const sslMode = new URL(connectionString).searchParams.get("sslmode")?.trim().toLowerCase()
   const disableSsl = ["1", "true"].includes(String(env.DISABLE_POSTGRES_SSL || "").toLowerCase()) || sslMode === "disable"
-  const client = new Client({ connectionString, ssl: disableSsl || ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false }, connectionTimeoutMillis: 8_000 })
+  const client = new Client({ connectionString, ...(hyperdrive ? {} : { ssl: disableSsl || ["localhost", "127.0.0.1"].includes(hostname) ? false : { rejectUnauthorized: false } }), connectionTimeoutMillis: 8_000 })
   await client.connect()
   try { return await operation(client) } finally { await client.end().catch(() => undefined) }
 }
