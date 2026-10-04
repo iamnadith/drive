@@ -357,9 +357,9 @@ async function ensureHyperdrive(token: string, accountId: string, state: Install
   const fingerprint = createHmac("sha256", primaryEncryptionKey()).update(JSON.stringify(origin)).digest("hex")
   const name = resourceNames().hyperdrive
   const saved = state.hyperdrives?.[accountId]
-  const configs: Array<{ id: string; name: string; origin?: { host?: string; database?: string; user?: string; port?: number; scheme?: string } }> = []
+  const configs: Array<{ id: string; name: string; origin_connection_limit?: number; origin?: { host?: string; database?: string; user?: string; port?: number; scheme?: string } }> = []
   for (let page = 1; page <= 100; page += 1) {
-    const batch = await cf<Array<{ id: string; name: string; origin?: { host?: string; database?: string; user?: string; port?: number; scheme?: string } }>>(token, `/accounts/${accountId}/hyperdrive/configs?per_page=100&page=${page}`)
+    const batch = await cf<Array<{ id: string; name: string; origin_connection_limit?: number; origin?: { host?: string; database?: string; user?: string; port?: number; scheme?: string } }>>(token, `/accounts/${accountId}/hyperdrive/configs?per_page=100&page=${page}`)
     configs.push(...batch)
     if (batch.length < 100) break
   }
@@ -372,16 +372,16 @@ async function ensureHyperdrive(token: string, accountId: string, state: Install
       && existing.origin.user === origin.user
       && Number(existing.origin.port || 5432) === origin.port
       && ["postgres", "postgresql"].includes(String(existing.origin.scheme || "postgres"))
-    if (saved?.id !== existing.id || saved.originFingerprint !== fingerprint || !originMatches) {
+    if (saved?.id !== existing.id || saved.originFingerprint !== fingerprint || !originMatches || existing.origin_connection_limit !== 5) {
       await cf(token, `/accounts/${accountId}/hyperdrive/configs/${existing.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ name, origin, origin_connection_limit: 10, caching: { disabled: true }, mtls: { sslmode: "require" } }),
+        body: JSON.stringify({ name, origin, origin_connection_limit: 5, caching: { disabled: true }, mtls: { sslmode: "require" } }),
       })
     }
   } else {
     config = await cf<{ id: string; name: string }>(token, `/accounts/${accountId}/hyperdrive/configs`, {
       method: "POST",
-      body: JSON.stringify({ name, origin, origin_connection_limit: 10, caching: { disabled: true }, mtls: { sslmode: "require" } }),
+      body: JSON.stringify({ name, origin, origin_connection_limit: 5, caching: { disabled: true }, mtls: { sslmode: "require" } }),
     })
   }
   if (!config?.id) throw new Error("Cloudflare did not return a Hyperdrive configuration ID")
