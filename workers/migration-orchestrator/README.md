@@ -1,6 +1,6 @@
 # Migration Orchestrator
 
-This autonomous Cloudflare Worker owns migration progress and database synchronization for both Super Slurper and the migration worker pool. It connects directly to PostgreSQL, polls and persists Super Slurper job progress, hands completed buckets to the File Scanner for independent verification, and activates the verified target account. For the worker pool it also converts File Scanner inventory into one-file jobs, recovers stale or aborted leases, fans GitHub dispatch intents through Cloudflare Queues, and retries bounded repair generations.
+This autonomous Cloudflare Worker owns migration progress and database synchronization for both Super Slurper and the migration worker pool. It connects directly to PostgreSQL, polls and persists Super Slurper job progress, hands completed buckets to the File Scanner for independent verification, disables the previous active source account, and activates the verified target account. For the worker pool it also converts File Scanner inventory into one-file jobs, recovers stale or aborted leases, fans GitHub dispatch intents through Cloudflare Queues, and retries bounded repair generations.
 
 It selects active migrations in either execution mode, including `migration_workers`. File enumeration and verification remain File Scanner responsibilities; account refresh remains a Backend Orchestrator responsibility. Coordination uses durable database rows plus authenticated wake-up calls to the File Scanner and Backend Orchestrator.
 

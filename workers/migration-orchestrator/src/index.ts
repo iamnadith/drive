@@ -1209,7 +1209,7 @@ async function activateTargetAndCompleteMigration(db: Client, migration: Row) {
     // The partial unique index on active accounts is immediate. A single
     // multi-row UPDATE can promote the target before it demotes the source,
     // even though the final state would have only one active account.
-    await db.query(`update drive_accounts set status='available',updated_at=now()
+    await db.query(`update drive_accounts set status='disabled',updated_at=now()
       where status='active' and id<>$1`, [migration.target_account_id])
     const activated = await db.query(`update drive_accounts set
       status='active',last_migrated=to_char(now(),'YYYY-MM-DD HH24:MI:SS'),
