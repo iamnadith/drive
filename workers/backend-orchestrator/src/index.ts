@@ -1158,7 +1158,7 @@ async function runRetention(db: Client, config: RuntimeConfig) {
     `update drive_maintenance_state set
        last_run_at=case when $2::boolean then now()-interval '6 hours' else now() end,
        last_result=$3::jsonb
-     where task_name='backend-orchestrator-retention'`,
+     where task_name=$1`,
     ["backend-orchestrator-retention", incomplete, JSON.stringify({ deleted, errors, incomplete, completedAt: new Date().toISOString() })]
   )
   return { ran: true, deleted, errors, incomplete }
