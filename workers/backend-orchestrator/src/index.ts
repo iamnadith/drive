@@ -729,7 +729,7 @@ async function selectNextAccount(db: Client, syncIntervalMinutes: number) {
     select id,label,email,api_token,cloudflare_account_id,r2_access_key_id,r2_secret_access_key,status,last_synced_at
     from drive_accounts
     where api_token<>''
-      and status='active'
+      and status in('active','available')
       and (last_synced_at is null or last_synced_at < now() - ($1::text || ' minutes')::interval)
     order by last_synced_at asc nulls first,
              created_at asc limit 1
@@ -781,7 +781,7 @@ async function loadSyncProgress(db: Client) {
 async function selectAccountById(db: Client, accountId: string) {
   const result = await db.query<AccountRow>(`
     select id,label,email,api_token,cloudflare_account_id,r2_access_key_id,r2_secret_access_key,status,last_synced_at
-    from drive_accounts where id=$1 and api_token<>'' and status='active' limit 1
+    from drive_accounts where id=$1 and api_token<>'' and status in('active','available') limit 1
   `, [accountId])
   return result.rows[0] ?? null
 }
