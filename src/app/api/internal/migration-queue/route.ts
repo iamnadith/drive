@@ -87,7 +87,7 @@ async function seedQueue(db: import("pg").Client, migrationId: string, generatio
 }
 
 async function syncQueue(db: import("pg").Client, migrationId: string, generation: number, limit: number) {
-  await queryDb(`update drive_repair_jobs j set status='canceled',updated_at=now(),completed_at=coalesce(completed_at,now())
+  await queryDb(`update drive_repair_jobs j set status='canceled',updated_at=now(),completed_at=coalesce(j.completed_at,now())
     from drive_migrations m where j.migration_id=$1 and m.id=j.migration_id and m.status in('canceled','aborted','failed','verification_failed') and j.mode='migration' and j.status not in('completed','failed','canceled')`, [migrationId])
   const { rows: main } = await queryDb<Row>(`select status,greatest(1,coalesce(nullif(options->>'workerGeneration','')::int,1)) generation from drive_migrations where id=$1`, [migrationId])
   const canceled = await queryDb<Row>(`select id from drive_repair_jobs where migration_id=$1 and mode='migration' and status='canceled' and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2`, [migrationId, generation])
