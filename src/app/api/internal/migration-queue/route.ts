@@ -29,7 +29,7 @@ async function seedQueue(db: import("pg").Client, migrationId: string, generatio
     cursorId = split[1] || null
   }
   const { rows } = await queryDb<Row>(`
-    select j.id,j.migration_id,j.status,j.mode,j.work_key,j.payload job_payload,j.progress,j.result,j.summary,j.error,j.claimed_by_agent_id,j.claim_token,j.created_at,j.updated_at,
+    select j.id,j.migration_id,j.status,j.mode,j.work_key,j.payload job_payload,j.progress,j.result,j.summary,j.error,j.claimed_by_agent_id,j.claim_token,j.created_at,j.created_at::text seed_created_at,j.updated_at,
       m.options,m.source_account_id,m.target_account_id,
       s.cloudflare_account_id source_account,s.r2_access_key_id source_key,s.r2_secret_access_key source_secret,
       t.cloudflare_account_id target_account,t.r2_access_key_id target_key,t.r2_secret_access_key target_secret,
@@ -55,6 +55,8 @@ async function seedQueue(db: import("pg").Client, migrationId: string, generatio
   }
   const first = page[0]
   if (!first.source_account || !first.target_account || !first.source_key || !first.source_secret || !first.target_key || !first.target_secret) throw new Error(`Migration ${migrationId} has incomplete R2 credentials; queue seeding stopped before dispatch`)
+  const existing = await db.query(`select count(*)::int count from drive_migration_queue_jobs where migration_id=$1 and generation=$2 and id=any($3::uuid[])`, [migrationId, generation, page.map((row) => row.id)])
+  const inserted = Math.max(0, page.length - Number(existing.rows[0]?.count || 0))
   await db.query(`update drive_migration_queue_meta set execution_config=coalesce(execution_config,$3::jsonb),updated_at=now() where migration_id=$1 and generation=$2`, [migrationId, generation, JSON.stringify({
     migration: { id: migrationId, options: first.options || {}, pathPrefix: (first.options || {}).pathPrefix || null },
     source: { accountId: first.source_account, accessKeyId: first.source_key, secretAccessKey: first.source_secret },
@@ -77,8 +79,10 @@ async function seedQueue(db: import("pg").Client, migrationId: string, generatio
     }
     const last = page[page.length - 1]
     const complete = rows.length <= limit
-    await db.query(`update drive_migration_queue_meta set seed_cursor=$3,seed_complete=$4,status=case when $4 then 'ready' else 'seeding' end,total_jobs=total_jobs+$5,updated_at=now() where migration_id=$1 and generation=$2`, [migrationId, generation, `${new Date(last.created_at).toISOString()}|${last.id}`, complete, page.length])
-    return { inserted: page.length, complete }
+    await db.query(`update drive_migration_queue_meta set seed_cursor=$3,seed_complete=$4,status=case when $4 then 'ready' else 'seeding' end,
+      total_jobs=(select count(*) from drive_migration_queue_jobs where migration_id=$1 and generation=$2),updated_at=now()
+      where migration_id=$1 and generation=$2`, [migrationId, generation, `${last.seed_created_at}|${last.id}`, complete])
+    return { inserted, complete }
   } catch (error) { throw error }
 }
 
