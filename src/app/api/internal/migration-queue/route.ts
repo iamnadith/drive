@@ -113,7 +113,7 @@ async function syncQueue(db: import("pg").Client, migrationId: string, generatio
   let cursorAt: string | null = null
   let cursorId: string | null = null
   if (meta?.sync_cursor) { const split = String(meta.sync_cursor).split("|"); cursorAt = split[0] || null; cursorId = split[1] || null }
-  const result = await db.query(`select id,status,payload,progress,result,summary,error,agent_id,claim_token,attempts,last_heartbeat_at,completed_at,created_at,updated_at
+  const result = await db.query(`select id,status,payload,progress,result,summary,error,agent_id,claim_token,attempts,last_heartbeat_at,completed_at,created_at,updated_at,updated_at::text sync_updated_at
     from drive_migration_queue_jobs where migration_id=$1 and generation=$2 and status in('completed','failed','canceled')
       and ($3::timestamptz is null or (updated_at,id)>($3::timestamptz,$4::uuid))
     order by updated_at,id limit $5`, [migrationId, generation, cursorAt, cursorId, limit])
@@ -123,7 +123,7 @@ async function syncQueue(db: import("pg").Client, migrationId: string, generatio
       completed_at=x.completed_at,updated_at=x.updated_at from jsonb_to_recordset($2::jsonb) as x(id uuid,status text,progress jsonb,result jsonb,summary text,error text,agent_id uuid,claim_token uuid,attempts int,last_heartbeat_at timestamptz,completed_at timestamptz,updated_at timestamptz)
       where j.id=x.id and j.migration_id=$1`, [migrationId, JSON.stringify(result.rows.map((row) => ({ ...row, progress: row.progress || {}, result: row.result || {} })))])
     const last = result.rows[result.rows.length - 1]
-    await db.query(`update drive_migration_queue_meta set sync_cursor=$3,updated_at=now() where migration_id=$1 and generation=$2`, [migrationId, generation, `${new Date(last.updated_at).toISOString()}|${last.id}`])
+    await db.query(`update drive_migration_queue_meta set sync_cursor=$3,updated_at=now() where migration_id=$1 and generation=$2`, [migrationId, generation, `${last.sync_updated_at}|${last.id}`])
   }
   const { rows: workers } = await db.query(`select worker_instance_id,agent_id,status,current_job_id,last_heartbeat_at,metadata
     from drive_migration_queue_workers where migration_id=$1 and generation=$2`, [migrationId, generation])
