@@ -81,15 +81,16 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
         count(*) filter(where status='completed')::bigint completed_jobs,
         count(*) filter(where status='failed')::bigint failed_jobs,
         count(*) filter(where status='canceled')::bigint canceled_jobs,
-        coalesce(sum(case when status='completed' then case when result->'items'->0->>'transferred' ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end when status in('claimed','running') then greatest(case when result->'items'->0->>'transferred' ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end,case when progress->>'transferred' ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end) else 0 end),0)::bigint transferred,
+        coalesce(sum(case when status='completed' then case when result->'totals'->>'transferred' ~ '^[0-9]+$' then (result->'totals'->>'transferred')::bigint else coalesce((select sum(case when x->>'transferred' ~ '^[0-9]+$' then (x->>'transferred')::bigint else 0 end) from jsonb_array_elements(case when jsonb_typeof(result->'items')='array' then result->'items' else '[]'::jsonb end) x),0) end when status in('claimed','running') then greatest(case when result->'totals'->>'transferred' ~ '^[0-9]+$' then (result->'totals'->>'transferred')::bigint else coalesce((select sum(case when x->>'transferred' ~ '^[0-9]+$' then (x->>'transferred')::bigint else 0 end) from jsonb_array_elements(case when jsonb_typeof(result->'items')='array' then result->'items' else '[]'::jsonb end) x),0) end,case when progress->'totals'->>'transferred' ~ '^[0-9]+$' then (progress->'totals'->>'transferred')::bigint when progress->>'transferred' ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end) else 0 end),0)::bigint transferred,
         coalesce(sum(case when result->'items'->0->>'skipped' ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint when status in('claimed','running') and progress->>'skipped' ~ '^[0-9]+$' then (progress->>'skipped')::bigint else 0 end),0)::bigint skipped,
         coalesce(sum(case when result->'items'->0->>'failed' ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' then 1 else 0 end),0)::bigint failed,
         coalesce(sum(case when status='completed' and result->'items'->0->>'transferred' ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 and payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$' then (payload->'inventoryObjects'->0->>'size')::bigint else 0 end),0)::bigint completed_bytes,
         coalesce(sum(case when status in('claimed','running') and progress->'currentFile'->>'bytesTransferred' ~ '^[0-9]+$' then (progress->'currentFile'->>'bytesTransferred')::bigint else 0 end),0)::bigint in_progress_bytes,
-        coalesce((select sum(greatest(0,extract(epoch from (
+        coalesce((select sum(greatest(w.runtime_seconds,greatest(0,floor(extract(epoch from (
           coalesce(nullif(w.metadata->>'retiredAt','')::timestamptz,
-            case when w.status='online' and w.last_heartbeat_at>now()-interval '90 seconds' then now() else w.last_heartbeat_at end)
-          - coalesce(nullif(w.metadata->>'workerStartedAt','')::timestamptz,w.last_heartbeat_at)))::bigint)
+            case when w.status='online' and w.last_heartbeat_at>now()-interval '90 seconds' then now()
+              when w.status='online' then w.last_heartbeat_at+interval '90 seconds' else w.last_heartbeat_at end)
+          - coalesce(nullif(w.metadata->>'workerStartedAt','')::timestamptz,w.last_heartbeat_at)))::bigint)))
           from drive_migration_queue_workers w where w.migration_id=$1 and w.generation=$2),0)::bigint worker_runtime_seconds,
         max(updated_at) updated_at
         from drive_migration_queue_jobs where migration_id=$1 and generation=$2`, [id, generation])).rows[0]
@@ -108,9 +109,13 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
               count(*) filter(where status='completed')::bigint completed_jobs,
               count(*) filter(where status='failed')::bigint failed_jobs,
               count(*) filter(where status in('completed','failed','canceled'))::bigint finished_jobs,
-              coalesce(sum(case when status in('completed','claimed','running') and result->'items'->0->>'transferred' ~ '^[0-9]+$' then greatest((result->'items'->0->>'transferred')::bigint,case when progress->>'transferred' ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end) when status in('claimed','running') and progress->>'transferred' ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end),0)::bigint completed_files,
-              coalesce(sum(case when result->'items'->0->>'failed' ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' then 1 else 0 end),0)::bigint failed_files,
-              coalesce(sum(case when status='completed' and result->'items'->0->>'transferred' ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 and payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$' then (payload->'inventoryObjects'->0->>'size')::bigint else 0 end),0)::bigint completed_bytes
+              coalesce(sum(case when status in('completed','claimed','running') then greatest(
+                case when result->'totals'->>'transferred' ~ '^[0-9]+$' then (result->'totals'->>'transferred')::bigint else coalesce((select sum(case when x->>'transferred' ~ '^[0-9]+$' then (x->>'transferred')::bigint else 0 end) from jsonb_array_elements(case when jsonb_typeof(result->'items')='array' then result->'items' else '[]'::jsonb end) x),0) end,
+                case when progress->'totals'->>'transferred' ~ '^[0-9]+$' then (progress->'totals'->>'transferred')::bigint when progress->>'transferred' ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end) else 0 end),0)::bigint completed_files,
+              coalesce(sum(case when status in('completed','claimed','running','failed') then greatest(
+                case when result->'totals'->>'failed' ~ '^[0-9]+$' then (result->'totals'->>'failed')::bigint else coalesce((select sum(case when x->>'failed' ~ '^[0-9]+$' then (x->>'failed')::bigint else 0 end) from jsonb_array_elements(case when jsonb_typeof(result->'items')='array' then result->'items' else '[]'::jsonb end) x),0) end,
+                case when progress->'totals'->>'failed' ~ '^[0-9]+$' then (progress->'totals'->>'failed')::bigint when progress->>'failed' ~ '^[0-9]+$' then (progress->>'failed')::bigint else 0 end) else 0 end),0)::bigint failed_files,
+              coalesce(sum(case when status='completed' and result->'totals'->>'transferred' ~ '^[0-9]+$' and (result->'totals'->>'transferred')::bigint>0 and payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$' then (payload->'inventoryObjects'->0->>'size')::bigint else 0 end),0)::bigint completed_bytes
             from drive_migration_queue_jobs where migration_id=$1 and generation=$2 and claimed_by is not null group by claimed_by
           ) select w.worker_instance_id,w.agent_id,w.status,w.current_job_id,w.last_heartbeat_at,w.metadata,
               coalesce(t.completed_jobs,0)::bigint completed_jobs,coalesce(t.failed_jobs,0)::bigint failed_jobs,
@@ -127,24 +132,41 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
             where q.migration_id=$1 and q.generation=$2 and nullif(item->>'id','') is not null order by item->>'id',q.created_at
           ), item_totals as (
             select source_bucket,target_bucket,sum(source_objects)::bigint total_objects,sum(source_bytes)::bigint source_bytes from item_rows group by 1,2
+          ), job_item_rows as (
+            select q.id,q.status,q.updated_at,item->>'sourceBucket' source_bucket,item->>'targetBucket' target_bucket,item->>'id' item_id,
+              q.progress->>'currentItemId' current_item_id,
+              case when q.progress->>'transferred' ~ '^[0-9]+$' then (q.progress->>'transferred')::bigint else 0 end current_transferred,
+              case when q.progress->>'skipped' ~ '^[0-9]+$' then (q.progress->>'skipped')::bigint else 0 end current_skipped,
+              coalesce(res.transferred,0)::bigint result_transferred,coalesce(res.failed,0)::bigint result_failed,coalesce(res.skipped,0)::bigint result_skipped,
+              coalesce(live.transferred,0)::bigint live_transferred,coalesce(live.failed,0)::bigint live_failed,coalesce(live.skipped,0)::bigint live_skipped
+            from drive_migration_queue_jobs q
+            cross join lateral jsonb_array_elements(case when jsonb_typeof(q.payload->'items')='array' then q.payload->'items' else '[]'::jsonb end) item
+            left join lateral (select sum(case when x->>'transferred' ~ '^[0-9]+$' then (x->>'transferred')::bigint else 0 end)::bigint transferred,
+                sum(case when x->>'failed' ~ '^[0-9]+$' then (x->>'failed')::bigint else 0 end)::bigint failed,
+                sum(case when x->>'skipped' ~ '^[0-9]+$' then (x->>'skipped')::bigint else 0 end)::bigint skipped
+              from jsonb_array_elements(case when jsonb_typeof(q.result->'items')='array' then q.result->'items' else '[]'::jsonb end) x where x->>'itemId'=item->>'id') res on true
+            left join lateral (select sum(case when x->>'transferred' ~ '^[0-9]+$' then (x->>'transferred')::bigint else 0 end)::bigint transferred,
+                sum(case when x->>'failed' ~ '^[0-9]+$' then (x->>'failed')::bigint else 0 end)::bigint failed,
+                sum(case when x->>'skipped' ~ '^[0-9]+$' then (x->>'skipped')::bigint else 0 end)::bigint skipped
+              from jsonb_array_elements(case when jsonb_typeof(q.progress->'itemProgress')='array' then q.progress->'itemProgress' else '[]'::jsonb end) x where x->>'itemId'=item->>'id') live on true
+            where q.migration_id=$1 and q.generation=$2 and nullif(item->>'id','') is not null
           ), job_totals as (
-            select payload->'items'->0->>'sourceBucket' source_bucket,payload->'items'->0->>'targetBucket' target_bucket,
-              count(*)::bigint observed_objects,
-              coalesce(sum(case when payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$' then (payload->'inventoryObjects'->0->>'size')::bigint else 0 end),0)::bigint observed_bytes,
-              count(*) filter(where status='pending')::bigint queued_objects,
+            select source_bucket,target_bucket,count(*) filter(where status='pending')::bigint queued_objects,
               count(*) filter(where status in('claimed','running'))::bigint running_jobs,
-              count(*) filter(where status='completed')::bigint completed_jobs,
-              count(*) filter(where status='canceled')::bigint canceled_jobs,
-              coalesce(sum(case when status='completed' then case when result->'items'->0->>'transferred' ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end else greatest(case when result->'items'->0->>'transferred' ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end,case when progress->>'transferred' ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end) end),0)::bigint transferred_objects,
-              coalesce(sum(case when result->'items'->0->>'failed' ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' then 1 else 0 end),0)::bigint failed_objects,
-              coalesce(sum(case when result->'items'->0->>'skipped' ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint when status in('claimed','running') and progress->>'skipped' ~ '^[0-9]+$' then (progress->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,max(updated_at) updated_at
-            from drive_migration_queue_jobs where migration_id=$1 and generation=$2 group by 1,2
+              coalesce(sum(case when status='completed' then result_transferred else greatest(result_transferred,live_transferred,
+                case when current_item_id=item_id then current_transferred else 0 end) end),0)::bigint transferred_objects,
+              coalesce(sum(case when status='completed' then result_failed else greatest(result_failed,live_failed) end),0)::bigint failed_objects,
+              coalesce(sum(case when status='completed' then result_skipped else greatest(result_skipped,live_skipped,
+                case when current_item_id=item_id then current_skipped else 0 end) end),0)::bigint skipped_objects,
+              max(updated_at) updated_at
+            from job_item_rows group by source_bucket,target_bucket
           ) select coalesce(i.source_bucket,j.source_bucket) source_bucket,coalesce(i.target_bucket,j.target_bucket) target_bucket,
-              greatest(coalesce(i.total_objects,0),coalesce(j.observed_objects,0))::bigint total_objects,coalesce(j.queued_objects,0)::bigint queued_objects,
-              coalesce(j.running_jobs,0)::bigint running_objects,
-              coalesce(j.transferred_objects,0)::bigint transferred_objects,coalesce(j.failed_objects,0)::bigint failed_objects,
-              coalesce(j.skipped_objects,0)::bigint skipped_objects,greatest(coalesce(i.source_bytes,0),coalesce(j.observed_bytes,0))::bigint source_bytes,j.updated_at
-            from item_totals i full outer join job_totals j using(source_bucket,target_bucket) order by coalesce(i.source_bucket,j.source_bucket),coalesce(i.target_bucket,j.target_bucket)`, [id, generation]),
+              coalesce(i.total_objects,0)::bigint total_objects,coalesce(j.queued_objects,0)::bigint queued_objects,
+              coalesce(j.running_jobs,0)::bigint running_objects,coalesce(j.transferred_objects,0)::bigint transferred_objects,
+              coalesce(j.failed_objects,0)::bigint failed_objects,coalesce(j.skipped_objects,0)::bigint skipped_objects,
+              coalesce(i.source_bytes,0)::bigint source_bytes,j.updated_at
+            from item_totals i full outer join job_totals j using(source_bucket,target_bucket)
+            order by coalesce(i.source_bucket,j.source_bucket),coalesce(i.target_bucket,j.target_bucket)`, [id, generation]),
         db.query(`select id,claimed_by,last_heartbeat_at,progress,payload->'job'->>'mode' mode from drive_migration_queue_jobs where migration_id=$1 and generation=$2 and status in('claimed','running') and claimed_by is not null and last_heartbeat_at>now()-interval '90 seconds' and jsonb_typeof(progress->'currentFile')='object' and progress->'currentFile'->>'key' is not null order by updated_at desc limit 100`, [id, generation]),
         db.query(`select m.generation,m.status,m.seed_complete,m.created_at,m.updated_at,
             coalesce(j.total_jobs,0)::bigint total_jobs,coalesce(j.queued_jobs,0)::bigint queued_jobs,
@@ -197,7 +219,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       for (const dispatched of dispatchedWorkers) {
         if (!queueWorkerIds.has(dispatched.instanceId)) workerRuns.push(dispatched)
       }
-      return { snapshot: { migrationId: id, workerGeneration: generation, totalJobs: total, queuedJobs: Number(stats.rows[0]?.queued_jobs || 0), runningJobs: Number(stats.rows[0]?.running_jobs || 0), remainingJobs: Number(stats.rows[0]?.remaining_jobs || 0), completedJobs: Number(stats.rows[0]?.completed_jobs || 0), failedJobs: Number(stats.rows[0]?.failed_jobs || 0), canceledJobs: Number(stats.rows[0]?.canceled_jobs || 0), totalObjects: buckets.reduce((sum, bucket) => sum + bucket.totalObjects, 0), transferred: Number(stats.rows[0]?.transferred || 0), completedBytes: Number(stats.rows[0]?.completed_bytes || 0), inProgressBytes: Number(stats.rows[0]?.in_progress_bytes || 0), workerRuntimeSeconds: Number(stats.rows[0]?.worker_runtime_seconds || 0), skipped: Number(stats.rows[0]?.skipped || 0), failed: Number(stats.rows[0]?.failed || 0), onlineWorkers, activeTransfers: active.rowCount || 0, buckets, updatedAt, sampledAt: new Date().toISOString() }, snapshotUpdatedAt: updatedAt, jobs: recent.rows, liveFiles: active.rows.map((row) => ({ ...(row.progress?.currentFile || {}), jobId: row.id, workerId: row.claimed_by, lastHeartbeatAt: row.last_heartbeat_at, operation: row.mode })), jobPage, jobPagination: { pageIndex, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)), total }, attempts: queueAttempts, workerRuns, selectedGeneration: generation, migrationStatus: meta.status, dataSource: "queue_database" }
+      return { snapshot: { migrationId: id, workerGeneration: generation, totalJobs: total, queuedJobs: Number(stats.rows[0]?.queued_jobs || 0), runningJobs: Number(stats.rows[0]?.running_jobs || 0), remainingJobs: Number(stats.rows[0]?.remaining_jobs || 0), completedJobs: Number(stats.rows[0]?.completed_jobs || 0), failedJobs: Number(stats.rows[0]?.failed_jobs || 0), canceledJobs: Number(stats.rows[0]?.canceled_jobs || 0), totalObjects: buckets.reduce((sum, bucket) => sum + bucket.totalObjects, 0), transferred: Number(stats.rows[0]?.transferred || 0), inProgressFiles: active.rowCount || 0, completedBytes: Number(stats.rows[0]?.completed_bytes || 0), inProgressBytes: Number(stats.rows[0]?.in_progress_bytes || 0), workerRuntimeSeconds: Number(stats.rows[0]?.worker_runtime_seconds || 0), skipped: Number(stats.rows[0]?.skipped || 0), failed: Number(stats.rows[0]?.failed || 0), onlineWorkers, activeTransfers: active.rowCount || 0, buckets, updatedAt, sampledAt: new Date().toISOString() }, snapshotUpdatedAt: updatedAt, jobs: recent.rows, liveFiles: active.rows.map((row) => ({ ...(row.progress?.currentFile || {}), jobId: row.id, workerId: row.claimed_by, lastHeartbeatAt: row.last_heartbeat_at, operation: row.mode })), jobPage, jobPagination: { pageIndex, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)), total }, attempts: queueAttempts, workerRuns, selectedGeneration: generation, migrationStatus: meta.status, dataSource: "queue_database" }
     }, queueSettings.queueDatabaseSsl)
     if (queueProjection) return queueProjection
     } catch (error) {
