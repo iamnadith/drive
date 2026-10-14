@@ -65,7 +65,12 @@ const RANGE_COPY_THRESHOLD = Math.max(
   0,
   Math.min(1024 * 1024 * 1024, (Number.isFinite(RANGE_COPY_THRESHOLD_MB) ? RANGE_COPY_THRESHOLD_MB : 64) * 1024 * 1024)
 )
-const RANGE_COPY_CONCURRENCY = Math.max(1, Math.min(16, Number(getArg("range-copy-concurrency", String(UPLOAD_QUEUE_SIZE))) || UPLOAD_QUEUE_SIZE))
+// Large inventory objects are copied as independent ranged parts. GitHub
+// workers get a little more per-object parallelism so multi-GB files do not
+// sit behind a small four-part window; keep the part size unchanged to bound
+// memory and preserve resumable multipart checkpoints.
+const DEFAULT_RANGE_COPY_CONCURRENCY = process.env.GITHUB_ACTIONS === "true" ? "8" : String(UPLOAD_QUEUE_SIZE)
+const RANGE_COPY_CONCURRENCY = Math.max(1, Math.min(16, Number(getArg("range-copy-concurrency", DEFAULT_RANGE_COPY_CONCURRENCY)) || UPLOAD_QUEUE_SIZE))
 // Keep one heartbeat cycle well below the panel's stale-lease window. A
 // 60-second timeout with five retries can block for several minutes, causing
 // the orchestrator to requeue a live worker while it is still copying.
@@ -2187,7 +2192,7 @@ function stopHeartbeatLoop() {
 async function main() {
   console.log(`Worker starting for agent ${AGENT_ID} using ${queueClient ? "the migration queue database" : SERVER_URL}`)
   console.log(
-    `Copy tuning: ${COPY_CONCURRENCY} object(s) in parallel, ${UPLOAD_QUEUE_SIZE} upload part(s) per object, ${Math.round(UPLOAD_PART_SIZE / 1024 / 1024)} MB parts`
+    `Copy tuning: ${COPY_CONCURRENCY} object(s) in parallel, ${RANGE_COPY_CONCURRENCY} ranged part(s) per large object, ${UPLOAD_QUEUE_SIZE} upload part(s) per streamed object, ${Math.round(UPLOAD_PART_SIZE / 1024 / 1024)} MB parts`
   )
   if (!heartbeatLoopStarted) {
     heartbeatLoopStarted = true
