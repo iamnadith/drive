@@ -36,6 +36,7 @@ const REPAIR_JOB_ID = String(getArg("repair-job-id", process.env.DRIVE_REPAIR_JO
 const POOL_MODE = Boolean(MIGRATION_ID && !REPAIR_JOB_ID)
 const GITHUB_RUN_ID = String(process.env.GITHUB_RUN_ID || "")
 const WORKER_INSTANCE_ID = String(process.env.WORKER_INSTANCE_ID || GITHUB_RUN_ID || "").trim()
+const WORKER_STARTED_AT = new Date().toISOString()
 // GitHub-hosted jobs have a hard six-hour ceiling. Retire five minutes early
 // so the current file can be durably released and the run can close cleanly.
 const DEFAULT_MAX_RUNTIME_SECONDS = process.env.GITHUB_ACTIONS === "true" ? "21300" : "0"
@@ -444,8 +445,12 @@ async function heartbeat(extra = {}) {
     }
     QUEUE_GENERATION = Number(meta.generation)
     await db.query(`insert into drive_migration_queue_workers(worker_instance_id,agent_id,migration_id,generation,status,current_job_id,metadata,last_heartbeat_at,updated_at)
-      values($1,$2,$3,$4,'online',$5,$6::jsonb,now(),now()) on conflict(worker_instance_id) do update set status='online',current_job_id=excluded.current_job_id,metadata=excluded.metadata,last_heartbeat_at=now(),updated_at=now()`,
-      [WORKER_INSTANCE_ID, AGENT_ID || null, migrationId, meta.generation, currentJobId, JSON.stringify(extra)])
+      values($1,$2,$3,$4,'online',$5,jsonb_build_object('workerStartedAt',$7::timestamptz)||$6::jsonb,now(),now())
+      on conflict(worker_instance_id) do update set status='online',current_job_id=excluded.current_job_id,
+        metadata=case when drive_migration_queue_workers.metadata ? 'workerStartedAt' then drive_migration_queue_workers.metadata||(excluded.metadata-'workerStartedAt')
+          else jsonb_build_object('workerStartedAt',$7::timestamptz)||drive_migration_queue_workers.metadata||(excluded.metadata-'workerStartedAt') end,
+        last_heartbeat_at=now(),updated_at=now()`,
+      [WORKER_INSTANCE_ID, AGENT_ID || null, migrationId, meta.generation, currentJobId, JSON.stringify(extra), WORKER_STARTED_AT])
     if (currentJobId) {
       const claimToken = jobClaimTokens.get(currentJobId)
       const renewed = await db.query(`update drive_migration_queue_jobs set lease_expires_at=now()+interval '3 minutes',last_heartbeat_at=now(),updated_at=now()
@@ -531,9 +536,12 @@ async function claimJob() {
       const claimed = await db.query(`update drive_migration_queue_jobs set status='running',claimed_by=$2,agent_id=$4::uuid,claim_token=$3::uuid,attempts=attempts+1,
         lease_expires_at=now()+interval '3 minutes',last_heartbeat_at=now(),updated_at=now()
         where id=$1 returning id,migration_id,generation,payload,progress,result,claim_token,status`, [selected.id, WORKER_INSTANCE_ID, claimToken, validUuid(AGENT_ID) ? AGENT_ID : null])
-      await db.query(`insert into drive_migration_queue_workers(worker_instance_id,agent_id,migration_id,generation,status,current_job_id,last_heartbeat_at,updated_at)
-        values($1,$2,$3,$4,'online',$5,now(),now()) on conflict(worker_instance_id) do update set status='online',current_job_id=excluded.current_job_id,last_heartbeat_at=now(),updated_at=now()`,
-        [WORKER_INSTANCE_ID, AGENT_ID || null, MIGRATION_ID, meta.generation, selected.id])
+      await db.query(`insert into drive_migration_queue_workers(worker_instance_id,agent_id,migration_id,generation,status,current_job_id,metadata,last_heartbeat_at,updated_at)
+        values($1,$2,$3,$4,'online',$5,jsonb_build_object('workerStartedAt',$6::timestamptz),now(),now())
+        on conflict(worker_instance_id) do update set status='online',current_job_id=excluded.current_job_id,
+          metadata=case when drive_migration_queue_workers.metadata ? 'workerStartedAt' then drive_migration_queue_workers.metadata
+            else drive_migration_queue_workers.metadata||excluded.metadata end,last_heartbeat_at=now(),updated_at=now()`,
+        [WORKER_INSTANCE_ID, AGENT_ID || null, MIGRATION_ID, meta.generation, selected.id, WORKER_STARTED_AT])
       await db.query("commit")
       const row = claimed.rows[0]
       jobClaimTokens.set(row.id, row.claim_token)
