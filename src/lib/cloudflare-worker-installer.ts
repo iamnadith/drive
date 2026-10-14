@@ -340,8 +340,7 @@ async function ensureQueue(token: string, accountId: string, name: string) {
   return existing || cf<{ queue_id: string; queue_name: string }>(token, `/accounts/${accountId}/queues`, { method: "POST", body: JSON.stringify({ queue_name: name }) })
 }
 
-async function removeWorkerQueueConsumer(token: string, accountId: string, worker: HostedWorker, scriptName: string) {
-  if (worker === "backend") return
+async function removeWorkerQueueConsumer(token: string, accountId: string, scriptName: string) {
   // Find consumers by the actual script binding, not by the currently
   // configured queue name. The installation suffix can change if APP_URL
   // changes, and Cloudflare refuses script deletion while any Queue points at
@@ -655,7 +654,7 @@ export async function deleteCloudflareWorkers() {
         current.phase = "deleting"; state.step = `${worker}_deleting`; await saveState(state)
         if (current.accountId && state.encryptedTokens?.[worker]) {
           const token = decryptToken(state.encryptedTokens[worker]!, state.id, worker)
-          await removeWorkerQueueConsumer(token, current.accountId, worker, current.scriptName)
+          await removeWorkerQueueConsumer(token, current.accountId, current.scriptName)
           await deleteWorkerScript(token, current.accountId, current.scriptName)
         }
         state.workers[worker] = { scriptName: current.scriptName, phase: "queued" }
