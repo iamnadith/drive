@@ -37,7 +37,7 @@ function num(value: unknown) { const parsed = Number(value); return Number.isFin
 function formatNumber(value: number) { return new Intl.NumberFormat().format(Math.max(0, value)) }
 function formatDate(value?: string) { if (!value) return "—"; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString() }
 function formatBytes(value: number) { if (value <= 0) return "0 B"; const units = ["B", "KB", "MB", "GB", "TB"]; let size = value; let unit = 0; while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1 } return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unit]}` }
-function formatWorkerHours(value: number) { const seconds = Math.max(0, Math.floor(value)); const hours = Math.floor(seconds / 3600); const minutes = Math.floor((seconds % 3600) / 60); const remainder = seconds % 60; return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(remainder).padStart(2, "0")}s` }
+function formatWorkerHours(value: number) { const seconds = Math.max(0, Math.floor(value)); return `${(seconds / 3600).toFixed(2)} h` }
 function percentage(done: number, total: number) { return total > 0 ? Math.max(0, Math.min(100, (done / total) * 100)) : 0 }
 
 function WorkerTableDate({ value }: { value?: string }) {
