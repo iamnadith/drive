@@ -109,6 +109,12 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
     queueSettingsCache = { expiresAt: now + 30_000, value: await getMigrationWorkerSettings() }
   }
   const queueSettings = queueSettingsCache.value
+  if (!queueSettings.queueDatabaseUrl) {
+    const migration = await queryDb<{ execution_mode: string | null }>(`select options->>'executionMode' execution_mode from drive_migrations where id=$1 limit 1`, [id])
+    if (migration.rows[0]?.execution_mode === "migration_workers") {
+      throw new Error("Migration queue database is not configured; worker-pool counts cannot be read authoritatively")
+    }
+  }
   if (queueSettings.queueDatabaseUrl) {
     try {
     const queueProjection = await withMigrationQueueDatabase(queueSettings.queueDatabaseUrl, async (db) => {
@@ -201,9 +207,37 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
         const generationRemaining = Number(row.remaining_jobs || 0)
         const failed = ["failed", "verification_failed", "canceled", "cancelled", "aborted"].includes(generationStatus)
         const complete = generationStatus === "completed"
-        const poolStatus = failed ? "failed" : complete ? "completed" : generationOnline > 0 || generationRunning > 0 ? "running" : row.seed_complete && generationRemaining > 0 ? "dispatching" : "processing"
+        const generationFailedJobs = Number(row.failed_jobs || 0)
+        const generationCompletedJobs = Number(row.completed_jobs || 0)
+        const poolStatus = generationFailedJobs > 0 && generationRemaining === 0
+          ? "failed"
+          : Number(row.canceled_jobs || 0) > 0 && generationRemaining === 0
+            ? "canceled"
+            : complete || (generationRemaining === 0 && generationFailedJobs === 0 && generationCompletedJobs > 0)
+              ? "completed"
+              : failed ? "failed" : generationOnline > 0 || generationRunning > 0 ? "running" : row.seed_complete && generationRemaining > 0 ? "dispatching" : "processing"
         return { generation: Number(row.generation), status: poolStatus, workerCount: Number(row.worker_count || 0), runningWorkers: generationOnline, onlineWorkers: generationOnline, totalJobs: Number(row.total_jobs || 0), queuedJobs: Number(row.queued_jobs || 0), runningJobs: generationRunning, remainingJobs: generationRemaining, completedJobs: Number(row.completed_jobs || 0), failedJobs: Number(row.failed_jobs || 0), canceledJobs: Number(row.canceled_jobs || 0), createdAt: row.created_at, updatedAt: row.updated_at }
       })
+      if (!queueAttempts.some((attempt) => Number(attempt.generation) === generation) && liveProjection.stats.totalJobs > 0) {
+        const failed = liveProjection.stats.failedJobs
+        const remaining = liveProjection.stats.remainingJobs
+        queueAttempts.push({
+          generation,
+          status: failed > 0 && remaining === 0 ? "failed" : remaining > 0 ? "dispatching" : "completed",
+          workerCount: 0,
+          runningWorkers: onlineWorkers,
+          onlineWorkers,
+          totalJobs: liveProjection.stats.totalJobs,
+          queuedJobs: liveProjection.stats.queuedJobs,
+          runningJobs: liveProjection.stats.runningJobs,
+          remainingJobs: remaining,
+          completedJobs: liveProjection.stats.completedJobs,
+          failedJobs: failed,
+          canceledJobs: liveProjection.stats.canceledJobs,
+          createdAt: liveProjection.updatedAt,
+          updatedAt: liveProjection.updatedAt,
+        })
+      }
       const jobPage = page.rows.map((row) => ({ id: row.id, status: row.status, claimedByAgentId: row.agent_id || row.claimed_by, summary: row.summary, error: row.error, createdAt: row.created_at, updatedAt: row.updated_at, lastHeartbeatAt: row.last_heartbeat_at, completedAt: row.completed_at, objectKey: row.object_key || "", objectSize: Number(row.object_size || 0), sourceBucket: row.source_bucket || "", targetBucket: row.target_bucket || "", transferred: Number(row.transferred || 0), skipped: Number(row.skipped || 0), failed: Number(row.failed || 0) }))
       const workerRuns: Array<Record<string, unknown>> = workers.rows.map((row) => {
         const online = row.status === "online" && Date.now() - Date.parse(row.last_heartbeat_at) < 90_000
@@ -297,7 +331,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       select count(*)::bigint total_jobs,
         count(*) filter(where status='pending')::bigint queued_jobs,
         count(*) filter(where status in('claimed','running'))::bigint running_jobs,
-        count(*) filter(where status in('pending','claimed','running') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<2))::bigint remaining_jobs,
+        count(*) filter(where status in('pending','claimed','running'))::bigint remaining_jobs,
         count(*) filter(where status='completed')::bigint completed_jobs,
         count(*) filter(where status='failed')::bigint failed_jobs,
         coalesce(sum(case when status='completed' then case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end when status in('claimed','running') then greatest(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end,case when (progress->>'transferred') ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end) else 0 end),0)::bigint transferred_objects,
@@ -457,7 +491,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
           select count(*)::bigint total_jobs,
             count(*) filter(where status='pending')::bigint queued_jobs,
             count(*) filter(where status in('claimed','running'))::bigint running_jobs,
-            count(*) filter(where status in('pending','claimed','running') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<2))::bigint remaining_jobs,
+            count(*) filter(where status in('pending','claimed','running'))::bigint remaining_jobs,
             count(*) filter(where status='completed')::bigint completed_jobs,
             count(*) filter(where status='failed')::bigint failed_jobs,
             count(*) filter(where status='canceled')::bigint canceled_jobs,

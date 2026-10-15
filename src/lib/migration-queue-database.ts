@@ -67,7 +67,8 @@ export async function readMigrationQueueLiveProjectionFromClient(db: Client, mig
         ), job_item_rows as (
         select q.status,q.updated_at,item.item_id,item.source_bucket,item.target_bucket,item.source_objects,item.source_bytes,
             greatest(case when q.result->>'retryCount' ~ '^[0-9]+$' then (q.result->>'retryCount')::int else 0 end,
-              case when q.result->>'verificationRetryCount' ~ '^[0-9]+$' then (q.result->>'verificationRetryCount')::int else 0 end) retry_count,
+              case when q.result->>'verificationRetryCount' ~ '^[0-9]+$' then (q.result->>'verificationRetryCount')::int else 0 end,
+              greatest(q.attempts-1,0)) retry_count,
             coalesce(res.transferred,0)::bigint result_transferred,coalesce(res.failed,0)::bigint result_failed,coalesce(res.skipped,0)::bigint result_skipped,
             coalesce(live.transferred,0)::bigint live_transferred,coalesce(live.failed,0)::bigint live_failed,coalesce(live.skipped,0)::bigint live_skipped,
             q.progress->>'currentItemId' current_item_id,q.progress->'currentFile' current_file,
@@ -105,7 +106,7 @@ export async function readMigrationQueueLiveProjectionFromClient(db: Client, mig
         where w.migration_id=$1 and w.generation=$2 order by w.last_heartbeat_at desc`, [migrationId, generation]),
       db.query(`select count(*)::bigint total_jobs,count(*) filter(where status='pending')::bigint queued_jobs,
         count(*) filter(where status in('claimed','running'))::bigint running_jobs,
-        count(*) filter(where status in('pending','claimed','running') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<2))::bigint remaining_jobs,
+        count(*) filter(where status in('pending','claimed','running'))::bigint remaining_jobs,
         count(*) filter(where status='completed')::bigint completed_jobs,count(*) filter(where status='failed')::bigint failed_jobs,
         count(*) filter(where status='canceled')::bigint canceled_jobs,
         coalesce(sum(case when status='completed' then case when result->'totals'->>'transferred' ~ '^[0-9]+$' then (result->'totals'->>'transferred')::bigint else coalesce((select sum(case when x->>'transferred' ~ '^[0-9]+$' then (x->>'transferred')::bigint else 0 end) from jsonb_array_elements(case when jsonb_typeof(result->'items')='array' then result->'items' else '[]'::jsonb end) x),0) end when status in('claimed','running') then greatest(case when progress->'totals'->>'transferred' ~ '^[0-9]+$' then (progress->'totals'->>'transferred')::bigint when progress->>'transferred' ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end,case when result->'totals'->>'transferred' ~ '^[0-9]+$' then (result->'totals'->>'transferred')::bigint else 0 end) else 0 end),0)::bigint transferred,

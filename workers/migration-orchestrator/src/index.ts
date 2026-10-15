@@ -654,6 +654,81 @@ async function recoverJobs(db: Client, migrationId: string, generation: number, 
   `, [migrationId, `migration:${migrationId}:generation:${generation}:inventory:%`, `%`])
   return result.rowCount || 0
 }
+async function recoverQueueFailedJobs(db: Client, migrationId: string, generation: number) {
+  const settings = (await db.query(`select value from drive_app_settings where key='migration-workers' limit 1`)).rows[0]?.value || {}
+  const queueUrl = String(settings.queueDatabaseUrl || "").trim()
+  if (!queueUrl) return { configured: false, retried: 0 }
+  const parsed = new URL(queueUrl)
+  const sslMode = parsed.searchParams.get("sslmode")
+  parsed.searchParams.delete("sslmode")
+  const queue = new Client({
+    connectionString: parsed.toString(),
+    ssl: ["disable"].includes(sslMode || "") || ["localhost", "127.0.0.1"].includes(parsed.hostname) ? false : { rejectUnauthorized: false },
+    connectionTimeoutMillis: 8_000,
+    keepAlive: true,
+    application_name: "drive-migration-orchestrator-retry",
+  })
+  await queue.connect()
+  let retries: Array<{ id: string; retry_count: number; progress: Row; result: Row; summary: string }> = []
+  let terminalFailure = false
+  let failedItems: Array<{ item_id: string; failed_jobs: number }> = []
+  try {
+    await queue.query("begin")
+    try {
+      const result = await queue.query(`with retryable as materialized (
+          select id,progress,result,error,
+            greatest(case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end,
+              greatest(attempts-1,0)) retry_count
+          from drive_migration_queue_jobs
+          where migration_id=$1 and generation=$2 and status='failed'
+          order by updated_at,id for update skip locked
+        ), recovered as (
+          update drive_migration_queue_jobs q set status='pending',progress='{}'::jsonb,
+            result=coalesce(r.result,'{}'::jsonb)||jsonb_build_object('retryCount',r.retry_count+1,
+              'lastRetryError',left(coalesce(q.error,''),2000)),
+            summary=format('Retrying failed object (retry %s of 2)',r.retry_count+1),error=null,
+            claimed_by=null,agent_id=null,claim_token=null,lease_expires_at=null,last_heartbeat_at=null,
+            completed_at=null,updated_at=now()
+          from retryable r
+          where q.id=r.id and r.retry_count<2
+          returning q.id,(q.result->>'retryCount')::int retry_count,q.progress,q.result,q.summary
+        ) select * from recovered`, [migrationId, generation])
+      retries = result.rows
+      const counts = (await queue.query(`select m.seed_complete,
+          count(*) filter(where q.status in('pending','claimed','running'))::int remaining_jobs,
+          count(*) filter(where q.status='failed')::int failed_jobs
+        from drive_migration_queue_meta m left join drive_migration_queue_jobs q
+          on q.migration_id=m.migration_id and q.generation=m.generation
+        where m.migration_id=$1 and m.generation=$2 group by m.seed_complete`, [migrationId, generation])).rows[0]
+      terminalFailure = counts?.seed_complete === true && Number(counts.remaining_jobs || 0) === 0 && Number(counts.failed_jobs || 0) > 0
+      const buckets = await queue.query(`select item->>'id' item_id,count(*) filter(where q.status='failed')::int failed_jobs,
+          count(*) filter(where q.status in('pending','claimed','running'))::int remaining_jobs
+        from drive_migration_queue_jobs q
+        cross join lateral jsonb_array_elements(case when jsonb_typeof(q.payload->'items')='array' then q.payload->'items' else '[]'::jsonb end) item
+        where q.migration_id=$1 and q.generation=$2 and nullif(item->>'id','') is not null
+        group by item->>'id'`, [migrationId, generation])
+      failedItems = buckets.rows.filter((row) => Number(row.failed_jobs || 0) > 0 && Number(row.remaining_jobs || 0) === 0)
+      await queue.query("commit")
+    } catch (error) { await queue.query("rollback").catch(() => undefined); throw error }
+  } finally { await queue.end().catch(() => undefined) }
+  if (retries.length) {
+    await db.query(`update drive_repair_jobs j set status='pending',claimed_by_agent_id=null,claim_token=null,claimed_at=null,started_at=null,
+        last_heartbeat_at=null,completed_at=null,error=null,summary=x.summary,progress=x.progress,result=x.result,updated_at=now()
+      from jsonb_to_recordset($2::jsonb) as x(id uuid,retry_count int,progress jsonb,result jsonb,summary text)
+      where j.id=x.id and j.migration_id=$1 and j.mode='migration'`, [migrationId, JSON.stringify(retries)])
+  }
+  for (const item of failedItems) {
+    await db.query(`update drive_migration_items set slurper_status='failed',last_progress_at=now(),updated_at=now(),
+        progress=jsonb_set(jsonb_set(coalesce(progress,'{}'::jsonb),'{stage}','"worker_pool_failed"'::jsonb),'{live}',
+          coalesce(progress->'live','{}'::jsonb)||jsonb_build_object('status','failed','failedObjects',$2,'updatedAt',now()))
+      where id=$1 and migration_id=$3 and coalesce(slurper_status,'')<>'completed'`, [item.item_id, item.failed_jobs, migrationId])
+  }
+  if (terminalFailure) {
+    await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message='Migration worker retries exhausted; failed queue jobs remain',last_synced_at=now(),updated_at=now()
+      where id=$1 and status in('running','verifying')`, [migrationId])
+  }
+  return { configured: true, retried: retries.length, terminalFailure, failedBuckets: failedItems.length }
+}
 async function refreshWorkerItemProgress(db: Client, migration: Row, generation: number, affectedItemIds?: string[]) {
   await db.query(`
     with relevant_jobs as materialized (
@@ -2264,7 +2339,10 @@ async function cycle(env: Env) {
       // Settings follow each bucket's successful verification instead of
       // waiting for the entire migration to finish.
       const bucketSettings = await syncNextBucketSettings(db, migration)
-      const recovered = shards.inventoryPending || shards.queuePending ? 0 : await recoverJobs(db, migration.id, shards.generation, shards.shardCount)
+      const recovered = shards.inventoryPending || shards.queuePending || directQueueMode ? 0 : await recoverJobs(db, migration.id, shards.generation, shards.shardCount)
+      const queueRecovery = directQueueMode && !shards.inventoryPending && !shards.queuePending && !shards.terminalFailure
+        ? await recoverQueueFailedJobs(db, migration.id, shards.generation)
+        : { configured: directQueueMode, retried: 0 }
       await renew(db, owner)
       const finalized = shards.terminalFailure || shards.inventoryPending || shards.queuePending
         ? { complete: false, terminalFailure: Boolean(shards.terminalFailure), jobs: {} }
@@ -2288,7 +2366,7 @@ async function cycle(env: Env) {
       await recordItemStageEvents(db, migration, shards.generation)
       if (shards.inventoryPending || shards.queuePending || (directQueueMode && !queueSeed.complete)) await env.GITHUB_DISPATCH_QUEUE.send({ control: "cycle" })
       await db.query(`update drive_migrations set last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
-      return complete(db, owner, migration.id, { ok: true, migrationId, ...shards, migrationQueue: directQueueMode ? { seed: queueSeed, mirror: queueMirror } : null, recovered, finalized, ...verification, bucketSettings, fileScanner, dispatched })
+      return complete(db, owner, migration.id, { ok: true, migrationId, ...shards, migrationQueue: directQueueMode ? { seed: queueSeed, mirror: queueMirror, recovery: queueRecovery } : null, recovered, finalized, ...verification, bucketSettings, fileScanner, dispatched })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await db.query(`update drive_migration_orchestrator_state set status='error',lease_owner=null,lease_expires_at=null,last_completed_at=now(),last_error=$1,last_migration_id=$2,last_result=$3::jsonb,updated_at=now() where id=true and lease_owner=$4`, [message, migrationId, JSON.stringify({ ok: false, error: message }), owner]).catch(() => undefined)
