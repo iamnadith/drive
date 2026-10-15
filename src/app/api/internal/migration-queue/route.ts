@@ -11,6 +11,15 @@ export const dynamic = "force-dynamic"
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
 
+async function queryMain<T = Row>(stage: string, sql: string, values: unknown[] = []) {
+  try {
+    return await queryDb<T>(sql, values)
+  } catch (error) {
+    const databaseError = error as { message?: unknown; position?: unknown; code?: unknown }
+    throw new Error(`${stage}: ${String(databaseError.message || error)} (position ${String(databaseError.position || "unknown")}, code ${String(databaseError.code || "unknown")})`)
+  }
+}
+
 async function seedQueue(db: import("pg").Client, migrationId: string, generation: number, limit: number) {
   // A retry creates a new fenced generation. Stop old queue rows before
   // publishing the new one so an old GitHub runner cannot keep processing it.
@@ -124,15 +133,15 @@ async function syncQueue(db: import("pg").Client, migrationId: string, generatio
       ))::bigint))),status='offline',current_job_id=null,
       metadata=metadata||jsonb_build_object('retiredAt',last_heartbeat_at+interval '90 seconds','retireReason','heartbeat_expired','runtimeAccountingVersion',1),updated_at=now()
     where migration_id=$1 and generation=$2 and status='online' and last_heartbeat_at<=now()-interval '90 seconds'`, [migrationId, generation])
-  await queryDb(`update drive_repair_jobs j set status='canceled',updated_at=now(),completed_at=coalesce(j.completed_at,now())
+  await queryMain("cancel_terminal_jobs", `update drive_repair_jobs j set status='canceled',updated_at=now(),completed_at=coalesce(j.completed_at,now())
     from drive_migrations m where j.migration_id=$1 and m.id=j.migration_id and m.status in('canceled','aborted','failed','verification_failed') and j.mode='migration' and j.status not in('completed','failed','canceled')`, [migrationId])
-  const { rows: main } = await queryDb<Row>(`select status,greatest(1,coalesce(nullif(options->>'workerGeneration','')::int,1)) generation from drive_migrations where id=$1`, [migrationId])
-  const canceled = await queryDb<Row>(`select id from drive_repair_jobs where migration_id=$1 and mode='migration' and status='canceled' and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2`, [migrationId, generation])
+  const { rows: main } = await queryMain<Row>("read_migration_state", `select status,greatest(1,coalesce(nullif(options->>'workerGeneration','')::int,1)) generation from drive_migrations where id=$1`, [migrationId])
+  const canceled = await queryMain<Row>("read_canceled_jobs", `select id from drive_repair_jobs where migration_id=$1 and mode='migration' and status='canceled' and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2`, [migrationId, generation])
   for (let offset = 0; offset < canceled.rows.length; offset += 250) {
     await db.query(`update drive_migration_queue_jobs set status='canceled',completed_at=coalesce(completed_at,now()),lease_expires_at=null,updated_at=now()
       where migration_id=$1 and generation=$2 and id=any($3::uuid[]) and status not in('completed','failed','canceled')`, [migrationId, generation, canceled.rows.slice(offset, offset + 250).map((row) => row.id)])
   }
-  const recovered = await queryDb<Row>(`select id,progress,result from drive_repair_jobs where migration_id=$1 and mode='migration' and status='pending'
+  const recovered = await queryMain<Row>("read_recovered_jobs", `select id,progress,result from drive_repair_jobs where migration_id=$1 and mode='migration' and status='pending'
     and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2
     and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end>0`, [migrationId, generation])
   for (let offset = 0; offset < recovered.rows.length; offset += 250) {
@@ -155,7 +164,7 @@ async function syncQueue(db: import("pg").Client, migrationId: string, generatio
       and ($3::timestamptz is null or (updated_at,id)>($3::timestamptz,$4::uuid))
     order by updated_at,id limit $5`, [migrationId, generation, cursorAt, cursorId, limit])
   if (result.rowCount) {
-    await queryDb(`update drive_repair_jobs j set status=x.status,progress=x.progress,result=x.result,summary=x.summary,error=x.error,
+    await queryMain("mirror_terminal_jobs", `update drive_repair_jobs j set status=x.status,progress=x.progress,result=x.result,summary=x.summary,error=x.error,
       claimed_by_agent_id=x.agent_id,claim_token=x.claim_token,last_heartbeat_at=x.last_heartbeat_at,
       completed_at=x.completed_at,updated_at=x.updated_at from jsonb_to_recordset($2::jsonb) as x(id uuid,status text,progress jsonb,result jsonb,summary text,error text,agent_id uuid,claim_token uuid,attempts int,last_heartbeat_at timestamptz,completed_at timestamptz,updated_at timestamptz)
       where j.id=x.id and j.migration_id=$1`, [migrationId, JSON.stringify(result.rows.map((row) => ({ ...row, progress: row.progress || {}, result: row.result || {} })))])
@@ -170,12 +179,12 @@ async function syncQueue(db: import("pg").Client, migrationId: string, generatio
       effective_status: worker.status === "online" && Date.now() - Date.parse(worker.last_heartbeat_at) < 90_000 ? "online" : "offline",
     })))
     if (records === "[]") continue
-    await queryDb(`update drive_agents a set status=x.effective_status,last_heartbeat_at=x.last_heartbeat_at,
+    await queryMain("mirror_queue_workers_to_agents", `update drive_agents a set status=x.effective_status,last_heartbeat_at=x.last_heartbeat_at,
       last_seen_version='worker-v3-queue-db',metadata=coalesce(a.metadata,'{}'::jsonb)||jsonb_build_object(
         'queueWorkerInstanceId',x.worker_instance_id,'currentQueueJobId',x.current_job_id),updated_at=now()
       from jsonb_to_recordset($1::jsonb) as x(worker_instance_id text,agent_id uuid,status text,effective_status text,current_job_id uuid,last_heartbeat_at timestamptz)
       where a.id=x.agent_id`, [records])
-    await queryDb(`update drive_agent_runs r set status=case when x.effective_status='online' then 'running' else 'completed' end,
+    await queryMain("mirror_queue_workers_to_runs", `update drive_agent_runs r set status=case when x.effective_status='online' then 'running' else 'completed' end,
       job_reference=coalesce(x.current_job_id::text,r.job_reference),summary=case when x.effective_status='online' then 'Worker heartbeat synchronized from migration queue database' else 'Worker retired or heartbeat expired in migration queue database' end,
       completed_at=case when x.effective_status='online' then null else coalesce(r.completed_at,x.last_heartbeat_at) end,
       payload=r.payload||jsonb_build_object('phase',case when x.effective_status='online' then 'working' else 'retired' end,'queueWorkerStatus',x.effective_status,'queueHeartbeatAt',x.last_heartbeat_at),
@@ -246,7 +255,7 @@ async function syncQueue(db: import("pg").Client, migrationId: string, generatio
     totalObjects: bucketStats.reduce((sum, item) => sum + item.totalObjects, 0), onlineWorkers: Number(queueWorkers[0]?.online_workers || 0),
     activeTransfers: Number(queueWorkers[0]?.active_transfers || 0), inProgressFiles: Number(queueWorkers[0]?.active_transfers || 0), workerRuntimeSeconds: Number(queueWorkers[0]?.worker_runtime_seconds || 0), buckets: bucketStats, updatedAt: new Date().toISOString(),
   }
-  await queryDb(`insert into drive_migration_worker_live_state(migration_id,snapshot,updated_at) values($1,$2::jsonb,now())
+  await queryMain("save_live_snapshot", `insert into drive_migration_worker_live_state(migration_id,snapshot,updated_at) values($1,$2::jsonb,now())
     on conflict(migration_id) do update set snapshot=excluded.snapshot,updated_at=now()`, [migrationId, JSON.stringify(snapshot)])
   return { synced: result.rowCount || 0, syncedWorkers: workers.length, aggregate: { totalJobs: snapshot.totalJobs, completedJobs: snapshot.completedJobs, runningJobs: snapshot.runningJobs, onlineWorkers: snapshot.onlineWorkers } }
 }
