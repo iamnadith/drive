@@ -1348,7 +1348,7 @@ export default function WorkersPage() {
       </Card>
 
       <MigrationWorkerSecretControl />
-      <GitHubBackendWorkerSetupCard connected={githubConnected} onCreated={() => void loadAgents()} />
+      <GitHubBackendWorkerSetupCard connected={githubConnected} onConnect={startGitHubConnect} onCreated={() => void loadAgents()} />
       <CloudflareWorkerHosting />
 
       <AlertDialog open={!!confirmDeleteWorker} onOpenChange={(open: boolean) => !open && setConfirmDeleteWorker(null)}>

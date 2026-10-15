@@ -5,10 +5,11 @@ import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import type { WorkerRepository } from "@/lib/github-worker-setup"
 
-export function GitHubWorkerSetup({ connected, onSelect, onBusy, workerKind = "migration" }: {
+export function GitHubWorkerSetup({ connected, onSelect, onBusy, workerKind = "migration", startLabel }: {
   connected: boolean
   workerKind?: "migration" | "backend"
-  onSelect: (repo: WorkerRepository, workflow: string) => void
+  startLabel?: string
+  onSelect: (repo: WorkerRepository, workflow: string) => void | Promise<void>
   onBusy: (busy: boolean) => void
 }) {
   const [busy, setBusy] = React.useState(false)
@@ -58,7 +59,7 @@ export function GitHubWorkerSetup({ connected, onSelect, onBusy, workerKind = "m
         }
         if (result.status === "ready" && result.repo && typeof result.workflow === "string" && result.workflow) {
           cursor.current = undefined
-          onSelect(result.repo, result.workflow)
+          await onSelect(result.repo, result.workflow)
           return
         }
         if (result.status === "ready") throw new Error("GitHub setup did not return a repository workflow. Press start to retry.")
@@ -90,7 +91,7 @@ export function GitHubWorkerSetup({ connected, onSelect, onBusy, workerKind = "m
   return <div className="md:col-span-2 flex flex-col gap-3">
     <p className="text-sm text-muted-foreground">Automatically find or create your worker repository, sync the latest code, and activate its workflow. Existing repositories are reused when you retry.</p>
     <div className="flex gap-2">
-      <Button type="button" disabled={!connected || busy} aria-busy={busy} onClick={() => void run()}>{busy ? "Starting..." : "start"}</Button>
+      <Button type="button" disabled={!connected || busy} aria-busy={busy} onClick={() => void run()}>{busy ? "Starting..." : startLabel || "start"}</Button>
     </div>
     {message && <p role="status" className="text-sm text-muted-foreground">{message}</p>}
     {candidates.length > 0 && <Select disabled={busy} onValueChange={(id) => void run(id)}>
