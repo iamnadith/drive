@@ -6,7 +6,7 @@ type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; M
 // Database rows are dynamically shaped by the PostgreSQL queries below.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-const BUILD = 44
+const BUILD = 45
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -1869,7 +1869,13 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row) {
     pendingVerifications: Number(work.rows[0]?.verification_pending || 0),
     generation,
   }
-  if (!pendingTaskCount) return { dispatched: 0, reason: "no_pending_scan_or_verification_tasks", ...diagnostics }
+  if (!pendingTaskCount) {
+    const canceled = await db.query(`update drive_agent_runs set status='canceled',completed_at=now(),summary='No scan or verification work remained before this Backend Worker dispatch started',payload=payload||jsonb_build_object('phase','canceled_no_work','canceledAt',now()),updated_at=now()
+      where run_type='github_backend_dispatch' and status='pending' and payload->>'migrationId'=$1
+        and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2
+        and coalesce(payload->>'phase','created') in('created','queued')`, [migration.id, generation])
+    return { dispatched: 0, canceledIntents: canceled.rowCount || 0, reason: "no_pending_scan_or_verification_tasks", ...diagnostics }
+  }
   const configuration = await db.query(`select key,value from drive_app_settings where key in('migration-orchestrator','migration-workers')`)
   const orchestration = configuration.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
   const workerSettings = configuration.rows.find((row) => row.key === "migration-workers")?.value || {}
