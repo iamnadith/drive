@@ -6,7 +6,7 @@ type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; M
 // Database rows are dynamically shaped by the PostgreSQL queries below.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-const BUILD = 43
+const BUILD = 44
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -1901,10 +1901,17 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row) {
   const stranded = await db.query(`select id from drive_agent_runs where run_type='github_backend_dispatch' and status='pending'
     and payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2
     and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit 10`, [migration.id, generation])
-  let requeued = 0
-  for (const run of stranded.rows) {
-    await env.GITHUB_DISPATCH_QUEUE.send({ intentId: String(run.id) }, { contentType: "json" })
-    requeued += 1
+  let dispatched = 0
+  for (let offset = 0; offset < stranded.rows.length; offset += 3) {
+    const batch = stranded.rows.slice(offset, offset + 3)
+    const outcomes = await Promise.all(batch.map(async (run) => {
+      try { return await consumeDispatch(env, String(run.id), 0) }
+      catch (error) {
+        console.error("Backend Worker dispatch intent deferred", run.id, error instanceof Error ? error.message : String(error))
+        return "deferred"
+      }
+    }))
+    dispatched += outcomes.filter((outcome) => ["accepted", "awaiting_reconciliation", "reconciled"].includes(outcome)).length
   }
   const agents = await db.query(`select id,github_repo_owner,github_repo_name,github_workflow_file,github_ref,github_token,
       least(5,greatest(1,coalesce(worker_count,1))) worker_count
@@ -1920,11 +1927,10 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row) {
       and a.metadata->>'workerKind'='backend'`, [migration.id, generation])
   const activeBackendRuns = Number(totalActive.rows[0]?.count || 0)
   diagnostics.activeRuns = activeBackendRuns
-  if (!agents.rowCount) return { dispatched: 0, requeued, reason: "no_eligible_backend_worker_agent", ...diagnostics }
+  if (!agents.rowCount) return { dispatched, reason: "no_eligible_backend_worker_agent", ...diagnostics }
   let remainingDemand = Math.max(0, pendingTaskCount - activeBackendRuns)
   diagnostics.remainingDemand = remainingDemand
-  if (!remainingDemand) return { dispatched: 0, requeued, reason: "pending_tasks_already_covered_by_active_runs", ...diagnostics }
-  let dispatched = 0
+  if (!remainingDemand) return { dispatched, reason: dispatched ? "existing_backend_dispatches_started" : "pending_tasks_already_covered_by_active_runs", ...diagnostics }
   for (const agent of agents.rows) {
     const active = await db.query(`select count(*)::int count from drive_agent_runs
       where agent_id=$1 and run_type='github_backend_dispatch' and status in('pending','running')
@@ -1941,14 +1947,17 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row) {
           and greatest(1,coalesce(nullif(options->>'workerGeneration','')::int,1))=$4) returning id`,
         [agent.id, JSON.stringify({ migrationId: migration.id, workerGeneration: generation, pool: true, workerType: "backend", workerInstanceId, source: "migration_orchestrator", phase: "created" }), migration.id, generation])
       if (!intent.rows[0]) break
-      await env.GITHUB_DISPATCH_QUEUE.send({ intentId: String(intent.rows[0].id) }, { contentType: "json" })
-      dispatched += 1
+      try {
+        const outcome = await consumeDispatch(env, String(intent.rows[0].id), 0)
+        if (["accepted", "awaiting_reconciliation", "reconciled"].includes(outcome)) dispatched += 1
+      } catch (error) {
+        console.error("New Backend Worker dispatch intent deferred", intent.rows[0].id, error instanceof Error ? error.message : String(error))
+      }
     }
   }
   return {
     dispatched,
-    requeued,
-    reason: dispatched > 0 ? "backend_workers_dispatched" : requeued > 0 ? "existing_backend_dispatches_requeued" : "no_backend_worker_capacity_available",
+    reason: dispatched > 0 ? "backend_workers_dispatched" : stranded.rowCount ? "existing_backend_dispatches_reconciled_or_deferred" : "no_backend_worker_capacity_available",
     ...diagnostics,
   }
 }
@@ -2971,7 +2980,6 @@ async function cycle(env: Env) {
         : { dispatched: 0, reason: "migration_not_active" }
       const backendDispatched = Number(backendDispatch.dispatched || 0)
       await recordItemStageEvents(db, migration, shards.generation)
-      if (shards.inventoryPending || shards.queuePending || (directQueueMode && (!queueSeed.complete || !queueMirror.complete))) await env.GITHUB_DISPATCH_QUEUE.send({ control: "cycle" })
       await db.query(`update drive_migrations set last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
       return complete(db, owner, migration.id, { ok: true, migrationId, ...shards, migrationQueue: directQueueMode ? { seed: queueSeed, mirror: queueMirror, recovery: queueRecovery } : null, recovered, finalized, ...verification, bucketSettings, fileScanner, dispatched, backendDispatched, backendDispatch })
     } catch (error) {
@@ -2995,19 +3003,17 @@ export default {
     if (url.pathname === "/status" && request.method === "GET") return json(await database(env, async (db) => { const row = await db.query(`select * from drive_migration_orchestrator_state where id=true`); return { ok: true, service: "migration-orchestrator", build: BUILD, state: row.rows[0] || null } }))
     const liveMatch = /^\/migrations\/([0-9a-f-]{36})\/live$/i.exec(url.pathname)
     if (liveMatch && request.method === "GET") return json(await database(env, async (db) => { await ensureSchema(db); return { ok: true, ...(await migrationLiveState(db, liveMatch[1])) } }))
-    if (url.pathname === "/wake" && request.method === "POST") {
-      await env.GITHUB_DISPATCH_QUEUE.send({ control: "cycle" }, { contentType: "json" })
-      return json({ ok: true, queued: true }, 202)
-    }
+    if (url.pathname === "/wake" && request.method === "POST") { try { return json(await cycle(env)) } catch (error) { return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 503) } }
     if (url.pathname === "/run" && request.method === "POST") { try { return json(await cycle(env)) } catch (error) { return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 503) } }
     return json({ error: "Not found" }, 404)
   },
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-    // Free-plan cron invocations have a 10 ms CPU budget. Opening PostgreSQL
-    // and reconciling a growing fleet here can terminate the invocation after
-    // acquiring its lease, starving new workflows indefinitely. Keep the timer
-    // lightweight; the durable queue consumer owns the full scheduling cycle.
-    ctx.waitUntil(env.GITHUB_DISPATCH_QUEUE.send({ control: "cycle" }, { contentType: "json" }))
+    // Postgres is the durable scheduler. Avoid queue self-messages: a scan
+    // cycle used to enqueue another cycle immediately, exhausting the free
+    // daily write quota and preventing all later worker dispatches.
+    ctx.waitUntil(cycle(env).catch((error) => {
+      console.error("Scheduled Migration Orchestrator cycle failed", error instanceof Error ? error.message : String(error))
+    }))
   },
   async queue(batch: MessageBatch<DispatchMessage>, env: Env) {
     for (const message of batch.messages) {
