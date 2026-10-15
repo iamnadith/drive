@@ -41,7 +41,8 @@ export function GitHubWorkerSetup({ connected, onSelect, onBusy, workerKind = "m
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ cursor: cursor.current, selectedId }), signal: abort.signal,
         })
-        const result = await response.json().catch(() => null) as {
+        const responseText = await response.text()
+        let result: {
           status?: string
           cursor?: unknown
           message?: unknown
@@ -49,8 +50,16 @@ export function GitHubWorkerSetup({ connected, onSelect, onBusy, workerKind = "m
           repo?: WorkerRepository
           workflow?: unknown
           candidates?: WorkerRepository[]
-        } | null
-        if (!result || typeof result !== "object") throw new Error("GitHub setup returned an invalid response. Retry to continue.")
+        } | null = null
+        try {
+          result = JSON.parse(responseText) as typeof result
+        } catch {
+          // Preserve the HTTP details below so HTML platform errors are actionable.
+        }
+        const contentType = response.headers.get("content-type")?.split(";")[0] || "unknown content type"
+        if (!result || typeof result !== "object") {
+          throw new Error(`GitHub setup returned an unexpected response (HTTP ${response.status}, ${contentType}). Retry; if it continues, check the deployment function logs.`)
+        }
         if (!response.ok) throw new Error(typeof result.error === "string" ? result.error : "GitHub setup failed. Retry to continue.")
         if (abort.signal.aborted) return
         setMessage(typeof result.message === "string" ? result.message : "Continuing GitHub setup...")
