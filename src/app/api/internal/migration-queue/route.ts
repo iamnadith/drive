@@ -272,7 +272,7 @@ export async function POST(request: Request) {
     if (!/^[0-9a-f-]{36}$/i.test(migrationId)) return NextResponse.json({ error: "Valid migrationId is required" }, { status: 400 })
     const { queueDatabaseUrl, queueDatabaseSsl } = await getMigrationWorkerSettings()
     if (!queueDatabaseUrl) return NextResponse.json({ error: "Migration queue database is not configured in Settings" }, { status: 503 })
-    const limit = Math.max(50, Math.min(20_000, Math.trunc(Number(body.limit) || 500)))
+    const limit = Math.max(50, Math.min(100_000, Math.trunc(Number(body.limit) || 500)))
     const result = await withMigrationQueueDatabase(queueDatabaseUrl, async (db) => {
       const client = db as import("pg").Client & { query: (...args: any[]) => Promise<any> }
       const originalQuery = client.query.bind(client)
