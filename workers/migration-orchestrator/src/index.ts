@@ -1619,12 +1619,19 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
   const endpointRecoveryGrace = Date.parse(String(recovery.rows[0]?.recovery_until || "")) > Date.now()
   const budget = integer(orchestration.maxDispatchesPerCycle, 100, 1, 100)
   const stranded = await db.query(`select id from drive_agent_runs where run_type='github_dispatch' and status='pending' and payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2 and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit $3`, [migration.id, generation, budget])
-  for (const row of stranded.rows) await env.GITHUB_DISPATCH_QUEUE.send({ intentId: row.id }, { contentType: "json" })
+  let queued = 0
+  for (const row of stranded.rows) {
+    try {
+      const outcome = await consumeDispatch(env, String(row.id), 0)
+      if (["accepted", "awaiting_reconciliation", "reconciled"].includes(outcome)) queued += 1
+    } catch (error) {
+      console.error("Durable GitHub dispatch intent deferred", String(row.id), error instanceof Error ? error.message : String(error))
+    }
+  }
   // Every registered GitHub workflow contributes its configured capacity to
   // every active worker-pool migration. Re-read this set on every cycle so a
   // workflow registered mid-migration joins automatically.
   const agents = await db.query(`select id,github_repo_owner,github_repo_name,github_workflow_file,github_ref,github_token,least(5,greatest(1,coalesce(worker_count,1))) worker_count from drive_agents where provider='github_actions' and status<>'disabled' and github_token is not null and github_repo_owner is not null and github_repo_name is not null and github_workflow_file is not null order by created_at,id`)
-  let queued = stranded.rowCount || 0
   const githubRunsByWorkflow = new Map<string, Row[]>()
   const activeByWorkflow = new Map<string, Set<string>>()
   const blockedWorkflows = new Set<string>()
@@ -1754,9 +1761,12 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row) {
         returning id
       `, [agent.id, JSON.stringify({ migrationId: migration.id, workerGeneration: generation, pool: true, workerInstanceId, source: "migration_orchestrator", phase: "created" }), migration.id, generation])
       if (!intent.rows[0]) return queued
-      await env.GITHUB_DISPATCH_QUEUE.send({ intentId: intent.rows[0].id }, { contentType: "json" })
-      await db.query(`update drive_agent_runs set payload=payload||'{"phase":"queued"}'::jsonb,summary='Queued for independent GitHub dispatch consumer',updated_at=now() where id=$1`, [intent.rows[0].id])
-      queued += 1
+      try {
+        const outcome = await consumeDispatch(env, String(intent.rows[0].id), 0)
+        if (["accepted", "awaiting_reconciliation", "reconciled"].includes(outcome)) queued += 1
+      } catch (error) {
+        console.error("New durable GitHub dispatch intent deferred", String(intent.rows[0].id), error instanceof Error ? error.message : String(error))
+      }
     }
   }
   return queued
