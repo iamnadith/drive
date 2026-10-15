@@ -223,9 +223,11 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       return { snapshot: { migrationId: id, workerGeneration: generation, totalJobs: total, queuedJobs: Number(stats.rows[0]?.queued_jobs || 0), runningJobs: Number(stats.rows[0]?.running_jobs || 0), remainingJobs: Number(stats.rows[0]?.remaining_jobs || 0), completedJobs: Number(stats.rows[0]?.completed_jobs || 0), failedJobs: Number(stats.rows[0]?.failed_jobs || 0), canceledJobs: Number(stats.rows[0]?.canceled_jobs || 0), totalObjects: buckets.reduce((sum, bucket) => sum + bucket.totalObjects, 0), transferred: Number(stats.rows[0]?.transferred || 0), inProgressFiles: active.rowCount || 0, completedBytes: Number(stats.rows[0]?.completed_bytes || 0), inProgressBytes: Number(stats.rows[0]?.in_progress_bytes || 0), workerRuntimeSeconds: Number(stats.rows[0]?.worker_runtime_seconds || 0), skipped: Number(stats.rows[0]?.skipped || 0), failed: Number(stats.rows[0]?.failed || 0), onlineWorkers, activeTransfers: active.rowCount || 0, buckets, updatedAt, sampledAt: new Date().toISOString() }, snapshotUpdatedAt: updatedAt, jobs: recent.rows, liveFiles: active.rows.map((row) => ({ ...(row.progress?.currentFile || {}), jobId: row.id, workerId: row.claimed_by, lastHeartbeatAt: row.last_heartbeat_at, operation: row.mode })), jobPage, jobPagination: { pageIndex, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)), total }, attempts: queueAttempts, workerRuns, selectedGeneration: generation, migrationStatus: meta.status, dataSource: "queue_database" }
     }, queueSettings.queueDatabaseSsl)
     if (queueProjection) return queueProjection
+    if (queueSettings.queueDatabaseUrl) throw new Error("Migration queue counts are not available in the queue database yet")
     } catch (error) {
       queueReadFailed = true
       console.error("Migration worker-pool queue database projection failed", error instanceof Error ? error.message : String(error))
+      if (queueSettings.queueDatabaseUrl) throw new Error("Queue counts are temporarily unavailable from the migration queue database")
       // Fall back to the saved primary-database projection while the queue DB is unavailable.
     }
   }

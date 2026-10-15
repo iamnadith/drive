@@ -34,7 +34,7 @@ export async function GET(
               return current ? { ...item, slurperStatus: current.slurperStatus, progress: { ...item.progress, live: current.progress.live }, updatedAt: current.progress.live.updatedAt || item.updatedAt } : item
             })
             workerRuns = live.workerRuns
-            migration = { ...migration, status: live.migrationStatus, options: { ...migration.options, workerPoolLiveStats: live.stats } }
+            migration = { ...migration, status: live.migrationStatus, options: { ...migration.options, workerPoolLiveStats: live.stats, workerPoolQueueSeeding: live.seedComplete !== true } }
             workerPoolLiveStats = live.stats
           }
         } catch {

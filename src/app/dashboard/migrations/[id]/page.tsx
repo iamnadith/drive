@@ -17,7 +17,6 @@ import {
   Square,
   ShieldCheck,
   Trash2,
-  ListTodo,
   Users,
 } from "lucide-react"
 
@@ -75,6 +74,7 @@ type Migration = {
     executionMode?: "super_slurper" | "migration_workers"
     workerGeneration?: number
     workerShardCount?: number
+    workerPoolQueueSeeding?: boolean
     overwrite?: boolean
     concurrency?: number
     pathPrefix?: string | null
@@ -265,6 +265,7 @@ function statusBadge(
 
 function migrationWorkerBadge(status: string | undefined) {
   const value = String(status || "").toLowerCase()
+  if (value === "processing") return <Badge variant="secondary">Processing</Badge>
   if (value === "completed") return <Badge className="bg-green-600">Worker completed</Badge>
   if (value === "deploying") return <Badge className="bg-yellow-600">Worker deploying</Badge>
   if (value === "aborting") return <Badge className="bg-yellow-600">Worker stopping</Badge>
@@ -1895,12 +1896,13 @@ export default function MigrationDetailsPage() {
                     ? stoppingRuns.length > 0 ? "aborting" : "aborted"
                     : migrationStatus === "verifying"
                       ? "verifying"
-                      : runningRuns.length > 0
-                        ? "running"
-                        : ["pending", "queued", "created", "dispatching"].includes(latestRunStatus)
-                          ? "deploying"
-                          : "queued"
-              const queueRemaining = items.reduce((sum, item) => sum + getBucketSnapshot(item).queued, 0)
+                      : migration.options.workerPoolQueueSeeding
+                        ? "processing"
+                        : runningRuns.length > 0
+                          ? "running"
+                          : ["pending", "queued", "created", "dispatching"].includes(latestRunStatus)
+                            ? "deploying"
+                            : "queued"
               const lastActivityAt = latestRun?.lastHeartbeatAt || latestRun?.updatedAt || migration.updatedAt
 
               return (
@@ -1912,7 +1914,7 @@ export default function MigrationDetailsPage() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-4">
-                    <dl className="grid gap-y-4 border-y py-4 sm:grid-cols-2 lg:grid-cols-4">
+                    <dl className="grid gap-y-4 border-y py-4 sm:grid-cols-2 lg:grid-cols-3">
                       <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:border-r lg:first:pl-0">
                         <Users className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                         <div className="min-w-0">
@@ -1925,13 +1927,6 @@ export default function MigrationDetailsPage() {
                         <div className="min-w-0">
                           <dt className="text-xs font-medium text-muted-foreground">Transferred</dt>
                           <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatNumber(overviewProgress.transferred)}</dd>
-                        </div>
-                      </div>
-                      <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:border-r">
-                        <ListTodo className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-                        <div className="min-w-0">
-                          <dt className="text-xs font-medium text-muted-foreground">Queue remaining</dt>
-                          <dd className="mt-1 truncate text-sm font-medium tabular-nums">{formatNumber(queueRemaining)}</dd>
                         </div>
                       </div>
                       <div className="flex min-w-0 items-start gap-3 sm:px-3 lg:pr-0">

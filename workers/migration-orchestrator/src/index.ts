@@ -6,7 +6,7 @@ type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; M
 // Database rows are dynamically shaped by the PostgreSQL queries below.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-const BUILD = 36
+const BUILD = 37
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -1336,22 +1336,96 @@ async function workerEndpointAvailable(db: Client, migrationId: string, orchestr
   return true
 }
 
-async function migrationQueueRequest(db: Client, env: Env, action: "seed" | "sync", migrationId: string, generation: number) {
+async function seedMigrationQueue(db: Client, migrationId: string, generation: number) {
   const configured = await db.query(`select value from drive_app_settings where key='migration-workers' limit 1`)
   const settings = configured.rows[0]?.value || {}
-  if (!String(settings.queueDatabaseUrl || "").trim()) return { configured: false, complete: false, inserted: 0, synced: 0 }
+  const queueUrl = String(settings.queueDatabaseUrl || "").trim()
+  if (!queueUrl) return { configured: false, complete: false, inserted: 0 }
+  const parsed = new URL(queueUrl)
+  parsed.searchParams.delete("sslmode")
+  const sslMode = new URL(queueUrl).searchParams.get("sslmode")?.toLowerCase()
+  const queue = new Client({ connectionString: parsed.toString(), ssl: ["disable"].includes(sslMode || "") || ["localhost", "127.0.0.1"].includes(parsed.hostname) ? false : { rejectUnauthorized: false }, connectionTimeoutMillis: 8_000, keepAlive: true, application_name: "drive-migration-orchestrator-seed" })
+  await queue.connect()
+  try {
+    // Seed one bounded page per Orchestrator cycle. The cursor commits with the
+    // queue rows, so a crash replays at most this page and ON CONFLICT is safe.
+    // Keep JS row decoding/mapping below the 10 ms CPU budget; the entire
+    // queue is still consumed continuously through durable cursor pages.
+    const limit = 500
+    await queue.query("begin")
+    await queue.query(`insert into drive_migration_queue_meta(migration_id,generation,status) values($1,$2,'seeding') on conflict(migration_id,generation) do nothing`, [migrationId, generation])
+    const meta = (await queue.query(`select seed_cursor,seed_complete from drive_migration_queue_meta where migration_id=$1 and generation=$2 for update`, [migrationId, generation])).rows[0]
+    let cursorAt: string | null = null
+    let cursorId: string | null = null
+    if (meta.seed_cursor) { const parts = String(meta.seed_cursor).split("|"); cursorAt = parts[0] || null; cursorId = parts[1] || null }
+    if (meta.seed_complete) {
+      const late = await db.query(`select exists(select 1 from drive_repair_jobs j where j.migration_id=$1 and j.mode='migration'
+        and greatest(1,coalesce(nullif(j.payload->>'workerGeneration','')::int,1))=$2
+        and ($3::timestamptz is null or (j.created_at,j.id)>($3::timestamptz,$4::uuid))) has_late_jobs`, [migrationId, generation, cursorAt, cursorId])
+      if (!late.rows[0]?.has_late_jobs) { await queue.query("commit"); return { configured: true, complete: true, inserted: 0 } }
+      await queue.query(`update drive_migration_queue_meta set seed_complete=false,status='seeding',updated_at=now() where migration_id=$1 and generation=$2`, [migrationId, generation])
+    }
+    const { rows } = await db.query(`
+      select j.id,j.status,j.payload job_payload,j.progress,j.result,j.summary,j.error,j.claimed_by_agent_id,j.claim_token,j.created_at,j.created_at::text seed_created_at,j.updated_at,
+        m.options,s.cloudflare_account_id source_account,s.r2_access_key_id source_key,s.r2_secret_access_key source_secret,
+        t.cloudflare_account_id target_account,t.r2_access_key_id target_key,t.r2_secret_access_key target_secret,
+        i.items job_items
+      from drive_repair_jobs j join drive_migrations m on m.id=j.migration_id
+      join drive_accounts s on s.id=m.source_account_id join drive_accounts t on t.id=m.target_account_id
+      left join lateral (
+        select jsonb_agg(jsonb_build_object('id',i.id,'sourceBucket',i.source_bucket,'targetBucket',i.target_bucket,
+          'sourceObjects',i.source_objects,'sourceBytes',i.source_bytes,'slurperStatus',i.slurper_status,'progress',i.progress) order by i.created_at,i.id) items
+        from jsonb_array_elements_text(coalesce(j.payload->'itemIds','[]'::jsonb)) item_ref(item_id)
+        join drive_migration_items i on i.id::text=item_ref.item_id and i.migration_id=j.migration_id
+      ) i on true
+      where j.migration_id=$1 and j.mode='migration'
+        and greatest(1,coalesce(nullif(j.payload->>'workerGeneration','')::int,1))=$2
+        and ($3::timestamptz is null or (j.created_at,j.id)>($3::timestamptz,$4::uuid))
+      order by j.created_at,j.id limit $5`, [migrationId, generation, cursorAt, cursorId, limit + 1])
+    const page = rows.slice(0, limit)
+    if (!page.length) {
+      await queue.query(`update drive_migration_queue_meta set seed_complete=true,status='ready',updated_at=now() where migration_id=$1 and generation=$2`, [migrationId, generation])
+      await queue.query("commit")
+      return { configured: true, complete: true, inserted: 0 }
+    }
+    const first = page[0]
+    if (!first.source_account || !first.target_account || !first.source_key || !first.source_secret || !first.target_key || !first.target_secret) throw new Error(`Migration ${migrationId} has incomplete R2 credentials; queue seeding stopped before dispatch`)
+    await queue.query(`update drive_migration_queue_meta set execution_config=coalesce(execution_config,$3::jsonb),updated_at=now() where migration_id=$1 and generation=$2`, [migrationId, generation, JSON.stringify({ migration: { id: migrationId, options: first.options || {}, pathPrefix: (first.options || {}).pathPrefix || null }, source: { accountId: first.source_account, accessKeyId: first.source_key, secretAccessKey: first.source_secret }, target: { accountId: first.target_account, accessKeyId: first.target_key, secretAccessKey: first.target_secret } })])
+    const queueRows = page.map((row) => ({
+      id: row.id, migration_id: migrationId, generation,
+      status: row.status === "completed" ? "completed" : row.status === "failed" ? "failed" : "pending",
+      payload: { job: { id: row.id, mode: "migration", migrationId, verifyAllBuckets: true, strictCompletion: true, kind: row.job_payload?.kind, progress: row.progress || {} }, ...(row.job_payload?.workerShard ? { workerShard: row.job_payload.workerShard } : {}), ...(typeof row.job_payload?.workerGeneration === "number" ? { workerGeneration: row.job_payload.workerGeneration } : {}), ...(Array.isArray(row.job_payload?.inventoryObjects) ? { inventoryObjects: row.job_payload.inventoryObjects } : {}), items: Array.isArray(row.job_items) ? row.job_items : [] },
+      progress: row.progress || {}, result: row.result || {}, summary: row.summary, error: row.error, agent_id: row.claimed_by_agent_id, claim_token: row.claim_token, attempts: 0, created_at: row.created_at, updated_at: row.updated_at,
+    }))
+    await queue.query(`insert into drive_migration_queue_jobs(id,migration_id,generation,status,payload,progress,result,summary,error,agent_id,claim_token,attempts,created_at,updated_at)
+      select x.id,x.migration_id,x.generation,x.status,x.payload,x.progress,x.result,x.summary,x.error,x.agent_id,x.claim_token,x.attempts,x.created_at,x.updated_at
+      from jsonb_to_recordset($1::jsonb) as x(id uuid,migration_id uuid,generation integer,status text,payload jsonb,progress jsonb,result jsonb,summary text,error text,agent_id uuid,claim_token uuid,attempts integer,created_at timestamptz,updated_at timestamptz)
+      on conflict(id) do update set payload=excluded.payload where drive_migration_queue_jobs.status='pending'`, [JSON.stringify(queueRows)])
+    const last = page[page.length - 1]
+    const complete = rows.length <= limit
+    await queue.query(`update drive_migration_queue_meta set seed_cursor=$3,seed_complete=$4,status=case when $4 then 'ready' else 'seeding' end,total_jobs=(select count(*) from drive_migration_queue_jobs where migration_id=$1 and generation=$2),updated_at=now() where migration_id=$1 and generation=$2`, [migrationId, generation, `${last.seed_created_at}|${last.id}`, complete])
+    await queue.query("commit")
+    return { configured: true, complete, inserted: page.length }
+  } catch (error) { await queue.query("rollback").catch(() => undefined); throw error }
+  finally { await queue.end().catch(() => undefined) }
+}
+
+// Status mirroring remains a separate bounded control-plane operation while
+// queue materialization itself is performed directly by this Worker.
+async function migrationQueueRequest(db: Client, env: Env, migrationId: string, generation: number) {
+  const configured = await db.query(`select value from drive_app_settings where key='migration-workers' limit 1`)
+  const settings = configured.rows[0]?.value || {}
+  if (!String(settings.queueDatabaseUrl || "").trim()) return { configured: false, complete: false, synced: 0 }
   const originRow = await db.query(`select value->>'panelOrigin' panel_origin from drive_app_settings where key='orchestration-panel-origin' limit 1`)
   const base = String(env.PANEL_URL || originRow.rows[0]?.panel_origin || "").trim().replace(/\/+$/, "")
-  if (!base) throw new Error("Panel URL is unavailable for migration queue synchronization")
+  if (!base) throw new Error("Panel URL is unavailable for migration queue status synchronization")
   const response = await fetch(`${base}/api/internal/migration-queue`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${String(env.MIGRATION_ORCHESTRATOR_SECRET || "")}` },
-    body: JSON.stringify({ action, migrationId, generation, limit: action === "seed" ? 100_000 : 1_000 }),
-    signal: AbortSignal.timeout(45_000),
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${String(env.MIGRATION_ORCHESTRATOR_SECRET || "")}` },
+    body: JSON.stringify({ action: "sync", migrationId, generation, limit: 1_000 }), signal: AbortSignal.timeout(45_000),
   })
   const result = await response.json().catch(() => ({})) as Row
-  if (!response.ok || result.ok !== true) throw new Error(`Migration queue ${action} failed (HTTP ${response.status}): ${String(result.error || "unknown error")}`)
-  return { configured: true, complete: result.complete === true, inserted: Number(result.inserted || 0), synced: Number(result.synced || 0) }
+  if (!response.ok || result.ok !== true) throw new Error(`Migration queue status sync failed (HTTP ${response.status}): ${String(result.error || "unknown error")}`)
+  return { configured: true, complete: result.complete === true, synced: Number(result.synced || 0) }
 }
 
 async function dispatchWorkers(db: Client, env: Env, migration: Row) {
@@ -2079,15 +2153,15 @@ async function cycle(env: Env) {
       }
       const queueConfiguration = await db.query(`select value->>'queueDatabaseUrl' queue_url from drive_app_settings where key='migration-workers' limit 1`)
       const directQueueMode = Boolean(String(queueConfiguration.rows[0]?.queue_url || "").trim())
-      let queueSeed = { configured: false, complete: false, inserted: 0, synced: 0 }
-      let queueMirror = { configured: false, complete: false, inserted: 0, synced: 0 }
+      let queueSeed = { configured: false, complete: false, inserted: 0 }
+      let queueMirror = { configured: false, complete: false, synced: 0 }
       if (directQueueMode) {
         if (!shards.inventoryPending && !shards.queuePending && !shards.terminalFailure) {
-          queueSeed = await migrationQueueRequest(db, env, "seed", migration.id, shards.generation)
+          queueSeed = await seedMigrationQueue(db, migration.id, shards.generation)
           // Keep the main database quiet while a large scanner inventory is
           // being copied in seed batches. No worker is dispatched until the
           // whole generation is present, so mirror once seeding is complete.
-          if (queueSeed.complete) queueMirror = await migrationQueueRequest(db, env, "sync", migration.id, shards.generation)
+          if (queueSeed.complete) queueMirror = await migrationQueueRequest(db, env, migration.id, shards.generation)
         }
       }
       await ensureBucketVerification(db, migration, shards.generation)
@@ -2108,7 +2182,7 @@ async function cycle(env: Env) {
       const current = (await db.query(`select * from drive_migrations where id=$1`, [migration.id])).rows[0]
       if (["completed", "failed", "verification_failed", "canceled", "aborted"].includes(String(current?.status || "").toLowerCase())) {
         await abortMigrationWorkers(db, migration.id, `Migration is ${current.status}; stopping remaining GitHub workers`)
-        if (directQueueMode) queueMirror = await migrationQueueRequest(db, env, "sync", migration.id, shards.generation)
+        if (directQueueMode) queueMirror = await migrationQueueRequest(db, env, migration.id, shards.generation)
       }
       // Keep scanning and copying as separate phases. The worker pool starts
       // only after every source inventory is complete and every scanned object
