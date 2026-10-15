@@ -274,6 +274,16 @@ export async function POST(request: Request) {
     if (!queueDatabaseUrl) return NextResponse.json({ error: "Migration queue database is not configured in Settings" }, { status: 503 })
     const limit = Math.max(50, Math.min(1000, Math.trunc(Number(body.limit) || 500)))
     const result = await withMigrationQueueDatabase(queueDatabaseUrl, async (db) => {
+      const client = db as import("pg").Client & { query: (...args: any[]) => Promise<any> }
+      const originalQuery = client.query.bind(client)
+      client.query = async (...args: any[]) => {
+        try { return await originalQuery(...args) }
+        catch (error) {
+          const databaseError = error as { message?: unknown; position?: unknown; code?: unknown }
+          const sql = typeof args[0] === "string" ? args[0].replace(/\s+/g, " ").slice(0, 120) : "prepared query"
+          throw new Error(`Queue SQL [${sql}] failed: ${String(databaseError.message || error)} (position ${String(databaseError.position || "unknown")}, code ${String(databaseError.code || "unknown")})`)
+        }
+      }
       await ensureMigrationQueueSchema(db)
       await db.query("begin")
       try {
