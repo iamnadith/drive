@@ -6,7 +6,7 @@ type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; M
 // Database rows are dynamically shaped by the PostgreSQL queries below.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-const BUILD = 42
+const BUILD = 43
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -1870,7 +1870,7 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row) {
     generation,
   }
   if (!pendingTaskCount) return { dispatched: 0, reason: "no_pending_scan_or_verification_tasks", ...diagnostics }
-  const configuration = await db.query(`select value from drive_app_settings where key in('migration-orchestrator','migration-workers')`)
+  const configuration = await db.query(`select key,value from drive_app_settings where key in('migration-orchestrator','migration-workers')`)
   const orchestration = configuration.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
   const workerSettings = configuration.rows.find((row) => row.key === "migration-workers")?.value || {}
   const secretSyncDiagnostics = {
