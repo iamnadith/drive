@@ -138,8 +138,18 @@ export default function MigrationWorkerPoolDetailsPage() {
   }, [migrationId, pagination.pageIndex, pagination.pageSize, selectedGeneration, selectedJobId])
 
   React.useEffect(() => { void load() }, [load])
-  React.useEffect(() => { const timer = window.setInterval(() => setLiveNow(Date.now()), 1_000); return () => window.clearInterval(timer) }, [])
-  React.useEffect(() => { const timer = window.setInterval(() => void load({ background: true }), 10_000); return () => window.clearInterval(timer) }, [load])
+  React.useEffect(() => {
+    const tick = () => { if (document.visibilityState === "visible") setLiveNow(Date.now()) }
+    const timer = window.setInterval(tick, 10_000)
+    document.addEventListener("visibilitychange", tick)
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", tick) }
+  }, [])
+  React.useEffect(() => {
+    const refresh = () => { if (document.visibilityState === "visible") void load({ background: true }) }
+    const timer = window.setInterval(refresh, 30_000)
+    document.addEventListener("visibilitychange", refresh)
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh) }
+  }, [load])
   React.useEffect(() => { setLiveFiles([]) }, [migrationId, selectedGeneration])
 
   const openJob = React.useCallback(async (id: string) => {

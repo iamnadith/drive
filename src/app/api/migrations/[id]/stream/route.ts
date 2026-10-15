@@ -102,7 +102,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
         // The stream only projects saved PostgreSQL state; worker schedules
         // advance migrations independently of any connected dashboard.
         while (!closed && !request.signal.aborted) {
-          let nextDelay = 10_000
+          let nextDelay = 30_000
           try {
             const currentBootstrap = await getCachedStreamSnapshot(id)
             if (!currentBootstrap) {
@@ -135,7 +135,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
             } else {
               safeEnqueue(encoder.encode(": keepalive\n\n"))
             }
-            nextDelay = directQueue ? 10_000 : ["running", "verifying", "queued"].includes(migration.status) ? 4_000 : 15_000
+            nextDelay = directQueue ? 30_000 : ["running", "verifying", "queued"].includes(migration.status) ? 10_000 : 30_000
           } catch (e: unknown) {
             const message =
               typeof e === "object" && e !== null && "message" in e

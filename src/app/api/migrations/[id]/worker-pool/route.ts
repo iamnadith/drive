@@ -10,6 +10,7 @@ export const dynamic = "force-dynamic"
 
 type PoolResult = Awaited<ReturnType<typeof readPool>>
 const responseCache = new Map<string, { expiresAt: number; promise: Promise<PoolResult> }>()
+const RESPONSE_CACHE_TTL_MS = 15_000
 let queueSettingsCache: { expiresAt: number; value: Awaited<ReturnType<typeof getMigrationWorkerSettings>> } | null = null
 const dispatchedWorkersCache = new Map<string, { expiresAt: number; value: Array<Record<string, unknown>> }>()
 
@@ -643,7 +644,7 @@ function cachedPool(id: string, pageIndex: number, pageSize: number, selectedGen
     responseCache.delete(key)
     throw error
   })
-  responseCache.set(key, { expiresAt: now + 3_000, promise })
+  responseCache.set(key, { expiresAt: now + RESPONSE_CACHE_TTL_MS, promise })
   if (responseCache.size > 100) {
     for (const [key, entry] of responseCache) if (entry.expiresAt <= now) responseCache.delete(key)
   }
