@@ -5,8 +5,9 @@ import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import type { WorkerRepository } from "@/lib/github-worker-setup"
 
-export function GitHubWorkerSetup({ connected, onSelect, onBusy }: {
+export function GitHubWorkerSetup({ connected, onSelect, onBusy, workerKind = "migration" }: {
   connected: boolean
+  workerKind?: "migration" | "backend"
   onSelect: (repo: WorkerRepository, workflow: string) => void
   onBusy: (busy: boolean) => void
 }) {
@@ -34,7 +35,8 @@ export function GitHubWorkerSetup({ connected, onSelect, onBusy }: {
     try {
       const deadline = Date.now() + 5 * 60 * 1000
       while (Date.now() < deadline) {
-        const response = await fetch("/api/github/worker-setup", {
+        const setupPath = workerKind === "backend" ? "/api/github/backend-worker-setup" : "/api/github/worker-setup"
+        const response = await fetch(setupPath, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ cursor: cursor.current, selectedId }), signal: abort.signal,
         })
