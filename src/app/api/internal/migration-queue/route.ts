@@ -278,6 +278,12 @@ export async function POST(request: Request) {
     }, queueDatabaseSsl)
     return NextResponse.json({ ok: true, action, ...result }, { headers: { "Cache-Control": "no-store, max-age=0" } })
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 503 })
+    const databaseError = error as { code?: unknown; position?: unknown; routine?: unknown }
+    return NextResponse.json({
+      error: error instanceof Error ? error.message : String(error),
+      ...(typeof databaseError.position === "string" ? { position: databaseError.position } : {}),
+      ...(typeof databaseError.code === "string" ? { code: databaseError.code } : {}),
+      ...(typeof databaseError.routine === "string" ? { routine: databaseError.routine } : {}),
+    }, { status: 503 })
   }
 }
