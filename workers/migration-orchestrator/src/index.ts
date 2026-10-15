@@ -6,7 +6,7 @@ type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; M
 // Database rows are dynamically shaped by the PostgreSQL queries below.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-const BUILD = 41
+const BUILD = 42
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -1873,8 +1873,19 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row) {
   const configuration = await db.query(`select value from drive_app_settings where key in('migration-orchestrator','migration-workers')`)
   const orchestration = configuration.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
   const workerSettings = configuration.rows.find((row) => row.key === "migration-workers")?.value || {}
+  const secretSyncDiagnostics = {
+    statusReady: String(workerSettings.secretSyncStatus || "") === "ready",
+    urlMatches: String(workerSettings.synchronizedServerUrl || "").replace(/\/+$/, "") === String(orchestration.orchestratorUrl || "").replace(/\/+$/, ""),
+    secretLengthValid: String(workerSettings.sharedSecret || "").length >= 24 && String(workerSettings.sharedSecret || "").length <= MAX_SECRET_LENGTH,
+    synchronizedHashMatches: String(workerSettings.synchronizedSecretHash || "") === await sha256Hex(String(workerSettings.sharedSecret || "")),
+  }
+  diagnostics.secretSync = secretSyncDiagnostics
   if (!(await githubWorkerSecretsAreCurrent(orchestration, workerSettings))) {
-    return { dispatched: 0, reason: "backend_worker_secret_sync_not_current", ...diagnostics }
+    const reason = !secretSyncDiagnostics.statusReady ? "backend_worker_secret_sync_status_not_ready"
+      : !secretSyncDiagnostics.urlMatches ? "backend_worker_secret_sync_url_mismatch"
+        : !secretSyncDiagnostics.secretLengthValid ? "backend_worker_shared_secret_invalid"
+          : "backend_worker_secret_sync_hash_mismatch"
+    return { dispatched: 0, reason, ...diagnostics }
   }
   if (!(await workerEndpointAvailable(db, migration.id, orchestration))) {
     return { dispatched: 0, reason: "migration_orchestrator_endpoint_unavailable", ...diagnostics }
