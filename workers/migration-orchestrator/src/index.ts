@@ -6,7 +6,7 @@ type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; M
 // Database rows are dynamically shaped by the PostgreSQL queries below.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-const BUILD = 40
+const BUILD = 41
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -1863,12 +1863,22 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row) {
             and j.work_key like format('migration:%s:generation:%s:inventory:%%',m.id,$2)
             and j.payload->'itemIds'->>0=i.id::text and j.status<>'completed')))) verification_pending`, [migration.id, generation])
   const pendingTaskCount = Number(work.rows[0]?.inventory_pending || 0) + Number(work.rows[0]?.verification_pending || 0)
-  if (!pendingTaskCount) return 0
+  const diagnostics: Row = {
+    pendingTasks: pendingTaskCount,
+    pendingInventoryScans: Number(work.rows[0]?.inventory_pending || 0),
+    pendingVerifications: Number(work.rows[0]?.verification_pending || 0),
+    generation,
+  }
+  if (!pendingTaskCount) return { dispatched: 0, reason: "no_pending_scan_or_verification_tasks", ...diagnostics }
   const configuration = await db.query(`select value from drive_app_settings where key in('migration-orchestrator','migration-workers')`)
   const orchestration = configuration.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
   const workerSettings = configuration.rows.find((row) => row.key === "migration-workers")?.value || {}
-  if (!(await githubWorkerSecretsAreCurrent(orchestration, workerSettings))) return 0
-  if (!(await workerEndpointAvailable(db, migration.id, orchestration))) return 0
+  if (!(await githubWorkerSecretsAreCurrent(orchestration, workerSettings))) {
+    return { dispatched: 0, reason: "backend_worker_secret_sync_not_current", ...diagnostics }
+  }
+  if (!(await workerEndpointAvailable(db, migration.id, orchestration))) {
+    return { dispatched: 0, reason: "migration_orchestrator_endpoint_unavailable", ...diagnostics }
+  }
   const activeRuns = await db.query(`select r.*,a.github_repo_owner,a.github_repo_name,a.github_workflow_file,a.github_ref,a.github_token
     from drive_agent_runs r join drive_agents a on a.id=r.agent_id
     where r.run_type='github_backend_dispatch' and r.status in('pending','running')
@@ -1880,7 +1890,11 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row) {
   const stranded = await db.query(`select id from drive_agent_runs where run_type='github_backend_dispatch' and status='pending'
     and payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2
     and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit 10`, [migration.id, generation])
-  for (const run of stranded.rows) await env.GITHUB_DISPATCH_QUEUE.send({ intentId: String(run.id) }, { contentType: "json" })
+  let requeued = 0
+  for (const run of stranded.rows) {
+    await env.GITHUB_DISPATCH_QUEUE.send({ intentId: String(run.id) }, { contentType: "json" })
+    requeued += 1
+  }
   const agents = await db.query(`select id,github_repo_owner,github_repo_name,github_workflow_file,github_ref,github_token,
       least(5,greatest(1,coalesce(worker_count,1))) worker_count
     from drive_agents where provider='github_actions' and status<>'disabled'
@@ -1888,11 +1902,17 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row) {
       and metadata->>'workerKind'='backend'
       and github_token is not null and github_repo_owner is not null and github_repo_name is not null
       and github_workflow_file is not null order by created_at,id`)
+  diagnostics.eligibleAgents = agents.rowCount || 0
   const totalActive = await db.query(`select count(*)::int count from drive_agent_runs r join drive_agents a on a.id=r.agent_id
     where r.run_type='github_backend_dispatch' and r.status in('pending','running')
       and r.payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=$2
       and a.metadata->>'workerKind'='backend'`, [migration.id, generation])
-  let remainingDemand = Math.max(0, pendingTaskCount - Number(totalActive.rows[0]?.count || 0))
+  const activeBackendRuns = Number(totalActive.rows[0]?.count || 0)
+  diagnostics.activeRuns = activeBackendRuns
+  if (!agents.rowCount) return { dispatched: 0, requeued, reason: "no_eligible_backend_worker_agent", ...diagnostics }
+  let remainingDemand = Math.max(0, pendingTaskCount - activeBackendRuns)
+  diagnostics.remainingDemand = remainingDemand
+  if (!remainingDemand) return { dispatched: 0, requeued, reason: "pending_tasks_already_covered_by_active_runs", ...diagnostics }
   let dispatched = 0
   for (const agent of agents.rows) {
     const active = await db.query(`select count(*)::int count from drive_agent_runs
@@ -1914,7 +1934,12 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row) {
       dispatched += 1
     }
   }
-  return dispatched
+  return {
+    dispatched,
+    requeued,
+    reason: dispatched > 0 ? "backend_workers_dispatched" : requeued > 0 ? "existing_backend_dispatches_requeued" : "no_backend_worker_capacity_available",
+    ...diagnostics,
+  }
 }
 
 async function abortMigrationWorkers(db: Client, migrationId: string, reason: string) {
@@ -2930,13 +2955,14 @@ async function cycle(env: Env) {
       const inventoryReady = !shards.inventoryPending && !shards.queuePending && (!directQueueMode || queueSeed.complete)
       const hasRunnableFiles = shards.shardCount > 0 || shards.created > 0
       const dispatched = current?.status === "running" && inventoryReady && hasRunnableFiles ? await dispatchWorkers(db, env, current) : 0
-      const backendDispatched = current && ["running", "verifying"].includes(String(current.status))
+      const backendDispatch = current && ["running", "verifying"].includes(String(current.status))
         ? await dispatchBackendWorkers(db, env, current)
-        : 0
+        : { dispatched: 0, reason: "migration_not_active" }
+      const backendDispatched = Number(backendDispatch.dispatched || 0)
       await recordItemStageEvents(db, migration, shards.generation)
       if (shards.inventoryPending || shards.queuePending || (directQueueMode && (!queueSeed.complete || !queueMirror.complete))) await env.GITHUB_DISPATCH_QUEUE.send({ control: "cycle" })
       await db.query(`update drive_migrations set last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
-      return complete(db, owner, migration.id, { ok: true, migrationId, ...shards, migrationQueue: directQueueMode ? { seed: queueSeed, mirror: queueMirror, recovery: queueRecovery } : null, recovered, finalized, ...verification, bucketSettings, fileScanner, dispatched, backendDispatched })
+      return complete(db, owner, migration.id, { ok: true, migrationId, ...shards, migrationQueue: directQueueMode ? { seed: queueSeed, mirror: queueMirror, recovery: queueRecovery } : null, recovered, finalized, ...verification, bucketSettings, fileScanner, dispatched, backendDispatched, backendDispatch })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await db.query(`update drive_migration_orchestrator_state set status='error',lease_owner=null,lease_expires_at=null,last_completed_at=now(),last_error=$1,last_migration_id=$2,last_result=$3::jsonb,updated_at=now() where id=true and lease_owner=$4`, [message, migrationId, JSON.stringify({ ok: false, error: message }), owner]).catch(() => undefined)
