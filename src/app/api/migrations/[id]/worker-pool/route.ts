@@ -26,7 +26,7 @@ async function getDispatchedWorkers(migrationId: string, generation: number) {
       and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=$2
       and nullif(r.payload->>'workerInstanceId','') is not null
       and r.created_at>now()-interval '24 hours'
-    order by r.payload->>'workerInstanceId',r.created_at desc,r.updated_at desc limit 100`, [migrationId, generation])
+    order by r.payload->>'workerInstanceId',r.created_at desc,r.updated_at desc limit 1000`, [migrationId, generation])
   const value = rows.map((row) => ({
     id: String(row.payload && typeof row.payload === "object" ? (row.payload as Record<string, unknown>).workerInstanceId || row.id : row.id),
     agentId: row.agent_id,
@@ -263,20 +263,36 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       return { snapshot: { migrationId: id, workerGeneration: generation, totalJobs: liveProjection.stats.totalJobs, queuedJobs: liveProjection.stats.queuedJobs, runningJobs: liveProjection.stats.runningJobs, remainingJobs: liveProjection.stats.remainingJobs, completedJobs: liveProjection.stats.completedJobs, failedJobs: liveProjection.stats.failedJobs, canceledJobs: liveProjection.stats.canceledJobs, totalObjects: buckets.reduce((sum, bucket) => sum + Number(bucket.totalObjects || 0), 0), transferred: liveProjection.stats.transferred, inProgressFiles: active.rowCount || 0, completedBytes: Number(stats?.completed_bytes || 0), inProgressBytes: Number(stats?.in_progress_bytes || 0), workerRuntimeSeconds: Number(stats?.worker_runtime_seconds || 0), skipped: liveProjection.stats.skipped, failed: liveProjection.stats.failed, onlineWorkers, activeTransfers: active.rowCount || 0, buckets, updatedAt, sampledAt: new Date().toISOString() }, snapshotUpdatedAt: updatedAt, jobs: recent.rows, liveFiles: active.rows.map((row) => ({ ...(row.progress?.currentFile || {}), jobId: row.id, workerId: row.claimed_by, lastHeartbeatAt: row.last_heartbeat_at, operation: row.mode })), jobPage, jobPagination: { pageIndex, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)), total }, attempts: queueAttempts, workerRuns, selectedGeneration: generation, queueStatus, dataSource: "queue_database" }
     }, queueSettings.queueDatabaseSsl)
     if (queueProjection) {
-      const verifiedFailures = await queryDb<{ source_bucket: string; target_bucket: string; failed_objects: string | number }>(`
+      const bucketVerification = await queryDb<{ source_bucket: string; target_bucket: string; verification_status: string | null; failed_objects: string | number }>(`
         select i.source_bucket,i.target_bucket,
-          sum(v.missing_objects+v.mismatched_objects+case when coalesce(m.options->>'verifyStrictDestination','false')='true' then v.extra_objects else 0 end)::bigint failed_objects
+          case when bool_or(v.status='failed') then 'failed'
+            when count(v.id)=count(*) and bool_and(v.status='completed') then 'completed'
+            when bool_or(v.status='running') then 'running'
+            when bool_or(v.status='pending') then 'pending'
+            else null end verification_status,
+          coalesce(sum(v.missing_objects+v.mismatched_objects+case when coalesce(m.options->>'verifyStrictDestination','false')='true' then v.extra_objects else 0 end),0)::bigint failed_objects
         from drive_migration_items i
         join drive_migrations m on m.id=i.migration_id
-        join drive_migration_verification_state v on v.migration_item_id=i.id and v.migration_id=i.migration_id
-        where i.migration_id=$1 and v.generation=$2 and v.status='completed'
+        left join drive_migration_verification_state v on v.migration_item_id=i.id and v.migration_id=i.migration_id and v.generation=$2
+        where i.migration_id=$1
         group by i.source_bucket,i.target_bucket`, [id, queueProjection.selectedGeneration])
-      const failedByBucket = new Map(verifiedFailures.rows.map((row) => [`${row.source_bucket}\u0000${row.target_bucket}`, Number(row.failed_objects || 0)]))
+      const verificationByBucket = new Map(bucketVerification.rows.map((row) => [`${row.source_bucket}\u0000${row.target_bucket}`, { status: String(row.verification_status || "").toLowerCase(), failed: Number(row.failed_objects || 0) }]))
       const buckets = Array.isArray(queueProjection.snapshot.buckets) ? queueProjection.snapshot.buckets as Array<Record<string, unknown>> : []
       for (const bucket of buckets) {
-        const verificationFailures = failedByBucket.get(`${String(bucket.sourceBucket || "")}\u0000${String(bucket.targetBucket || "")}`) || 0
+        const verification = verificationByBucket.get(`${String(bucket.sourceBucket || "")}\u0000${String(bucket.targetBucket || "")}`)
+        const verificationFailures = verification?.failed || 0
         bucket.failedObjects = Number(bucket.failedObjects || 0) + verificationFailures
-        if (verificationFailures > 0 && Number(bucket.queuedObjects || 0) === 0 && Number(bucket.runningObjects || 0) === 0) bucket.status = "failed"
+        const transferComplete = bucket.remainingJobs !== undefined
+          ? Number(bucket.remainingJobs || 0) === 0 && Number(bucket.failedJobs || 0) === 0 && Number(bucket.canceledJobs || 0) === 0
+          : Number(bucket.queuedObjects || 0) === 0
+            && Number(bucket.runningObjects || 0) === 0
+            && Number(bucket.failedObjects || 0) === 0
+            && Number(bucket.transferredObjects || 0) + Number(bucket.alreadyPresentObjects || 0) + Number(bucket.skippedObjects || 0) >= Number(bucket.totalObjects || 0)
+        if (verificationFailures > 0) bucket.status = "failed"
+        else if (verification?.status === "failed") bucket.status = "verification_failed"
+        else if (transferComplete && verification?.status === "completed") bucket.status = "completed"
+        else if (transferComplete && verification?.status === "running") bucket.status = "verifying"
+        else if (transferComplete && ["", "pending"].includes(verification?.status || "")) bucket.status = "awaiting_verification"
       }
       queueProjection.snapshot.buckets = buckets
       queueProjection.snapshot.failed = buckets.reduce((sum, bucket) => sum + Number(bucket.failedObjects || 0), 0)

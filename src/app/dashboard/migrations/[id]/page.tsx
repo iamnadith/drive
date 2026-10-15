@@ -247,6 +247,7 @@ function statusBadge(
   if (s === "queued") return <Badge variant="secondary">Queued</Badge>
   if (s === "retrying") return <Badge className="bg-amber-600">Retrying</Badge>
   if (s === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
+  if (s === "awaiting_verification") return <Badge className="bg-purple-600">Awaiting verification</Badge>
   if (s === "progress_fetch_failed") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
   if (s === "paused") return <Badge className="bg-yellow-600">Paused</Badge>
   if (s === "failed") return <Badge className="bg-red-600">Failed</Badge>
@@ -354,7 +355,7 @@ function mergeIncomingItem(prev: MigrationItem | undefined, next: MigrationItem)
 
   if (normalizeStatus(nextLive.status) === "retrying") {
     mergedLive.status = "retrying"
-  } else if (isTerminalBucketDisplayStatus(prevLive.status) && !isTerminalBucketDisplayStatus(nextLive.status)) {
+  } else if (isTerminalBucketDisplayStatus(prevLive.status) && !isTerminalBucketDisplayStatus(nextLive.status) && nextLive.awaitingVerification !== true) {
     mergedLive.status = prevLive.status
   } else if (
     !isTerminalBucketDisplayStatus(prevLive.status) &&
@@ -746,7 +747,6 @@ export default function MigrationDetailsPage() {
   const [busyAction, setBusyAction] = React.useState<string | null>(null)
   const [busyItemAction, setBusyItemAction] = React.useState<Record<string, string>>({})
   const [deleteOpen, setDeleteOpen] = React.useState(false)
-  const [manualCompleteOpen, setManualCompleteOpen] = React.useState(false)
   const [logsOpen, setLogsOpen] = React.useState(false)
   const [logsItemId, setLogsItemId] = React.useState<string | null>(null)
   const [failedOpen, setFailedOpen] = React.useState(false)
@@ -884,7 +884,7 @@ export default function MigrationDetailsPage() {
     return snapshot
   }, [migration?.status])
 
-  const readBucketSettingsStatus = (item: MigrationItem): "syncing" | "synced" | "failed" | null => {
+  const readBucketSettingsStatus = (item: MigrationItem): "pending" | "syncing" | "synced" | "failed" | null => {
     const progress = isRecord(item.progress) ? item.progress : {}
     const orchestratorSettings = isRecord(progress.orchestratorSettings) ? progress.orchestratorSettings : null
     const settingsSync = isRecord(progress.settingsSync) ? progress.settingsSync : null
@@ -892,10 +892,10 @@ export default function MigrationDetailsPage() {
     if (status === "syncing") return "syncing"
     if (status === "synced" || status === "completed") return "synced"
     if (status === "failed") return "failed"
-    if (status === "pending") return "syncing"
+    if (status === "pending") return "pending"
     return null
   }
-  const showSettingsColumn = items.some((item) => readBucketSettingsStatus(item) !== null)
+  const showSettingsColumn = items.some((item) => readBucketSettingsStatus(item) !== null || isCompletedStatus(getItemStatus(item)))
 
   const bucketCounts = React.useMemo(() => {
     let completed = 0
@@ -1071,7 +1071,7 @@ export default function MigrationDetailsPage() {
   }, [loadInitial])
 
   const runMigrationAction = React.useCallback(
-    async (action: "pause_all" | "resume_all" | "cancel_migration" | "mark_completed" | "retry_migration" | "repair_migration" | "verify_all" | "settings_sync") => {
+    async (action: "pause_all" | "resume_all" | "cancel_migration" | "retry_migration" | "repair_migration" | "verify_all" | "settings_sync") => {
       if (!id) return
       if (busyAction) return
       setBusyAction(action)
@@ -1080,7 +1080,7 @@ export default function MigrationDetailsPage() {
         const res = await postJsonWithTimeout({
           url: `/api/migrations/${encodeURIComponent(id)}/action`,
           body: { action },
-          timeoutMs: action === "settings_sync" || action === "mark_completed" ? 120_000 : 12_000,
+          timeoutMs: action === "settings_sync" ? 120_000 : 12_000,
         })
         const json: unknown = await res.json().catch(() => ({}))
         const errorMessage = isRecord(json) && typeof json.error === "string" ? json.error : "Unable to run action"
@@ -1550,10 +1550,11 @@ export default function MigrationDetailsPage() {
       meta: { width: "min-w-[130px]", align: "center" },
       cell: ({ row }: { row: { original: MigrationItem } }) => {
         const item = row.original
-        const settingsStatus = readBucketSettingsStatus(item) ?? (isCompletedStatus(getItemStatus(item)) ? "syncing" : null)
+        const settingsStatus = readBucketSettingsStatus(item) ?? (isCompletedStatus(getItemStatus(item)) ? "pending" : null)
         if (!settingsStatus) return <span className="text-xs text-muted-foreground">—</span>
         if (settingsStatus === "synced") return <Badge className="bg-green-600">Synced</Badge>
         if (settingsStatus === "failed") return <Badge className="bg-red-600">Failed</Badge>
+        if (settingsStatus === "pending") return <Badge variant="secondary">Pending</Badge>
         return <Badge className="bg-purple-600">Syncing</Badge>
       },
     } satisfies ColumnDef<MigrationItem, unknown>] : []),
@@ -1748,8 +1749,6 @@ export default function MigrationDetailsPage() {
                 })
               const settingsSyncInProgress =
                 migration.syncStatus === "syncing" || items.some((item) => readBucketSettingsStatus(item) === "syncing")
-              const showMarkCompleted =
-                allBucketsTerminal && !["completed", "failed"].includes(String(effectiveMigrationStatus)) && !settingsSyncFailed
 
               return (
                 <>
@@ -1849,17 +1848,6 @@ export default function MigrationDetailsPage() {
                     </Button>
                   ) : null}
 
-                  {showMarkCompleted ? (
-                    <Button
-                      onClick={() => setManualCompleteOpen(true)}
-                      loading={busyAction === "mark_completed"}
-                      disabled={Boolean(busyAction)}
-                      variant="secondary"
-                    >
-                      {busyAction !== "mark_completed" ? <CheckCircle2 className="h-4 w-4 mr-0" /> : null}
-                      Mark completed
-                    </Button>
-                  ) : null}
                 </>
               )
             })()}
@@ -2400,31 +2388,6 @@ export default function MigrationDetailsPage() {
           Delete migration
         </Button>
       </div>
-
-      <AlertDialog open={manualCompleteOpen} onOpenChange={setManualCompleteOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Mark migration completed?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will mark the migration as completed and switch the active Cloudflare account to the migrated target account.
-              The previous active account will be disabled. There is no automatic rollback after this switch.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={Boolean(busyAction)}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setManualCompleteOpen(false)
-                void runMigrationAction("mark_completed")
-              }}
-              disabled={Boolean(busyAction)}
-            >
-              {busyAction === "mark_completed" ? <Spinner className="mr-0" /> : null}
-              Confirm
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <AlertDialogContent>

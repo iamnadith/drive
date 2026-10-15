@@ -58,6 +58,7 @@ function statusBadge(status?: string) {
   if (value === "retrying") return <Badge className="bg-amber-600">Retrying</Badge>
   if (["running", "copying", "transferring"].includes(value)) return <Badge>Running</Badge>
   if (["scanning", "verifying"].includes(value)) return <Badge variant="secondary">{value === "scanning" ? "Scanning" : "Verifying"}</Badge>
+  if (value === "awaiting_verification") return <Badge className="bg-purple-600">Awaiting verification</Badge>
   if (["pending", "queued", "claimed"].includes(value)) return <Badge variant="outline">Queued</Badge>
   if (value === "failed") return <Badge variant="destructive">Failed</Badge>
   if (["canceled", "aborted"].includes(value)) return <Badge variant="outline">Canceled</Badge>
@@ -381,6 +382,8 @@ export default function MigrationWorkerPoolDetailsPage() {
         <p className="text-sm text-muted-foreground">{formatLastSyncedAt(snapshot.updatedAt)}</p>
         <div className="flex w-full gap-2 sm:w-auto"><Button asChild variant="outline" size="sm" className="flex-1 rounded-xl sm:flex-none"><Link href={`/dashboard/migrations/${encodeURIComponent(migrationId)}`}><ArrowLeft data-icon="inline-start" />Back</Link></Button><Button variant="outline" size="sm" className="flex-1 rounded-xl sm:flex-none" onClick={() => void load({ manual: true })} disabled={refreshing}><RefreshCw data-icon="inline-start" className={refreshing ? "animate-spin" : undefined} />Refresh</Button></div>
       </div>
+      <div className="min-w-0">
+        <p className="mb-1 text-xs text-muted-foreground">Pool generations · {attempts.length} generation{attempts.length === 1 ? "" : "s"}; the jobs table below is paginated across the full queue.</p>
       <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded-xl border bg-muted/30 p-1">
           {[...attempts].sort((a, b) => b.generation - a.generation).map((attempt) => {
             const selected = attempt.generation === selectedGeneration
@@ -393,11 +396,13 @@ export default function MigrationWorkerPoolDetailsPage() {
               setSelectedJob(null)
             }}>
               <span className="font-medium">{attempt.generation === 1 ? "Initial pool" : `Retry ${attempt.generation - 1}`}</span>
+              <span className="text-muted-foreground">{formatNumber(num(attempt.workerCount))} workers</span>
               <span className="text-muted-foreground">{formatNumber(num(attempt.completedJobs))}/{formatNumber(num(attempt.totalJobs))}</span>
               <span className="sr-only">{attempt.status}</span>
             </Button>
           })}
           {attempts.length === 0 ? <span className="px-3 py-1.5 text-xs text-muted-foreground">No worker pools have been dispatched yet.</span> : null}
+      </div>
       </div>
       <Card className="gap-0 py-0">
         <CardHeader className="flex flex-row items-center justify-between gap-4 px-5 py-3 pb-2">

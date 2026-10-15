@@ -71,7 +71,7 @@ function normalizeBucketSnapshot(snapshot: BucketSnapshot): BucketSnapshot {
 
 function isActiveBucketDisplayStatus(value: unknown): boolean {
   const s = normalizeStatus(value)
-  return s === "scanning" || s === "queued" || s === "running" || s === "verifying" || s === "creating_job" || s === "job_id_pending"
+  return s === "scanning" || s === "queued" || s === "running" || s === "verifying" || s === "awaiting_verification" || s === "creating_job" || s === "job_id_pending"
 }
 
 export function isTerminalBucketDisplayStatus(value: unknown): boolean {
@@ -86,6 +86,7 @@ export function getBucketDisplayStatusRank(value: unknown): number {
   if (s === "queued" || s === "creating_job" || s === "job_id_pending") return 2
   if (s === "running") return 3
   if (s === "verifying") return 4
+  if (s === "awaiting_verification") return 4
   if (s === "no_files") return 5
   if (s === "completed") return 6
   if (s === "verification_failed" || isFailedLikeStatus(s)) return 7
@@ -180,6 +181,7 @@ export function readLiveBucketState(progress: Record<string, unknown>) {
   return {
     updatedAt: typeof live.updatedAt === "string" ? live.updatedAt : null,
     status: typeof live.status === "string" ? live.status : undefined,
+    awaitingVerification: live.awaitingVerification === true,
     transferredObjects: typeof live.transferredObjects === "number" ? live.transferredObjects : 0,
     transferredBytes: typeof live.transferredBytes === "number" ? live.transferredBytes : 0,
     skippedObjects: typeof live.skippedObjects === "number" ? live.skippedObjects : 0,

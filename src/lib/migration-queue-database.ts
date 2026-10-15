@@ -162,15 +162,39 @@ export function overlayMigrationQueueItems<T extends { id: string; progress: Rec
     const verification = isRecord(item.progress.fileVerification) ? item.progress.fileVerification : {}
     const verifiedFailures = Math.max(0, Number(verification.missing ?? verification.missingObjects ?? 0) || 0)
       + Math.max(0, Number(verification.mismatched ?? verification.mismatchedObjects ?? 0) || 0)
+    const verificationState = "verificationState" in item && isRecord(item.verificationState)
+      ? item.verificationState
+      : {}
+    const verificationStatus = String(verificationState.status || verification.status || "").toLowerCase()
+    const verificationMissing = Number(verificationState.missingObjects ?? verification.missing ?? 0)
+    const verificationMismatched = Number(verificationState.mismatchedObjects ?? verification.mismatched ?? 0)
+    const verificationExtra = Number(verificationState.extraObjects ?? verification.extra ?? 0)
+    const verificationPassed = verificationStatus === "completed"
+      && verificationMissing === 0
+      && verificationMismatched === 0
+      && (verificationState.strictDestination !== true || verificationExtra === 0)
+    const transferTotalJobs = Number(current.progress.live.totalJobs ?? 0)
+    const transferCompletedJobs = Number(current.progress.live.completedJobs ?? 0)
+    const transferComplete = transferTotalJobs > 0
+      && transferCompletedJobs >= transferTotalJobs
+      && Number(current.progress.live.queuedJobs ?? 0) === 0
+      && Number(current.progress.live.runningJobs ?? 0) === 0
+      && Number(current.progress.live.failedJobs ?? 0) === 0
+    const verificationFailed = verificationStatus === "failed"
+      || (verificationStatus === "completed" && !verificationPassed)
+    const queueLifecycleStatus = transferComplete && !verificationPassed
+      ? verificationFailed ? "verification_failed" : verificationStatus === "running" ? "verifying" : "awaiting_verification"
+      : current.slurperStatus
     const live = {
       ...current.progress.live,
+      ...(transferComplete && !verificationPassed ? { status: queueLifecycleStatus, awaitingVerification: !verificationFailed } : {}),
       totalObjects: Math.max(Number(current.progress.live.totalObjects || 0), numericBaseline("totalObjects")),
       transferredObjects: numericBaseline("transferredObjects") + Number(current.progress.live.transferredObjects || 0),
       skippedObjects: numericBaseline("skippedObjects") + Number(current.progress.live.skippedObjects || 0),
       failedObjects: Number(current.progress.live.failedObjects || 0) + verifiedFailures,
       sourceBytes: Math.max(Number(current.progress.live.sourceBytes || 0), numericBaseline("sourceBytes")),
     }
-    return { ...item, slurperStatus: current.slurperStatus, progress: { ...item.progress, migrationQueue: { ...migrationQueue, generation: projection.generation }, live }, updatedAt }
+    return { ...item, slurperStatus: queueLifecycleStatus, progress: { ...item.progress, migrationQueue: { ...migrationQueue, generation: projection.generation }, live }, updatedAt }
   })
 }
 
