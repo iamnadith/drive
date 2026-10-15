@@ -6,7 +6,7 @@ type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; M
 // Database rows are dynamically shaped by the PostgreSQL queries below.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-const BUILD = 37
+const BUILD = 38
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -211,8 +211,22 @@ async function refreshSuperSlurperProgress(db: Client, migration: Row) {
       return
     }
     const values = slurperProgressValues(response)
-    const status = normalizeSlurperStatus(values.status)
+    let status = normalizeSlurperStatus(values.status)
     const previous = item.progress?.slurperCumulative || item.progress?.slurperNormalized || {}
+    let completionCandidate: Row | null = null
+    let completionRecovered = false
+    // Super Slurper can leave a job in `running` after its progress counters
+    // have stopped at the full object count. Require five minutes of identical
+    // complete counters, then let File Scanner independently verify the bucket.
+    if (status === "running" && values.objects !== null && values.objects > 0 && values.transferred >= values.objects && values.failed === 0) {
+      const prior = item.progress?.slurperCompletionCandidate
+      const sameCounts = Number(prior?.objects) === values.objects && Number(prior?.transferred) === values.transferred
+      completionCandidate = sameCounts && typeof prior?.since === "string"
+        ? prior
+        : { objects: values.objects, transferred: values.transferred, since: new Date().toISOString() }
+      completionRecovered = Boolean(completionCandidate) && Date.now() - Date.parse(String(completionCandidate?.since)) >= 5 * 60_000
+      if (completionRecovered) status = "completed"
+    }
     const baseline = nonNegative(item.progress?.rerunBaselineTransferred) ?? 0
     const transferred = baseline + values.transferred
     const cumulative = Math.max(nonNegative(previous.transferredObjects) ?? 0, transferred)
@@ -251,18 +265,22 @@ async function refreshSuperSlurperProgress(db: Client, migration: Row) {
             (case when jsonb_typeof(progress->'events')='array' then progress->'events' else '[]'::jsonb end)
               || case when progress->>'slurperEventStatus' is distinct from $2 then
                 jsonb_build_array(jsonb_build_object('at',now(),'stage',case when $2='completed' then 'super_slurper_transfer' else 'super_slurper_'||$2 end,'status',$2,
-                  'message',case $2 when 'running' then 'Super Slurper is transferring this bucket'
+                  'message',case when $8::boolean then 'Super Slurper stayed running after all objects were accounted; independent verification is starting' else case $2 when 'running' then 'Super Slurper is transferring this bucket'
                     when 'verifying' then 'Super Slurper finished; File Scanner verification started'
                     when 'completed' then 'Super Slurper transfer completed; File Scanner verification pending'
                     when 'failed' then 'Super Slurper bucket job failed'
                     when 'aborted' then 'Super Slurper bucket job was aborted'
-                    else 'Super Slurper status changed to '||$2 end))
+                    else 'Super Slurper status changed to '||$2 end end))
                 else '[]'::jsonb end,true),
           '{slurperEventStatus}',to_jsonb($2::text),true),
         last_progress_at=now(),updated_at=now()
       where id=$1 and coalesce(slurper_status,'') not in('completed','failed','aborted','verification_failed')
         and exists(select 1 from drive_migrations m where m.id=$7 and m.status in('running','verifying'))
-    `, [item.id, status, objects, JSON.stringify(normalized), JSON.stringify({ ...normalized, status: liveStatus }), JSON.stringify(live), migration.id])
+    `, [item.id, status, objects, JSON.stringify(normalized), JSON.stringify({ ...normalized, status: liveStatus }), JSON.stringify(live), migration.id, completionRecovered])
+    await db.query(`update drive_migration_items set progress=jsonb_set(
+      jsonb_set(coalesce(progress,'{}'::jsonb),'{slurperCompletionCandidate}',$2::jsonb,true),
+      '{slurperCompletionRecovery}',$3::jsonb,true),updated_at=now() where id=$1`, [item.id,
+      JSON.stringify(completionCandidate), JSON.stringify(completionRecovered ? { status: "verified_by_file_scanner_pending", observedAt: new Date().toISOString(), providerStatus: values.status, objects: values.objects, transferred: values.transferred } : null)])
     refreshed += 1
   })
   await db.query("begin")
@@ -1290,6 +1308,13 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
     await db.query(`update drive_migrations set status='verification_failed',sync_status='failed',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id, `File Scanner verification found ${missing} missing, ${mismatched} mismatched, ${extra} extra; repair is available`])
     return { verification: "failed", missing, mismatched, extra, repairAvailable: true }
   }
+  const pendingSettings = await db.query(`select count(*)::int pending from drive_migration_items i
+    join drive_migration_verification_state v on v.migration_item_id=i.id and v.migration_id=i.migration_id
+    where i.migration_id=$1 and i.slurper_status='completed' and v.status='completed'
+      and v.missing_objects=0 and v.mismatched_objects=0
+      and (v.extra_objects=0 or $2=false)
+      and coalesce(i.progress->'orchestratorSettings'->>'status','')<>'synced'`, [migration.id, opts(migration).verifyStrictDestination === true])
+  if (Number(pendingSettings.rows[0]?.pending || 0) > 0) return { verification: "waiting_for_bucket_settings", pendingBucketSettings: Number(pendingSettings.rows[0].pending) }
   const settings = await syncNextBucketSettings(db, migration)
   if (settings.settings !== "synced") return { verification: settings.settings === "failed" ? "failed" : "settings_sync", missing, mismatched, extra, ...settings }
   const completion = await activateTargetAndCompleteMigration(db, migration)
@@ -2108,6 +2133,7 @@ async function cycle(env: Env) {
         const jobs = await createSuperSlurperJobs(db, migration)
         const slurper = await refreshSuperSlurperProgress(db, migration)
         await finalizeVerifiedBuckets(db, migration, 1)
+        const bucketSettings = await syncNextBucketSettings(db, migration)
         const verificationQueue = await db.query(`select
           count(*) filter(where status in('pending','running'))::int pending,
           count(*)::int total from drive_migration_verification_state where migration_id=$1 and generation=1`, [migration.id])
@@ -2122,7 +2148,7 @@ async function cycle(env: Env) {
         }
         await renew(db, owner)
         await db.query(`update drive_migrations set last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
-        return complete(db, owner, migration.id, { ok: true, migrationId, executionMode: "super_slurper", inventory, jobs, ...slurper, ...verification, fileScanner })
+        return complete(db, owner, migration.id, { ok: true, migrationId, executionMode: "super_slurper", inventory, jobs, ...slurper, ...verification, bucketSettings, fileScanner })
       }
       const shards = await ensureShards(db, migration)
       if (shards.noItems) {
