@@ -55,6 +55,7 @@ function statusBadge(status?: string) {
   if (["completed", "complete", "copied", "verified"].includes(value)) return <Badge>Completed</Badge>
   if (value === "processing") return <Badge variant="secondary">Processing</Badge>
   if (value === "dispatching") return <Badge variant="secondary">Dispatching</Badge>
+  if (value === "retrying") return <Badge className="bg-amber-600">Retrying</Badge>
   if (["running", "copying", "transferring"].includes(value)) return <Badge>Running</Badge>
   if (["scanning", "verifying"].includes(value)) return <Badge variant="secondary">{value === "scanning" ? "Scanning" : "Verifying"}</Badge>
   if (["pending", "queued", "claimed"].includes(value)) return <Badge variant="outline">Queued</Badge>
@@ -214,7 +215,7 @@ export default function MigrationWorkerPoolDetailsPage() {
     { accessorKey: "targetBucket", header: "Target", meta: { width: "min-w-[200px]", align: "center" }, cell: ({ row }) => <span className="break-all text-[13px] font-medium">{row.original.targetBucket}</span> },
     { accessorKey: "status", header: "Status", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }) => <div className="flex min-h-10 items-center justify-center">{statusBadge(poolBucketTransferStatus(row.original))}</div> },
     { id: "total", header: "Total", meta: { width: "min-w-[110px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.totalObjects))}</span> },
-    { id: "queue", header: "Queue", meta: { width: "min-w-[110px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.queuedObjects))}</span> },
+    ...(snapshot.buckets?.some((bucket) => num(bucket.queuedObjects) > 0) ? [{ id: "queue", header: "Queue", meta: { width: "min-w-[110px]", align: "center" }, cell: ({ row }: { row: { original: BucketStat } }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.queuedObjects))}</span> }] : []),
     { id: "inProgress", header: "In progress", meta: { width: "min-w-[110px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.runningObjects))}</span> },
     { id: "transferred", header: "Transferred", meta: { width: "min-w-[130px]", align: "center" }, cell: ({ row }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.transferredObjects))}</span> },
     ...(snapshot.buckets?.some((bucket) => num(bucket.skippedObjects) > 0) ? [{ id: "skipped", header: "Skipped", meta: { width: "min-w-[120px]", align: "center" }, cell: ({ row }: { row: { original: BucketStat } }) => <span className="text-[13px] font-medium tabular-nums">{formatNumber(num(row.original.skippedObjects))}</span> }] : []),

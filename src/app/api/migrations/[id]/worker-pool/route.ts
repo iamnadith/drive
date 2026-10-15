@@ -3,7 +3,7 @@ import { NextResponse } from "next/server"
 import { ensureDriveSchema, queryDb } from "@/lib/db"
 import { requireAdmin } from "@/lib/server-auth"
 import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
-import { withMigrationQueueDatabase } from "@/lib/migration-queue-database"
+import { readMigrationQueueLiveProjectionFromClient, withMigrationQueueDatabase } from "@/lib/migration-queue-database"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -61,6 +61,47 @@ function hasCompleteSnapshot(snapshot: Record<string, unknown>) {
   return Array.isArray(snapshot.buckets) && Number.isFinite(Number(snapshot.totalJobs))
 }
 
+type QueueProjection = NonNullable<Awaited<ReturnType<typeof readMigrationQueueLiveProjectionFromClient>>>
+
+function projectQueueBuckets(projection: QueueProjection): Array<Record<string, unknown>> {
+  const buckets = new Map<string, Record<string, unknown>>()
+  for (const item of projection.items) {
+    const key = `${item.sourceBucket}\u0000${item.targetBucket}`
+    const current = buckets.get(key) ?? {
+      id: `${item.sourceBucket}:${item.targetBucket}`,
+      sourceBucket: item.sourceBucket,
+      targetBucket: item.targetBucket,
+      status: "completed",
+      totalObjects: 0,
+      queuedObjects: 0,
+      runningObjects: 0,
+      transferredObjects: 0,
+      skippedObjects: 0,
+      failedObjects: 0,
+      retryingObjects: 0,
+      sourceBytes: 0,
+      updatedAt: item.progress.live.updatedAt,
+    }
+    current.totalObjects = Number(current.totalObjects) + Number(item.progress.live.totalObjects || 0)
+    current.queuedObjects = Number(current.queuedObjects) + Number(item.progress.live.queuedObjects || 0)
+    current.runningObjects = Number(current.runningObjects) + Number(item.progress.live.runningJobs || 0)
+    current.transferredObjects = Number(current.transferredObjects) + Number(item.progress.live.transferredObjects || 0)
+    current.skippedObjects = Number(current.skippedObjects) + Number(item.progress.live.skippedObjects || 0)
+    current.failedObjects = Number(current.failedObjects) + Number(item.progress.live.failedObjects || 0)
+    if (item.progress.live.status === "retrying") current.retryingObjects = Number(current.retryingObjects) + Number(item.progress.live.queuedObjects || 0) + Number(item.progress.live.runningJobs || 0)
+    current.sourceBytes = Number(current.sourceBytes) + Number(item.progress.live.sourceBytes || 0)
+    const itemTime = Date.parse(String(item.progress.live.updatedAt || ""))
+    if (Number.isFinite(itemTime) && itemTime > Date.parse(String(current.updatedAt || ""))) current.updatedAt = item.progress.live.updatedAt
+    const status = String(item.progress.live.status || "completed")
+    if (["running", "retrying", "queued", "failed", "canceled"].includes(status)) current.status = status
+    buckets.set(key, current)
+  }
+  return Array.from(buckets.values()).map((bucket) => ({
+    ...bucket,
+    status: Number(bucket.retryingObjects) ? "retrying" : Number(bucket.runningObjects) ? "running" : Number(bucket.queuedObjects) ? "dispatching" : Number(bucket.failedObjects) ? "failed" : bucket.status === "canceled" ? "canceled" : "completed",
+  }))
+}
+
 async function readPool(id: string, pageIndex: number, pageSize: number, selectedGeneration: number) {
   const now = Date.now()
   let queueReadFailed = false
@@ -71,10 +112,9 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
   if (queueSettings.queueDatabaseUrl) {
     try {
     const queueProjection = await withMigrationQueueDatabase(queueSettings.queueDatabaseUrl, async (db) => {
-      const meta = (await db.query(`select generation,status,seed_complete,updated_at from drive_migration_queue_meta
-        where migration_id=$1 and ($2::int=0 or generation=$2) order by generation desc limit 1`, [id, selectedGeneration])).rows[0]
-      if (!meta) return null
-      const generation = Number(meta.generation)
+      const liveProjection = await readMigrationQueueLiveProjectionFromClient(db, id, selectedGeneration)
+      if (!liveProjection) return null
+      const generation = liveProjection.generation
       const stats = (await db.query(`select count(*)::bigint total_jobs,
         count(*) filter(where status='pending')::bigint queued_jobs,
         count(*) filter(where status in('claimed','running'))::bigint running_jobs,
@@ -95,7 +135,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
           from drive_migration_queue_workers w where w.migration_id=$1 and w.generation=$2),0)::bigint worker_runtime_seconds,
         max(updated_at) updated_at
         from drive_migration_queue_jobs where migration_id=$1 and generation=$2`, [id, generation])).rows[0]
-      const [page, recent, workers, bucketRows, active, generationRows] = await Promise.all([
+      const [page, recent, workers, active, generationRows] = await Promise.all([
         db.query(`select id,status,claimed_by,agent_id,summary,error,created_at,updated_at,last_heartbeat_at,completed_at,
           payload->'inventoryObjects'->0->>'key' object_key,
           case when payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$' then (payload->'inventoryObjects'->0->>'size')::bigint else 0 end object_size,
@@ -125,49 +165,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
             from drive_migration_queue_workers w left join worker_totals t using(worker_instance_id)
             where w.migration_id=$1 and w.generation=$2 and w.last_heartbeat_at>now()-interval '24 hours'
             order by (w.status='online' and w.last_heartbeat_at>now()-interval '90 seconds') desc,w.last_heartbeat_at desc limit 100`, [id, generation]),
-        db.query(`with item_rows as (
-            select distinct on (item->>'id') item->>'id' item_id,item->>'sourceBucket' source_bucket,item->>'targetBucket' target_bucket,
-              case when item->>'sourceObjects' ~ '^[0-9]+$' then (item->>'sourceObjects')::bigint else 0 end source_objects,
-              case when item->>'sourceBytes' ~ '^[0-9]+$' then (item->>'sourceBytes')::bigint else 0 end source_bytes
-            from drive_migration_queue_jobs q cross join lateral jsonb_array_elements(case when jsonb_typeof(q.payload->'items')='array' then q.payload->'items' else '[]'::jsonb end) item
-            where q.migration_id=$1 and q.generation=$2 and nullif(item->>'id','') is not null order by item->>'id',q.created_at
-          ), item_totals as (
-            select source_bucket,target_bucket,sum(source_objects)::bigint total_objects,sum(source_bytes)::bigint source_bytes from item_rows group by 1,2
-          ), job_item_rows as (
-            select q.id,q.status,q.updated_at,item->>'sourceBucket' source_bucket,item->>'targetBucket' target_bucket,item->>'id' item_id,
-              q.progress->>'currentItemId' current_item_id,
-              case when q.progress->>'transferred' ~ '^[0-9]+$' then (q.progress->>'transferred')::bigint else 0 end current_transferred,
-              case when q.progress->>'skipped' ~ '^[0-9]+$' then (q.progress->>'skipped')::bigint else 0 end current_skipped,
-              coalesce(res.transferred,0)::bigint result_transferred,coalesce(res.failed,0)::bigint result_failed,coalesce(res.skipped,0)::bigint result_skipped,
-              coalesce(live.transferred,0)::bigint live_transferred,coalesce(live.failed,0)::bigint live_failed,coalesce(live.skipped,0)::bigint live_skipped
-            from drive_migration_queue_jobs q
-            cross join lateral jsonb_array_elements(case when jsonb_typeof(q.payload->'items')='array' then q.payload->'items' else '[]'::jsonb end) item
-            left join lateral (select sum(case when x->>'transferred' ~ '^[0-9]+$' then (x->>'transferred')::bigint else 0 end)::bigint transferred,
-                sum(case when x->>'failed' ~ '^[0-9]+$' then (x->>'failed')::bigint else 0 end)::bigint failed,
-                sum(case when x->>'skipped' ~ '^[0-9]+$' then (x->>'skipped')::bigint else 0 end)::bigint skipped
-              from jsonb_array_elements(case when jsonb_typeof(q.result->'items')='array' then q.result->'items' else '[]'::jsonb end) x where x->>'itemId'=item->>'id') res on true
-            left join lateral (select sum(case when x->>'transferred' ~ '^[0-9]+$' then (x->>'transferred')::bigint else 0 end)::bigint transferred,
-                sum(case when x->>'failed' ~ '^[0-9]+$' then (x->>'failed')::bigint else 0 end)::bigint failed,
-                sum(case when x->>'skipped' ~ '^[0-9]+$' then (x->>'skipped')::bigint else 0 end)::bigint skipped
-              from jsonb_array_elements(case when jsonb_typeof(q.progress->'itemProgress')='array' then q.progress->'itemProgress' else '[]'::jsonb end) x where x->>'itemId'=item->>'id') live on true
-            where q.migration_id=$1 and q.generation=$2 and nullif(item->>'id','') is not null
-          ), job_totals as (
-            select source_bucket,target_bucket,count(*) filter(where status='pending')::bigint queued_objects,
-              count(*) filter(where status in('claimed','running'))::bigint running_jobs,
-              coalesce(sum(case when status='completed' then result_transferred when status in('claimed','running') then greatest(result_transferred,live_transferred,
-                case when current_item_id=item_id then current_transferred else 0 end) else 0 end),0)::bigint transferred_objects,
-              coalesce(sum(case when status='failed' then greatest(1,result_failed,live_failed) when status='completed' then result_failed else greatest(result_failed,live_failed) end),0)::bigint failed_objects,
-              coalesce(sum(case when status='completed' then result_skipped else greatest(result_skipped,live_skipped,
-                case when current_item_id=item_id then current_skipped else 0 end) end),0)::bigint skipped_objects,
-              max(updated_at) updated_at
-            from job_item_rows group by source_bucket,target_bucket
-          ) select coalesce(i.source_bucket,j.source_bucket) source_bucket,coalesce(i.target_bucket,j.target_bucket) target_bucket,
-              coalesce(i.total_objects,0)::bigint total_objects,coalesce(j.queued_objects,0)::bigint queued_objects,
-              coalesce(j.running_jobs,0)::bigint running_objects,coalesce(j.transferred_objects,0)::bigint transferred_objects,
-              coalesce(j.failed_objects,0)::bigint failed_objects,coalesce(j.skipped_objects,0)::bigint skipped_objects,
-              coalesce(i.source_bytes,0)::bigint source_bytes,j.updated_at
-            from item_totals i full outer join job_totals j using(source_bucket,target_bucket)
-            order by coalesce(i.source_bucket,j.source_bucket),coalesce(i.target_bucket,j.target_bucket)`, [id, generation]),
+
         db.query(`select id,claimed_by,last_heartbeat_at,progress,payload->'job'->>'mode' mode from drive_migration_queue_jobs where migration_id=$1 and generation=$2 and status in('claimed','running') and claimed_by is not null and last_heartbeat_at>now()-interval '90 seconds' and jsonb_typeof(progress->'currentFile')='object' and progress->'currentFile'->>'key' is not null order by updated_at desc limit 100`, [id, generation]),
         db.query(`select m.generation,m.status,m.seed_complete,m.created_at,m.updated_at,
             coalesce(j.total_jobs,0)::bigint total_jobs,coalesce(j.queued_jobs,0)::bigint queued_jobs,
@@ -189,12 +187,12 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
             from drive_migration_queue_workers where migration_id=m.migration_id and generation=m.generation) w on true
           where m.migration_id=$1 order by m.generation desc limit 100`, [id]),
       ])
-      const total = Number(stats.rows[0]?.total_jobs || 0)
+      const total = liveProjection.stats.totalJobs
       const onlineWorkers = workers.rows.filter((row) => row.status === "online" && Date.now() - Date.parse(row.last_heartbeat_at) < 90_000).length
-      const queueStatus = String(meta.status || "").toLowerCase()
-      const buckets = bucketRows.rows.map((row, index) => ({ id: `${row.source_bucket || ""}:${row.target_bucket || ""}:${index}`, sourceBucket: row.source_bucket || "", targetBucket: row.target_bucket || "", status: Number(row.running_objects) ? "running" : Number(row.queued_objects) ? "dispatching" : Number(row.failed_objects) ? "failed" : Number(row.canceled_jobs) && !Number(row.completed_jobs) ? "canceled" : "completed", totalObjects: Number(row.total_objects), queuedObjects: Number(row.queued_objects), runningObjects: Number(row.running_objects), transferredObjects: Number(row.transferred_objects), skippedObjects: Number(row.skipped_objects), failedObjects: Number(row.failed_objects), sourceBytes: Number(row.source_bytes), updatedAt: row.updated_at }))
-      const latestQueueUpdate = stats.rows[0]?.updated_at ? Date.parse(stats.rows[0].updated_at) : 0
-      const latestMetaUpdate = meta.updated_at ? Date.parse(meta.updated_at) : 0
+      const queueStatus = String(liveProjection.queueStatus || "").toLowerCase()
+      const buckets = projectQueueBuckets(liveProjection)
+      const latestQueueUpdate = liveProjection.updatedAt ? Date.parse(liveProjection.updatedAt) : 0
+      const latestMetaUpdate = latestQueueUpdate
       const updatedAt = new Date(Math.max(latestQueueUpdate, latestMetaUpdate) || Date.now()).toISOString()
       const queueAttempts = generationRows.rows.map((row) => {
         const generationStatus = String(row.status || "").toLowerCase()
@@ -220,9 +218,28 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       for (const dispatched of dispatchedWorkers) {
         if (!queueWorkerIds.has(dispatched.instanceId)) workerRuns.push(dispatched)
       }
-      return { snapshot: { migrationId: id, workerGeneration: generation, totalJobs: total, queuedJobs: Number(stats.rows[0]?.queued_jobs || 0), runningJobs: Number(stats.rows[0]?.running_jobs || 0), remainingJobs: Number(stats.rows[0]?.remaining_jobs || 0), completedJobs: Number(stats.rows[0]?.completed_jobs || 0), failedJobs: Number(stats.rows[0]?.failed_jobs || 0), canceledJobs: Number(stats.rows[0]?.canceled_jobs || 0), totalObjects: buckets.reduce((sum, bucket) => sum + bucket.totalObjects, 0), transferred: Number(stats.rows[0]?.transferred || 0), inProgressFiles: active.rowCount || 0, completedBytes: Number(stats.rows[0]?.completed_bytes || 0), inProgressBytes: Number(stats.rows[0]?.in_progress_bytes || 0), workerRuntimeSeconds: Number(stats.rows[0]?.worker_runtime_seconds || 0), skipped: Number(stats.rows[0]?.skipped || 0), failed: Number(stats.rows[0]?.failed || 0), onlineWorkers, activeTransfers: active.rowCount || 0, buckets, updatedAt, sampledAt: new Date().toISOString() }, snapshotUpdatedAt: updatedAt, jobs: recent.rows, liveFiles: active.rows.map((row) => ({ ...(row.progress?.currentFile || {}), jobId: row.id, workerId: row.claimed_by, lastHeartbeatAt: row.last_heartbeat_at, operation: row.mode })), jobPage, jobPagination: { pageIndex, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)), total }, attempts: queueAttempts, workerRuns, selectedGeneration: generation, queueStatus, dataSource: "queue_database" }
+      return { snapshot: { migrationId: id, workerGeneration: generation, totalJobs: liveProjection.stats.totalJobs, queuedJobs: liveProjection.stats.queuedJobs, runningJobs: liveProjection.stats.runningJobs, remainingJobs: liveProjection.stats.remainingJobs, completedJobs: liveProjection.stats.completedJobs, failedJobs: liveProjection.stats.failedJobs, canceledJobs: liveProjection.stats.canceledJobs, totalObjects: buckets.reduce((sum, bucket) => sum + Number(bucket.totalObjects || 0), 0), transferred: liveProjection.stats.transferred, inProgressFiles: active.rowCount || 0, completedBytes: Number(stats.rows[0]?.completed_bytes || 0), inProgressBytes: Number(stats.rows[0]?.in_progress_bytes || 0), workerRuntimeSeconds: Number(stats.rows[0]?.worker_runtime_seconds || 0), skipped: liveProjection.stats.skipped, failed: liveProjection.stats.failed, onlineWorkers, activeTransfers: active.rowCount || 0, buckets, updatedAt, sampledAt: new Date().toISOString() }, snapshotUpdatedAt: updatedAt, jobs: recent.rows, liveFiles: active.rows.map((row) => ({ ...(row.progress?.currentFile || {}), jobId: row.id, workerId: row.claimed_by, lastHeartbeatAt: row.last_heartbeat_at, operation: row.mode })), jobPage, jobPagination: { pageIndex, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)), total }, attempts: queueAttempts, workerRuns, selectedGeneration: generation, queueStatus, dataSource: "queue_database" }
     }, queueSettings.queueDatabaseSsl)
-    if (queueProjection) return queueProjection
+    if (queueProjection) {
+      const verifiedFailures = await queryDb<{ source_bucket: string; target_bucket: string; failed_objects: string | number }>(`
+        select i.source_bucket,i.target_bucket,
+          sum(v.missing_objects+v.mismatched_objects+case when coalesce(m.options->>'verifyStrictDestination','false')='true' then v.extra_objects else 0 end)::bigint failed_objects
+        from drive_migration_items i
+        join drive_migrations m on m.id=i.migration_id
+        join drive_migration_verification_state v on v.migration_item_id=i.id and v.migration_id=i.migration_id
+        where i.migration_id=$1 and v.generation=$2 and v.status='completed'
+        group by i.source_bucket,i.target_bucket`, [id, queueProjection.selectedGeneration])
+      const failedByBucket = new Map(verifiedFailures.rows.map((row) => [`${row.source_bucket}\u0000${row.target_bucket}`, Number(row.failed_objects || 0)]))
+      const buckets = Array.isArray(queueProjection.snapshot.buckets) ? queueProjection.snapshot.buckets as Array<Record<string, unknown>> : []
+      for (const bucket of buckets) {
+        const verificationFailures = failedByBucket.get(`${String(bucket.sourceBucket || "")}\u0000${String(bucket.targetBucket || "")}`) || 0
+        bucket.failedObjects = Number(bucket.failedObjects || 0) + verificationFailures
+        if (verificationFailures > 0 && Number(bucket.queuedObjects || 0) === 0 && Number(bucket.runningObjects || 0) === 0) bucket.status = "failed"
+      }
+      queueProjection.snapshot.buckets = buckets
+      queueProjection.snapshot.failed = buckets.reduce((sum, bucket) => sum + Number(bucket.failedObjects || 0), 0)
+      return queueProjection
+    }
     if (queueSettings.queueDatabaseUrl) throw new Error("Migration queue counts are not available in the queue database yet")
     } catch (error) {
       queueReadFailed = true

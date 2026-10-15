@@ -245,6 +245,7 @@ function statusBadge(
   if (s === "verifying") return <Badge className="bg-purple-600">Verifying</Badge>
   if (s === "scanning") return <Badge className="bg-sky-600">Scanning</Badge>
   if (s === "queued") return <Badge variant="secondary">Queued</Badge>
+  if (s === "retrying") return <Badge className="bg-amber-600">Retrying</Badge>
   if (s === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
   if (s === "progress_fetch_failed") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
   if (s === "paused") return <Badge className="bg-yellow-600">Paused</Badge>
@@ -351,7 +352,9 @@ function mergeIncomingItem(prev: MigrationItem | undefined, next: MigrationItem)
       : Math.max(prevLive.verifyIssues, nextLive.verifyIssues),
   }
 
-  if (isTerminalBucketDisplayStatus(prevLive.status) && !isTerminalBucketDisplayStatus(nextLive.status)) {
+  if (normalizeStatus(nextLive.status) === "retrying") {
+    mergedLive.status = "retrying"
+  } else if (isTerminalBucketDisplayStatus(prevLive.status) && !isTerminalBucketDisplayStatus(nextLive.status)) {
     mergedLive.status = prevLive.status
   } else if (
     !isTerminalBucketDisplayStatus(prevLive.status) &&
