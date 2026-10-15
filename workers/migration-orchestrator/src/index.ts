@@ -1346,7 +1346,7 @@ async function migrationQueueRequest(db: Client, env: Env, action: "seed" | "syn
   const response = await fetch(`${base}/api/internal/migration-queue`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${String(env.MIGRATION_ORCHESTRATOR_SECRET || "")}` },
-    body: JSON.stringify({ action, migrationId, generation, limit: 1000 }),
+    body: JSON.stringify({ action, migrationId, generation, limit: action === "seed" ? 20_000 : 1_000 }),
     signal: AbortSignal.timeout(45_000),
   })
   const result = await response.json().catch(() => ({})) as Row
