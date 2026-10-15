@@ -3,6 +3,8 @@ import { compactPreviousMigrationDetails } from "./database-maintenance"
 import { queryDb, withDbTransaction } from "./db"
 import { ensureActivitySchema, recordActivityInTransaction, type RecordActivityInput } from "./activity-store"
 import { mapMigrationWorkerRun, type MigrationWorkerRun, type MigrationWorkerRunRow } from "./migration-worker-runs"
+import { getMigrationWorkerSettings } from "./migration-worker-settings-store"
+import { deleteMigrationQueueData } from "./migration-queue-database"
 
 export type MigrationStatus = "draft" | "running" | "verifying" | "completed" | "failed" | "verification_failed" | "canceled"
 export type MigrationSyncStatus = "idle" | "syncing" | "ok" | "error"
@@ -33,6 +35,10 @@ export type MigrationOptions = {
   workerPoolLiveStats?: Record<string, number>
   /** Queue seeding is still processing; expose no copied-row count in the migration card. */
   workerPoolQueueSeeding?: boolean
+  /** Queue data is pending cleanup after terminal worker-pool completion. */
+  queueCleanupPending?: boolean
+  /** Timestamp at which the external worker queue was removed. */
+  queueCleanupCompleteAt?: string | null
   historyReadOnlyAt?: string
   historyReadOnlyReason?: string
 
@@ -688,6 +694,15 @@ export async function queueMigrationItemVerification(migrationId: string, itemId
 }
 
 export async function deleteMigration(id: string): Promise<void> {
+  const existing = await queryDb<{ options: Record<string, unknown> | null }>(`select options from public.${MIGRATIONS_TABLE} where id=$1 limit 1`, [id])
+  if (existing.rows[0]?.options?.executionMode === "migration_workers") {
+    const queueSettings = await getMigrationWorkerSettings()
+    if (queueSettings.queueDatabaseUrl) {
+      // The queue database is separate, so primary database FK cascades
+      // cannot remove its rows.
+      await deleteMigrationQueueData(queueSettings.queueDatabaseUrl, id, queueSettings.queueDatabaseSsl)
+    }
+  }
   await queryDb(`delete from public.${MIGRATIONS_TABLE} where id = $1`, [id])
 }
 

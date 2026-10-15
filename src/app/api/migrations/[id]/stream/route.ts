@@ -55,7 +55,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
 
   const { id } = await context.params
   const bootstrap = await getCachedStreamSnapshot(id)
-  const queueSettings = bootstrap?.migration?.options?.executionMode === "migration_workers"
+  const queueSettings = bootstrap?.migration?.options?.executionMode === "migration_workers" && ["running", "verifying"].includes(String(bootstrap.migration.status).toLowerCase())
     ? await getMigrationWorkerSettings()
     : null
   const directQueue = queueSettings?.queueDatabaseUrl ? { url: queueSettings.queueDatabaseUrl, ssl: queueSettings.queueDatabaseSsl } : null
@@ -110,7 +110,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
               break
             }
             let { migration, items, workerRuns } = currentBootstrap
-            if (directQueue) {
+            if (directQueue && ["running", "verifying"].includes(String(migration.status).toLowerCase())) {
               try {
                 const live = await readMigrationQueueLiveProjection(directQueue.url, directQueue.ssl, id, Math.max(0, Number(migration.options.workerGeneration || 0)))
                 if (live) {

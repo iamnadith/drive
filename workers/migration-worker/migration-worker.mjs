@@ -92,12 +92,34 @@ function queueClientOptions() {
 let queueClient = QUEUE_DATABASE_URL ? new pg.Client(queueClientOptions()) : null
 let queueReady = false
 let queueOperation = Promise.resolve()
+let queueIdleTimer = null
+const QUEUE_CONNECTION_IDLE_MS = Math.max(1_000, Number(process.env.QUEUE_CONNECTION_IDLE_MS || 5_000))
+
+function releaseQueueConnectionAfterIdle() {
+  if (queueIdleTimer) clearTimeout(queueIdleTimer)
+  queueIdleTimer = setTimeout(() => {
+    queueIdleTimer = null
+    const release = queueOperation.then(async () => {
+      if (!queueReady || !queueClient) return
+      const idleClient = queueClient
+      queueClient = null
+      queueReady = false
+      await idleClient.end().catch(() => undefined)
+    })
+    queueOperation = release.catch(() => undefined)
+  }, QUEUE_CONNECTION_IDLE_MS)
+  queueIdleTimer.unref?.()
+}
 
 async function withQueue(operation) {
-  if (!queueClient) throw new Error("Migration queue database is not configured")
+  if (!QUEUE_DATABASE_URL) throw new Error("Migration queue database is not configured")
   const run = queueOperation.then(async () => {
+    if (queueIdleTimer) {
+      clearTimeout(queueIdleTimer)
+      queueIdleTimer = null
+    }
     if (!queueReady) {
-      await queueClient.end().catch(() => undefined)
+      await queueClient?.end().catch(() => undefined)
       queueClient = new pg.Client(queueClientOptions())
       await queueClient.connect()
       queueReady = true
@@ -109,6 +131,8 @@ async function withQueue(operation) {
       await queueClient.end().catch(() => undefined)
       queueClient = new pg.Client(queueClientOptions())
       throw error
+    } finally {
+      releaseQueueConnectionAfterIdle()
     }
   })
   queueOperation = run.catch(() => undefined)
@@ -2354,5 +2378,6 @@ process.on("uncaughtException", (error) => {
 })
 
 void runWorkerForever().finally(async () => {
+  if (queueIdleTimer) clearTimeout(queueIdleTimer)
   if (queueClient && queueReady) await queueClient.end().catch(() => undefined)
 })

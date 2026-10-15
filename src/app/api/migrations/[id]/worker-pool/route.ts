@@ -105,10 +105,15 @@ function projectQueueBuckets(projection: QueueProjection): Array<Record<string, 
 async function readPool(id: string, pageIndex: number, pageSize: number, selectedGeneration: number) {
   const now = Date.now()
   let queueReadFailed = false
-  if (!queueSettingsCache || queueSettingsCache.expiresAt <= now) {
+  const lifecycle = await queryDb<{ status: string; execution_mode: string | null }>(`select status,options->>'executionMode' execution_mode from drive_migrations where id=$1 limit 1`, [id])
+  const terminalMigration = ["completed", "failed", "verification_failed", "canceled", "aborted"].includes(String(lifecycle.rows[0]?.status || "").toLowerCase())
+    && lifecycle.rows[0]?.execution_mode === "migration_workers"
+  if (!terminalMigration && (!queueSettingsCache || queueSettingsCache.expiresAt <= now)) {
     queueSettingsCache = { expiresAt: now + 30_000, value: await getMigrationWorkerSettings() }
   }
-  const queueSettings = queueSettingsCache.value
+  const queueSettings = terminalMigration
+    ? { queueDatabaseUrl: "", queueDatabaseSsl: true } as Awaited<ReturnType<typeof getMigrationWorkerSettings>>
+    : queueSettingsCache!.value
   if (!queueSettings.queueDatabaseUrl) {
     const migration = await queryDb<{ execution_mode: string | null }>(`select options->>'executionMode' execution_mode from drive_migrations where id=$1 limit 1`, [id])
     if (migration.rows[0]?.execution_mode === "migration_workers") {
@@ -133,12 +138,15 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
         coalesce(sum(case when status='failed' then greatest(1,case when result->'totals'->>'failed' ~ '^[0-9]+$' then (result->'totals'->>'failed')::bigint else 0 end,coalesce((select sum(case when x->>'failed' ~ '^[0-9]+$' then (x->>'failed')::bigint else 0 end) from jsonb_array_elements(case when jsonb_typeof(result->'items')='array' then result->'items' else '[]'::jsonb end) x),0)) when result->'totals'->>'failed' ~ '^[0-9]+$' then (result->'totals'->>'failed')::bigint else coalesce((select sum(case when x->>'failed' ~ '^[0-9]+$' then (x->>'failed')::bigint else 0 end) from jsonb_array_elements(case when jsonb_typeof(result->'items')='array' then result->'items' else '[]'::jsonb end) x),0) end),0)::bigint failed,
         coalesce(sum(case when status='completed' and result->'items'->0->>'transferred' ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 and payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$' then (payload->'inventoryObjects'->0->>'size')::bigint else 0 end),0)::bigint completed_bytes,
         coalesce(sum(case when status in('claimed','running') and progress->'currentFile'->>'bytesTransferred' ~ '^[0-9]+$' then (progress->'currentFile'->>'bytesTransferred')::bigint else 0 end),0)::bigint in_progress_bytes,
-        coalesce((select sum(greatest(w.runtime_seconds,greatest(0,floor(extract(epoch from (
-          coalesce(nullif(w.metadata->>'retiredAt','')::timestamptz,
-            case when w.status='online' and w.last_heartbeat_at>now()-interval '90 seconds' then now()
-              when w.status='online' then w.last_heartbeat_at+interval '90 seconds' else w.last_heartbeat_at end)
-          - coalesce(nullif(w.metadata->>'workerStartedAt','')::timestamptz,w.last_heartbeat_at)))::bigint)))
-          from drive_migration_queue_workers w where w.migration_id=$1 and w.generation=$2),0)::bigint worker_runtime_seconds,
+        coalesce((
+          select sum(greatest(w.runtime_seconds,greatest(0,floor(extract(epoch from (
+            coalesce(nullif(w.metadata->>'retiredAt','')::timestamptz,
+              case when w.status='online' and w.last_heartbeat_at>now()-interval '90 seconds' then now()
+                when w.status='online' then w.last_heartbeat_at+interval '90 seconds' else w.last_heartbeat_at end)
+            - coalesce(nullif(w.metadata->>'workerStartedAt','')::timestamptz,w.last_heartbeat_at)
+          )))::bigint)))
+          from drive_migration_queue_workers w where w.migration_id=$1 and w.generation=$2
+        ),0)::bigint worker_runtime_seconds,
         max(updated_at) updated_at
         from drive_migration_queue_jobs where migration_id=$1 and generation=$2`, [id, generation])).rows[0]
       const [page, recent, workers, active, generationRows] = await Promise.all([

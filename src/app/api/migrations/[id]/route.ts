@@ -22,7 +22,7 @@ export async function GET(
     let { migration, items, workerRuns } = bootstrap
     const { accounts } = bootstrap
     let workerPoolLiveStats: Record<string, number> | null = null
-    if (migration?.options?.executionMode === "migration_workers") {
+    if (migration?.options?.executionMode === "migration_workers" && ["running", "verifying"].includes(String(migration.status).toLowerCase())) {
       const settings = await getMigrationWorkerSettings()
       if (settings.queueDatabaseUrl) {
         const generation = Math.max(0, Number(migration.options.workerGeneration || 0))

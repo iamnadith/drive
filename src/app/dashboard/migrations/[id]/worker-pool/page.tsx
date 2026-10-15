@@ -83,6 +83,7 @@ export default function MigrationWorkerPoolDetailsPage() {
   const [snapshot, setSnapshot] = React.useState<PoolSnapshot>({})
   const [attempts, setAttempts] = React.useState<PoolAttempt[]>([])
   const [workerRuns, setWorkerRuns] = React.useState<PoolWorkerRun[]>([])
+  const [migrationStatus, setMigrationStatus] = React.useState("")
   const [selectedGeneration, setSelectedGeneration] = React.useState(0)
   const selectedGenerationRef = React.useRef(0)
   selectedGenerationRef.current = selectedGeneration
@@ -123,6 +124,7 @@ export default function MigrationWorkerPoolDetailsPage() {
       })
       setAttempts(Array.isArray(data.attempts) ? data.attempts : [])
       setWorkerRuns(Array.isArray(data.workerRuns) ? data.workerRuns : [])
+      setMigrationStatus(String(data.migrationStatus || ""))
       if (selectedGeneration === 0 && Number(data.selectedGeneration) > 0) setSelectedGeneration(Number(data.selectedGeneration))
       if (isRecord(data.jobPagination)) setPagination(data.jobPagination as Pagination)
       if (detailResponse) {
@@ -149,11 +151,11 @@ export default function MigrationWorkerPoolDetailsPage() {
     return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", tick) }
   }, [])
   React.useEffect(() => {
-    const refresh = () => { if (document.visibilityState === "visible") void load({ background: true }) }
+    const refresh = () => { if (document.visibilityState === "visible" && !["completed", "failed", "verification_failed", "canceled", "aborted"].includes(migrationStatus.toLowerCase())) void load({ background: true }) }
     const timer = window.setInterval(refresh, 30_000)
     document.addEventListener("visibilitychange", refresh)
     return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh) }
-  }, [load])
+  }, [load, migrationStatus])
   React.useEffect(() => { setLiveFiles([]) }, [migrationId, selectedGeneration])
 
   const openJob = React.useCallback(async (id: string) => {
@@ -438,7 +440,7 @@ export default function MigrationWorkerPoolDetailsPage() {
           storageKey="drive:workerPoolLogsCols:v1"
           emptyState="No worker logs captured yet."
         />
-        <DashboardDataTable data={jobPage} columns={jobColumns} pageSize={pagination.pageSize} minWidth="1020px" withCard={false} serverPagination={{ pageIndex: pagination.pageIndex, pageCount: pagination.pageCount, onPageChange: (page) => { setPagination((current) => ({ ...current, pageIndex: page })); void load({ page }) } }} emptyState="No file jobs were materialized for this attempt." />
+        {migrationStatus.toLowerCase() !== "completed" ? <DashboardDataTable data={jobPage} columns={jobColumns} pageSize={pagination.pageSize} minWidth="1020px" withCard={false} serverPagination={{ pageIndex: pagination.pageIndex, pageCount: pagination.pageCount, onPageChange: (page) => { setPagination((current) => ({ ...current, pageIndex: page })); void load({ page }) } }} emptyState="No file jobs were materialized for this attempt." /> : null}
         {selectedJobId ? <Card className="gap-0 overflow-hidden py-0"><CardHeader className="border-b px-5 py-4"><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><CardTitle className="text-base">Job details</CardTitle>{selectedJob ? statusBadge(selectedJob.status) : <Badge variant="outline">Loading</Badge>}</div><CardDescription className="mt-1 truncate font-mono">{selectedJobId}</CardDescription></div>{selectedJob ? <div className="flex flex-wrap gap-2">{selectedActive ? <Button variant="destructive" size="sm" onClick={() => void mutateSelected("POST")} disabled={mutating}><XCircle data-icon="inline-start" />Abort</Button> : null}<Button variant="outline" size="sm" onClick={() => setDeleteOpen(true)} disabled={mutating || Boolean(selectedActive)}><Trash2 data-icon="inline-start" />Delete</Button></div> : null}</div></CardHeader><CardContent className="p-5">{selectedJob ? <div className="flex flex-col gap-5"><div className="grid gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-2 xl:grid-cols-4">{[["Transferred", num(selectedTotals?.transferred)], ["Skipped", num(selectedTotals?.skipped)], ["Failed", num(selectedTotals?.failed)], ["Worker", selectedJob.claimedByAgentId || "—"]].map(([label, value]) => <div key={String(label)} className="bg-background p-4"><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 truncate font-medium tabular-nums">{typeof value === "number" ? formatNumber(value) : value}</p></div>)}</div>{selectedJob.summary || selectedJob.error ? <div className="rounded-xl border bg-muted/25 p-4"><p className="text-sm font-medium">{selectedJob.summary || "Worker job update"}</p>{selectedJob.error ? <p className="mt-2 text-sm text-destructive">{selectedJob.error}</p> : null}</div> : null}<div className="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4"><div><p className="text-xs text-muted-foreground">Mode</p><p className="mt-1 font-medium">{selectedJob.mode}</p></div><div><p className="text-xs text-muted-foreground">Created</p><p className="mt-1 font-medium">{formatDate(selectedJob.createdAt)}</p></div><div><p className="text-xs text-muted-foreground">Updated</p><p className="mt-1 font-medium">{formatDate(selectedJob.updatedAt)}</p></div><div><p className="text-xs text-muted-foreground">Migration</p><p className="mt-1 truncate font-mono text-xs">{selectedJob.migrationId}</p></div></div></div> : <Skeleton className="h-40 w-full" />}</CardContent></Card> : null}
         {selectedJob && selectedFailureSamples.length > 0 ? <Card className="gap-0 py-0"><CardHeader className="border-b px-5 py-4"><CardTitle className="text-base">File failure details</CardTitle><CardDescription>Worker recorded these copy errors for this job.</CardDescription></CardHeader><CardContent className="max-h-96 space-y-2 overflow-auto p-5">{selectedFailureSamples.map((sample, index) => <div key={`${String(sample.key || "file")}:${index}`} className="rounded-lg border border-destructive/20 bg-muted/30 p-3"><p className="break-all font-mono text-xs">{String(sample.key || "Unknown file")}</p><p className="mt-1 break-words text-xs text-destructive">{String(sample.error || "No error message was recorded")}</p></div>)}</CardContent></Card> : null}
     </div>

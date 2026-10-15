@@ -6,7 +6,7 @@ type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; M
 // Database rows are dynamically shaped by the PostgreSQL queries below.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-const BUILD = 39
+const BUILD = 40
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -151,9 +151,9 @@ async function selectMigration(db: Client): Promise<Row | null> {
         )
       ) or (
         (m.status in('canceled','completed','aborted') or (m.status in('failed','verification_failed') and coalesce(m.options->>'executionMode','')='migration_workers'))
-        and exists(select 1 from drive_agent_runs r where r.run_type='github_dispatch' and r.status in('pending','running') and (
+        and (m.options->>'queueCleanupPending'='true' or exists(select 1 from drive_agent_runs r where r.run_type='github_dispatch' and r.status in('pending','running') and (
           r.payload->>'migrationId'=m.id::text or exists(select 1 from drive_repair_jobs j where j.id::text=r.job_reference and j.migration_id=m.id)
-        ))
+        )))
       )
     ) and coalesce(m.options->>'executionMode','super_slurper') in ('migration_workers','super_slurper')
     order by coalesce(m.last_synced_at,m.created_at),m.created_at limit 1`, [TRANSIENT_SCAN_SQL_PATTERN])
@@ -1593,20 +1593,20 @@ async function seedMigrationQueue(db: Client, migrationId: string, generation: n
 
 // Status mirroring remains a separate bounded control-plane operation while
 // queue materialization itself is performed directly by this Worker.
-async function migrationQueueRequest(db: Client, env: Env, migrationId: string, generation: number) {
+async function migrationQueueRequest(db: Client, env: Env, migrationId: string, generation: number, action: "sync" | "cleanup" = "sync") {
   const configured = await db.query(`select value from drive_app_settings where key='migration-workers' limit 1`)
   const settings = configured.rows[0]?.value || {}
-  if (!String(settings.queueDatabaseUrl || "").trim()) return { configured: false, complete: false, synced: 0 }
+  if (!String(settings.queueDatabaseUrl || "").trim()) return { configured: false, complete: false, synced: 0, cleaned: action === "cleanup" }
   const originRow = await db.query(`select value->>'panelOrigin' panel_origin from drive_app_settings where key='orchestration-panel-origin' limit 1`)
   const base = String(env.PANEL_URL || originRow.rows[0]?.panel_origin || "").trim().replace(/\/+$/, "")
   if (!base) throw new Error("Panel URL is unavailable for migration queue status synchronization")
   const response = await fetch(`${base}/api/internal/migration-queue`, {
     method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${String(env.MIGRATION_ORCHESTRATOR_SECRET || "")}` },
-    body: JSON.stringify({ action: "sync", migrationId, generation, limit: 1_000 }), signal: AbortSignal.timeout(45_000),
+    body: JSON.stringify({ action, migrationId, generation, limit: action === "cleanup" ? 100_000 : 1_000 }), signal: AbortSignal.timeout(45_000),
   })
   const result = await response.json().catch(() => ({})) as Row
   if (!response.ok || result.ok !== true) throw new Error(`Migration queue status sync failed (HTTP ${response.status}): ${String(result.error || "unknown error")}`)
-  return { configured: true, complete: result.complete === true, synced: Number(result.synced || 0) }
+  return { configured: true, complete: result.complete === true, synced: Number(result.synced || 0), cleaned: result.cleaned === true }
 }
 
 async function dispatchWorkers(db: Client, env: Env, migration: Row) {
@@ -2261,7 +2261,19 @@ async function cycle(env: Env) {
       if (["canceled", "completed", "aborted"].includes(String(migration.status).toLowerCase()) || terminalWorkerMigration) {
         migrationId = migration.id
         const workers = await abortMigrationWorkers(db, migration.id, `Migration is ${migration.status}; stopping remaining GitHub workers`)
-        return complete(db, owner, migration.id, { ok: workers.warnings.length === 0, migrationId: migration.id, workerShutdown: workers })
+        const queueCleanupDone = Boolean(opts(migration).queueCleanupCompleteAt) && opts(migration).queueCleanupPending !== true
+        let queueCleanup: Row = { cleaned: true, skipped: queueCleanupDone ? "already_cleaned" : "not_configured" }
+        if (opts(migration).executionMode === "migration_workers" && !queueCleanupDone) {
+          try {
+            queueCleanup = await migrationQueueRequest(db, env, migration.id, integer(opts(migration).workerGeneration, 1, 1, 1000000), "cleanup")
+            if (queueCleanup.cleaned === true) await db.query(`update drive_migrations set options=(options-'queueCleanupPending')||jsonb_build_object('queueCleanupCompleteAt',now()),updated_at=now() where id=$1`, [migration.id])
+            else await db.query(`update drive_migrations set options=jsonb_set(coalesce(options,'{}'::jsonb),'{queueCleanupPending}','true'::jsonb,true),updated_at=now() where id=$1`, [migration.id])
+          } catch (error) {
+            queueCleanup = { cleaned: false, error: error instanceof Error ? error.message : String(error) }
+            await db.query(`update drive_migrations set options=jsonb_set(coalesce(options,'{}'::jsonb),'{queueCleanupPending}','true'::jsonb,true),updated_at=now() where id=$1`, [migration.id])
+          }
+        }
+        return complete(db, owner, migration.id, { ok: workers.warnings.length === 0 && queueCleanup.cleaned !== false, migrationId: migration.id, workerShutdown: workers, queueCleanup })
       }
       if (migration.status === "failed" || migration.status === "verification_failed") {
         const reopened = await db.query(`update drive_migrations set status='running',sync_status='running',sync_message='Resuming durable migration state',completed_at=null,last_synced_at=now(),updated_at=now() where id=$1 and status in('failed','verification_failed') returning *`, [migration.id])
@@ -2351,7 +2363,7 @@ async function cycle(env: Env) {
       const queueConfiguration = await db.query(`select value->>'queueDatabaseUrl' queue_url from drive_app_settings where key='migration-workers' limit 1`)
       const directQueueMode = Boolean(String(queueConfiguration.rows[0]?.queue_url || "").trim())
       let queueSeed = { configured: false, complete: false, inserted: 0 }
-      let queueMirror = { configured: false, complete: false, synced: 0 }
+      let queueMirror: Row = { configured: false, complete: false, synced: 0 }
       if (directQueueMode) {
         if (!shards.inventoryPending && !shards.queuePending && !shards.terminalFailure) {
           queueSeed = await seedMigrationQueue(db, migration.id, shards.generation)
@@ -2382,7 +2394,16 @@ async function cycle(env: Env) {
       const current = (await db.query(`select * from drive_migrations where id=$1`, [migration.id])).rows[0]
       if (["completed", "failed", "verification_failed", "canceled", "aborted"].includes(String(current?.status || "").toLowerCase())) {
         await abortMigrationWorkers(db, migration.id, `Migration is ${current.status}; stopping remaining GitHub workers`)
-        if (directQueueMode) queueMirror = await migrationQueueRequest(db, env, migration.id, shards.generation)
+        if (directQueueMode) {
+          try {
+            queueMirror = await migrationQueueRequest(db, env, migration.id, shards.generation, "cleanup")
+            if (queueMirror.cleaned === true) await db.query(`update drive_migrations set options=(options-'queueCleanupPending')||jsonb_build_object('queueCleanupCompleteAt',now()),updated_at=now() where id=$1`, [migration.id])
+            else await db.query(`update drive_migrations set options=jsonb_set(coalesce(options,'{}'::jsonb),'{queueCleanupPending}','true'::jsonb,true),updated_at=now() where id=$1`, [migration.id])
+          } catch (error) {
+            queueMirror = { configured: true, complete: false, synced: 0, error: error instanceof Error ? error.message : String(error) }
+            await db.query(`update drive_migrations set options=jsonb_set(coalesce(options,'{}'::jsonb),'{queueCleanupPending}','true'::jsonb,true),updated_at=now() where id=$1`, [migration.id])
+          }
+        }
       }
       // Keep scanning and copying as separate phases. The worker pool starts
       // only after every source inventory is complete and every scanned object

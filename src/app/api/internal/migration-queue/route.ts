@@ -258,7 +258,7 @@ async function syncQueue(db: import("pg").Client, migrationId: string, generatio
   }
   await queryMain("save_live_snapshot", `insert into drive_migration_worker_live_state(migration_id,snapshot,updated_at) values($1,$2::jsonb,now())
     on conflict(migration_id) do update set snapshot=excluded.snapshot,updated_at=now()`, [migrationId, JSON.stringify(snapshot)])
-  return { synced: result.rowCount || 0, syncedWorkers: workers.length, aggregate: { totalJobs: snapshot.totalJobs, completedJobs: snapshot.completedJobs, runningJobs: snapshot.runningJobs, onlineWorkers: snapshot.onlineWorkers } }
+  return { synced: result.rowCount || 0, syncedWorkers: workers.length, aggregate: { totalJobs: snapshot.totalJobs, queuedJobs: snapshot.queuedJobs, runningJobs: snapshot.runningJobs, remainingJobs: snapshot.remainingJobs, completedJobs: snapshot.completedJobs, failedJobs: snapshot.failedJobs, canceledJobs: snapshot.canceledJobs, onlineWorkers: snapshot.onlineWorkers } }
 }
 
 export async function POST(request: Request) {
@@ -268,11 +268,11 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => ({})) as Row
     const migrationId = typeof body.migrationId === "string" ? body.migrationId : ""
     const generation = Math.max(1, Math.trunc(Number(body.generation) || 1))
-    const action = body.action === "sync" ? "sync" : "seed"
+    const action = body.action === "sync" ? "sync" : body.action === "cleanup" ? "cleanup" : "seed"
     if (!/^[0-9a-f-]{36}$/i.test(migrationId)) return NextResponse.json({ error: "Valid migrationId is required" }, { status: 400 })
     const { queueDatabaseUrl, queueDatabaseSsl } = await getMigrationWorkerSettings()
     if (!queueDatabaseUrl) return NextResponse.json({ error: "Migration queue database is not configured in Settings" }, { status: 503 })
-    const limit = Math.max(50, Math.min(100_000, Math.trunc(Number(body.limit) || 500)))
+    const limit = action === "cleanup" ? 100_000 : Math.max(50, Math.min(100_000, Math.trunc(Number(body.limit) || 500)))
     const result = await withMigrationQueueDatabase(queueDatabaseUrl, async (db) => {
       const client = db as import("pg").Client & { query: (...args: any[]) => Promise<any> }
       const originalQuery = client.query.bind(client)
@@ -285,6 +285,29 @@ export async function POST(request: Request) {
         }
       }
       await ensureMigrationQueueSchema(db)
+      if (action === "cleanup") {
+        const status = await queryMain<{ status: string }>("cleanup_status", `select status from drive_migrations where id=$1`, [migrationId])
+        if (!status.rows[0] || !["completed", "failed", "verification_failed", "canceled", "aborted"].includes(status.rows[0].status)) {
+          throw new Error("Queue data can only be cleaned up after the migration reaches a terminal status")
+        }
+        const initialized = await db.query(`select 1 from drive_migration_queue_meta where migration_id=$1 and generation=$2 limit 1`, [migrationId, generation])
+        if (!initialized.rowCount) return { synced: 0, syncedWorkers: 0, cleaned: true, alreadyClean: true }
+        const snapshot = await syncQueue(db, migrationId, generation, limit)
+        if (Number(snapshot.aggregate?.onlineWorkers || 0) > 0 || Number(snapshot.aggregate?.remainingJobs || 0) > 0) {
+          return { ...snapshot, cleaned: false, cleanupPending: Number(snapshot.aggregate?.onlineWorkers || 0) > 0 ? "waiting_for_workers_to_exit" : "waiting_for_terminal_jobs" }
+        }
+        await db.query("begin")
+        try {
+          await db.query("delete from drive_migration_queue_jobs where migration_id=$1", [migrationId])
+          await db.query("delete from drive_migration_queue_workers where migration_id=$1", [migrationId])
+          await db.query("delete from drive_migration_queue_meta where migration_id=$1", [migrationId])
+          await db.query("commit")
+        } catch (error) {
+          await db.query("rollback").catch(() => undefined)
+          throw error
+        }
+        return { ...snapshot, cleaned: true }
+      }
       await db.query("begin")
       try {
         await db.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`drive-migration-queue:${migrationId}:${generation}`])

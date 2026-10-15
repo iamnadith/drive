@@ -36,7 +36,7 @@ export async function GET() {
       ?? migrations.find((migration) => migration.status === "draft")
       ?? migrations[0]
       ?? null
-    if (activeMigration?.options.executionMode === "migration_workers") {
+    if (activeMigration?.options.executionMode === "migration_workers" && ["running", "verifying"].includes(String(activeMigration.status).toLowerCase())) {
       const settings = await getMigrationWorkerSettings()
       if (settings.queueDatabaseUrl) {
         try {

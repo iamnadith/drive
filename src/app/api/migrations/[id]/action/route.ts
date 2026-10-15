@@ -813,6 +813,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           workerRepairMismatchedObjects: false,
           manualCompleted: false,
           targetActivatedAt: undefined,
+          queueCleanupPending: false,
+          queueCleanupCompleteAt: null,
         },
       })
       await wakeMigrationOrchestrator()
@@ -925,6 +927,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           ...migration.options,
           manualCompleted: false,
           targetActivatedAt: undefined,
+          queueCleanupPending: false,
+          queueCleanupCompleteAt: null,
           ...(workerMode
             ? { workerGeneration, overwrite: false, workerRetryFailedObjectsOnly: true, workerRetryObjectKeysByItem }
             : {}),

@@ -8,6 +8,26 @@ export async function withMigrationQueueDatabase<T>(url: string, operation: (db:
   try { return await operation(client) } finally { await client.end().catch(() => undefined) }
 }
 
+export async function deleteMigrationQueueData(url: string, migrationId: string, ssl = true) {
+  return withMigrationQueueDatabase(url, async (db) => {
+    const tables = await db.query(`select to_regclass('public.drive_migration_queue_jobs') jobs,
+      to_regclass('public.drive_migration_queue_workers') workers,
+      to_regclass('public.drive_migration_queue_meta') meta`)
+    if (!tables.rows[0]?.jobs && !tables.rows[0]?.workers && !tables.rows[0]?.meta) return { jobs: 0, workers: 0, meta: 0 }
+    await db.query("begin")
+    try {
+      const jobs = tables.rows[0].jobs ? await db.query("delete from drive_migration_queue_jobs where migration_id=$1", [migrationId]) : { rowCount: 0 }
+      const workers = tables.rows[0].workers ? await db.query("delete from drive_migration_queue_workers where migration_id=$1", [migrationId]) : { rowCount: 0 }
+      const meta = tables.rows[0].meta ? await db.query("delete from drive_migration_queue_meta where migration_id=$1", [migrationId]) : { rowCount: 0 }
+      await db.query("commit")
+      return { jobs: jobs.rowCount || 0, workers: workers.rowCount || 0, meta: meta.rowCount || 0 }
+    } catch (error) {
+      await db.query("rollback").catch(() => undefined)
+      throw error
+    }
+  }, ssl)
+}
+
 export async function ensureMigrationQueueSchema(db: Client) {
   await db.query(`
     create table if not exists drive_migration_queue_meta (
