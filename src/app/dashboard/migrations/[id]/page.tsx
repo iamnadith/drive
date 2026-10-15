@@ -334,8 +334,12 @@ function mergeIncomingItem(prev: MigrationItem | undefined, next: MigrationItem)
   const mergedLive = {
     ...nextLive,
     totalObjects: Math.max(prevLive.totalObjects, nextLive.totalObjects),
-    transferredObjects: Math.max(prevLive.transferredObjects, nextLive.transferredObjects),
-    transferredBytes: Math.max(prevLive.transferredBytes, nextLive.transferredBytes),
+    transferredObjects: isTerminalBucketDisplayStatus(nextLive.status)
+      ? nextLive.transferredObjects
+      : Math.max(prevLive.transferredObjects, nextLive.transferredObjects),
+    transferredBytes: isTerminalBucketDisplayStatus(nextLive.status)
+      ? nextLive.transferredBytes
+      : Math.max(prevLive.transferredBytes, nextLive.transferredBytes),
     skippedObjects: isTerminalBucketDisplayStatus(nextLive.status)
       ? nextLive.skippedObjects
       : Math.max(prevLive.skippedObjects, nextLive.skippedObjects),

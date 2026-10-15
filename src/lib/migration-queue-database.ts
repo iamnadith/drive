@@ -61,8 +61,8 @@ export async function readMigrationQueueLiveProjection(url: string, ssl: boolean
         count(*) filter(where q.status='completed')::bigint completed_jobs,
         count(*) filter(where q.status='failed')::bigint failed_jobs,
         count(*) filter(where q.status='canceled')::bigint canceled_jobs,
-        coalesce(sum(case when q.status='completed' then case when q.result->'items'->0->>'transferred' ~ '^[0-9]+$' then (q.result->'items'->0->>'transferred')::bigint else 0 end else greatest(case when q.result->'items'->0->>'transferred' ~ '^[0-9]+$' then (q.result->'items'->0->>'transferred')::bigint else 0 end,case when q.progress->>'transferred' ~ '^[0-9]+$' then (q.progress->>'transferred')::bigint else 0 end) end),0)::bigint transferred_objects,
-        coalesce(sum(case when q.result->'items'->0->>'failed' ~ '^[0-9]+$' then (q.result->'items'->0->>'failed')::bigint when q.status='failed' then 1 else 0 end),0)::bigint failed_objects,
+        coalesce(sum(case when q.status='completed' then case when q.result->'items'->0->>'transferred' ~ '^[0-9]+$' then (q.result->'items'->0->>'transferred')::bigint else 0 end when q.status in('claimed','running') then greatest(case when q.result->'items'->0->>'transferred' ~ '^[0-9]+$' then (q.result->'items'->0->>'transferred')::bigint else 0 end,case when q.progress->>'transferred' ~ '^[0-9]+$' then (q.progress->>'transferred')::bigint else 0 end) else 0 end),0)::bigint transferred_objects,
+        coalesce(sum(case when q.status='failed' then greatest(1,case when q.result->'items'->0->>'failed' ~ '^[0-9]+$' then (q.result->'items'->0->>'failed')::bigint else 0 end) when q.result->'items'->0->>'failed' ~ '^[0-9]+$' then (q.result->'items'->0->>'failed')::bigint else 0 end),0)::bigint failed_objects,
         coalesce(sum(case when q.result->'items'->0->>'skipped' ~ '^[0-9]+$' then (q.result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
         max(q.updated_at) updated_at,
         (array_agg(q.progress->'currentFile' order by q.updated_at desc) filter(where jsonb_typeof(q.progress->'currentFile')='object'))[1] current_file

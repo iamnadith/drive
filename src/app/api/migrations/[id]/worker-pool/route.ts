@@ -83,8 +83,8 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
         count(*) filter(where status='failed')::bigint failed_jobs,
         count(*) filter(where status='canceled')::bigint canceled_jobs,
         coalesce(sum(case when status='completed' then case when result->'totals'->>'transferred' ~ '^[0-9]+$' then (result->'totals'->>'transferred')::bigint else coalesce((select sum(case when x->>'transferred' ~ '^[0-9]+$' then (x->>'transferred')::bigint else 0 end) from jsonb_array_elements(case when jsonb_typeof(result->'items')='array' then result->'items' else '[]'::jsonb end) x),0) end when status in('claimed','running') then greatest(case when result->'totals'->>'transferred' ~ '^[0-9]+$' then (result->'totals'->>'transferred')::bigint else coalesce((select sum(case when x->>'transferred' ~ '^[0-9]+$' then (x->>'transferred')::bigint else 0 end) from jsonb_array_elements(case when jsonb_typeof(result->'items')='array' then result->'items' else '[]'::jsonb end) x),0) end,case when progress->'totals'->>'transferred' ~ '^[0-9]+$' then (progress->'totals'->>'transferred')::bigint when progress->>'transferred' ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end) else 0 end),0)::bigint transferred,
-        coalesce(sum(case when result->'items'->0->>'skipped' ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint when status in('claimed','running') and progress->>'skipped' ~ '^[0-9]+$' then (progress->>'skipped')::bigint else 0 end),0)::bigint skipped,
-        coalesce(sum(case when result->'items'->0->>'failed' ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' then 1 else 0 end),0)::bigint failed,
+        coalesce(sum(case when status='completed' and result->'totals'->>'skipped' ~ '^[0-9]+$' then (result->'totals'->>'skipped')::bigint when status='completed' then coalesce((select sum(case when x->>'skipped' ~ '^[0-9]+$' then (x->>'skipped')::bigint else 0 end) from jsonb_array_elements(case when jsonb_typeof(result->'items')='array' then result->'items' else '[]'::jsonb end) x),0) when status in('claimed','running') and progress->'totals'->>'skipped' ~ '^[0-9]+$' then (progress->'totals'->>'skipped')::bigint when status in('claimed','running') and progress->>'skipped' ~ '^[0-9]+$' then (progress->>'skipped')::bigint else 0 end),0)::bigint skipped,
+        coalesce(sum(case when status='failed' then greatest(1,case when result->'totals'->>'failed' ~ '^[0-9]+$' then (result->'totals'->>'failed')::bigint else 0 end,coalesce((select sum(case when x->>'failed' ~ '^[0-9]+$' then (x->>'failed')::bigint else 0 end) from jsonb_array_elements(case when jsonb_typeof(result->'items')='array' then result->'items' else '[]'::jsonb end) x),0)) when result->'totals'->>'failed' ~ '^[0-9]+$' then (result->'totals'->>'failed')::bigint else coalesce((select sum(case when x->>'failed' ~ '^[0-9]+$' then (x->>'failed')::bigint else 0 end) from jsonb_array_elements(case when jsonb_typeof(result->'items')='array' then result->'items' else '[]'::jsonb end) x),0) end),0)::bigint failed,
         coalesce(sum(case when status='completed' and result->'items'->0->>'transferred' ~ '^[0-9]+$' and (result->'items'->0->>'transferred')::bigint>0 and payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$' then (payload->'inventoryObjects'->0->>'size')::bigint else 0 end),0)::bigint completed_bytes,
         coalesce(sum(case when status in('claimed','running') and progress->'currentFile'->>'bytesTransferred' ~ '^[0-9]+$' then (progress->'currentFile'->>'bytesTransferred')::bigint else 0 end),0)::bigint in_progress_bytes,
         coalesce((select sum(greatest(w.runtime_seconds,greatest(0,floor(extract(epoch from (
@@ -100,9 +100,9 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
           payload->'inventoryObjects'->0->>'key' object_key,
           case when payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$' then (payload->'inventoryObjects'->0->>'size')::bigint else 0 end object_size,
           payload->'items'->0->>'sourceBucket' source_bucket,payload->'items'->0->>'targetBucket' target_bucket,
-          case when result->'items'->0->>'transferred' ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint when progress->>'transferred' ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end transferred,
+          case when status='completed' and result->'items'->0->>'transferred' ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint when status in('claimed','running') and progress->>'transferred' ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end transferred,
           case when result->'items'->0->>'skipped' ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end skipped,
-          case when result->'items'->0->>'failed' ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint else 0 end failed
+          case when status='failed' then greatest(1,case when result->'items'->0->>'failed' ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint else 0 end) when result->'items'->0->>'failed' ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint else 0 end failed
           from drive_migration_queue_jobs where migration_id=$1 and generation=$2 order by created_at desc,id desc limit $3 offset $4`, [id, generation, pageSize, pageIndex * pageSize]),
         db.query(`select id,status,payload->'job'->>'mode' mode,progress,result from drive_migration_queue_jobs where migration_id=$1 and generation=$2 order by updated_at desc,id desc limit 20`, [id, generation]),
         db.query(`with worker_totals as (
@@ -154,9 +154,9 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
           ), job_totals as (
             select source_bucket,target_bucket,count(*) filter(where status='pending')::bigint queued_objects,
               count(*) filter(where status in('claimed','running'))::bigint running_jobs,
-              coalesce(sum(case when status='completed' then result_transferred else greatest(result_transferred,live_transferred,
-                case when current_item_id=item_id then current_transferred else 0 end) end),0)::bigint transferred_objects,
-              coalesce(sum(case when status='completed' then result_failed else greatest(result_failed,live_failed) end),0)::bigint failed_objects,
+              coalesce(sum(case when status='completed' then result_transferred when status in('claimed','running') then greatest(result_transferred,live_transferred,
+                case when current_item_id=item_id then current_transferred else 0 end) else 0 end),0)::bigint transferred_objects,
+              coalesce(sum(case when status='failed' then greatest(1,result_failed,live_failed) when status='completed' then result_failed else greatest(result_failed,live_failed) end),0)::bigint failed_objects,
               coalesce(sum(case when status='completed' then result_skipped else greatest(result_skipped,live_skipped,
                 case when current_item_id=item_id then current_skipped else 0 end) end),0)::bigint skipped_objects,
               max(updated_at) updated_at
@@ -280,11 +280,11 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       select count(*)::bigint total_jobs,
         count(*) filter(where status='pending')::bigint queued_jobs,
         count(*) filter(where status in('claimed','running'))::bigint running_jobs,
-        count(*) filter(where status in('pending','claimed','running') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<3))::bigint remaining_jobs,
+        count(*) filter(where status in('pending','claimed','running') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<2))::bigint remaining_jobs,
         count(*) filter(where status='completed')::bigint completed_jobs,
         count(*) filter(where status='failed')::bigint failed_jobs,
         coalesce(sum(case when status='completed' then case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end when status in('claimed','running') then greatest(case when (result->'items'->0->>'transferred') ~ '^[0-9]+$' then (result->'items'->0->>'transferred')::bigint else 0 end,case when (progress->>'transferred') ~ '^[0-9]+$' then (progress->>'transferred')::bigint else 0 end) else 0 end),0)::bigint transferred_objects,
-        coalesce(sum(case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint when status='failed' and jsonb_typeof(result->'items')<>'array' then 1 else 0 end),0)::bigint failed_objects,
+        coalesce(sum(case when status='failed' then greatest(1,case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint else 0 end) when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint else 0 end),0)::bigint failed_objects,
         coalesce(sum(case when (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
         count(*) filter(where status='canceled')::bigint canceled_jobs
       from public.drive_repair_jobs
@@ -440,7 +440,7 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
           select count(*)::bigint total_jobs,
             count(*) filter(where status='pending')::bigint queued_jobs,
             count(*) filter(where status in('claimed','running'))::bigint running_jobs,
-            count(*) filter(where status in('pending','claimed','running') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<3))::bigint remaining_jobs,
+            count(*) filter(where status in('pending','claimed','running') or (status='failed' and case when result->>'retryCount' ~ '^[0-9]+$' then (result->>'retryCount')::int else 0 end<2))::bigint remaining_jobs,
             count(*) filter(where status='completed')::bigint completed_jobs,
             count(*) filter(where status='failed')::bigint failed_jobs,
             count(*) filter(where status='canceled')::bigint canceled_jobs,
@@ -522,8 +522,8 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
           count(*) filter(where status='canceled')::bigint canceled_jobs,
           coalesce(sum(case when status='completed' and (result->'items'->0->>'transferred') ~ '^[0-9]+$'
             then greatest(0,(result->'items'->0->>'transferred')::bigint-coalesce(nullif(result->'items'->0->>'skipped','')::bigint,0)) else 0 end),0)::bigint transferred_objects,
-          coalesce(sum(case when (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
-          coalesce(sum(case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint else 0 end),0)::bigint failed_objects,
+          coalesce(sum(case when status='completed' and (result->'items'->0->>'skipped') ~ '^[0-9]+$' then (result->'items'->0->>'skipped')::bigint else 0 end),0)::bigint skipped_objects,
+          coalesce(sum(case when status='failed' then greatest(1,case when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint else 0 end) when (result->'items'->0->>'failed') ~ '^[0-9]+$' then (result->'items'->0->>'failed')::bigint else 0 end),0)::bigint failed_objects,
           coalesce(sum(case when status='completed' and (result->'items'->0->>'transferred') ~ '^[0-9]+$'
             and (result->'items'->0->>'transferred')::bigint>0 then case when payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$' then (payload->'inventoryObjects'->0->>'size')::bigint else 0 end else 0 end),0)::bigint transferred_bytes,
           coalesce(sum(case when payload->'inventoryObjects'->0->>'size' ~ '^[0-9]+$' then (payload->'inventoryObjects'->0->>'size')::bigint else 0 end),0)::bigint source_bytes,
