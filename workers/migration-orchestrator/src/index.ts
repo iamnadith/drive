@@ -1286,11 +1286,12 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
   const active = await db.query(`select id from drive_migrations where id=$1 and status in('running','verifying')`, [migration.id])
   if (!active.rowCount) return { verification: "canceled" }
   const transfers = await db.query(`
-    select not exists(select 1 from drive_migration_items i where i.migration_id=$1
+    select $3<>'migration_workers' or (
+      not exists(select 1 from drive_migration_items i where i.migration_id=$1
         and (coalesce(i.progress->'migrationInventory'->>'status','')<>'completed'
           or coalesce(i.progress->'migrationQueue'->>'status','')<>'completed'))
-      and not exists(select 1 from drive_repair_jobs j where j.migration_id=$1 and j.work_key like $2 and j.status<>'completed') ready
-  `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
+      and not exists(select 1 from drive_repair_jobs j where j.migration_id=$1 and j.work_key like $2 and j.status<>'completed')) ready
+  `, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`, String(opts(migration).executionMode || "super_slurper")])
   if (transfers.rows[0]?.ready !== true) return { verification: "waiting_for_transfers" }
   const states = await db.query(`select status,missing_objects,mismatched_objects,extra_objects from drive_migration_verification_state where migration_id=$1 and generation=$2`, [migration.id, generation])
   if (states.rows.some((row) => row.status === "failed")) {

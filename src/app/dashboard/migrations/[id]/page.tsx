@@ -1016,7 +1016,7 @@ export default function MigrationDetailsPage() {
   }, [migration?.status])
 
   const effectiveMigrationStatus = React.useMemo(() => {
-    if (overviewBadgeStatus === "aborted") return "canceled"
+    if (String(overviewBadgeStatus) === "aborted") return "canceled"
     return overviewBadgeStatus
   }, [overviewBadgeStatus])
 
