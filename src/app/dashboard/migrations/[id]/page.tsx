@@ -75,6 +75,7 @@ type Migration = {
     workerGeneration?: number
     workerShardCount?: number
     workerPoolQueueSeeding?: boolean
+    workerPoolLiveStats?: Record<string, number>
     overwrite?: boolean
     concurrency?: number
     pathPrefix?: string | null
@@ -267,17 +268,18 @@ function statusBadge(
 
 function migrationWorkerBadge(status: string | undefined) {
   const value = String(status || "").toLowerCase()
-  if (value === "processing") return <Badge variant="secondary">Processing</Badge>
-  if (value === "completed") return <Badge className="bg-green-600">Worker completed</Badge>
-  if (value === "deploying") return <Badge className="bg-yellow-600">Worker deploying</Badge>
-  if (value === "aborting") return <Badge className="bg-yellow-600">Worker stopping</Badge>
-  if (value === "running") return <Badge className="bg-primary text-primary-foreground">Worker running</Badge>
-  if (value === "verifying") return <Badge className="bg-purple-600">Worker verifying</Badge>
+  if (value === "processing") return <Badge variant="secondary">Preparing queue</Badge>
+  if (value === "completed") return <Badge className="bg-green-600">Completed</Badge>
+  if (value === "deploying" || value === "dispatching") return <Badge className="bg-yellow-600">Dispatching workers</Badge>
+  if (value === "aborting" || value === "stopping_workers") return <Badge className="bg-yellow-600">Stopping workers</Badge>
+  if (value === "finalizing") return <Badge className="bg-purple-600">Finalizing</Badge>
+  if (value === "ready_to_complete") return <Badge className="bg-purple-600">Ready to complete</Badge>
+  if (value === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
   if (value === "claimed") return <Badge className="bg-sky-600">Worker claimed</Badge>
-  if (value === "pending" || value === "queued") return <Badge variant="secondary">Worker queued</Badge>
-  if (value === "failed") return <Badge className="bg-red-600">Worker failed</Badge>
-  if (value === "canceled" || value === "aborted") return <Badge variant="outline">Worker stopped</Badge>
-  return <Badge variant="outline">{value || "Worker idle"}</Badge>
+  if (value === "pending" || value === "queued") return <Badge variant="secondary">Dispatching workers</Badge>
+  if (value === "failed") return <Badge className="bg-red-600">Failed</Badge>
+  if (value === "canceled" || value === "aborted") return <Badge variant="outline">Stopped</Badge>
+  return <Badge variant="outline">{value || "Not dispatched"}</Badge>
 }
 
 function migrationStatusBadge(status: string | undefined) {
@@ -1866,31 +1868,48 @@ export default function MigrationDetailsPage() {
               const runningRuns = currentRuns.filter((run) => String(run.status).toLowerCase() === "running")
               const latestRun = [...currentRuns].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0]
               const latestRunStatus = String(latestRun?.status || "").toLowerCase()
-              // Cancellation is still in progress only while a worker is
-              // actually heartbeating, or while an undispatched pending run
-              // has not received the durable abort intent. An offline run
-              // with abortRequested must not leave the card on "stopping"
-              // forever after GitHub has already terminated it.
-              const stoppingRuns = currentRuns.filter((run) =>
-                run.online || (String(run.status).toLowerCase() === "pending" && !run.abortRequested)
-              )
+              // This badge follows the worker-pool job lifecycle. Bucket
+              // verification continues independently after the pool finishes.
               const migrationStatus = String(migration.status || "").toLowerCase()
               const canAbortPool = ["running", "verifying"].includes(migrationStatus)
-              const status = ["completed"].includes(migrationStatus)
-                ? "completed"
-                : ["failed", "verification_failed"].includes(migrationStatus)
-                  ? stoppingRuns.length > 0 ? "aborting" : "failed"
-                  : ["canceled", "cancelled", "aborted"].includes(migrationStatus)
-                    ? stoppingRuns.length > 0 ? "aborting" : "aborted"
-                    : migrationStatus === "verifying"
-                      ? "verifying"
-                      : migration.options.workerPoolQueueSeeding
-                        ? "processing"
-                        : runningRuns.length > 0
-                          ? "running"
-                          : ["pending", "queued", "created", "dispatching"].includes(latestRunStatus)
-                            ? "deploying"
-                            : "queued"
+              const poolStats = migration.options.workerPoolLiveStats || {}
+              const poolTotalJobs = Number(poolStats.totalJobs || 0)
+              const poolRemainingJobs = Number(poolStats.remainingJobs || 0)
+              const poolFailedJobs = Number(poolStats.failedJobs || 0)
+              const poolCanceledJobs = Number(poolStats.canceledJobs || 0)
+              const poolTerminalJobs = Number(poolStats.completedJobs || 0) + poolFailedJobs + poolCanceledJobs
+              const poolQueueFinished = poolTotalJobs > 0 && poolRemainingJobs === 0 && poolTerminalJobs >= poolTotalJobs && poolFailedJobs === 0 && poolCanceledJobs === 0
+              const verificationComplete = items.length > 0 && items.every((item) => {
+                const verification = item.verificationState
+                return verification && ["completed", "verified"].includes(String(verification.status).toLowerCase())
+                  && Number(verification.missingObjects || 0) === 0
+                  && Number(verification.mismatchedObjects || 0) === 0
+                  && Number(verification.extraObjects || 0) === 0
+              })
+              const hasStopIntent = currentRuns.some((run) => run.online && run.abortRequested)
+              const status = ["failed", "verification_failed"].includes(migrationStatus)
+                ? activeRuns.length > 0 ? "stopping_workers" : "failed"
+                : ["canceled", "cancelled", "aborted"].includes(migrationStatus)
+                  ? activeRuns.length > 0 ? "stopping_workers" : "aborted"
+                  : hasStopIntent
+                    ? "stopping_workers"
+                    : migrationStatus === "completed"
+                      ? activeRuns.length > 0 ? "stopping_workers" : "completed"
+                      : poolFailedJobs > 0 && poolRemainingJobs === 0
+                        ? "failed"
+                        : poolCanceledJobs > 0 && poolRemainingJobs === 0
+                          ? "aborted"
+                          : poolQueueFinished
+                            ? activeRuns.length > 0 ? "finalizing" : verificationComplete ? "ready_to_complete" : "completed"
+                        : migration.options.workerPoolQueueSeeding
+                          ? "processing"
+                          : runningRuns.length > 0 || Number(poolStats.runningJobs || 0) > 0
+                            ? "running"
+                            : ["pending", "queued", "created", "dispatching"].includes(latestRunStatus) || Number(poolStats.queuedJobs || 0) > 0
+                              ? "dispatching"
+                              : migrationStatus === "verifying"
+                                ? activeRuns.length > 0 ? "finalizing" : "completed"
+                                : "dispatching"
               const lastActivityAt = latestRun?.lastHeartbeatAt || latestRun?.updatedAt || migration.updatedAt
 
               return (
