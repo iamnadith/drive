@@ -9,9 +9,9 @@ test('the orchestrator creates scan work while scanner cron and queue continue d
   const config = read('workers/file-scanner/wrangler.jsonc')
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   assert.match(config, /"crons":\s*\["\* \* \* \* \*"\]/)
-  assert.match(scanner, /async scheduled\(_event: ScheduledEvent, env: Env, ctx: ExecutionContext\)[\s\S]*?cycleAndContinue\(env\)/)
+  assert.match(scanner, /async scheduled\(_event: ScheduledEvent, env: Env, ctx: ExecutionContext\)[\s\S]*?cycleAndContinue\(env, ctx\)/)
   assert.match(orchestrator, /async function wakeFileScanner\(db: Client\)[\s\S]*?\/run/)
-  assert.match(scanner, /url\.pathname === "\/run" && request\.method === "POST"[\s\S]*?cycleAndContinue\(env\)/)
+  assert.match(scanner, /url\.pathname === "\/run" && request\.method === "POST"[\s\S]*?cycleAndContinue\(env, ctx\)/)
   assert.doesNotMatch(scanner, /url\.pathname === "\/status" && request\.method === "GET"[^\n]*cycle/)
   assert.match(scanner, /let schemaReady: Promise<void> \| null = null/)
 })
@@ -44,12 +44,14 @@ test('bucket verification waits for its own inventory and jobs while other bucke
   assert.match(claim, /v\.status='pending'/)
 })
 
-test('failed concurrent scans use queue backoff instead of immediate continuation loops', () => {
+test('failed concurrent scans use queue backoff and successful pages self-continue without queue writes', () => {
   const scanner = read('workers/file-scanner/src/index.ts')
   const continuation = scanner.slice(scanner.indexOf('async function cycleAndContinue'), scanner.indexOf('export default'))
   const queue = scanner.slice(scanner.indexOf('async queue(batch:'), scanner.indexOf('async scheduled('))
   assert.match(continuation, /const failed = "ok" in result && result\.ok === false/)
-  assert.match(continuation, /if \(!idle && !skipped && !failed\).*FILE_SCAN_QUEUE\.send/)
+  assert.match(continuation, /if \(!idle && !skipped && !failed\)[\s\S]*?ctx\.waitUntil\(fetch\(`\$\{scannerUrl\}\/wake`/)
+  assert.match(continuation, /Authorization: `Bearer \$\{secret\}`/)
+  assert.doesNotMatch(continuation, /FILE_SCAN_QUEUE\.send/)
   assert.match(queue, /if \("ok" in result && result\.ok === false\) throw new Error/)
   assert.match(queue, /message\.retry\(\{ delaySeconds: Math\.min\(15 \* \(2 \*\* Math\.min\(message\.attempts, 8\)\), 900\) \}\)/)
 })
@@ -160,7 +162,7 @@ test('empty migrations complete in the orchestrator without requiring scanner or
 test('empty and verified migrations share the existing target activation and completion transaction', () => {
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   const activation = orchestrator.slice(orchestrator.indexOf('async function activateTargetAndCompleteMigration'), orchestrator.indexOf('async function finishOrRepair'))
-  assert.match(activation, /update drive_accounts set status='available'[\s\S]*where status='active' and id<>\$1/)
+  assert.match(activation, /update drive_accounts set status='disabled'[\s\S]*where status='active' and id<>\$1/)
   assert.match(activation, /update drive_accounts set[\s\S]*status='active'[\s\S]*where id=\$1 returning id/)
   assert.match(activation, /status='completed',completed_at=now\(\),sync_status='synced'/)
   assert.match(activation, /summary_item_count=\(select count\(\*\) from drive_migration_items/)
