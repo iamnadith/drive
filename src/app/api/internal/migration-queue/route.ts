@@ -3,6 +3,7 @@ import { authenticateMigrationOrchestrator } from "@/lib/migration-orchestrator-
 import { queryDb } from "@/lib/db"
 import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
 import { ensureMigrationQueueSchema, withMigrationQueueDatabase } from "@/lib/migration-queue-database"
+import type { QueryResultRow } from "pg"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -11,7 +12,7 @@ export const dynamic = "force-dynamic"
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
 
-async function queryMain<T = Row>(stage: string, sql: string, values: unknown[] = []) {
+async function queryMain<T extends QueryResultRow = Row>(stage: string, sql: string, values: unknown[] = []) {
   try {
     return await queryDb<T>(sql, values)
   } catch (error) {
