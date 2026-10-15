@@ -6,15 +6,15 @@ if (!(globalThis as { DOMParser?: unknown }).DOMParser) (globalThis as { DOMPars
 if (!(globalThis as { Node?: unknown }).Node) (globalThis as { Node?: unknown }).Node = { ELEMENT_NODE: 1, TEXT_NODE: 3 }
 
 type ScanMessage = { reason: "continue" }
-type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; FILE_SCANNER_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; FILE_SCAN_QUEUE: Queue<ScanMessage> }
+type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; FILE_SCANNER_SECRET?: string; FILE_SCANNER_URL?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; FILE_SCAN_QUEUE: Queue<ScanMessage> }
 type Row = Record<string, any>
 type ClaimedTask = { kind: "migration" | "generic"; task: Row }
 type ClaimedCycle = { ok: true; owner: string; tasks: ClaimedTask[] } | { ok: true; skipped: string } | { ok: true; idle: true }
-const BUILD = 21
+const BUILD = 22
 const MAX_SECRET_LENGTH = 512
 // Workers Free allows only 10 ms of CPU per invocation. Keep each invocation
-// deliberately small; queue continuations immediately schedule the next
-// durable page, so large buckets still drain without oversized JSON/SQL work.
+// deliberately small; authenticated self-continuations schedule the next
+// durable page without spending Cloudflare Queue operations.
 const SCAN_CONCURRENCY = 1
 const DATABASE_RETRY_DELAYS_MS = [250, 1_000, 3_000]
 const DATABASE_RETRY_DELAYS_WITH_FINAL_BACKOFF_MS = [...DATABASE_RETRY_DELAYS_MS, 8_000]
@@ -536,30 +536,42 @@ async function cycle(env: Env) {
   }
 }
 
-async function cycleAndContinue(env: Env) {
+async function cycleAndContinue(env: Env, ctx?: ExecutionContext) {
   const result = await cycle(env)
   const idle = "idle" in result && result.idle === true
   const skipped = "skipped" in result && Boolean(result.skipped)
   const failed = "ok" in result && result.ok === false
-  if (!idle && !skipped && !failed) await env.FILE_SCAN_QUEUE.send({ reason: "continue" }, { contentType: "json" })
+  if (!idle && !skipped && !failed) {
+    const scannerUrl = env.FILE_SCANNER_URL?.replace(/\/+$/, "")
+    const secret = env.FILE_SCANNER_SECRET
+    if (!scannerUrl || !secret || !ctx) throw new Error("File Scanner continuation is not configured")
+    ctx.waitUntil(fetch(`${scannerUrl}/wake`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${secret}` },
+    }).then(async (response) => {
+      if (!response.ok) throw new Error(`File Scanner continuation returned HTTP ${response.status}`)
+    }).catch((error) => {
+      console.error("File Scanner continuation request failed; durable work remains available to Cron", error)
+    }))
+  }
   return result
 }
 
 export default {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url)
     if (url.pathname === "/" || url.pathname === "/health") {
       return json({ ok: true, service: "file-scanner", build: BUILD })
     }
     if (!(await authorized(request, env))) return json({ error: "Unauthorized" }, 401)
     if (url.pathname === "/status" && request.method === "GET") return json(await database(env, async (db) => { const [state,verificationQueue,inventoryQueue] = await Promise.all([db.query(`select * from drive_file_scanner_state where id=true`),db.query(`select status,count(*)::int count from drive_migration_verification_state group by status`),db.query(`select status,count(*)::int count,count(*) filter(where lease_expires_at>now())::int leased,min(updated_at) oldest_updated_at from drive_bucket_scans where status in('pending','running','failed') group by status`)]); return { ok: true, service: "file-scanner", build: BUILD, state: state.rows[0] || null, queue: verificationQueue.rows, inventoryScans: inventoryQueue.rows } }))
-    if (url.pathname === "/run" && request.method === "POST" || url.pathname === "/wake" && request.method === "POST") { try { return json(await cycleAndContinue(env)) } catch (error) { return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 503) } }
+    if (url.pathname === "/run" && request.method === "POST" || url.pathname === "/wake" && request.method === "POST") { try { return json(await cycleAndContinue(env, ctx)) } catch (error) { return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 503) } }
     return json({ error: "Not found" }, 404)
   },
-  async queue(batch: MessageBatch<ScanMessage>, env: Env) {
+  async queue(batch: MessageBatch<ScanMessage>, env: Env, ctx: ExecutionContext) {
     for (const message of batch.messages) {
       try {
-        const result = await cycleAndContinue(env)
+        const result = await cycleAndContinue(env, ctx)
         if ("ok" in result && result.ok === false) throw new Error("One or more File Scanner tasks failed")
         message.ack()
       }
@@ -567,7 +579,7 @@ export default {
     }
   },
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(cycleAndContinue(env).then(() => undefined).catch((error) => {
+    ctx.waitUntil(cycleAndContinue(env, ctx).then(() => undefined).catch((error) => {
       console.error("Scheduled File Scanner cycle failed", error)
     }))
   },
