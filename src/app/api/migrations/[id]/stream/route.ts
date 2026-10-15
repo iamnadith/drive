@@ -119,7 +119,8 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
                     return current ? { ...item, slurperStatus: current.slurperStatus, progress: { ...item.progress, live: current.progress.live }, updatedAt: current.progress.live.updatedAt || item.updatedAt } : item
                   })
                   workerRuns = live.workerRuns
-                  migration = { ...migration, status: live.migrationStatus, options: { ...migration.options, workerPoolLiveStats: live.stats } }
+                  // Queue metadata is not the migration lifecycle status.
+                  migration = { ...migration, options: { ...migration.options, workerPoolLiveStats: live.stats } }
                 }
               } catch {
                 // Fall back to the last Orchestrator projection if the queue database is briefly unreachable.

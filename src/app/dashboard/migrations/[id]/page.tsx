@@ -1009,18 +1009,11 @@ export default function MigrationDetailsPage() {
   )
 
   const overviewBadgeStatus = React.useMemo(() => {
-    if (migration && ["completed", "failed", "verification_failed", "canceled"].includes(migration.status)) return migration.status
-    if (migration?.status === "verifying" && migration.syncMessage?.toLowerCase().includes("settings")) return "verifying"
-    if (bucketCounts.scanning > 0) return "scanning"
-    if (bucketCounts.running > 0) return "running"
-    if (bucketCounts.verifying > 0) return "verifying"
-    if (bucketCounts.failed > 0) return "failed"
-    if (bucketCounts.verificationFailed > 0) return "verification_failed"
-    if (bucketCounts.aborted > 0 && bucketCounts.completed + bucketCounts.failed + bucketCounts.aborted === bucketCounts.total && bucketCounts.failed === 0)
-      return "aborted"
-    if (bucketCounts.completed === bucketCounts.total && bucketCounts.total > 0) return "completed"
+    // The Overview badge represents the migration lifecycle owned by the
+    // orchestrator. Bucket and queue projections must never promote it to a
+    // terminal state independently.
     return migration?.status ?? "draft"
-  }, [bucketCounts, migration])
+  }, [migration?.status])
 
   const effectiveMigrationStatus = React.useMemo(() => {
     if (overviewBadgeStatus === "aborted") return "canceled"
