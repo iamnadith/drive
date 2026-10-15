@@ -72,7 +72,7 @@ async function seedQueue(db: import("pg").Client, migrationId: string, generatio
     target: { accountId: first.target_account, accessKeyId: first.target_key, secretAccessKey: first.target_secret },
   })])
   try {
-    for (const row of page) {
+    const queueRows = page.map((row) => {
       if (!row.source_account || !row.target_account || !row.source_key || !row.source_secret || !row.target_key || !row.target_secret) throw new Error(`Migration ${migrationId} has incomplete R2 credentials; queue seeding stopped before dispatch`)
       const executionPayload = {
         job: { id: row.id, mode: "migration", migrationId, verifyAllBuckets: true, strictCompletion: true, kind: row.job_payload?.kind, progress: row.progress || {} },
@@ -81,10 +81,29 @@ async function seedQueue(db: import("pg").Client, migrationId: string, generatio
         ...(Array.isArray(row.job_payload?.inventoryObjects) ? { inventoryObjects: row.job_payload.inventoryObjects } : {}),
         items: Array.isArray(row.job_items) ? row.job_items : [],
       }
+      return {
+        id: row.id,
+        migration_id: migrationId,
+        generation,
+        status: row.status === "completed" ? "completed" : row.status === "failed" ? "failed" : "pending",
+        payload: executionPayload,
+        progress: row.progress || {},
+        result: row.result || {},
+        summary: row.summary,
+        error: row.error,
+        agent_id: row.claimed_by_agent_id,
+        claim_token: row.claim_token,
+        attempts: 0,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+      }
+    })
+    if (queueRows.length) {
       await db.query(`insert into drive_migration_queue_jobs(id,migration_id,generation,status,payload,progress,result,summary,error,agent_id,claim_token,attempts,created_at,updated_at)
-        values($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8,$9,$10,$11,$12,$13,$14)
+        select x.id,x.migration_id,x.generation,x.status,x.payload,x.progress,x.result,x.summary,x.error,x.agent_id,x.claim_token,x.attempts,x.created_at,x.updated_at
+        from jsonb_to_recordset($1::jsonb) as x(id uuid,migration_id uuid,generation integer,status text,payload jsonb,progress jsonb,result jsonb,summary text,error text,agent_id uuid,claim_token uuid,attempts integer,created_at timestamptz,updated_at timestamptz)
         on conflict(id) do update set payload=excluded.payload where drive_migration_queue_jobs.status='pending'`,
-        [row.id, migrationId, generation, row.status === "completed" ? "completed" : row.status === "failed" ? "failed" : "pending", JSON.stringify(executionPayload), JSON.stringify(row.progress || {}), JSON.stringify(row.result || {}), row.summary, row.error, row.claimed_by_agent_id, row.claim_token, 0, row.created_at, row.updated_at])
+        [JSON.stringify(queueRows)])
     }
     const last = page[page.length - 1]
     const complete = rows.length <= limit
@@ -102,7 +121,7 @@ async function syncQueue(db: import("pg").Client, migrationId: string, generatio
   await db.query(`update drive_migration_queue_workers set
       runtime_seconds=greatest(runtime_seconds,greatest(0,floor(extract(epoch from (
         last_heartbeat_at+interval '90 seconds'-coalesce(nullif(metadata->>'workerStartedAt','')::timestamptz,last_heartbeat_at)
-      ))::bigint)),status='offline',current_job_id=null,
+      ))::bigint))),status='offline',current_job_id=null,
       metadata=metadata||jsonb_build_object('retiredAt',last_heartbeat_at+interval '90 seconds','retireReason','heartbeat_expired','runtimeAccountingVersion',1),updated_at=now()
     where migration_id=$1 and generation=$2 and status='online' and last_heartbeat_at<=now()-interval '90 seconds'`, [migrationId, generation])
   await queryDb(`update drive_repair_jobs j set status='canceled',updated_at=now(),completed_at=coalesce(j.completed_at,now())
