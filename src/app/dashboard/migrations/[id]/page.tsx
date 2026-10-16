@@ -880,8 +880,16 @@ export default function MigrationDetailsPage() {
 
   const getBucketSnapshot = React.useCallback((item: MigrationItem) => {
     const snapshot = getMergedBucketSnapshot(item)
-    if (["canceled", "cancelled", "aborted"].includes(normalizeStatus(migration?.status))) {
+    const migrationStatus = normalizeStatus(migration?.status)
+    if (["canceled", "cancelled", "aborted"].includes(migrationStatus)) {
       return { ...snapshot, displayStatus: "aborted", queued: 0 }
+    }
+    if (["failed", "verification_failed"].includes(migrationStatus)) {
+      const bucketStatus = normalizeStatus(snapshot.displayStatus)
+      const bucketAlreadyTerminal = isCompletedStatus(bucketStatus) || isFailedLikeStatus(bucketStatus) || isAbortedStatus(bucketStatus)
+      if (!bucketAlreadyTerminal) {
+        return { ...snapshot, displayStatus: migrationStatus }
+      }
     }
     return snapshot
   }, [migration?.status])

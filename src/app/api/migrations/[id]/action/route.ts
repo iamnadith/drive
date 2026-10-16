@@ -93,6 +93,22 @@ async function wakeMigrationOrchestrator(options?: { requireFileScanner?: boolea
 }
 
 async function reserveMigrationWorkerGeneration(migrationId: string, expectedStatus: string, itemIds: string[], action: "repair_migration" | "retry_migration") {
+  // Dispatch intents that never left the Orchestrator's local queue cannot
+  // have a live GitHub process. Close them before reserving the next
+  // generation; otherwise an aborted, never-submitted intent can block retry
+  // forever even though every actual workflow run has stopped.
+  await queryDb(`
+    update drive_agent_runs
+    set status='canceled',summary='Canceled orphaned dispatch intent before a new worker generation',completed_at=now(),updated_at=now()
+    where run_type='github_dispatch' and status='pending' and external_run_id is null
+      and payload->>'migrationId'=$1
+      and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=(
+        select greatest(1,coalesce(nullif(options->>'workerGeneration','')::int,1)) from drive_migrations where id=$1
+      )
+      and payload->>'phase' in('created','queued')
+      and payload->>'githubAbortRequestedAt' is not null
+  `, [migrationId])
+
   const result = await queryDb<{ generation: string }>(`
     with claimed as (
       update drive_migrations m
@@ -723,6 +739,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     if (action === "retry_migration") {
       const workerMode = migration.options.executionMode === "migration_workers"
+      const terminalWorkerMigration = workerMode && ["failed", "verification_failed", "canceled", "aborted"].includes(normalizeStatus(migration.status))
       const candidates = items.filter((item) => {
         const s = normalizeStatus(item.slurperStatus)
         if (workerMode) {
@@ -733,7 +750,15 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           const verificationFailed = s === "verification_failed" || verify.status === "error" ||
             (fileVerification.status === "completed" && (Number(fileVerification.missing) > 0 || Number(fileVerification.mismatched) > 0))
           const transferFailed = s === "failed" || String(live.status || "").toLowerCase() === "failed" || Number(live.failedObjects || 0) > 0
-          return verificationFailed || transferFailed
+          // A terminal migration can leave buckets queued or marked verifying
+          // even though their verification row is still pending and has no
+          // worker lease. Include those incomplete buckets in an explicit
+          // retry so a new generation can rescan and resume them safely.
+          const stranded = terminalWorkerMigration && (
+            ["queued", "running", "scanning", "verifying", "awaiting_verification", "retrying"].includes(s) ||
+            ["queued", "running", "scanning", "verifying", "awaiting_verification", "retrying"].includes(String(live.status || "").toLowerCase())
+          )
+          return verificationFailed || transferFailed || stranded
         }
         const verifyStatus = readVerifyStatus(
           isRecord(item.progress) ? (item.progress as Record<string, unknown>) : {}
