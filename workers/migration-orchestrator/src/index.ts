@@ -1,5 +1,6 @@
 import { Client } from "pg"
 import { syncWorkerRepository } from "../../../src/lib/github-worker-sync"
+import { readMigrationQueueLiveProjection } from "../../../src/lib/migration-queue-database"
 
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_WORKER_SOURCE_REPO?: string; GITHUB_BACKEND_WORKER_SOURCE_REPO?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
@@ -620,11 +621,78 @@ async function ensureShards(db: Client, migration: Row) {
 
 async function refreshMigrationSnapshot(db: Client, migrationId: string) {
   const generation = Math.max(1, Number((await db.query(`select coalesce(nullif(options->>'workerGeneration','')::int,1) generation from drive_migrations where id=$1`, [migrationId])).rows[0]?.generation || 1))
-  const queueConfigured = await db.query(`select 1 from drive_app_settings where key='migration-workers' and coalesce(value->>'queueDatabaseUrl','')<>'' limit 1`)
-  if (queueConfigured.rowCount) {
-    const saved = await db.query(`select snapshot from drive_migration_worker_live_state where migration_id=$1 limit 1`, [migrationId])
-    const snapshot = saved.rows[0]?.snapshot
-    if (snapshot && Number(snapshot.workerGeneration || generation) === generation) return { snapshot, workerGeneration: generation }
+  const configuration = await db.query(`select value from drive_app_settings where key='migration-workers' limit 1`)
+  const settings = configuration.rows[0]?.value || {}
+  const queueUrl = String(settings.queueDatabaseUrl || "").trim()
+  if (queueUrl) {
+    const projection = await readMigrationQueueLiveProjection(queueUrl, settings.queueDatabaseSsl !== false, migrationId, generation)
+    if (projection && projection.generation === generation && projection.seedComplete) {
+      const stats = projection.stats
+      const buckets = projection.items.map((item) => {
+        const live = item.progress.live
+        const transferComplete = live.remainingJobs === 0 && live.failedJobs === 0 && live.canceledJobs === 0
+        const terminalFailed = live.remainingJobs === 0 && (live.failedJobs > 0 || live.canceledJobs > 0)
+        const bucketStatus = transferComplete ? "verifying" : terminalFailed ? "failed" : live.runningJobs > 0 ? "running" : "queued"
+        const liveStatus = transferComplete ? "awaiting_verification" : terminalFailed ? "failed" : live.runningJobs > 0 ? "running" : "queued"
+        return {
+          id: item.id,
+          sourceBucket: item.sourceBucket,
+          targetBucket: item.targetBucket,
+          slurperStatus: bucketStatus,
+          migrationQueue: {
+            generation,
+            status: transferComplete ? "completed" : terminalFailed ? "failed" : "running",
+            materializationStatus: "completed",
+            totalJobs: live.totalJobs,
+            completedJobs: live.completedJobs,
+            failedJobs: live.failedJobs,
+            canceledJobs: live.canceledJobs,
+            remainingJobs: live.remainingJobs,
+            updatedAt: projection.updatedAt,
+          },
+          live: { ...live, status: liveStatus, workerStage: "migration", awaitingVerification: transferComplete, updatedAt: projection.updatedAt },
+        }
+      })
+      const snapshotBuckets = buckets.map((item) => ({
+        id: item.id,
+        sourceBucket: item.sourceBucket,
+        targetBucket: item.targetBucket,
+        status: item.live.status,
+        totalObjects: item.live.totalObjects,
+        queuedObjects: item.live.queuedObjects,
+        transferredObjects: item.live.transferredObjects,
+        alreadyPresentObjects: item.live.alreadyPresentObjects,
+        copiedObjects: Math.max(0, item.live.transferredObjects - item.live.alreadyPresentObjects),
+        skippedObjects: item.live.skippedObjects,
+        failedObjects: item.live.failedObjects,
+        sourceBytes: item.live.sourceBytes,
+        updatedAt: projection.updatedAt,
+      }))
+      const onlineWorkers = projection.workerRuns.filter((worker) => worker.online).length
+      const activeTransfers = projection.workerRuns.filter((worker) => worker.online && worker.jobId).length
+      const snapshot = {
+        migrationId,
+        workerGeneration: generation,
+        ...stats,
+        onlineWorkers,
+        activeTransfers,
+        inProgressFiles: activeTransfers,
+        totalObjects: snapshotBuckets.reduce((sum, item) => sum + item.totalObjects, 0),
+        alreadyPresentObjects: snapshotBuckets.reduce((sum, item) => sum + item.alreadyPresentObjects, 0),
+        copiedObjects: snapshotBuckets.reduce((sum, item) => sum + item.copiedObjects, 0),
+        buckets: snapshotBuckets,
+        updatedAt: projection.updatedAt,
+      }
+      await db.query(`insert into drive_migration_worker_live_state(migration_id,snapshot,updated_at) values($1,$2::jsonb,now())
+        on conflict(migration_id) do update set snapshot=excluded.snapshot,updated_at=now()`, [migrationId, JSON.stringify(snapshot)])
+      await db.query(`update drive_migration_items i set slurper_status=x.slurper_status,
+        progress=jsonb_set(jsonb_set(coalesce(i.progress,'{}'::jsonb),'{migrationQueue}',coalesce(i.progress->'migrationQueue','{}'::jsonb)||x.migration_queue,true),
+          '{live}',coalesce(i.progress->'live','{}'::jsonb)||x.live,true),last_progress_at=now(),updated_at=now()
+        from jsonb_to_recordset($2::jsonb) as x(id uuid,slurper_status text,migration_queue jsonb,live jsonb)
+        where i.id=x.id and i.migration_id=$1 and coalesce(i.slurper_status,'') not in('completed','verification_failed')`,
+      [migrationId, JSON.stringify(buckets.map((item) => ({ id: item.id, slurper_status: item.slurperStatus, migration_queue: item.migrationQueue, live: item.live })))])
+      return { snapshot: { ...snapshot, workerGeneration: generation }, workerGeneration: generation }
+    }
   }
   const [workerResult, aggregateResult, itemsResult] = await Promise.all([
     db.query(`select
@@ -2972,10 +3040,13 @@ async function cycle(env: Env) {
       if (directQueueMode) {
         if (!shards.inventoryPending && !shards.queuePending && !shards.terminalFailure) {
           queueSeed = await seedMigrationQueue(db, migration.id, shards.generation)
-          // Keep the main database quiet while a large scanner inventory is
-          // being copied in seed batches. No worker is dispatched until the
-          // whole generation is present, so mirror once seeding is complete.
-          if (queueSeed.complete) queueMirror = await migrationQueueRequest(db, env, migration.id, shards.generation)
+          // Neon is authoritative for file queue state. Project its aggregate
+          // directly into the control DB; a Vercel status-mirror request can
+          // otherwise hold this orchestrator cycle before worker dispatch.
+          if (queueSeed.complete) {
+            await refreshMigrationSnapshot(db, migration.id)
+            queueMirror = { configured: true, complete: true, synced: 0, source: "neon" }
+          }
         }
       }
       await ensureBucketVerification(db, migration, shards.generation, directQueueMode)
