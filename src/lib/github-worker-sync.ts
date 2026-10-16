@@ -2,7 +2,7 @@ import { isWorkerWorkflow, type GitHubWorkerKind } from "./github-worker-workflo
 
 const directoryFor = (kind: GitHubWorkerKind) => kind === "backend" ? "workers/backend-worker/" : "workers/migration-worker/"
 export const DEFAULT_WORKER_SOURCE = "iamnadith/Drive"
-type Repository = { id: number; default_branch: string; archived?: boolean; disabled?: boolean; source?: { id: number }; parent?: { id: number } }
+type Repository = { id: number; default_branch: string; archived?: boolean; disabled?: boolean }
 type Entry = { path: string; mode: string; type: string; sha: string }
 type Tree = { tree: Entry[]; truncated?: boolean }
 type Commit = { sha: string; tree: { sha: string } }
@@ -84,15 +84,6 @@ export async function syncWorkerRepository(input: {
     if (wanted.some(e => e.type !== "blob" || !["100644", "100755"].includes(e.mode))) throw new Error("Worker source must contain regular files")
     wanted.push({ ...workflow, path: input.workflow })
     let targetSha = await head(targetPath, target.default_branch)
-    const sameNetwork = target.id === source.id || target.source?.id === (source.source?.id || source.id) || target.parent?.id === source.id
-    if (sameNetwork && targetSha !== sourceSha) {
-      const comparison = await api<{ behind_by: number }>(`${targetPath}/compare/${sourceSha}...${targetSha}`)
-      if (!Number.isInteger(comparison.behind_by)) throw new Error("GitHub did not confirm source commit ancestry")
-      if (comparison.behind_by > 0) {
-        await api(`${targetPath}/merges`, "POST", { base: target.default_branch, head: sourceSha, commit_message: `Sync worker repository from ${sourceName}@${sourceSha}` })
-        targetSha = await head(targetPath, target.default_branch)
-      }
-    }
     const targetTree = await tree(targetPath, targetSha)
     const changed = wanted.filter(e => !targetTree.entries.some(t => t.path === e.path && t.sha === e.sha && t.mode === e.mode))
     const removed = targetTree.entries.filter(e => e.path.startsWith(directory) && e.type !== "tree" && !wanted.some(s => s.path === e.path))
@@ -122,10 +113,6 @@ export async function syncWorkerRepository(input: {
     if (wanted.some(e => !verified.entries.some(t => t.path === e.path && t.sha === e.sha && t.mode === e.mode)) ||
         verified.entries.some(e => e.path.startsWith(directory) && e.type !== "tree" && !wanted.some(s => s.path === e.path))) {
       throw new Error("Worker repository did not match the latest source files; dispatch stopped")
-    }
-    if (sameNetwork && targetSha !== sourceSha) {
-      const comparison = await api<{ behind_by: number }>(`${targetPath}/compare/${sourceSha}...${targetSha}`)
-      if (comparison.behind_by !== 0) throw new Error("Worker repository is still missing upstream commits; dispatch stopped")
     }
     if (await head(sourcePath, source.default_branch) !== sourceSha || await head(targetPath, target.default_branch) !== targetSha) continue
     let workflowPath = `${targetPath}/actions/workflows/${encodeURIComponent(input.workflow.split("/").pop()!)}`

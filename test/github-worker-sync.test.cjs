@@ -20,7 +20,6 @@ const workflowPath = '.github/workflows/migration-worker.yml'
 const runtimePath = 'workers/migration-worker/'
 const sourceSha = 'a'.repeat(40)
 const initialSha = 'b'.repeat(40)
-const mergedSha = 'c'.repeat(40)
 const committedSha = 'd'.repeat(40)
 function fixture(options = {}) {
   const blobs = new Map()
@@ -47,7 +46,6 @@ function fixture(options = {}) {
   targetEntries.push(unrelated)
   if (options.obsolete) targetEntries.push(entry(runtimePath + 'obsolete.js', 'delete stale worker file'))
   let targetSha = initialSha
-  let behind = options.merge ? 2 : 0
   let currentSource = sourceSha
   let actionState = options.actionState || 'active'
   let actionsEnabled = !options.actionsDisabled
@@ -63,19 +61,9 @@ function fixture(options = {}) {
     calls.push({ pathname, method, body })
     if (options.fail && options.fail(pathname, method)) return response({ message: 'denied' }, 403)
     if (pathname === '/repos/iamnadith/Drive') return response({ id: 1, default_branch: 'main' })
-    if (pathname === '/repos/me/renamed') return response({ id: 2, default_branch: 'custom', source: options.copy ? undefined : { id: 1 }, archived: options.archived })
+    if (pathname === '/repos/me/renamed') return response({ id: 2, default_branch: 'custom', archived: options.archived })
     const source = pathname.startsWith('/repos/iamnadith/Drive/')
     if (pathname.includes('/git/ref/heads/')) return response({ object: { sha: source ? currentSource : targetSha } })
-    if (pathname.includes('/compare/')) return response({ behind_by: behind })
-    if (pathname.endsWith('/merges')) {
-      if (options.conflict) return response({ message: 'Merge conflict' }, 409)
-      assert.equal(body.base, 'custom')
-      assert.equal(body.head, sourceSha)
-      behind = 0
-      targetSha = mergedSha
-      targetEntries = [...sourceEntries, unrelated]
-      return response({ sha: targetSha })
-    }
     if (pathname.includes('/git/commits/') && method === 'GET') return response({ sha: source ? currentSource : targetSha, tree: { sha: source ? 'source-tree' : 'target-tree' } })
     if (pathname.includes('/git/trees/') && method === 'GET') return response({ tree: source ? sourceEntries : targetEntries, truncated: options.truncated })
     if (pathname.includes('/git/blobs/') && method === 'GET') {
@@ -129,10 +117,11 @@ test('current renamed fork is verified without a write and uses its actual defau
   assert.deepEqual(await syncWorkerRepository(f.input), { sourceSha, targetSha: initialSha, defaultBranch: 'custom' })
   assert.ok(f.calls.every(c => c.method === 'GET'))
 }))
-test('behind fork merges the configured source commit before returning a verified head', () => run({ merge: true }, async f => {
-  assert.equal((await syncWorkerRepository(f.input)).targetSha, mergedSha)
-  assert.equal(f.calls.filter(c => c.pathname.endsWith('/merges')).length, 1)
-  assert.ok(!f.calls.some(c => c.method === 'PATCH'))
+test('behind fork syncs only worker files without merging the full upstream branch', () => run({ merge: true }, async f => {
+  assert.equal((await syncWorkerRepository(f.input)).targetSha, committedSha)
+  assert.ok(!f.calls.some(c => c.pathname.endsWith('/merges') || c.pathname.includes('/compare/')))
+  assert.equal(f.calls.filter(c => c.method === 'PATCH').length, 1)
+  assert.ok(f.entries().some(e => e.path === 'personal.txt'))
 }))
 test('renamed saved workflow and stale copied worker files are updated atomically, preserving other files', () => run({ copy: true, stale: true, alias: '.github/workflows/my-worker.yaml', obsolete: true }, async f => {
   assert.equal((await syncWorkerRepository(f.input)).targetSha, committedSha)
@@ -153,10 +142,6 @@ test('concurrent destination update retries from the new head without force push
 }))
 test('source movement during synchronization is rechecked before success', () => run({ stale: true, sourceMoves: true }, async f => {
   assert.equal((await syncWorkerRepository(f.input)).sourceSha, 'f'.repeat(40))
-}))
-test('merge conflicts stop launches without forcing or replacing history', () => run({ merge: true, conflict: true }, async f => {
-  await assert.rejects(syncWorkerRepository(f.input), /409.*Merge conflict/)
-  assert.ok(!f.calls.some(c => c.method === 'PATCH'))
 }))
 test('branch protection or permission failures cannot report sync success', () => run({ stale: true, fail: (p, m) => m === 'PATCH' }, async f => {
   await assert.rejects(syncWorkerRepository(f.input), /403/)
@@ -208,10 +193,12 @@ test('queued dispatch does not contact GitHub dispatch when code sync fails', as
       if (sql.includes('select r.*')) return { rows: [intent] }
       return { rows: [] }
     } }
+    const sync = async () => { if (fail) throw new Error('sync conflict'); return { sourceSha, targetSha: committedSha, defaultBranch: 'custom' } }
     const context = { exports: {}, Date, JSON, String, Number, Error, AbortSignal,
       database: async (env, operation) => operation(db),
       reconcileGitHubIntent: async () => false,
-      syncWorkerRepository: async () => { if (fail) throw new Error('sync conflict'); return { sourceSha, targetSha: committedSha, defaultBranch: 'custom' } },
+      syncWorkerRepository: sync,
+      syncWorkerRepositoryOnce: sync,
       GITHUB_WORKER_MAX_RUNTIME_SECONDS: 21300,
       fetch: async (url, options) => { dispatches.push({ url, body: JSON.parse(options.body) }); return { ok: true } },
     }
@@ -254,19 +241,17 @@ test('genuinely unindexed workflow stays blocked after activation is attempted',
   assert.ok(!f.calls.some(c => c.pathname.endsWith('/dispatches')))
 }))
 
-test('scheduled tick only enqueues a durable scheduling cycle without opening the database', async () => {
+test('scheduled tick runs the durable scheduler cycle without publishing a queue message', async () => {
   const vm = require('node:vm')
   const source = fs.readFileSync('workers/migration-orchestrator/src/index.ts', 'utf8')
   const method = source.slice(source.indexOf('  async scheduled('), source.indexOf('  async queue('))
-  const context = { exports: {}, cycle: () => { throw new Error('cron must not run database cycle') } }
+  let cycles = 0
+  const context = { exports: {}, cycle: async () => { cycles++; return { ok: true } } }
   vm.runInNewContext(ts.transpileModule('exports.handler = {' + method + '}', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context)
-  const messages = [], pending = []
-  await context.exports.handler.scheduled({}, { GITHUB_DISPATCH_QUEUE: { send: async (body, options) => messages.push({ body, options }) } }, { waitUntil: promise => pending.push(promise) })
+  const pending = []
+  await context.exports.handler.scheduled({}, {}, { waitUntil: promise => pending.push(promise) })
   await Promise.all(pending)
-  assert.equal(messages.length, 1)
-  assert.equal(messages[0].body.control, 'cycle')
-  assert.equal(messages[0].options.contentType, 'json')
-  await assert.rejects(context.exports.handler.scheduled({}, { GITHUB_DISPATCH_QUEUE: { send: async () => { throw new Error('queue unavailable') } } }, { waitUntil: promise => pending.push(promise) }).then(() => Promise.all(pending)), /queue unavailable/)
+  assert.equal(cycles, 1)
 })
 
 test('newly registered fork reasserts repository and workflow activation even when GitHub reports active', () => run({}, async f => {
