@@ -1,6 +1,6 @@
 import { Client } from "pg"
 import { syncWorkerRepository } from "../../../src/lib/github-worker-sync"
-import { readMigrationQueueLiveProjection } from "../../../src/lib/migration-queue-database"
+import { readMigrationQueueLiveProjectionFromClient } from "../../../src/lib/migration-queue-database"
 
 type DispatchMessage = { intentId: string } | { control: "cycle" }
 type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; MIGRATION_ORCHESTRATOR_SECRET?: string; PANEL_URL?: string; DISABLE_POSTGRES_SSL?: string; GITHUB_WORKER_SOURCE_REPO?: string; GITHUB_BACKEND_WORKER_SOURCE_REPO?: string; GITHUB_DISPATCH_QUEUE: Queue<DispatchMessage> }
@@ -625,7 +625,23 @@ async function refreshMigrationSnapshot(db: Client, migrationId: string) {
   const settings = configuration.rows[0]?.value || {}
   const queueUrl = String(settings.queueDatabaseUrl || "").trim()
   if (queueUrl) {
-    const projection = await readMigrationQueueLiveProjection(queueUrl, settings.queueDatabaseSsl !== false, migrationId, generation)
+    const parsedQueueUrl = new URL(queueUrl)
+    const sslMode = parsedQueueUrl.searchParams.get("sslmode")
+    parsedQueueUrl.searchParams.delete("sslmode")
+    const queue = new Client({
+      connectionString: parsedQueueUrl.toString(),
+      ssl: settings.queueDatabaseSsl === false || sslMode === "disable" ? false : { rejectUnauthorized: false },
+      connectionTimeoutMillis: 8_000,
+      keepAlive: true,
+      application_name: "drive-migration-queue-projection",
+    })
+    let projection
+    try {
+      await queue.connect()
+      projection = await readMigrationQueueLiveProjectionFromClient(queue, migrationId, generation)
+    } finally {
+      await queue.end().catch(() => undefined)
+    }
     if (projection && projection.generation === generation && projection.seedComplete) {
       const stats = projection.stats
       const buckets = projection.items.map((item) => {
