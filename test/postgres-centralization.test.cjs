@@ -17,6 +17,17 @@ test("build and runtime schema guards use the same schema version", () => {
   assert.equal(buildVersion, runtimeVersion)
 })
 
+test("analytics snapshot migration removes the old account primary key before allowing null account ids", () => {
+  for (const file of ["src/lib/db.ts", "workers/backend-orchestrator/src/index.ts"]) {
+    const source = read(file)
+    const dropPrimaryKey = source.indexOf("drop constraint if exists drive_analytics_active_account_snapshots_pkey")
+    const allowNullAccount = source.indexOf("alter column account_id drop not null")
+    assert.ok(dropPrimaryKey >= 0 && allowNullAccount > dropPrimaryKey, `${file} drops the old primary key first`)
+  }
+  assert.doesNotMatch(read("src/lib/db.ts"), /gen_random_bytes\(/)
+  assert.doesNotMatch(read("src/lib/project-operations-store.ts"), /gen_random_bytes\(/)
+})
+
 test("Vercel builds skip the database-backed schema installer by default", () => {
   const output = execFileSync(process.execPath, [path.join(root, "scripts/prepare-schema.mjs")], {
     cwd: root,

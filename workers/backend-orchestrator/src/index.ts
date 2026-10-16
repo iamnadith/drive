@@ -227,8 +227,8 @@ async function legacyEnsureSchema(db: Client) {
   `)
   await db.query(`alter table drive_analytics_active_account_snapshots add column if not exists bucket_fingerprint text`)
   await db.query(`alter table drive_analytics_active_account_snapshots add column if not exists scope text not null default 'account'`)
-  await db.query(`alter table drive_analytics_active_account_snapshots alter column account_id drop not null`)
   await db.query(`alter table drive_analytics_active_account_snapshots drop constraint if exists drive_analytics_active_account_snapshots_pkey`)
+  await db.query(`alter table drive_analytics_active_account_snapshots alter column account_id drop not null`)
   await db.query(`alter table drive_analytics_active_account_snapshots add constraint drive_analytics_active_account_snapshots_pkey primary key (scope, captured_day)`)
   await db.query(`
     with ranked as (

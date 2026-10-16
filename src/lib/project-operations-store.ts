@@ -348,7 +348,7 @@ export async function upsertProjectObjectInventory(input: {
     `
       insert into drive_project_object_inventory
         (project_id, bucket_name, object_key, file_id, size, etag, content_type, metadata, last_modified, deleted_at)
-      values ($1, $2, $3, coalesce($4, encode(gen_random_bytes(12), 'hex')), $5, $6, $7, coalesce($8::jsonb, '{}'::jsonb), $9, null)
+      values ($1, $2, $3, coalesce($4, substr(replace(gen_random_uuid()::text, '-', ''), 1, 24)), $5, $6, $7, coalesce($8::jsonb, '{}'::jsonb), $9, null)
       on conflict (project_id, bucket_name, object_key) do update set
         size = excluded.size,
         etag = excluded.etag,
@@ -401,7 +401,7 @@ export async function upsertProjectObjectInventoryBatch(input: {
     `
       insert into drive_project_object_inventory
         (project_id, bucket_name, object_key, file_id, size, etag, metadata, last_modified, deleted_at)
-      select $1, $2, rows.object_key, encode(gen_random_bytes(12), 'hex'), rows.size,
+      select $1, $2, rows.object_key, substr(replace(gen_random_uuid()::text, '-', ''), 1, 24), rows.size,
              rows.etag, '{}'::jsonb, rows.last_modified, null
       from unnest(
         $3::text[], $4::bigint[], $5::text[], $6::timestamptz[]
