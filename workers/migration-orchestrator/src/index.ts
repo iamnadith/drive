@@ -1865,7 +1865,7 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
   return queued
 }
 
-async function dispatchBackendWorkers(db: Client, env: Env, migration: Row) {
+async function dispatchBackendWorkers(db: Client, env: Env, migration: Row, directQueueMode: boolean) {
   const generation = integer(opts(migration).workerGeneration, 1, 1, 1000000)
   const work = await db.query(`select
     (select count(*)::int from drive_migration_items i join drive_migrations m on m.id=i.migration_id
@@ -1881,9 +1881,9 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row) {
           or v.status='running' and (v.lease_expires_at is null or v.lease_expires_at<now()))
         and (m.options->>'executionMode' is distinct from 'migration_workers' or (
           i.progress->'migrationInventory'->>'status'='completed' and i.progress->'migrationQueue'->>'status'='completed'
-          and not exists(select 1 from drive_repair_jobs j where j.migration_id=m.id
+          and ($3::boolean or not exists(select 1 from drive_repair_jobs j where j.migration_id=m.id
             and j.work_key like format('migration:%s:generation:%s:inventory:%%',m.id,$2)
-            and j.payload->'itemIds'->>0=i.id::text and j.status<>'completed')))) verification_pending`, [migration.id, generation])
+            and j.payload->'itemIds'->>0=i.id::text and j.status<>'completed'))))) verification_pending`, [migration.id, generation, directQueueMode])
   const pendingTaskCount = Number(work.rows[0]?.inventory_pending || 0) + Number(work.rows[0]?.verification_pending || 0)
   const diagnostics: Row = {
     pendingTasks: pendingTaskCount,
@@ -3015,7 +3015,7 @@ async function cycle(env: Env) {
         ])
       }
       const backendDispatch = current && ["running", "verifying"].includes(String(current.status))
-        ? await dispatchBackendWorkers(db, env, current)
+        ? await dispatchBackendWorkers(db, env, current, directQueueMode)
         : { dispatched: 0, reason: "migration_not_active" }
       const backendDispatched = Number(backendDispatch.dispatched || 0)
       await recordItemStageEvents(db, migration, shards.generation)
