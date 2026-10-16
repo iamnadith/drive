@@ -477,7 +477,11 @@ async function ensureShards(db: Client, migration: Row) {
   // Mirror scanner counters on every cycle, not only at completion, so live
   // object/byte totals advance while inventory and queueing run concurrently.
   await db.query(`
-    update drive_migration_items i set source_objects=s.objects,source_bytes=s.bytes,last_progress_at=now(),updated_at=now(),
+    update drive_migration_items i set source_objects=s.objects,source_bytes=s.bytes,
+      slurper_status=case when s.status='completed' then
+        case when i.progress->'migrationQueue'->>'materializationStatus'='completed' then 'queued' else 'running' end
+        else 'scanning' end,
+      last_progress_at=now(),updated_at=now(),
       progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{migrationInventory}',coalesce(i.progress->'migrationInventory','{}'::jsonb)||jsonb_build_object('status',s.status,'objects',s.objects,'bytes',s.bytes,'completedAt',s.completed_at))
     from drive_bucket_scans s where i.migration_id=$1 and s.id=(i.progress->'migrationInventory'->>'sourceScanId')::uuid
   `, [migration.id])
@@ -584,7 +588,7 @@ async function ensureShards(db: Client, migration: Row) {
       const previousQueueStatus = queueItem.progress?.migrationQueue?.totalJobs != null
         ? queueItem.progress.migrationQueue.status
         : completed ? "completed" : "materializing"
-      await db.query(`update drive_migration_items set progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{migrationQueue}',$2::jsonb),updated_at=now() where id=$1`, [queueItem.id, JSON.stringify({ ...priorQueue, generation, status: previousQueueStatus, materializationStatus: completed ? "completed" : "materializing", lastKey: nextKey, materializedObjects: retryCoverage ? 0 : priorMaterialized + pageCount, totalObjects: Number(queueItem.source_objects || queueScan?.objects || 0), integrityRepairAttempts: integrityAttempts + (retryCoverage ? 1 : 0), integrityRepairMissing: retryCoverage ? missingCount : 0, updatedAt: new Date().toISOString() })])
+      await db.query(`update drive_migration_items set slurper_status=case when $3 then 'queued' else 'running' end,progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{migrationQueue}',$2::jsonb),last_progress_at=now(),updated_at=now() where id=$1`, [queueItem.id, JSON.stringify({ ...priorQueue, generation, status: previousQueueStatus, materializationStatus: completed ? "completed" : "materializing", lastKey: nextKey, materializedObjects: retryCoverage ? 0 : priorMaterialized + pageCount, totalObjects: Number(queueItem.source_objects || queueScan?.objects || 0), integrityRepairAttempts: integrityAttempts + (retryCoverage ? 1 : 0), integrityRepairMissing: retryCoverage ? missingCount : 0, updatedAt: new Date().toISOString() }), completed])
       await db.query("commit")
     } catch (error) {
       tuneQueueBatchSize(Number.MAX_SAFE_INTEGER, false)
@@ -671,7 +675,7 @@ async function sha256Hex(value: string) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
 }
-async function githubWorkerSecretsAreCurrent(orchestration: Row, workerSettings: Row) {
+async function githubWorkerDispatchConfigurationIsCurrent(orchestration: Row, workerSettings: Row) {
   if (String(workerSettings.secretSyncStatus || "") !== "ready") return false
   if (String(workerSettings.synchronizedServerUrl || "").replace(/\/+$/, "") !== String(orchestration.orchestratorUrl || "").replace(/\/+$/, "")) return false
   const sharedSecret = String(workerSettings.sharedSecret || "")
@@ -1681,7 +1685,7 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
   const configRows = await db.query(`select key,value from drive_app_settings where key in('migration-orchestrator','migration-workers')`)
   const orchestration = configRows.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
   const workerSettings = configRows.rows.find((row) => row.key === "migration-workers")?.value || {}
-  if (!(await githubWorkerSecretsAreCurrent(orchestration, workerSettings))) return 0
+  if (!(await githubWorkerDispatchConfigurationIsCurrent(orchestration, workerSettings))) return 0
   // Missing heartbeats during an endpoint outage do not mean the GitHub
   // processes need replacing. Keep their slots and durable file checkpoints.
   const directQueueMode = Boolean(String(workerSettings.queueDatabaseUrl || "").trim())
@@ -1908,7 +1912,7 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row, dire
     synchronizedHashMatches: String(workerSettings.synchronizedSecretHash || "") === await sha256Hex(String(workerSettings.sharedSecret || "")),
   }
   diagnostics.secretSync = secretSyncDiagnostics
-  if (!(await githubWorkerSecretsAreCurrent(orchestration, workerSettings))) {
+  if (!(await githubWorkerDispatchConfigurationIsCurrent(orchestration, workerSettings))) {
     const reason = !secretSyncDiagnostics.statusReady ? "backend_worker_secret_sync_status_not_ready"
       : !secretSyncDiagnostics.urlMatches ? "backend_worker_secret_sync_url_mismatch"
         : !secretSyncDiagnostics.secretLengthValid ? "backend_worker_shared_secret_invalid"
@@ -2159,6 +2163,7 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
     const result = await db.query(`select r.*,a.github_repo_owner,a.github_repo_name,a.github_workflow_file,a.github_ref,a.github_token,a.status agent_status from drive_agent_runs r join drive_agents a on a.id=r.agent_id where r.id=$1 for update of r`, [intentId])
     const intent = result.rows[0]
     if (!intent || intent.external_run_id || ["completed", "failed", "canceled"].includes(intent.status)) { await db.query("commit"); transactionOpen = false; return "terminal" }
+    const workerKind = intent.run_type === "github_backend_dispatch" ? "backend" : "migration"
     let endpointConfiguration: Row | null = null
     if (intent.payload?.pool === true) {
       const current = await db.query(`select m.status,greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1)) generation,
@@ -2172,13 +2177,16 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
         await db.query("commit"); transactionOpen = false
         return "terminal"
       }
+    }
+    let workerSettings: Row = {}
+    if (intent.payload?.pool === true || workerKind === "backend") {
       const configuration = await db.query(`select key,value from drive_app_settings where key in('migration-orchestrator','migration-workers')`)
       const orchestration = configuration.rows.find((row) => row.key === "migration-orchestrator")?.value || {}
+      workerSettings = configuration.rows.find((row) => row.key === "migration-workers")?.value || {}
       endpointConfiguration = orchestration
-      const workerSettings = configuration.rows.find((row) => row.key === "migration-workers")?.value || {}
-      if (!(await githubWorkerSecretsAreCurrent(orchestration, workerSettings))) {
+      if (!(await githubWorkerDispatchConfigurationIsCurrent(orchestration, workerSettings))) {
         await db.query("commit"); transactionOpen = false
-        throw new Error("GitHub migration-worker URL or secret is not synchronized to the current configuration; dispatch is paused")
+        throw new Error("GitHub worker dispatch URL or secret is not configured for this deployment; dispatch is paused")
       }
     }
     if (intent.agent_status === "disabled" || !intent.github_token) throw new Error("Registered workflow is disabled or missing its GitHub token")
@@ -2192,7 +2200,6 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
       return "terminal"
     }
     const workerInstanceId = String(intent.payload.workerInstanceId)
-    const workerKind = intent.run_type === "github_backend_dispatch" ? "backend" : "migration"
     const workerWorkflow = intent.github_workflow_file || (workerKind === "backend" ? ".github/workflows/backend-worker.yml" : ".github/workflows/migration-worker.yml")
     const codeSync = await syncWorkerRepositoryOnce({ token: intent.github_token, owner: intent.github_repo_owner, repo: intent.github_repo_name, workflow: workerWorkflow, sourceRepo: workerKind === "backend" ? env.GITHUB_BACKEND_WORKER_SOURCE_REPO || env.GITHUB_WORKER_SOURCE_REPO : env.GITHUB_WORKER_SOURCE_REPO, activateActions: intent.agent_status === "dispatch_ready", workerKind })
     await db.query(`update drive_agents set github_ref=$2,updated_at=now() where id=$1`, [intent.agent_id, codeSync.defaultBranch])
@@ -2200,7 +2207,7 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
     await db.query(`update drive_agent_runs set payload=payload||$2::jsonb,summary='Submitting GitHub workflow dispatch',updated_at=now() where id=$1`, [intent.id, JSON.stringify({ phase: "dispatching", dispatchStartedAt: new Date().toISOString(), dispatchAttempt: attempts })])
     const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(intent.github_repo_owner)}/${encodeURIComponent(intent.github_repo_name)}/dispatches`, {
       method: "POST", headers: { Authorization: `Bearer ${intent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator", "Content-Type": "application/json" },
-      body: JSON.stringify({ event_type: workerKind === "backend" ? "drive-backend-worker" : "drive-migration-worker", client_payload: { migration_id: intent.payload.migrationId, worker_generation: intent.payload.workerGeneration, agent_id: intent.agent_id, worker_instance_id: workerInstanceId, workflow_file: workerWorkflow, code_ref: codeSync.targetSha, max_runtime_seconds: GITHUB_WORKER_MAX_RUNTIME_SECONDS } }), signal: AbortSignal.timeout(20_000),
+      body: JSON.stringify({ event_type: workerKind === "backend" ? "drive-backend-worker" : "drive-migration-worker", client_payload: { migration_id: intent.payload.migrationId, worker_generation: intent.payload.workerGeneration, agent_id: intent.agent_id, worker_instance_id: workerInstanceId, server_url: endpointConfiguration?.orchestratorUrl || null, worker_secret: workerSettings.sharedSecret || null, workflow_file: workerWorkflow, code_ref: codeSync.targetSha, max_runtime_seconds: GITHUB_WORKER_MAX_RUNTIME_SECONDS } }), signal: AbortSignal.timeout(20_000),
     })
     if (!response.ok) throw new Error(`GitHub dispatch HTTP ${response.status}`)
     await db.query(`update drive_agent_runs set payload=payload||$2::jsonb,summary='GitHub accepted workflow dispatch; awaiting run reconciliation',updated_at=now() where id=$1`, [intent.id, JSON.stringify({ phase: "accepted", acceptedAt: new Date().toISOString() })])

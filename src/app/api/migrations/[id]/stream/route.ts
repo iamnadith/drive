@@ -137,7 +137,14 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
             } else {
               safeEnqueue(encoder.encode(": keepalive\n\n"))
             }
-            nextDelay = directQueue ? 30_000 : ["running", "verifying", "queued"].includes(migration.status) ? 10_000 : 30_000
+            const activeMigration = ["running", "verifying", "queued"].includes(String(migration.status).toLowerCase())
+            const scanning = items.some((item) => {
+              const progress = item.progress && typeof item.progress === "object" ? item.progress as Record<string, unknown> : {}
+              return ["pending", "running", "scanning"].includes(String(progress.sourceScanStatus ?? "").toLowerCase())
+            }) || (activeMigration && /scann|building migration queue/i.test(String(migration.syncMessage ?? "")))
+            // Scanner cursors and queue materialization advance independently of
+            // the browser. Poll saved state frequently enough to keep the view live.
+            nextDelay = scanning ? 5_000 : activeMigration ? 10_000 : 30_000
           } catch (e: unknown) {
             const message =
               typeof e === "object" && e !== null && "message" in e

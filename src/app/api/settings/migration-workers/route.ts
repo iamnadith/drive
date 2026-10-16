@@ -7,7 +7,7 @@ import {
   saveMigrationWorkerSettings,
 } from "@/lib/migration-worker-settings-store"
 import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
-import { syncAllGitHubWorkerSecrets } from "@/lib/github-worker-secrets"
+import { markGitHubWorkerDispatchConfigurationReady } from "@/lib/github-worker-secrets"
 import { ensureMigrationQueueSchema, withMigrationQueueDatabase } from "@/lib/migration-queue-database"
 import { queryDb } from "@/lib/db"
 
@@ -53,14 +53,14 @@ export async function PUT(request: Request) {
 
     try {
       await saveMigrationWorkerSettings({ sharedSecret, queueDatabaseUrl: body.queueDatabaseUrl, queueDatabaseSsl })
-      let syncedRepositories = 0
+      let dispatchPayloadEnabled = false
       if (requested) {
         const orchestration = await getMigrationOrchestratorSettings()
-        const synchronization = await syncAllGitHubWorkerSecrets({
+        await markGitHubWorkerDispatchConfigurationReady({
           serverUrl: orchestration.orchestratorUrl,
           sharedSecret,
         })
-        syncedRepositories = synchronization.syncedRepositories
+        dispatchPayloadEnabled = true
       }
       const settings = await getMigrationWorkerSettings()
       await recordUserActivity(request, auth.user.id, {
@@ -68,13 +68,13 @@ export async function PUT(request: Request) {
         entityType: "settings", entityId: "migration-workers",
         entityLabel: queueDatabaseUrl ? "Migration queue database" : "Migration Worker credentials",
         summary: queueDatabaseUrl ? "Configured Migration queue database" : "Updated Migration Worker credentials",
-        after: { configured: true, syncedRepositories },
+        after: { configured: true, dispatchPayloadEnabled },
       })
-      return NextResponse.json({ settings: publicMigrationWorkerSettings(settings), syncedRepositories })
+      return NextResponse.json({ settings: publicMigrationWorkerSettings(settings), dispatchPayloadEnabled })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return NextResponse.json({
-        error: `The Worker settings were saved, but GitHub Actions credentials could not be synchronized. Dispatch is paused until synchronization succeeds. ${message}`,
+        error: `The Worker settings were saved, but dispatch configuration could not be validated. ${message}`,
         settings: publicMigrationWorkerSettings(await getMigrationWorkerSettings()),
       }, { status: 502 })
     }

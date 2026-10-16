@@ -4,7 +4,7 @@ import { NextResponse } from "next/server"
 import { createAgentRun, getAgentById, getAgentGithubToken, listAgentRunsByAgentId, updateAgent, updateAgentRun } from "@/lib/agents-store"
 import { abortRepairJob, createRepairJob, ensureMigrationWorkerJobs, findActiveRepairJobForDispatch, listRepairJobs, type RepairJobMode } from "@/lib/repair-jobs-store"
 import { GITHUB_TOKEN_COOKIE, listGitHubWorkflowRuns } from "@/lib/github-oauth"
-import { syncGitHubWorkerSecrets } from "@/lib/github-worker-secrets"
+import { validateGitHubWorkerDispatchConfiguration } from "@/lib/github-worker-secrets"
 import { assertWorkerWorkflow } from "@/lib/github-worker-setup"
 import { syncWorkerRepository } from "@/lib/github-worker-sync"
 import { enrollMigrationWorkerAgents, getMigration, listMigrationItems } from "@/lib/migrations-store"
@@ -173,7 +173,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         }
         const token = await getAgentGithubToken(selectedId)
         if (!token) return NextResponse.json({ error: `Selected workflow ${selected.name} is missing its GitHub token` }, { status: 409 })
-        await syncGitHubWorkerSecrets({
+        validateGitHubWorkerDispatchConfiguration({
           token,
           owner: selected.githubRepoOwner,
           repo: selected.githubRepoName,
@@ -264,18 +264,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     // be reconciled without an expensive before/after run-list request.
     const runsBeforeDispatch: Awaited<ReturnType<typeof listGitHubWorkflowRuns>> = []
     const runIdsBeforeDispatch = new Set(runsBeforeDispatch.map((candidate) => candidate.id))
-    let secretSyncError: string | null = null
-    try {
-      await syncGitHubWorkerSecrets({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, sharedSecret, agentId: id, includeLegacyAgentId: false })
-    } catch (error: unknown) {
-      secretSyncError = errorMessage(error, "Unable to sync GitHub worker secrets")
-    }
-    if (secretSyncError) {
-      return NextResponse.json(
-        { error: `GitHub worker secret synchronization failed: ${secretSyncError}` },
-        { status: 502 }
-      )
-    }
+    validateGitHubWorkerDispatchConfiguration({ token: githubToken, owner: githubRepoOwner, repo: githubRepoName, serverUrl, sharedSecret })
     if (pool) await enrollMigrationWorkerAgents(migrationId, poolAgentIds.length > 0 ? poolAgentIds : [id])
     const queued = pool
       ? await ensureMigrationWorkerJobs({ migrationId, mode })
@@ -346,6 +335,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
               ...(job?.id ? { repair_job_id: job.id } : {}),
               agent_id: id,
               worker_instance_id: instanceId,
+              server_url: serverUrl,
+              worker_secret: sharedSecret,
               workflow_file: githubWorkflowFile,
               code_ref: codeSync.targetSha,
             },
@@ -382,7 +373,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         {
           error: `GitHub dispatch failed (${response.status}). ${
             text || "Check token/repo/workflow access."
-          }${secretSyncError ? ` Secret sync warning: ${secretSyncError}` : ""}`,
+          }`,
         },
         { status: 400 }
       )
@@ -413,7 +404,6 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         dispatchRequestedAt,
         githubRunIdsBeforeDispatch: Array.from(runIdsBeforeDispatch),
         dispatchTransport: "repository_dispatch",
-        ...(secretSyncError ? { secretSyncWarning: secretSyncError } : {}),
         ...(matchedRun?.htmlUrl ? { htmlUrl: matchedRun.htmlUrl } : {}),
       },
       ...(matchedRun?.status === "completed" ? { completedAt: new Date().toISOString() } : {}),

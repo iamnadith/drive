@@ -228,60 +228,6 @@ export async function listGitHubWorkflows(token: string, owner: string, repo: st
   return actual
 }
 
-export async function setGitHubActionsSecret(input: {
-  token: string
-  owner: string
-  repo: string
-  name: string
-  value: string
-}): Promise<void> {
-  try {
-    const sodiumModule = await import("libsodium-wrappers")
-    const sodium = (sodiumModule as { default?: typeof sodiumModule } & typeof sodiumModule).default ?? sodiumModule
-    const keyResponse = await githubApi<{ key: string; key_id: string }>(
-      `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/actions/secrets/public-key`,
-      input.token
-    )
-    if (typeof keyResponse?.key !== "string" || !keyResponse.key.trim()) {
-      throw new Error("GitHub did not return a repository secrets public key")
-    }
-    if (typeof keyResponse?.key_id !== "string" || !keyResponse.key_id.trim()) {
-      throw new Error("GitHub did not return a repository secrets key id")
-    }
-    if (!("ready" in sodium) || !("from_base64" in sodium) || !("crypto_box_seal" in sodium) || !("to_base64" in sodium)) {
-      throw new Error("libsodium-wrappers did not load correctly")
-    }
-
-    await sodium.ready
-    const variants = (sodium as { base64_variants?: { ORIGINAL?: number | null } }).base64_variants
-    if (!variants || typeof variants.ORIGINAL === "undefined") {
-      throw new Error("libsodium base64 helpers are unavailable")
-    }
-    const originalVariant = variants.ORIGINAL ?? undefined
-
-    const publicKey = sodium.from_base64(keyResponse.key, originalVariant)
-    if (!publicKey) throw new Error("Unable to decode GitHub repository public key")
-    const encryptedBytes = sodium.crypto_box_seal(input.value, publicKey)
-    const encryptedValue = sodium.to_base64(encryptedBytes, originalVariant)
-
-    await githubApi(
-      `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/actions/secrets/${encodeURIComponent(input.name)}`,
-      input.token,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          encrypted_value: encryptedValue,
-          key_id: keyResponse.key_id,
-        }),
-      }
-    )
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    throw new Error(`Unable to set GitHub Actions secret '${input.name}': ${message}`)
-  }
-}
-
 export async function listGitHubWorkflowRuns(input: {
   token: string
   owner: string

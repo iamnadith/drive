@@ -332,7 +332,16 @@ export function getItemDisplayStatus(
   if ((verify?.status === "pending" || verify?.status === "running") && (repairStage.includes("verify") || isCompletedStatus(base))) {
     return "verifying"
   }
-  if (base === "scanning") return "scanning"
+  if (base === "scanning") {
+    const inventory = isRecord(progress.migrationInventory) ? progress.migrationInventory : {}
+    const queue = isRecord(progress.migrationQueue) ? progress.migrationQueue : {}
+    const sourceScanStatus = normalizeStatus(progress.sourceScanStatus || inventory.status)
+    if (sourceScanStatus === "completed") {
+      const materializationStatus = normalizeStatus(queue.materializationStatus || queue.status)
+      return materializationStatus === "completed" ? "queued" : "running"
+    }
+    return "scanning"
+  }
   if (base === "scan_failed") return "failed"
   if (!isCompletedStatus(base)) return base
   if (verify?.status === "error") return "verification_failed"

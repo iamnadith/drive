@@ -4,7 +4,7 @@ import { queryDb, withDbAdvisoryLock, withDbTransaction } from "@/lib/db"
 import { getBackendOrchestratorSettings } from "@/lib/backend-orchestrator-settings-store"
 import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
 import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
-import { syncAllGitHubWorkerSecretsWithinInstallerLock } from "@/lib/github-worker-secrets"
+import { markGitHubWorkerDispatchConfigurationReadyWithinInstallerLock } from "@/lib/github-worker-secrets"
 import { runtimeHealthError } from "./cloudflare-worker-health.cjs"
 
 export type HostedWorker = "backend" | "scanner" | "migration"
@@ -855,13 +855,13 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       const synchronizedConfigurationMatches = workerSettings.synchronizedServerUrl === state.workers.migration.url
         && workerSettings.synchronizedSecretHash === createHash("sha256").update(workerSettings.sharedSecret).digest("hex")
       if (migrationUrlChanged || workerSettings.secretSyncStatus !== "ready" || !synchronizedConfigurationMatches) {
-        state.step = "github_worker_secrets_syncing"; await saveState(state)
-        await syncAllGitHubWorkerSecretsWithinInstallerLock({
+        state.step = "worker_dispatch_config_validating"; await saveState(state)
+        await markGitHubWorkerDispatchConfigurationReadyWithinInstallerLock({
           serverUrl: state.workers.migration.url || "",
           sharedSecret: workerSettings.sharedSecret,
         })
         githubSecretsSynchronized = true
-        state.step = "github_worker_secrets_ready"; await saveState(state)
+        state.step = "worker_dispatch_config_ready"; await saveState(state)
       }
       await saveRuntimeConfiguration(state, true)
       await queryDb(`insert into drive_app_settings(key,value,updated_at) values('cloudflare-worker-hosting',$1::jsonb,now()) on conflict(key) do update set value=excluded.value,updated_at=now()`, [JSON.stringify({ mode: "automatic" })])
@@ -874,7 +874,7 @@ export async function installCloudflareWorkers(input: { mode: InstallMode; token
       // must not leave unrelated running migrations switched off indefinitely.
       let runtimeRestoreError: string | null = null
       if (githubSecretsSynchronized && previousRuntime.migration.orchestratorUrl) {
-        await syncAllGitHubWorkerSecretsWithinInstallerLock({
+        await markGitHubWorkerDispatchConfigurationReadyWithinInstallerLock({
           serverUrl: previousRuntime.migration.orchestratorUrl,
           sharedSecret: workerSharedSecretForSync,
         }).catch(() => undefined)

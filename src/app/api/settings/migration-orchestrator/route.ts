@@ -6,7 +6,7 @@ import {
   saveMigrationOrchestratorSettings,
 } from "@/lib/migration-orchestrator-settings-store"
 import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
-import { syncAllGitHubWorkerSecrets } from "@/lib/github-worker-secrets"
+import { markGitHubWorkerDispatchConfigurationReady } from "@/lib/github-worker-secrets"
 import { workerFailureResponse } from "@/lib/worker-failure-response"
 import { recordUserActivity } from "@/lib/activity-audit"
 
@@ -53,15 +53,15 @@ export async function PUT(request: Request) {
     const settings = await saveMigrationOrchestratorSettings(body.worker === "file"
       ? { fileScannerUrl: body.fileScannerUrl, fileScannerSecret: body.fileScannerSecret }
       : { orchestratorUrl: body.orchestratorUrl, sharedSecret: body.sharedSecret })
-    let syncedRepositories: number | undefined
+    let dispatchPayloadEnabled: boolean | undefined
     if (body.worker !== "file" && settings.orchestratorUrl !== current.orchestratorUrl) {
       synchronizationAttempted = true
       const workerSettings = await getMigrationWorkerSettings()
-      const synchronization = await syncAllGitHubWorkerSecrets({
+      await markGitHubWorkerDispatchConfigurationReady({
         serverUrl: settings.orchestratorUrl,
         sharedSecret: workerSettings.sharedSecret,
       })
-      syncedRepositories = synchronization.syncedRepositories
+      dispatchPayloadEnabled = true
     }
     await recordUserActivity(request, auth.user.id, {
       action: "settings.migration_workers.updated",
@@ -69,14 +69,14 @@ export async function PUT(request: Request) {
       entityId: body.worker === "file" ? "file-scanner" : "migration-orchestrator",
       entityLabel: body.worker === "file" ? "File Scanner" : "Migration Orchestrator",
       summary: `Updated ${body.worker === "file" ? "File Scanner" : "Migration Orchestrator"} connection settings`,
-      after: { configured: body.worker === "file" ? Boolean(settings.fileScannerUrl) : Boolean(settings.orchestratorUrl), syncedRepositories },
+      after: { configured: body.worker === "file" ? Boolean(settings.fileScannerUrl) : Boolean(settings.orchestratorUrl), dispatchPayloadEnabled },
     })
-    return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings), syncedRepositories })
+    return NextResponse.json({ settings: publicMigrationOrchestratorSettings(settings), dispatchPayloadEnabled })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return NextResponse.json({
       error: synchronizationAttempted
-        ? `The Migration Orchestrator setting was saved, but GitHub Actions credentials could not be synchronized. Dispatch is paused until synchronization succeeds. ${message}`
+        ? `The Migration Orchestrator setting was saved, but worker dispatch configuration could not be validated. ${message}`
         : message,
     }, { status: synchronizationAttempted ? 502 : 400 })
   }

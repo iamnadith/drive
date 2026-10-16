@@ -131,7 +131,7 @@ export async function setMigrationWorkerSecretSyncStatus(
       'synchronizedSecretHash',$5::text
     ),now())
     on conflict(key) do update set
-      value=coalesce(drive_app_settings.value,'{}'::jsonb)||excluded.value,
+      value=(coalesce(drive_app_settings.value,'{}'::jsonb)-'synchronizedGitHubEnvironment')||excluded.value,
       updated_at=now()
   `, [SETTINGS_KEY, status, error?.slice(0, 800) || null, synchronized?.serverUrl || null, synchronized?.secretHash || null])
 }

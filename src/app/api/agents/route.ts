@@ -3,7 +3,7 @@ import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
 import { createAgent, listAgents, type AgentCapability, type AgentCategory, type AgentProvider } from "@/lib/agents-store"
 import { GITHUB_TOKEN_COOKIE } from "@/lib/github-oauth"
-import { syncGitHubWorkerSecrets } from "@/lib/github-worker-secrets"
+import { validateGitHubWorkerDispatchConfiguration } from "@/lib/github-worker-secrets"
 import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
 import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
 import { requireAdmin } from "@/lib/server-auth"
@@ -98,7 +98,7 @@ export async function POST(request: Request) {
         workerKind,
       })
       githubRef = codeSync.defaultBranch
-      await syncGitHubWorkerSecrets({
+      validateGitHubWorkerDispatchConfiguration({
         token: githubTokenToUse,
         owner: asString(body.githubRepoOwner).trim(),
         repo: asString(body.githubRepoName).trim(),

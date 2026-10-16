@@ -344,6 +344,14 @@ export async function getMigrationDashboardBootstrap(limit = 50): Promise<Migrat
           to_jsonb(item) || jsonb_build_object(
             'source_objects',item.source_objects::text,
             'source_bytes',item.source_bytes::text,
+            'progress',coalesce(item.progress,'{}'::jsonb)||case when source_scan.id is null then '{}'::jsonb else jsonb_build_object(
+              'sourceScanStatus',source_scan.status,
+              'sourceScanObjects',source_scan.objects,
+              'sourceScanBytes',source_scan.bytes,
+              'sourceScanLastKey',source_scan.last_key,
+              'sourceScanUpdatedAt',source_scan.updated_at,
+              'sourceScanError',source_scan.error
+            ) end,
             'verification_state',(
               select jsonb_build_object(
                 'generation',verification.generation,
@@ -364,6 +372,13 @@ export async function getMigrationDashboardBootstrap(limit = 50): Promise<Migrat
         )
         from public.drive_migration_items item
         join current_migration migration on migration.id=item.migration_id
+        left join lateral (
+          select scan.id,scan.status,scan.objects,scan.bytes,scan.last_key,scan.error,scan.updated_at
+          from public.drive_bucket_scans scan
+          where scan.migration_id=item.migration_id and scan.migration_item_id=item.id and scan.kind='source'
+          order by (scan.id::text=item.progress->'migrationInventory'->>'sourceScanId') desc,scan.updated_at desc
+          limit 1
+        ) source_scan on true
       ),'[]'::jsonb) as active_items
   `, [boundedLimit])
   const row = rows[0]
@@ -556,6 +571,14 @@ export async function getMigrationDetailBootstrap(
           to_jsonb(item) || jsonb_build_object(
             'source_objects',item.source_objects::text,
             'source_bytes',item.source_bytes::text,
+            'progress',coalesce(item.progress,'{}'::jsonb)||case when source_scan.id is null then '{}'::jsonb else jsonb_build_object(
+              'sourceScanStatus',source_scan.status,
+              'sourceScanObjects',source_scan.objects,
+              'sourceScanBytes',source_scan.bytes,
+              'sourceScanLastKey',source_scan.last_key,
+              'sourceScanUpdatedAt',source_scan.updated_at,
+              'sourceScanError',source_scan.error
+            ) end,
             'verification_state',(
               select jsonb_build_object(
                 'generation',verification.generation,
@@ -576,6 +599,13 @@ export async function getMigrationDetailBootstrap(
         )
         from public.drive_migration_items item
         join selected_migration migration on migration.id=item.migration_id
+        left join lateral (
+          select scan.id,scan.status,scan.objects,scan.bytes,scan.last_key,scan.error,scan.updated_at
+          from public.drive_bucket_scans scan
+          where scan.migration_id=item.migration_id and scan.migration_item_id=item.id and scan.kind='source'
+          order by (scan.id::text=item.progress->'migrationInventory'->>'sourceScanId') desc,scan.updated_at desc
+          limit 1
+        ) source_scan on true
       ),'[]'::jsonb) as items,
       case when $2::boolean then coalesce((
         select jsonb_agg(jsonb_build_object('id',account.id,'label',account.label,'email',account.email,'status',account.status)
