@@ -702,7 +702,9 @@ export function cloudflareInstallationReady(installation: Awaited<ReturnType<typ
   return ORDER.every((worker) => {
     const current = installation.workers[worker]
     const checkedAt = current.lastCheckedAt ? new Date(current.lastCheckedAt).getTime() : 0
-    return current.deployed === true && current.verified === true && Boolean(current.url && current.deployedAt && current.verifiedAt) && Number.isFinite(checkedAt) && checkedAt > 0
+    // `deployedAt` and `verifiedAt` are display metadata. A successful,
+    // authenticated health check is the evidence that the Worker is live.
+    return current.deployed === true && current.verified === true && Boolean(current.url) && Number.isFinite(checkedAt) && checkedAt > 0
   })
 }
 

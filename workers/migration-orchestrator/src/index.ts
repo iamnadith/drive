@@ -957,11 +957,10 @@ async function ensureBucketVerification(db: Client, migration: Row, generation: 
           and i.progress->'migrationQueue'->>'completedJobs' ~ '^[0-9]+$'
           and i.progress->'migrationQueue'->>'remainingJobs' ~ '^[0-9]+$'
           and i.progress->'migrationQueue'->>'failedJobs' ~ '^[0-9]+$'
-          and i.progress->'migrationQueue'->>'canceledJobs' ~ '^[0-9]+$'
           and (i.progress->'migrationQueue'->>'totalJobs')::bigint=(i.progress->'migrationQueue'->>'completedJobs')::bigint
           and (i.progress->'migrationQueue'->>'remainingJobs')::bigint=0
           and (i.progress->'migrationQueue'->>'failedJobs')::bigint=0
-          and (i.progress->'migrationQueue'->>'canceledJobs')::bigint=0
+          and coalesce(i.progress->'migrationQueue'->>'canceledJobs','0')='0'
           and ((i.progress->'migrationQueue'->>'totalJobs')::bigint>0 or coalesce(i.source_objects,0)=0)
         else not exists(select 1 from drive_repair_jobs j where j.migration_id=$1 and j.work_key like $2
           and j.payload->'itemIds'->>0=i.id::text and j.status<>'completed') end as ready
@@ -992,11 +991,10 @@ async function ensureBucketVerification(db: Client, migration: Row, generation: 
         and i.progress->'migrationQueue'->>'completedJobs' ~ '^[0-9]+$'
         and i.progress->'migrationQueue'->>'remainingJobs' ~ '^[0-9]+$'
         and i.progress->'migrationQueue'->>'failedJobs' ~ '^[0-9]+$'
-        and i.progress->'migrationQueue'->>'canceledJobs' ~ '^[0-9]+$'
         and (i.progress->'migrationQueue'->>'totalJobs')::bigint=(i.progress->'migrationQueue'->>'completedJobs')::bigint
         and (i.progress->'migrationQueue'->>'remainingJobs')::bigint=0
         and (i.progress->'migrationQueue'->>'failedJobs')::bigint=0
-        and (i.progress->'migrationQueue'->>'canceledJobs')::bigint=0
+        and coalesce(i.progress->'migrationQueue'->>'canceledJobs','0')='0'
         and ((i.progress->'migrationQueue'->>'totalJobs')::bigint>0 or coalesce(i.source_objects,0)=0)
       else not exists (select 1 from drive_repair_jobs j where j.migration_id=$1 and j.work_key like $3 and j.payload->'itemIds'->>0=i.id::text and j.status<>'completed') end
       and not exists (select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$2)

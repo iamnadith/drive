@@ -83,6 +83,14 @@ test('one unfinished bucket cannot prevent finished buckets entering verificatio
   assert.equal(queries.at(-1).sql, 'commit')
 })
 
+test('legacy completed queue projections without canceledJobs can enter verification', () => {
+  const source = orchestrator.slice(orchestrator.indexOf('async function ensureBucketVerification'), orchestrator.indexOf('async function finalizeVerifiedBuckets'))
+  assert.doesNotMatch(source, /migrationQueue'->>'canceledJobs' ~/)
+  assert.equal((source.match(/coalesce\(i\.progress->'migrationQueue'->>'canceledJobs','0'\)='0'/g) || []).length, 2)
+  const queueSync = fs.readFileSync('src/app/api/internal/migration-queue/route.ts', 'utf8')
+  assert.match(queueSync, /'canceledJobs',x\.canceled_jobs/)
+})
+
 test('worker shares quota cooldown between API calls and accepts HTML provider failures', async () => {
   const runtime = fs.readFileSync('workers/migration-worker/migration-worker.mjs', 'utf8')
   const source = 'let apiBlockedUntil = 0;\n' + runtime.slice(runtime.indexOf('async function api('), runtime.indexOf('async function heartbeat('))
