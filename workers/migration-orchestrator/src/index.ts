@@ -1199,9 +1199,6 @@ async function finalizeShards(db: Client, migration: Row, generation: number, sh
   try {
     const active = await db.query(`select id from drive_migrations where id=$1 and status in('running','verifying') for update`, [migration.id])
     if (!active.rowCount) { await db.query("commit"); return { complete: false, canceled: true, jobs } }
-    await db.query(`update drive_migration_items i set slurper_status='verifying',last_progress_at=now(),updated_at=now(),progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{stage}','"awaiting_independent_verification"'::jsonb)
-      where i.migration_id=$1 and coalesce(i.slurper_status,'')<>'worker_bucket_create_failed'
-        and not exists(select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$2 and v.status='completed')`, [migration.id, generation])
     await db.query(`update drive_migrations set status='verifying',sync_status='running',sync_message='Backend Worker verification pending',last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id])
     await db.query(`
     insert into drive_migration_verification_state(migration_item_id,migration_id,generation,status,phase)
@@ -1227,6 +1224,12 @@ async function finalizeShards(db: Client, migration: Row, generation: number, sh
       completed_at=case when drive_migration_verification_state.generation=excluded.generation then drive_migration_verification_state.completed_at else null end,
       updated_at=now()
     `, [migration.id, generation])
+    // Verification workers lock verification_state before touching the item and
+    // its scan rows. Keep finalization in the same order to avoid a v -> item
+    // foreign-key wait racing an item -> v upsert.
+    await db.query(`update drive_migration_items i set slurper_status='verifying',last_progress_at=now(),updated_at=now(),progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{stage}','"awaiting_independent_verification"'::jsonb)
+      where i.migration_id=$1 and coalesce(i.slurper_status,'')<>'worker_bucket_create_failed'
+        and not exists(select 1 from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$2 and v.status='completed')`, [migration.id, generation])
     await db.query("commit")
   } catch (error) { await db.query("rollback"); throw error }
   return { complete: true, jobs }
