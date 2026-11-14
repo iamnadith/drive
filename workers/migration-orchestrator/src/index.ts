@@ -2278,7 +2278,11 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
     await db.query("begin")
     let transactionOpen = true
     try {
-    const lock = await db.query(`select pg_try_advisory_lock(hashtext($1)) acquired`, [intentId])
+    // The intent is processed inside this transaction. A session-scoped lock
+    // survives COMMIT on pooled Hyperdrive connections and can permanently
+    // strand the intent when the connection returns to the pool. Tie the lock
+    // to this transaction so every success, retry, and rollback releases it.
+    const lock = await db.query(`select pg_try_advisory_xact_lock(hashtext($1)) acquired`, [intentId])
     if (lock.rows[0]?.acquired !== true) { await db.query("commit"); transactionOpen = false; return "awaiting_reconciliation" }
     const result = await db.query(`select r.*,a.github_repo_owner,a.github_repo_name,a.github_workflow_file,a.github_ref,a.github_token,a.status agent_status from drive_agent_runs r join drive_agents a on a.id=r.agent_id where r.id=$1 for update of r`, [intentId])
     const intent = result.rows[0]
