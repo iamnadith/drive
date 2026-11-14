@@ -591,7 +591,11 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
         'id',item.id,
         'sourceBucket',item.source_bucket,
         'targetBucket',item.target_bucket,
-        'status',coalesce(nullif(item.progress->'live'->>'status',''),item.slurper_status,'pending'),
+        'status',coalesce(
+          case when item.progress->'migrationPreparation'->>'status' in('scanning','processing')
+            and coalesce(nullif(item.progress->'migrationPreparation'->>'generation','')::int,0)=(select generation from selected_generation)
+            then item.progress->'migrationPreparation'->>'status' end,
+          nullif(item.progress->'live'->>'status',''),item.slurper_status,'unknown'),
         'totalObjects',case when item.progress->'live'->>'totalObjects' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'totalObjects')::numeric else coalesce(item.source_objects,0) end,
         'queuedObjects',case when item.progress->'live'->>'queuedObjects' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'queuedObjects')::numeric else 0 end,
         'transferredObjects',case when item.progress->'live'->>'transferredObjects' ~ '^-?[0-9]+(\\.[0-9]+)?$' then (item.progress->'live'->>'transferredObjects')::numeric else 0 end,

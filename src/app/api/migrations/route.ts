@@ -126,6 +126,10 @@ export async function POST(request: Request) {
         ? Math.max(0, Math.floor(data.verifyHashMaxBytes))
         : undefined
     const executionMode = data.executionMode === "migration_workers" ? "migration_workers" : "super_slurper"
+    if (executionMode === "migration_workers") {
+      const workerSettings = await getMigrationWorkerSettings()
+      if (!workerSettings.queueDatabaseUrl) return jsonBad("Configure the Neon migration queue database before starting a worker-pool migration", 409)
+    }
     const workerShardCount =
       typeof data.workerShardCount === "number" && Number.isFinite(data.workerShardCount)
         ? Math.max(1, Math.min(128, Math.floor(data.workerShardCount)))
@@ -152,7 +156,7 @@ export async function POST(request: Request) {
           pathPrefix,
           sourceMode: "s3",
           executionMode,
-          ...(executionMode === "migration_workers" ? { workerGeneration: 1, workerShardCount } : {}),
+          ...(executionMode === "migration_workers" ? { workerGeneration: 1, workerShardCount, workerQueueStorage: "neon" } : {}),
           verifyAfterCopy,
           verifyStrictDestination,
           verifyMode,
@@ -202,7 +206,7 @@ export async function POST(request: Request) {
         pathPrefix,
         sourceMode: "s3",
         executionMode,
-        ...(executionMode === "migration_workers" ? { workerGeneration: 1, workerShardCount } : {}),
+        ...(executionMode === "migration_workers" ? { workerGeneration: 1, workerShardCount, workerQueueStorage: "neon" } : {}),
         verifyAfterCopy,
         verifyStrictDestination,
         verifyMode,

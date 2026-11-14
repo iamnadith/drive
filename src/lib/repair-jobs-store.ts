@@ -400,7 +400,7 @@ export async function reconcileRepairJobs(input?: { jobId?: string; migrationId?
             ...(terminalStatus === "failed" ? { syncStatus: "error" as const } : { syncStatus: "ok" as const }),
             syncMessage: terminalSummary,
             lastSyncedAt: now,
-          }).catch(() => undefined)
+          }, { onlyWhileActive: true }).catch(() => undefined)
 
         }
       }

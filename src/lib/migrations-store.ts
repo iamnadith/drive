@@ -16,6 +16,11 @@ export type MigrationOptions = {
   workerGeneration?: number
   /** Number of deterministic object shards shared by the worker pool. */
   workerShardCount?: number
+  /** Durable per-file queue location; new worker-pool generations use Neon directly. */
+  workerQueueStorage?: "neon" | "aiven_legacy"
+  /** Retry only object keys proven missing or mismatched by the prior attempt. */
+  workerRetryFailedObjectsOnly?: boolean
+  workerRetryObjectKeysByItem?: Record<string, string[]>
   /** GitHub workers enrolled in this pool; the autonomous orchestrator keeps them running. */
   workerAgentIds?: string[]
   /** Automatic repair generations started after independent verification finds drift. */
@@ -823,7 +828,8 @@ export async function updateMigration(
     // Allow explicit null to clear DB fields.
     startedAt?: string | null
     completedAt?: string | null
-  }
+  },
+  options: { onlyWhileActive?: boolean } = {},
 ): Promise<DriveMigration> {
   const dbUpdates: Record<string, unknown> = { updated_at: new Date().toISOString() }
   if (updates.status !== undefined) dbUpdates.status = updates.status
@@ -839,7 +845,7 @@ export async function updateMigration(
     return `${column} = $${index + 2}${column === "options" ? "::jsonb" : ""}`
   })
   const { rows } = await queryDb<DriveMigrationRow>(
-    `update public.${MIGRATIONS_TABLE} set ${assignments.join(", ")} where id = $1 returning *`,
+    `update public.${MIGRATIONS_TABLE} set ${assignments.join(", ")} where id = $1${options.onlyWhileActive ? " and status in ('running', 'verifying')" : ""} returning *`,
     values
   )
   if (!rows[0]) throw new Error("Migration not found")

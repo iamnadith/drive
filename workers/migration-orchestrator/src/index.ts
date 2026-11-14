@@ -438,42 +438,78 @@ async function ensureShards(db: Client, migration: Row) {
   }
   let inventoryPending = 0
   const scansByItem = new Map<string, Row>()
+  const scanIdsByItem = new Map<string, string>()
+  const itemsNeedingScanLink: Row[] = []
   for (const item of items.rows) {
     const inventory = item.progress?.migrationInventory || {}
     const inventoryGeneration = Number(inventory.generation)
     const adoptLegacyGenerationOne = generation === 1 && inventory.generation == null
-    let scanId = inventoryGeneration === generation || adoptLegacyGenerationOne ? String(inventory.sourceScanId || "") : ""
-    if (!scanId) {
-      // Reuse an in-flight scanner task before creating one. Cron and queued
-      // wake cycles can overlap across isolates, so this keeps both paths on
-      // one inventory. Completed scans are not reused across repair generations.
-      const existing = await db.query(`select id from drive_bucket_scans where account_id=$1 and bucket_name=$2 and migration_id=$3 and migration_item_id=$4 and kind='source' and status in('pending','running') order by updated_at desc limit 1`, [migration.source_account_id, item.source_bucket, migration.id, item.id])
-      if (existing.rows[0]?.id) scanId = existing.rows[0].id
-      else {
-        const scan = await db.query(`insert into drive_bucket_scans(id,account_id,bucket_name,kind,migration_id,migration_item_id,status,updated_at) values(gen_random_uuid(),$1,$2,'source',$3,$4,'pending',now()) returning id`, [migration.source_account_id, item.source_bucket, migration.id, item.id])
-        scanId = scan.rows[0].id
-      }
-      await db.query(`update drive_migration_items set progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{migrationInventory}',$2::jsonb),slurper_status='scanning',updated_at=now() where id=$1`, [item.id, JSON.stringify({ sourceScanId: scanId, generation, status: "scanning" })])
-      item.progress = { ...(item.progress || {}), migrationInventory: { sourceScanId: scanId, generation, status: "scanning" } }
+    const currentScanId = inventoryGeneration === generation || adoptLegacyGenerationOne ? String(inventory.sourceScanId || "") : ""
+    if (currentScanId) scanIdsByItem.set(String(item.id), currentScanId)
+    else itemsNeedingScanLink.push(item)
+  }
+
+  // Create or link all bucket scans in a few set-based queries. The prior
+  // per-bucket SELECT/INSERT/UPDATE/SELECT loop could exhaust the 10 ms Worker
+  // CPU budget on a small migration and leave later buckets without scan jobs.
+  if (itemsNeedingScanLink.length) {
+    const itemIds = itemsNeedingScanLink.map((item) => String(item.id))
+    const existing = await db.query(`select distinct on(migration_item_id) migration_item_id,id
+      from drive_bucket_scans where migration_id=$1 and migration_item_id=any($2::uuid[])
+        and kind='source' and status in('pending','running')
+      order by migration_item_id,updated_at desc`, [migration.id, itemIds])
+    const existingByItem = new Map<string, string>(existing.rows.map((row) => [String(row.migration_item_id), String(row.id)] as [string, string]))
+    const newScans = itemsNeedingScanLink
+      .filter((item) => !existingByItem.has(String(item.id)))
+      .map((item) => ({ id: crypto.randomUUID(), itemId: String(item.id), bucket: String(item.source_bucket) }))
+    if (newScans.length) {
+      await db.query(`insert into drive_bucket_scans(id,account_id,bucket_name,kind,migration_id,migration_item_id,status,updated_at)
+        select p.scan_id,$1,p.bucket_name,'source',$2,p.item_id,'pending',now()
+        from unnest($3::uuid[],$4::uuid[],$5::text[]) as p(scan_id,item_id,bucket_name)
+        on conflict(id) do nothing`, [migration.source_account_id, migration.id, newScans.map((scan) => scan.id), newScans.map((scan) => scan.itemId), newScans.map((scan) => scan.bucket)])
+      for (const scan of newScans) existingByItem.set(scan.itemId, scan.id)
     }
-    const scan = (await db.query(`select status,error,objects,bytes,completed_at,attempt_count from drive_bucket_scans where id=$1`, [scanId])).rows[0]
-    if (scan?.status === "failed") {
-      const message = String(scan.error || `Source inventory failed for ${item.source_bucket}`)
-      if (isTransientWorkerError(message)) {
-        await db.query(`update drive_bucket_scans set status='pending',lease_owner=null,lease_expires_at=null,updated_at=now() where id=$1 and status='failed'`, [scanId])
-        const progress = { ...(item.progress || {}), migrationInventory: { ...(item.progress?.migrationInventory || {}), status: "retrying", lastError: message, retryAt: new Date().toISOString() }, events: appendMigrationEvent(item.progress || {}, "source_scan", "retrying", `Transient File Scanner error; resuming the saved cursor after backoff: ${message}`) }
-        await db.query(`update drive_migration_items set slurper_status='scanning',progress=$2::jsonb,last_progress_at=now(),updated_at=now() where id=$1 and exists(select 1 from drive_migrations where id=migration_id and status in('running','verifying'))`, [item.id, JSON.stringify(progress)])
+    const linkedItems = itemsNeedingScanLink.map((item) => ({ itemId: String(item.id), scanId: String(existingByItem.get(String(item.id)) || "") }))
+      .filter((entry) => entry.scanId)
+    if (linkedItems.length) {
+      await db.query(`update drive_migration_items i set
+          progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{migrationInventory}',
+            jsonb_build_object('sourceScanId',p.scan_id,'generation',$2::int,'status','scanning'),true),
+          slurper_status='scanning',last_progress_at=now(),updated_at=now()
+        from unnest($3::uuid[],$4::uuid[]) as p(item_id,scan_id)
+        where i.id=p.item_id and i.migration_id=$1`, [migration.id, generation, linkedItems.map((entry) => entry.itemId), linkedItems.map((entry) => entry.scanId)])
+      for (const entry of linkedItems) scanIdsByItem.set(entry.itemId, entry.scanId)
+    }
+  }
+  const allScanIds = [...new Set([...scanIdsByItem.values()])]
+  if (allScanIds.length) {
+    const scanRows = await db.query(`select id,status,error,objects,bytes,completed_at,attempt_count from drive_bucket_scans where id=any($1::uuid[])`, [allScanIds])
+    const scansById = new Map<string, Row>(scanRows.rows.map((row) => [String(row.id), row] as [string, Row]))
+    for (const item of items.rows) {
+      const scanId = scanIdsByItem.get(String(item.id))
+      const scan = scanId ? scansById.get(scanId) : undefined
+      if (!scan) {
         inventoryPending += 1
-        scansByItem.set(item.id, { ...scan, status: "pending" })
         continue
       }
-      const progress = { ...(item.progress || {}), migrationInventory: { ...(item.progress?.migrationInventory || {}), status: "failed", error: message, failedAt: new Date().toISOString() }, events: appendMigrationEvent(item.progress || {}, "source_scan", "failed", message) }
-      await db.query(`update drive_migration_items set slurper_status='precheck_failed',progress=$2::jsonb,last_progress_at=now(),updated_at=now() where id=$1`, [item.id, JSON.stringify(progress)])
-      await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id, `File Scanner source inventory failed for ${item.source_bucket}: ${message}`])
-      return { generation, shardCount: 0, created: 0, inventoryPending: 0, queuePending: 0, terminalFailure: true, targetBuckets }
+      if (scan.status === "failed") {
+        const message = String(scan.error || `Source inventory failed for ${item.source_bucket}`)
+        if (isTransientWorkerError(message)) {
+          await db.query(`update drive_bucket_scans set status='pending',lease_owner=null,lease_expires_at=null,updated_at=now() where id=$1 and status='failed'`, [scanId])
+          const progress = { ...(item.progress || {}), migrationInventory: { ...(item.progress?.migrationInventory || {}), status: "retrying", lastError: message, retryAt: new Date().toISOString() }, events: appendMigrationEvent(item.progress || {}, "source_scan", "retrying", `Transient File Scanner error; resuming the saved cursor after backoff: ${message}`) }
+          await db.query(`update drive_migration_items set slurper_status='scanning',progress=$2::jsonb,last_progress_at=now(),updated_at=now() where id=$1 and exists(select 1 from drive_migrations where id=migration_id and status in('running','verifying'))`, [item.id, JSON.stringify(progress)])
+          inventoryPending += 1
+          scansByItem.set(item.id, { ...scan, status: "pending" })
+          continue
+        }
+        const progress = { ...(item.progress || {}), migrationInventory: { ...(item.progress?.migrationInventory || {}), status: "failed", error: message, failedAt: new Date().toISOString() }, events: appendMigrationEvent(item.progress || {}, "source_scan", "failed", message) }
+        await db.query(`update drive_migration_items set slurper_status='precheck_failed',progress=$2::jsonb,last_progress_at=now(),updated_at=now() where id=$1`, [item.id, JSON.stringify(progress)])
+        await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id, `File Scanner source inventory failed for ${item.source_bucket}: ${message}`])
+        return { generation, shardCount: 0, created: 0, inventoryPending: 0, queuePending: 0, terminalFailure: true, targetBuckets }
+      }
+      if (scan.status !== "completed") inventoryPending += 1
+      scansByItem.set(item.id, scan)
     }
-    if (scan?.status !== "completed") inventoryPending += 1
-    scansByItem.set(item.id, scan || {})
   }
   // Mirror scanner counters on every cycle, not only at completion, so live
   // object/byte totals advance while inventory and queueing run concurrently.
@@ -486,6 +522,15 @@ async function ensureShards(db: Client, migration: Row) {
       progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{migrationInventory}',coalesce(i.progress->'migrationInventory','{}'::jsonb)||jsonb_build_object('status',s.status,'objects',s.objects,'bytes',s.bytes,'completedAt',s.completed_at))
     from drive_bucket_scans s where i.migration_id=$1 and s.id=(i.progress->'migrationInventory'->>'sourceScanId')::uuid
   `, [migration.id])
+  if (inventoryPending && opts(migration).workerQueueStorage === "neon") return { generation, shardCount: 0, created: 0, inventoryPending, queuePending: 1, terminalFailure: false, targetBuckets, queueStorage: "neon" }
+  // New worker-pool generations keep per-object jobs only in the dedicated
+  // Neon queue database. Aiven remains the owner of migration state and scan
+  // inventory, but never receives a duplicate drive_repair_jobs queue.
+  if (opts(migration).workerQueueStorage === "neon") {
+    await db.query(`update drive_migration_items set slurper_status='processing',last_progress_at=now(),updated_at=now()
+      where migration_id=$1 and coalesce(slurper_status,'') not in('worker_bucket_create_failed','precheck_failed','failed','verification_failed','completed')`, [migration.id])
+    return { generation, shardCount: 0, created: 0, inventoryPending: 0, queuePending: 0, terminalFailure: false, targetBuckets, queueStorage: "neon" }
+  }
   let created = 0
   let queueItem: Row | undefined
   let queueScan: Row | undefined
@@ -617,6 +662,38 @@ async function ensureShards(db: Client, migration: Row) {
     await db.query(`update drive_migration_items set slurper_status='completed',source_objects=0,source_bytes=0,updated_at=now() where migration_id=$1`, [migration.id])
   }
   return { generation, shardCount, created, inventoryPending: 0, queuePending: 0, targetBuckets }
+}
+
+async function updateMigrationPreparationStatuses(db: Client, migrationId: string, generation: number, queueReady: boolean) {
+  // Keep the bucket lifecycle in lockstep: a completed source scan is
+  // "processing" while the orchestrator materializes/seeds the full queue.
+  // No bucket becomes "queued" until every bucket is prepared and (when
+  // configured) the complete queue generation is durable in Neon.
+  await db.query(`update drive_migration_items i set
+      slurper_status=case
+        when $3::boolean then 'queued'
+        when coalesce(i.progress->'migrationInventory'->>'status','')='completed' then 'processing'
+        when nullif(i.progress->'migrationInventory'->>'sourceScanId','') is not null then 'scanning'
+        else coalesce(i.slurper_status,'unknown') end,
+      progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{migrationPreparation}',
+        coalesce(i.progress->'migrationPreparation','{}'::jsonb)||jsonb_build_object(
+          'generation',$2::int,
+          'status',case when $3::boolean then 'queued'
+            when coalesce(i.progress->'migrationInventory'->>'status','')='completed' then 'processing'
+            when nullif(i.progress->'migrationInventory'->>'sourceScanId','') is not null then 'scanning'
+            else 'unknown' end,
+          'updatedAt',now()),true),
+      last_progress_at=now(),updated_at=now()
+    where i.migration_id=$1
+      and coalesce(i.slurper_status,'') not in('completed','failed','aborted','precheck_failed','verification_failed','worker_bucket_create_failed')
+      and exists(select 1 from drive_migrations m where m.id=i.migration_id and m.status in('running','verifying'))
+      and (
+        ($3::boolean and (
+          coalesce(i.progress->'migrationPreparation'->>'generation','')<>$2::text
+          or coalesce(i.progress->'migrationPreparation'->>'status','') in('unknown','scanning','processing')
+        ))
+        or (not $3::boolean and coalesce(i.progress->'migrationPreparation'->>'status','')<>'queued')
+      )`, [migrationId, generation, queueReady])
 }
 
 async function refreshMigrationSnapshot(db: Client, migrationId: string) {
@@ -1175,16 +1252,19 @@ async function finalizeShards(db: Client, migration: Row, generation: number, sh
   const queueProjection = await db.query(`select snapshot from drive_migration_worker_live_state where migration_id=$1 limit 1`, [migration.id])
   const projection = queueProjection.rows[0]?.snapshot
   const directQueue = projection && Number(projection.workerGeneration) === generation && Number(projection.totalJobs) > 0
+  const neonOnlyQueue = opts(migration).workerQueueStorage === "neon"
   let jobs: Row
   if (directQueue) {
     jobs = { completed: Number(projection.completedJobs || 0), failed: Number(projection.failedJobs || 0), canceled: Number(projection.canceledJobs || 0), remaining: Number(projection.remainingJobs || 0), total: Number(projection.totalJobs || 0) }
+  } else if (neonOnlyQueue) {
+    jobs = { completed: 0, failed: 0, canceled: 0, remaining: 0, total: 0 }
   } else {
     const counts = await db.query(`select status,count(*)::int count from drive_repair_jobs where migration_id=$1 and work_key like $2 group by status`, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
     jobs = Object.fromEntries(counts.rows.map((row) => [row.status, Number(row.count)]))
   }
   const allCompleted = directQueue
     ? jobs.remaining === 0 && jobs.completed === jobs.total
-    : jobs.completed === shardCount
+    : neonOnlyQueue ? jobs.total === 0 : jobs.completed === shardCount
   if (!allCompleted) {
     const terminal = directQueue
       ? jobs.remaining === 0
@@ -1522,6 +1602,50 @@ async function activateTargetAndCompleteMigration(db: Client, migration: Row) {
   } catch (error) { await db.query("rollback"); throw error }
   return { activated: true, backendOrchestrator: await wakeBackendOrchestrator(db) }
 }
+async function retryNeonVerificationJobs(db: Client, migrationId: string, generation: number, itemIds: string[]) {
+  const diffRows = await db.query(`select migration_item_id::text item_id,key from drive_bucket_verify_diffs
+    where migration_item_id=any($1::uuid[]) and kind in('missing','size_mismatch')`, [itemIds])
+  const keysByItem = new Map<string, string[]>()
+  for (const row of diffRows.rows) {
+    const keys = keysByItem.get(String(row.item_id)) || []
+    if (!keys.includes(String(row.key))) keys.push(String(row.key))
+    keysByItem.set(String(row.item_id), keys)
+  }
+  const itemKeyPairs = [...keysByItem.entries()].flatMap(([itemId, keys]) => keys.map((key) => ({ itemId, key })))
+  if (!itemKeyPairs.length) return 0
+  const configuration = await db.query(`select value from drive_app_settings where key='migration-workers' limit 1`)
+  const settings = configuration.rows[0]?.value || {}
+  const queueUrl = String(settings.queueDatabaseUrl || "").trim()
+  if (!queueUrl) throw new Error("Neon migration queue database is not configured for automatic failed-object retry")
+  const parsed = new URL(queueUrl)
+  const sslMode = parsed.searchParams.get("sslmode")?.toLowerCase()
+  parsed.searchParams.delete("sslmode")
+  const queue = new Client({ connectionString: parsed.toString(), ssl: settings.queueDatabaseSsl === false || sslMode === "disable" || ["localhost", "127.0.0.1"].includes(parsed.hostname) ? false : { rejectUnauthorized: false }, connectionTimeoutMillis: 8_000, keepAlive: true, application_name: "drive-migration-orchestrator-retry" })
+  await queue.connect()
+  try {
+    await queue.query("begin")
+    const requeued = await queue.query(`update drive_migration_queue_jobs q set status='pending',claimed_by=null,agent_id=null,claim_token=null,
+        lease_expires_at=null,last_heartbeat_at=null,completed_at=null,error=null,summary='Retrying objects that failed independent verification',progress='{}'::jsonb,
+        result=jsonb_set(coalesce(q.result,'{}'::jsonb),'{verificationRetryCount}',to_jsonb(case when q.result->>'verificationRetryCount' ~ '^[0-9]+$' then (q.result->>'verificationRetryCount')::int+1 else 1 end)),updated_at=now()
+      where q.migration_id=$1 and q.generation=$2 and q.status='completed'
+        and exists(select 1 from jsonb_array_elements(case when jsonb_typeof(q.payload->'items')='array' then q.payload->'items' else '[]'::jsonb end) item(value)
+          where item.value->>'id'=any($3::text[]))
+        and q.payload->'inventoryObjects'->0->>'key'=any($4::text[])
+        and exists(select 1 from jsonb_array_elements(case when jsonb_typeof(q.payload->'items')='array' then q.payload->'items' else '[]'::jsonb end) item(value)
+          join jsonb_to_recordset($5::jsonb) pair(item_id text,key text) on pair.item_id=item.value->>'id' and pair.key=q.payload->'inventoryObjects'->0->>'key')
+      returning q.id`, [migrationId, generation, itemIds, itemKeyPairs.map((pair) => pair.key), JSON.stringify(itemKeyPairs)])
+    const alreadyQueued = await queue.query(`select count(*)::int count from drive_migration_queue_jobs q
+      where q.migration_id=$1 and q.generation=$2 and q.status='pending'
+        and q.payload->'inventoryObjects'->0->>'key'=any($3::text[])
+        and exists(select 1 from jsonb_array_elements(case when jsonb_typeof(q.payload->'items')='array' then q.payload->'items' else '[]'::jsonb end) item(value)
+          join jsonb_to_recordset($4::jsonb) pair(item_id text,key text) on pair.item_id=item.value->>'id' and pair.key=q.payload->'inventoryObjects'->0->>'key')`,
+    [migrationId, generation, itemKeyPairs.map((pair) => pair.key), JSON.stringify(itemKeyPairs)])
+    await queue.query(`update drive_migration_queue_meta set status='ready',seed_complete=true,updated_at=now() where migration_id=$1 and generation=$2`, [migrationId, generation])
+    await queue.query("commit")
+    return Math.max(requeued.rowCount || 0, Number(alreadyQueued.rows[0]?.count || 0))
+  } catch (error) { await queue.query("rollback").catch(() => undefined); throw error }
+  finally { await queue.end().catch(() => undefined) }
+}
 async function finishOrRepair(db: Client, migration: Row, generation: number) {
   const active = await db.query(`select id from drive_migrations where id=$1 and status in('running','verifying')`, [migration.id])
   if (!active.rowCount) return { verification: "canceled" }
@@ -1536,6 +1660,9 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
       if (Number(snapshot.remainingJobs || 0) > 0) return { verification: "waiting_for_transfers", jobs: snapshot.remainingJobs }
       if (Number(snapshot.failedJobs || 0) > 0 || Number(snapshot.canceledJobs || 0) > 0) return { verification: "failed", reason: "queue_jobs_failed", jobs: snapshot.failedJobs }
       if (Number(snapshot.completedJobs || 0) !== Number(snapshot.totalJobs || 0)) return { verification: "waiting_for_transfers" }
+    } else if (opts(migration).workerQueueStorage === "neon") {
+      // A zero-object migration has a valid, completed Neon seed with no job
+      // rows. It proceeds to verification without consulting Aiven jobs.
     } else {
       const jobs = await db.query(`select exists(select 1 from drive_repair_jobs j where j.migration_id=$1 and j.work_key like $2 and j.status<>'completed') pending`, [migration.id, `migration:${migration.id}:generation:${generation}:inventory:%`])
       if (jobs.rows[0]?.pending === true) return { verification: "waiting_for_transfers" }
@@ -1565,8 +1692,8 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
       where i.migration_id=$1 and v.generation=$2 and v.status='completed'
         and (v.missing_objects>0 or v.mismatched_objects>0 or (v.extra_objects>0 and $3::boolean))`,
     [migration.id, generation, opts(migration).verifyStrictDestination === true])
-    const exhausted = retryable.rows.filter((row) => Number(row.retry_count || 0) >= 1)
-    const retryItems = retryable.rows.filter((row) => Number(row.retry_count || 0) < 1)
+    const exhausted = retryable.rows.filter((row) => Number(row.retry_count || 0) >= 2)
+    const retryItems = retryable.rows.filter((row) => Number(row.retry_count || 0) < 2)
     if (!retryItems.length) {
       const failedIds = retryable.rows.map((row) => row.id)
       await db.query(`update drive_migration_items i set slurper_status='failed',last_progress_at=now(),updated_at=now(),
@@ -1574,8 +1701,8 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
             coalesce(i.progress->'live','{}'::jsonb)||jsonb_build_object('status','failed','failedObjects',
               coalesce((select v.missing_objects+v.mismatched_objects from drive_migration_verification_state v where v.migration_item_id=i.id and v.generation=$2),0),'updatedAt',now()))
         where i.id=any($1::uuid[])`, [failedIds, generation])
-      await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id, `File Scanner verification still found ${missing} missing, ${mismatched} mismatched, ${extra} extra after the automatic failed-object retry`])
-      return { verification: "failed", missing, mismatched, extra, retryCount: 1 }
+      await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`, [migration.id, `File Scanner verification still found ${missing} missing, ${mismatched} mismatched, ${extra} extra after two automatic failed-object retries`])
+      return { verification: "failed", missing, mismatched, extra, retryCount: 2 }
     }
     if (exhausted.length) {
       await db.query(`update drive_migration_items i set slurper_status='failed',last_progress_at=now(),updated_at=now(),
@@ -1587,18 +1714,23 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
     const retryIds = retryItems.map((row) => row.id)
     await db.query("begin")
     try {
-      const requeued = await db.query(`update drive_repair_jobs j set status='pending',claimed_by_agent_id=null,claim_token=null,claimed_at=null,started_at=null,
-          last_heartbeat_at=null,completed_at=null,error=null,summary='Retrying objects that failed independent verification',progress='{}'::jsonb,
-          result=jsonb_set(coalesce(j.result,'{}'::jsonb),'{verificationRetryCount}',to_jsonb(coalesce((j.result->>'verificationRetryCount')::int,0)+1)),updated_at=now()
-        where j.migration_id=$1 and j.mode='migration' and j.status='completed'
-          and j.payload->'itemIds'->>0=any($2::text[])
-          and j.payload->>'workerGeneration'=$4::int::text
-          and exists(select 1 from drive_bucket_verify_diffs d join drive_migration_verification_state v on v.migration_item_id=d.migration_item_id
-            where d.migration_item_id=any($3::uuid[]) and d.migration_item_id::text=j.payload->'itemIds'->>0
-              and v.generation=$4::int and d.kind in('missing','size_mismatch')
-              and d.key=j.payload->'inventoryObjects'->0->>'key')`,
-      [migration.id, retryIds, retryIds, generation])
-      if (!requeued.rowCount) {
+      let requeuedCount = 0
+      if (opts(migration).workerQueueStorage === "neon") {
+        requeuedCount = await retryNeonVerificationJobs(db, migration.id, generation, retryIds)
+      } else {
+        const requeued = await db.query(`update drive_repair_jobs j set status='pending',claimed_by_agent_id=null,claim_token=null,claimed_at=null,started_at=null,
+            last_heartbeat_at=null,completed_at=null,error=null,summary='Retrying objects that failed independent verification',progress='{}'::jsonb,
+            result=jsonb_set(coalesce(j.result,'{}'::jsonb),'{verificationRetryCount}',to_jsonb(case when j.result->>'verificationRetryCount' ~ '^[0-9]+$' then (j.result->>'verificationRetryCount')::int+1 else 1 end)),updated_at=now()
+          where j.migration_id=$1 and j.mode='migration' and j.status='completed'
+            and j.payload->'itemIds'->>0=any($2::text[])
+            and j.payload->>'workerGeneration'=$4::int::text
+            and exists(select 1 from drive_bucket_verify_diffs d join drive_migration_verification_state v on v.migration_item_id=d.migration_item_id
+              where d.migration_item_id=any($3::uuid[]) and d.migration_item_id::text=j.payload->'itemIds'->>0
+                and v.generation=$4::int and d.kind in('missing','size_mismatch')
+                and d.key=j.payload->'inventoryObjects'->0->>'key')`, [migration.id, retryIds, retryIds, generation])
+        requeuedCount = requeued.rowCount || 0
+      }
+      if (!requeuedCount) {
         await db.query(`update drive_migration_items set slurper_status='failed',last_progress_at=now(),updated_at=now(),
             progress=jsonb_set(coalesce(progress,'{}'::jsonb),'{stage}','"verification_retry_unavailable"'::jsonb) where id=any($1::uuid[])`, [retryIds])
         await db.query(`update drive_migrations set status='failed',sync_status='failed',sync_message='File Scanner found failed objects but no matching durable worker jobs were available to retry',last_synced_at=now(),updated_at=now() where id=$1`, [migration.id])
@@ -1619,6 +1751,7 @@ async function finishOrRepair(db: Client, migration: Row, generation: number) {
       await db.query(`update drive_migrations set status='running',sync_status='running',sync_message=$2,completed_at=null,last_synced_at=now(),updated_at=now() where id=$1 and status in('running','verifying')`,
         [migration.id, `Retrying failed objects in ${retryIds.length} bucket(s); destination overwrites are disabled`])
       await db.query("commit")
+      if (opts(migration).workerQueueStorage === "neon") await refreshMigrationSnapshot(db, migration.id)
     } catch (error) { await db.query("rollback"); throw error }
     return { verification: "retrying_failed_objects", missing, mismatched, extra, retriedBuckets: retryIds.length }
   }
@@ -1664,6 +1797,124 @@ async function workerEndpointAvailable(db: Client, migrationId: string, orchestr
     options=jsonb_set(coalesce(options,'{}'::jsonb),'{workerEndpointRecoveryUntil}',to_jsonb(now()+interval '6 minutes')),updated_at=now()
     where id=$1 and status in('running','verifying') and (sync_message like 'Cloudflare Workers daily request limit reached%' or sync_message like 'Worker endpoint %')`, [migrationId])
   return true
+}
+
+async function seedMigrationQueueFromInventory(db: Client, migrationId: string, generation: number, migrationOptions: Row) {
+  const configured = await db.query(`select value from drive_app_settings where key='migration-workers' limit 1`)
+  const settings = configured.rows[0]?.value || {}
+  const queueUrl = String(settings.queueDatabaseUrl || "").trim()
+  if (!queueUrl) return { configured: false, complete: false, inserted: 0, totalJobs: 0 }
+  const parsed = new URL(queueUrl)
+  const sslMode = parsed.searchParams.get("sslmode")?.toLowerCase()
+  parsed.searchParams.delete("sslmode")
+  const queue = new Client({ connectionString: parsed.toString(), ssl: settings.queueDatabaseSsl === false || sslMode === "disable" || ["localhost", "127.0.0.1"].includes(parsed.hostname) ? false : { rejectUnauthorized: false }, connectionTimeoutMillis: 8_000, keepAlive: true, application_name: "drive-migration-orchestrator-neon-seed" })
+  await queue.connect()
+  const startedAt = Date.now()
+  try {
+    const limit = Math.max(MIN_QUEUE_BATCH_SIZE, Math.min(MAX_QUEUE_BATCH_SIZE, adaptiveQueueBatchSize))
+    await queue.query("begin")
+    await queue.query(`insert into drive_migration_queue_meta(migration_id,generation,status) values($1,$2,'seeding') on conflict(migration_id,generation) do nothing`, [migrationId, generation])
+    const meta = (await queue.query(`select seed_cursor,seed_complete,total_jobs from drive_migration_queue_meta where migration_id=$1 and generation=$2 for update`, [migrationId, generation])).rows[0]
+    if (meta.seed_complete) {
+      await queue.query("commit")
+      return { configured: true, complete: true, inserted: 0, totalJobs: Number(meta.total_jobs || 0) }
+    }
+    const migrationContext = await db.query(`select m.options,
+        s.cloudflare_account_id source_account,s.r2_access_key_id source_key,s.r2_secret_access_key source_secret,
+        t.cloudflare_account_id target_account,t.r2_access_key_id target_key,t.r2_secret_access_key target_secret
+      from drive_migrations m join drive_accounts s on s.id=m.source_account_id join drive_accounts t on t.id=m.target_account_id
+      where m.id=$1 limit 1`, [migrationId])
+    const context = migrationContext.rows[0]
+    if (!context?.source_account || !context?.target_account || !context?.source_key || !context?.source_secret || !context?.target_key || !context?.target_secret) {
+      throw new Error(`Migration ${migrationId} has incomplete R2 credentials; Neon queue seeding stopped before worker dispatch`)
+    }
+    await queue.query(`update drive_migration_queue_meta set execution_config=coalesce(execution_config,$3::jsonb),updated_at=now() where migration_id=$1 and generation=$2`, [migrationId, generation, JSON.stringify({
+      migration: { id: migrationId, options: context.options || migrationOptions || {}, pathPrefix: (context.options || migrationOptions || {}).pathPrefix || null },
+      source: { accountId: context.source_account, accessKeyId: context.source_key, secretAccessKey: context.source_secret },
+      target: { accountId: context.target_account, accessKeyId: context.target_key, secretAccessKey: context.target_secret },
+    })])
+    let cursorItem: string | null = null
+    let cursorKey: string | null = null
+    if (meta.seed_cursor) {
+      try {
+        const cursor = JSON.parse(String(meta.seed_cursor)) as { itemId?: string; key?: string }
+        cursorItem = cursor.itemId || null
+        cursorKey = cursor.key || null
+      } catch { throw new Error(`Neon queue cursor for migration ${migrationId} is invalid; refusing to skip source inventory`) }
+    }
+    const retryOnly = migrationOptions.workerRetryFailedObjectsOnly === true
+    const retryKeys = migrationOptions.workerRetryObjectKeysByItem && typeof migrationOptions.workerRetryObjectKeysByItem === "object"
+      ? migrationOptions.workerRetryObjectKeysByItem : {}
+    const pageResult = await db.query(`select i.id::text item_id,i.source_bucket,i.target_bucket,i.source_objects,i.source_bytes,
+        o.key,o.size,o.etag
+      from drive_migration_items i
+      join drive_bucket_scans s on s.id=(i.progress->'migrationInventory'->>'sourceScanId')::uuid and s.status='completed'
+      join drive_bucket_scan_objects o on o.scan_id=s.id and not o.is_dir_marker
+      where i.migration_id=$1 and coalesce(i.slurper_status,'')<>'worker_bucket_create_failed'
+        and ($2::uuid is null or (i.id,o.key)>($2::uuid,$3::text))
+        and (not $4::boolean or jsonb_typeof(($5::jsonb)->(i.id::text)) is distinct from 'array'
+          or jsonb_array_length(coalesce(($5::jsonb)->(i.id::text),'[]'::jsonb))=0
+          or exists(select 1 from jsonb_array_elements_text(($5::jsonb)->(i.id::text)) wanted(value) where wanted.value=o.key))
+      order by i.id,o.key limit $6`, [migrationId, cursorItem, cursorKey, retryOnly, JSON.stringify(retryKeys), limit + 1])
+    const page = pageResult.rows.slice(0, limit)
+    if (!page.length) {
+      if (!retryOnly) {
+        const inventory = await db.query(`select count(*)::bigint count from drive_migration_items i
+          join drive_bucket_scans s on s.id=(i.progress->'migrationInventory'->>'sourceScanId')::uuid and s.status='completed'
+          join drive_bucket_scan_objects o on o.scan_id=s.id and not o.is_dir_marker
+          where i.migration_id=$1 and coalesce(i.slurper_status,'')<>'worker_bucket_create_failed'`, [migrationId])
+        const expected = Number(inventory.rows[0]?.count || 0)
+        const queued = Number(meta.total_jobs || 0)
+        if (expected !== queued) throw new Error(`Neon queue integrity check failed: ${expected} scanned objects but ${queued} durable jobs for migration ${migrationId}`)
+      }
+      await queue.query(`update drive_migration_queue_meta set seed_complete=true,status='ready',seed_cursor=coalesce(seed_cursor,'{}'),updated_at=now() where migration_id=$1 and generation=$2`, [migrationId, generation])
+      const totalJobs = Number((await queue.query(`select total_jobs from drive_migration_queue_meta where migration_id=$1 and generation=$2`, [migrationId, generation])).rows[0]?.total_jobs || 0)
+      await queue.query("commit")
+      tuneQueueBatchSize(Date.now() - startedAt, true)
+      return { configured: true, complete: true, inserted: 0, totalJobs }
+    }
+    const queueRows = page.map((row) => {
+      const id = crypto.randomUUID()
+      return {
+        id,
+        migration_id: migrationId,
+        generation,
+        status: "pending",
+        payload: {
+          job: { id, mode: "migration", migrationId, verifyAllBuckets: true, strictCompletion: true, kind: "migration_inventory_file", progress: {} },
+          workerGeneration: generation,
+          inventoryObjects: [{ key: row.key, size: Number(row.size || 0), etag: row.etag || null }],
+          items: [{ id: row.item_id, sourceBucket: row.source_bucket, targetBucket: row.target_bucket,
+            sourceObjects: Number(row.source_objects || 0), sourceBytes: Number(row.source_bytes || 0), slurperStatus: "queued", progress: {} }],
+        },
+        progress: {}, result: {}, attempts: 0,
+      }
+    })
+    await queue.query(`insert into drive_migration_queue_jobs(id,migration_id,generation,status,payload,progress,result,attempts)
+      select x.id,x.migration_id,x.generation,x.status,x.payload,x.progress,x.result,x.attempts
+      from jsonb_to_recordset($1::jsonb) as x(id uuid,migration_id uuid,generation integer,status text,payload jsonb,progress jsonb,result jsonb,attempts integer)
+      on conflict(id) do nothing`, [JSON.stringify(queueRows)])
+    const last = page[page.length - 1]
+    const complete = pageResult.rows.length <= limit
+    const totalJobs = Number(meta.total_jobs || 0) + queueRows.length
+    if (complete && !retryOnly) {
+      const inventory = await db.query(`select count(*)::bigint count from drive_migration_items i
+        join drive_bucket_scans s on s.id=(i.progress->'migrationInventory'->>'sourceScanId')::uuid and s.status='completed'
+        join drive_bucket_scan_objects o on o.scan_id=s.id and not o.is_dir_marker
+        where i.migration_id=$1 and coalesce(i.slurper_status,'')<>'worker_bucket_create_failed'`, [migrationId])
+      const expected = Number(inventory.rows[0]?.count || 0)
+      if (expected !== totalJobs) throw new Error(`Neon queue integrity check failed: ${expected} scanned objects but ${totalJobs} durable jobs for migration ${migrationId}`)
+    }
+    await queue.query(`update drive_migration_queue_meta set seed_cursor=$3,seed_complete=$4,status=case when $4 then 'ready' else 'seeding' end,
+      total_jobs=$5,updated_at=now() where migration_id=$1 and generation=$2`, [migrationId, generation, JSON.stringify({ itemId: last.item_id, key: last.key }), complete, totalJobs])
+    await queue.query("commit")
+    tuneQueueBatchSize(Date.now() - startedAt, true)
+    return { configured: true, complete, inserted: queueRows.length, totalJobs }
+  } catch (error) {
+    tuneQueueBatchSize(Number.MAX_SAFE_INTEGER, false)
+    await queue.query("rollback").catch(() => undefined)
+    throw error
+  } finally { await queue.end().catch(() => undefined) }
 }
 
 async function seedMigrationQueue(db: Client, migrationId: string, generation: number) {
@@ -3093,21 +3344,59 @@ async function cycle(env: Env) {
         await db.query(`update drive_migrations set sync_status='running',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status='running'`, [migration.id, syncMessage])
       }
       const queueConfiguration = await db.query(`select value->>'queueDatabaseUrl' queue_url from drive_app_settings where key='migration-workers' limit 1`)
+      const neonOnlyQueue = opts(migration).workerQueueStorage === "neon"
       const directQueueMode = Boolean(String(queueConfiguration.rows[0]?.queue_url || "").trim())
-      let queueSeed = { configured: false, complete: false, inserted: 0 }
+      if (shards.inventoryPending && !shards.terminalFailure) {
+        // Source scans are the first runnable work in a worker-pool migration.
+        // Dispatch them before queue projection, verification bookkeeping, and
+        // settings work so a slow later stage cannot leave the migration stuck
+        // at "Scanning" without a Backend Worker.
+        await renew(db, owner)
+        const activeMigration = (await db.query(`select * from drive_migrations where id=$1 and status in('running','verifying')`, [migration.id])).rows[0]
+        await updateMigrationPreparationStatuses(db, migration.id, shards.generation, false)
+        const backendDispatch = activeMigration
+          ? await dispatchBackendWorkers(db, env, activeMigration, directQueueMode)
+          : { dispatched: 0, reason: "migration_not_active", pendingTasks: 0, pendingInventoryScans: 0, pendingVerifications: 0 }
+        await renew(db, owner)
+        return complete(db, owner, migration.id, {
+          ok: true,
+          migrationId,
+          ...shards,
+          waitingFor: "source_inventory",
+          backendDispatched: Number(backendDispatch.dispatched || 0),
+          backendDispatch,
+        })
+      }
+      let queueSeed: Row = { configured: false, complete: false, inserted: 0, totalJobs: 0 }
       let queueMirror: Row = { configured: false, complete: false, synced: 0 }
       if (directQueueMode) {
         if (!shards.inventoryPending && !shards.queuePending && !shards.terminalFailure) {
-          queueSeed = await seedMigrationQueue(db, migration.id, shards.generation)
+          queueSeed = neonOnlyQueue
+            ? await seedMigrationQueueFromInventory(db, migration.id, shards.generation, opts(migration))
+            : await seedMigrationQueue(db, migration.id, shards.generation)
           // Neon is authoritative for file queue state. Project its aggregate
           // directly into the control DB; a Vercel status-mirror request can
           // otherwise hold this orchestrator cycle before worker dispatch.
           if (queueSeed.complete) {
             await refreshMigrationSnapshot(db, migration.id)
+            if (neonOnlyQueue && Number(queueSeed.totalJobs || 0) === 0) {
+              await db.query(`update drive_migration_items i set
+                progress=jsonb_set(coalesce(i.progress,'{}'::jsonb),'{migrationQueue}',jsonb_build_object(
+                  'generation',$2::int,'status','completed','materializationStatus','completed','totalJobs',0,'completedJobs',0,'failedJobs',0,'remainingJobs',0,'updatedAt',now()),true),
+                slurper_status='queued',last_progress_at=now(),updated_at=now()
+                where i.migration_id=$1 and coalesce(i.slurper_status,'') not in('worker_bucket_create_failed','precheck_failed','failed','verification_failed')`, [migration.id, shards.generation])
+            }
             queueMirror = { configured: true, complete: true, synced: 0, source: "neon" }
           }
         }
       }
+      if (neonOnlyQueue && !queueSeed.complete && !shards.inventoryPending && !shards.terminalFailure) {
+        await db.query(`update drive_migrations set sync_status='running',sync_message=$2,last_synced_at=now(),updated_at=now() where id=$1 and status='running'`,
+          [migration.id, queueSeed.configured ? `Preparing Neon migration queue (${Number(queueSeed.totalJobs || 0)} jobs committed; resumable seeding continues)` : "Waiting for the Neon migration queue database to be configured"])
+      }
+      const queuePreparationReady = !shards.inventoryPending && !shards.queuePending
+        && !shards.terminalFailure && (!directQueueMode || queueSeed.complete)
+      await updateMigrationPreparationStatuses(db, migration.id, shards.generation, queuePreparationReady)
       await ensureBucketVerification(db, migration, shards.generation, directQueueMode)
       if (!directQueueMode) await refreshWorkerItemProgress(db, migration, shards.generation)
       await finalizeVerifiedBuckets(db, migration, shards.generation)
@@ -3119,7 +3408,7 @@ async function cycle(env: Env) {
         ? await recoverQueueFailedJobs(db, migration.id, shards.generation)
         : { configured: directQueueMode, retried: 0, activeWorkerInstances: [] as string[] }
       await renew(db, owner)
-      const finalized = shards.terminalFailure || shards.inventoryPending || shards.queuePending
+      const finalized = shards.terminalFailure || shards.inventoryPending || shards.queuePending || (neonOnlyQueue && !queueSeed.complete)
         ? { complete: false, terminalFailure: Boolean(shards.terminalFailure), jobs: {} }
         : await finalizeShards(db, migration, shards.generation, shards.shardCount)
       const verification = finalized.complete ? await finishOrRepair(db, migration, shards.generation) : { verification: "waiting_for_shards" }
@@ -3148,7 +3437,9 @@ async function cycle(env: Env) {
       // has been materialized into a durable migration job. This prevents a
       // partially scanned repair from looking like an active worker run.
       const inventoryReady = !shards.inventoryPending && !shards.queuePending && (!directQueueMode || queueSeed.complete)
-      const hasRunnableFiles = shards.shardCount > 0 || shards.created > 0
+      const hasRunnableFiles = neonOnlyQueue
+        ? Number(queueSeed.totalJobs || 0) > 0
+        : shards.shardCount > 0 || shards.created > 0
       const activeQueueWorkerInstances = Array.isArray(queueRecovery.activeWorkerInstances) ? queueRecovery.activeWorkerInstances as string[] : []
       const dispatched = current?.status === "running" && inventoryReady && hasRunnableFiles
         ? await dispatchWorkers(db, env, current, activeQueueWorkerInstances)

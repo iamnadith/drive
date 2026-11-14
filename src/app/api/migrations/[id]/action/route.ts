@@ -13,6 +13,8 @@ import { syncMigrationBucketSettings } from "@/lib/migration-settings-sync"
 import { getMigrationReadOnlyState, isPermanentAccountCommunicationFailure } from "@/lib/migration-read-only"
 import { queryDb } from "@/lib/db"
 import { getMigrationOrchestratorSettings } from "@/lib/migration-orchestrator-settings-store"
+import { getMigrationWorkerSettings } from "@/lib/migration-worker-settings-store"
+import { withMigrationQueueDatabase } from "@/lib/migration-queue-database"
 
 export const runtime = "nodejs"
 
@@ -114,7 +116,7 @@ async function reserveMigrationWorkerGeneration(migrationId: string, expectedSta
       update drive_migrations m
       set status='running',completed_at=null,sync_status='syncing',
           sync_message='Worker-pool attempt reserved; File Scanner inventory pending',
-          options=jsonb_set(coalesce(m.options,'{}'::jsonb),'{workerGeneration}',to_jsonb(greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1))+1),true),
+          options=coalesce(m.options,'{}'::jsonb)||jsonb_build_object('workerGeneration',greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1))+1,'workerQueueStorage','neon'),
           last_synced_at=now(),updated_at=now()
       where m.id=$1 and m.status=$2
         and $2=any(array['completed','failed','verification_failed','canceled','aborted']::text[])
@@ -771,20 +773,44 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       let workerRetryObjectKeysByItem: Record<string, string[]> | undefined
       if (workerMode) {
         if (!candidates.length) return NextResponse.json({ error: "No failed or incomplete buckets need a worker-pool retry" }, { status: 409 })
-        const failedObjects = await queryDb<{ item_id: string; object_key: string }>(`
-          select item_id,object_key from (
-            select i.id::text item_id,inv->>'key' object_key
-            from drive_repair_jobs j
-            join lateral jsonb_array_elements_text(coalesce(j.payload->'itemIds','[]'::jsonb)) linked(item_id) on true
-            join drive_migration_items i on i.id::text=linked.item_id and i.migration_id=j.migration_id
-            cross join lateral jsonb_array_elements(coalesce(j.payload->'inventoryObjects','[]'::jsonb)) inv
-            where j.migration_id=$1 and i.id=any($2::uuid[])
-              and (j.status='failed' or case when coalesce(j.result->'items'->0->>'failed','0') ~ '^[0-9]+$' then (j.result->'items'->0->>'failed')::int>0 else false end)
-            union
-            select d.migration_item_id::text,d.key from drive_bucket_verify_diffs d
-            where d.migration_item_id=any($2::uuid[]) and d.kind in('missing','size_mismatch')
-          ) failed_keys where nullif(object_key,'') is not null order by item_id,object_key
-        `, [id, candidates.map((item) => item.id)])
+        const failedObjects = migration.options.workerQueueStorage === "neon"
+          ? await (async () => {
+              const queueSettings = await getMigrationWorkerSettings()
+              if (!queueSettings.queueDatabaseUrl) throw new Error("Neon migration queue database is not configured; failed objects cannot be identified for retry")
+              const itemIds = candidates.map((item) => item.id)
+              const [queuedFailures, verificationFailures] = await Promise.all([
+                withMigrationQueueDatabase(queueSettings.queueDatabaseUrl, async (queue) => queue.query<{ item_id: string; object_key: string }>(`
+                select distinct item.value->>'id' item_id,inv.value->>'key' object_key
+                from drive_migration_queue_jobs j
+                cross join lateral jsonb_array_elements(case when jsonb_typeof(j.payload->'items')='array' then j.payload->'items' else '[]'::jsonb end) item(value)
+                cross join lateral jsonb_array_elements(case when jsonb_typeof(j.payload->'inventoryObjects')='array' then j.payload->'inventoryObjects' else '[]'::jsonb end) inv(value)
+                where j.migration_id=$1 and j.generation=$2 and item.value->>'id'=any($3::text[])
+                  and (j.status='failed' or case when j.result->>'failed' ~ '^[0-9]+$' then (j.result->>'failed')::int>0 else false end)
+                order by item_id,object_key`, [id, Math.max(1, Number(migration.options.workerGeneration || 1)), itemIds]), queueSettings.queueDatabaseSsl !== false),
+                queryDb<{ item_id: string; object_key: string }>(`
+                  select d.migration_item_id::text item_id,d.key object_key
+                  from drive_bucket_verify_diffs d
+                  join drive_migration_items i on i.id=d.migration_item_id
+                  where i.migration_id=$1 and d.migration_item_id=any($2::uuid[])
+                    and d.kind in('missing','size_mismatch') and nullif(d.key,'') is not null
+                  order by item_id,object_key`, [id, itemIds]),
+              ])
+              return { rows: [...queuedFailures.rows, ...verificationFailures.rows] }
+            })()
+          : await queryDb<{ item_id: string; object_key: string }>(`
+              select item_id,object_key from (
+                select i.id::text item_id,inv->>'key' object_key
+                from drive_repair_jobs j
+                join lateral jsonb_array_elements_text(coalesce(j.payload->'itemIds','[]'::jsonb)) linked(item_id) on true
+                join drive_migration_items i on i.id::text=linked.item_id and i.migration_id=j.migration_id
+                cross join lateral jsonb_array_elements(coalesce(j.payload->'inventoryObjects','[]'::jsonb)) inv
+                where j.migration_id=$1 and i.id=any($2::uuid[])
+                  and (j.status='failed' or case when coalesce(j.result->'items'->0->>'failed','0') ~ '^[0-9]+$' then (j.result->'items'->0->>'failed')::int>0 else false end)
+                union
+                select d.migration_item_id::text,d.key from drive_bucket_verify_diffs d
+                where d.migration_item_id=any($2::uuid[]) and d.kind in('missing','size_mismatch')
+              ) failed_keys where nullif(object_key,'') is not null order by item_id,object_key
+            `, [id, candidates.map((item) => item.id)])
         workerRetryObjectKeysByItem = {}
         for (const row of failedObjects.rows) {
           const keys = workerRetryObjectKeysByItem[row.item_id] || (workerRetryObjectKeysByItem[row.item_id] = [])

@@ -71,7 +71,7 @@ function normalizeBucketSnapshot(snapshot: BucketSnapshot): BucketSnapshot {
 
 function isActiveBucketDisplayStatus(value: unknown): boolean {
   const s = normalizeStatus(value)
-  return s === "scanning" || s === "queued" || s === "running" || s === "verifying" || s === "awaiting_verification" || s === "creating_job" || s === "job_id_pending"
+  return s === "scanning" || s === "processing" || s === "queued" || s === "running" || s === "verifying" || s === "awaiting_verification" || s === "creating_job" || s === "job_id_pending"
 }
 
 export function isTerminalBucketDisplayStatus(value: unknown): boolean {
@@ -83,8 +83,9 @@ export function getBucketDisplayStatusRank(value: unknown): number {
   const s = normalizeStatus(value)
   if (!s) return 0
   if (s === "scanning") return 1
-  if (s === "queued" || s === "creating_job" || s === "job_id_pending") return 2
-  if (s === "running") return 3
+  if (s === "processing") return 2
+  if (s === "queued" || s === "creating_job" || s === "job_id_pending") return 3
+  if (s === "running") return 4
   if (s === "verifying") return 4
   if (s === "awaiting_verification") return 4
   if (s === "no_files") return 5
@@ -311,6 +312,7 @@ export function getItemDisplayStatus(
   const repairDetails = repairState?.details
   const verify = readVerifyState(progress)
   const base = getItemStatus(item)
+  const preparation = isRecord(progress.migrationPreparation) ? progress.migrationPreparation : {}
   const finalMissing =
     (repairResultItem && typeof repairResultItem.finalMissing === "number" ? repairResultItem.finalMissing : 0) +
     (repairDetails && typeof repairDetails.finalMissing === "number" ? Number(repairDetails.finalMissing) : 0)
@@ -332,13 +334,14 @@ export function getItemDisplayStatus(
   if ((verify?.status === "pending" || verify?.status === "running") && (repairStage.includes("verify") || isCompletedStatus(base))) {
     return "verifying"
   }
+  if (preparation.status === "processing" && !isCompletedStatus(base)) return "processing"
   if (base === "scanning") {
     const inventory = isRecord(progress.migrationInventory) ? progress.migrationInventory : {}
     const queue = isRecord(progress.migrationQueue) ? progress.migrationQueue : {}
     const sourceScanStatus = normalizeStatus(progress.sourceScanStatus || inventory.status)
     if (sourceScanStatus === "completed") {
       const materializationStatus = normalizeStatus(queue.materializationStatus || queue.status)
-      return materializationStatus === "completed" ? "queued" : "running"
+      return materializationStatus === "completed" ? "queued" : "processing"
     }
     return "scanning"
   }
@@ -384,7 +387,31 @@ export function getMergedBucketSnapshot(
     !repairResultItem &&
     isActiveRepairWorkerStatus(repairState?.status)
   if (live && shouldUseLiveBucketState(item, live, { latestRepairJobId: options?.latestRepairJobId ?? null })) {
-    const stableLive = live
+    const stableLive = live as typeof live & {
+      workerStage?: string
+      workerGeneration?: number
+      remainingJobs?: number
+      queuedJobs?: number
+      runningJobs?: number
+      failedJobs?: number
+      canceledJobs?: number
+    }
+    const migrationQueue = isRecord(progress.migrationQueue) ? progress.migrationQueue : {}
+    const migrationInventory = isRecord(progress.migrationInventory) ? progress.migrationInventory : {}
+    const migrationPreparation = isRecord(progress.migrationPreparation) ? progress.migrationPreparation : {}
+    const liveQueueGeneration = Number(migrationQueue.generation || 0)
+    const preparationGeneration = Number(migrationPreparation.generation || 0)
+    const currentPreparationGeneration = Number(migrationInventory.generation || migrationQueue.generation || preparationGeneration)
+    const showPreparationProcessing = migrationPreparation.status === "processing"
+      && preparationGeneration > 0 && preparationGeneration === currentPreparationGeneration
+    const liveQueueIsWorking = stableLive.workerStage === "migration" && (
+      Number(stableLive.remainingJobs || 0) > 0 ||
+      Number(stableLive.queuedJobs || 0) > 0 ||
+      Number(stableLive.runningJobs || 0) > 0
+    ) && liveQueueGeneration === Number(stableLive.workerGeneration || liveQueueGeneration)
+    const liveQueueExhausted = stableLive.workerStage === "migration" &&
+      Number(stableLive.remainingJobs || 0) === 0 &&
+      (Number(stableLive.failedJobs || 0) > 0 || Number(stableLive.canceledJobs || 0) > 0)
     return normalizeBucketSnapshot({
       displayStatus:
         canceledRepairWithoutResult
@@ -393,6 +420,12 @@ export function getMergedBucketSnapshot(
             ? durableItemStatus
           : durableItemStatus === "verification_failed"
             ? "verification_failed"
+          : showPreparationProcessing
+            ? "processing"
+          : liveQueueIsWorking
+            ? stableLive.status ?? getItemDisplayStatus(item, repairResultItem, stableLive.workerStatus ?? undefined)
+          : liveQueueExhausted
+            ? Number(stableLive.failedJobs || 0) > 0 ? "failed" : "aborted"
           : persistedVerificationStatus
             ? persistedVerificationStatus
           : stableLive.status ?? getItemDisplayStatus(item, repairResultItem, stableLive.workerStatus ?? undefined),

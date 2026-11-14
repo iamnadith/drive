@@ -245,6 +245,7 @@ function statusBadge(
   if (s === "completed") return <Badge className="bg-green-600">Completed</Badge>
   if (s === "verifying") return <Badge className="bg-purple-600">Verifying</Badge>
   if (s === "scanning") return <Badge className="bg-sky-600">Scanning</Badge>
+  if (s === "processing") return <Badge className="bg-amber-600">Processing</Badge>
   if (s === "queued") return <Badge variant="secondary">Queued</Badge>
   if (s === "retrying") return <Badge className="bg-amber-600">Retrying</Badge>
   if (s === "running") return <Badge className="bg-primary text-primary-foreground">Running</Badge>
@@ -290,6 +291,7 @@ function migrationStatusBadge(status: string | undefined) {
   if (["canceled", "cancelled", "aborted"].includes(s)) return <Badge variant="secondary">Aborted</Badge>
   if (s === "draft") return <Badge variant="outline">Draft</Badge>
   if (s === "paused") return <Badge className="bg-yellow-600">Paused</Badge>
+  if (s === "processing") return <Badge className="bg-amber-600">Processing</Badge>
   if (["running", "verifying", "scanning", "queued", "creating_job", "job_id_pending"].includes(s)) return <Badge className="bg-primary text-primary-foreground">Running</Badge>
   return <Badge variant="outline">{s}</Badge>
 }
@@ -355,7 +357,14 @@ function mergeIncomingItem(prev: MigrationItem | undefined, next: MigrationItem)
       : Math.max(prevLive.verifyIssues, nextLive.verifyIssues),
   }
 
-  if (normalizeStatus(nextLive.status) === "retrying") {
+  const preparation = isRecord(nextProgress.migrationPreparation) ? nextProgress.migrationPreparation : null
+  const preparationGeneration = typeof preparation?.generation === "number" ? preparation.generation : null
+  const preparationOwnsStatus = preparation?.status === "processing"
+    && (preparationGeneration === null || nextGeneration === null || preparationGeneration === nextGeneration)
+
+  if (preparationOwnsStatus) {
+    mergedLive.status = "processing"
+  } else if (normalizeStatus(nextLive.status) === "retrying") {
     mergedLive.status = "retrying"
   } else if (isTerminalBucketDisplayStatus(prevLive.status) && !isTerminalBucketDisplayStatus(nextLive.status) && nextLive.awaitingVerification !== true) {
     mergedLive.status = prevLive.status
