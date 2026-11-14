@@ -1778,10 +1778,12 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
   // five-minute quota cooldown when the public endpoint first recovers.
   const recovery = await db.query(`select options->>'workerEndpointRecoveryUntil' recovery_until from drive_migrations where id=$1`, [migration.id])
   const endpointRecoveryGrace = Date.parse(String(recovery.rows[0]?.recovery_until || "")) > Date.now()
-  const budget = integer(orchestration.maxDispatchesPerCycle, 100, 1, 100)
-  const stranded = await db.query(`select id from drive_agent_runs where run_type='github_dispatch' and status='pending' and payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2 and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit $3`, [migration.id, generation, budget])
+  // Each registered GitHub workflow can consume several external subrequests
+  // (lookup, code sync, and dispatch). Keep one cron cycle below the free-plan
+  // limit; the durable intents continue on the next minute.
+  const budget = Math.min(2, integer(orchestration.maxDispatchesPerCycle, 100, 1, 100))
   let queued = 0
-  const dispatchIntents: string[] = stranded.rows.map((row) => String(row.id))
+  const dispatchIntents: string[] = []
   // Every registered GitHub workflow contributes its configured capacity to
   // every active worker-pool migration. Re-read this set on every cycle so a
   // workflow registered mid-migration joins automatically.
@@ -1789,6 +1791,7 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
   const githubRunsByWorkflow = new Map<string, Row[]>()
   const activeByWorkflow = new Map<string, Set<string>>()
   const blockedWorkflows = new Set<string>()
+  let exactRunLookups = 0
   for (const agent of agents.rows) {
     const account = String(agent.github_repo_owner).toLowerCase()
     const workflowKey = `${account}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
@@ -1822,14 +1825,17 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
     const workflowKey = `${account}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
     if (blockedWorkflows.has(workflowKey)) continue
     const remoteRuns = githubRunsByWorkflow.get(workflowKey) || []
-    const trackedRuns = await db.query(`select id,payload,external_run_id,created_at,updated_at from drive_agent_runs where agent_id=$1 and run_type='github_dispatch' and status in('pending','running') and payload->>'migrationId'=$2 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$3`, [agent.id, migration.id, generation])
+    const trackedRuns = await db.query(`select id,status,payload,external_run_id,created_at,updated_at from drive_agent_runs where agent_id=$1 and run_type='github_dispatch' and (status in('pending','running') or (status='failed' and payload->>'workerInstanceId'=any($4::text[]))) and payload->>'migrationId'=$2 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$3`, [agent.id, migration.id, generation, activeQueueWorkerInstances])
     let agentOccupancy = 0
+    const undispatchedIntentIds: string[] = []
+    const matchedRemoteRunIds = new Set<string>()
     for (const tracked of trackedRuns.rows) {
       const instanceId = String(tracked.payload?.workerInstanceId || "")
       let remote = remoteRuns.find((run) => (tracked.external_run_id && String(run.id) === String(tracked.external_run_id)) || (instanceId && String(run.display_title || "").includes(instanceId)))
       // The workflow listing is bounded and can briefly omit a known run. Ask
       // GitHub for that exact run before deciding whether its slot is free.
-      if (!remote && tracked.external_run_id) {
+      if (!remote && tracked.external_run_id && exactRunLookups < 3) {
+        exactRunLookups += 1
         const lookup = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/runs/${encodeURIComponent(String(tracked.external_run_id))}`, { headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" }, signal: AbortSignal.timeout(10_000) }).catch(() => null)
         if (lookup?.ok) {
           remote = await lookup.json().catch(() => undefined) as Row | undefined
@@ -1848,12 +1854,28 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
         activeByWorkflow.get(workflowKey)?.delete(String(remote.id || tracked.external_run_id || ""))
         continue
       }
+      if (directQueueMode && activeQueueWorkerInstances.includes(instanceId)) {
+        // Queue heartbeats are authoritative. GitHub's workflow list is
+        // eventually consistent and can omit an already-running workflow.
+        // Check this before treating a missing run as dead.
+        if (tracked.status === "failed") {
+          await db.query(`update drive_agent_runs set status='running',summary='Live migration queue heartbeat recovered this GitHub worker slot',completed_at=null,updated_at=now(),payload=payload||jsonb_build_object('phase','reconciled','heartbeatRecoveredAt',now()) where id=$1 and status='failed'`, [tracked.id])
+        }
+        agentOccupancy += 1
+        continue
+      }
+      if (!remote && ["created", "queued"].includes(String(tracked.payload?.phase || "created")) && !tracked.payload?.dispatchStartedAt) {
+        // A durable intent that has never been submitted is pending work, not
+        // a dead worker. Keep it for this cycle's bounded dispatch batch.
+        undispatchedIntentIds.push(String(tracked.id))
+        continue
+      }
       if (!remote) {
         // A repository_dispatch can take a few seconds to appear in GitHub's
         // run list. This grace applies only before a run id has ever resolved;
         // known runs use their exact GitHub state above and release at once.
         const unresolvedAgeMs = Date.now() - Date.parse(String(tracked.payload?.acceptedAt || tracked.payload?.dispatchStartedAt || tracked.created_at || tracked.updated_at || ""))
-        if (Number.isFinite(unresolvedAgeMs) && unresolvedAgeMs < 60_000) {
+        if (Number.isFinite(unresolvedAgeMs) && unresolvedAgeMs < 5 * 60_000) {
           agentOccupancy += 1
           continue
         }
@@ -1862,6 +1884,7 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
         continue
       }
       const remoteStatus = String(remote?.status || "").toLowerCase()
+      if (remote?.id && ["queued", "in_progress", "waiting", "requested", "pending"].includes(remoteStatus)) matchedRemoteRunIds.add(String(remote.id))
       const remoteStartedAt = Date.parse(String(remote?.run_started_at || remote?.created_at || ""))
       const rotationDue = remoteStatus === "in_progress"
         && Number.isFinite(remoteStartedAt)
@@ -1874,13 +1897,6 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
             await db.query(`update drive_agent_runs set summary='Worker runtime window reached; GitHub cancellation requested before replacement',payload=payload||$2::jsonb,updated_at=now() where id=$1 and status in('pending','running')`, [tracked.id, JSON.stringify({ rotationRequestedAt: new Date().toISOString(), rotationReason: "github_runtime_window" })])
           }
         }
-        continue
-      }
-      // Direct-Neon workers heartbeat in the queue database, not in
-      // drive_agent_runs. Their queue heartbeat is the source of truth for
-      // capacity; the run row only records that GitHub accepted dispatch.
-      if (directQueueMode && activeQueueWorkerInstances.includes(instanceId)) {
-        agentOccupancy += 1
         continue
       }
       // A queued/waiting workflow has not started a worker process and cannot
@@ -1916,8 +1932,22 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
         agentOccupancy += 1
       }
     }
+    // A GitHub run may already be live even when its durable row was
+    // incorrectly failed by an older release. Count every unmatched live run
+    // against this repo's own capacity so one linked account cannot steal
+    // another account's worker slots.
+    const untrackedRemoteRuns = remoteRuns.filter((run) => run.id
+      && ["queued", "in_progress", "waiting", "requested", "pending"].includes(String(run.status || "").toLowerCase())
+      && !matchedRemoteRunIds.has(String(run.id))).length
+    agentOccupancy += untrackedRemoteRuns
     const vacancies = Math.max(0, Number(agent.worker_count || 1) - agentOccupancy)
-    for (let slot = 0; slot < vacancies && queued < budget; slot += 1) {
+    const pendingToDispatch = Math.min(vacancies, Math.max(0, budget - dispatchIntents.length), undispatchedIntentIds.length)
+    dispatchIntents.push(...undispatchedIntentIds.slice(0, pendingToDispatch))
+    const excessIntents = undispatchedIntentIds.slice(pendingToDispatch)
+    if (excessIntents.length) {
+      await db.query(`update drive_agent_runs set status='canceled',summary='Undispatched intent canceled; linked repository is at worker capacity',completed_at=now(),updated_at=now(),payload=payload||jsonb_build_object('phase','canceled_capacity','canceledAt',now()) where id=any($1::uuid[]) and status='pending' and coalesce(payload->>'phase','created') in('created','queued')`, [excessIntents])
+    }
+    for (let slot = pendingToDispatch; slot < vacancies && dispatchIntents.length < budget; slot += 1) {
       const workerInstanceId = crypto.randomUUID()
       const intent = await db.query(`
         insert into drive_agent_runs(id,agent_id,run_type,status,payload,summary,created_at,updated_at)
@@ -1937,7 +1967,7 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
   // minutes to fill a configured pool, while each dispatch held a database
   // transaction open across GitHub API calls. Three concurrent slots keep
   // connection pressure bounded while allowing the worker pool to start.
-  const dispatchConcurrency = 3
+  const dispatchConcurrency = 2
   for (let offset = 0; offset < dispatchIntents.length; offset += dispatchConcurrency) {
     const batch = dispatchIntents.slice(offset, offset + dispatchConcurrency)
     const outcomes = await Promise.all(batch.map(async (intentId) => {
@@ -2010,16 +2040,19 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row, dire
     from drive_agent_runs r join drive_agents a on a.id=r.agent_id
     where r.run_type='github_backend_dispatch' and r.status in('pending','running')
       and r.payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=$2
-      and a.github_token is not null`, [migration.id, generation])
+      and a.github_token is not null
+    order by r.updated_at asc limit 1`, [migration.id, generation])
   for (const run of activeRuns.rows) {
     await reconcileGitHubIntent(db, run, run).catch((error) => console.warn("Backend Worker GitHub run reconciliation deferred", run.id, error instanceof Error ? error.message : String(error)))
   }
   const stranded = await db.query(`select id from drive_agent_runs where run_type='github_backend_dispatch' and status='pending'
     and payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2
-    and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit 10`, [migration.id, generation])
+    and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit 1`, [migration.id, generation])
   let dispatched = 0
-  for (let offset = 0; offset < stranded.rows.length; offset += 3) {
-    const batch = stranded.rows.slice(offset, offset + 3)
+  let dispatchAttempts = 0
+  for (let offset = 0; offset < stranded.rows.length && dispatchAttempts < 1; offset += 1) {
+    const batch = stranded.rows.slice(offset, offset + 1)
+    dispatchAttempts += batch.length
     const outcomes = await Promise.all(batch.map(async (run) => {
       try { return await consumeDispatch(env, String(run.id), 0) }
       catch (error) {
@@ -2053,9 +2086,10 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row, dire
         and payload->>'migrationId'=$2 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$3`, [agent.id, migration.id, generation])
     const activeCount = Number(active.rows[0]?.count || 0)
     const vacancies = Math.max(0, Math.min(5, Number(agent.worker_count || 1)) - activeCount)
-    const needed = Math.min(vacancies, remainingDemand)
+    const needed = Math.min(vacancies, remainingDemand, Math.max(0, 1 - dispatchAttempts))
     remainingDemand -= needed
     for (let slot = 0; slot < needed; slot += 1) {
+      dispatchAttempts += 1
       const workerInstanceId = crypto.randomUUID()
       const intent = await db.query(`insert into drive_agent_runs(id,agent_id,run_type,status,payload,summary,created_at,updated_at)
         select gen_random_uuid(),$1,'github_backend_dispatch','pending',$2::jsonb,'Backend Worker dispatch queued',now(),now()
@@ -2090,6 +2124,8 @@ async function abortMigrationWorkers(db: Client, migrationId: string, reason: st
         or exists(select 1 from drive_migrations m where m.id::text=$1::text and m.status in('canceled','completed','aborted','failed','verification_failed'))
       )
       and a.provider='github_actions' and a.github_token is not null
+    order by r.updated_at asc
+    limit 2
   `, [migrationId])
   let canceled = 0
   const warnings: Array<{ runId: string; reason: string }> = []
@@ -2155,7 +2191,7 @@ async function reconcileCanceledWorkerRepairJobs(db: Client) {
       and exists(select 1 from drive_agent_runs r where r.run_type='github_dispatch' and r.status in('pending','running')
         and r.payload->>'migrationId'=j.migration_id::text and r.payload->>'pool'='true'
         and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=greatest(1,coalesce(nullif(m.options->>'workerGeneration','')::int,1)))
-    order by j.updated_at limit 20
+    order by j.updated_at limit 1
   `)
   const results = []
   for (const job of jobs.rows) {
@@ -2194,7 +2230,7 @@ async function reconcileOrphanedGitHubDispatches(db: Client) {
       )
     group by r.payload->>'migrationId'
     order by min(r.updated_at)
-    limit 10
+    limit 1
   `)
   const results = []
   for (const row of orphaned.rows) {
