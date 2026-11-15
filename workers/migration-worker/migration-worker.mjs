@@ -52,6 +52,7 @@ const LIVE_PROGRESS_SYNC_MS = Math.max(5_000, Number(getArg("live-progress-sync-
 const TELEMETRY_LOG_LIMIT = 100
 const TELEMETRY_FILE_EVENT_LIMIT = 100
 const MAX_OBJECTS = Math.max(1, Math.min(10_000_000, Number(getArg("max-objects", "2000000")) || 2_000_000))
+const MAX_CONCURRENT_BUCKET_TRANSFERS = 3
 const API_TIMEOUT_MS = Math.max(5_000, Number(getArg("api-timeout-ms", "30000")) || 30_000)
 const API_RETRIES = Math.max(1, Math.min(6, Number(getArg("api-retries", "3")) || 3))
 const S3_RETRIES = Math.max(1, Math.min(6, Number(getArg("s3-retries", "3")) || 3))
@@ -546,15 +547,43 @@ async function claimJob() {
     if (!MIGRATION_ID || !WORKER_INSTANCE_ID) throw new Error("Migration queue claims require migration id and worker instance id")
     await db.query("begin")
     try {
-      const meta = (await db.query(`select generation,status,seed_complete,execution_config from drive_migration_queue_meta where migration_id=$1 and ($2::int=0 or generation=$2) order by generation desc limit 1 for share`, [MIGRATION_ID, QUEUE_GENERATION])).rows[0]
+      // Serialize short claim transactions so concurrent workers see each
+      // other's bucket reservations before selecting the next bucket.
+      const meta = (await db.query(`select generation,status,seed_complete,execution_config from drive_migration_queue_meta where migration_id=$1 and ($2::int=0 or generation=$2) order by generation desc limit 1 for update`, [MIGRATION_ID, QUEUE_GENERATION])).rows[0]
       if (!meta || ["canceled", "completed", "failed", "verification_failed", "aborted", "superseded"].includes(String(meta.status))) {
         await db.query("commit")
         return { ok: true, job: null, poolComplete: true, poolStatus: meta?.status || "missing" }
       }
       QUEUE_GENERATION = Number(meta.generation)
-      const candidate = await db.query(`select id,payload,progress,result,status from drive_migration_queue_jobs
-        where migration_id=$1 and generation=$2 and (status='pending' or (status in('claimed','running') and lease_expires_at<now()))
-        order by created_at,id for update skip locked limit 1`, [MIGRATION_ID, meta.generation])
+      const activeBuckets = (await db.query(`select distinct item->>'sourceBucket' source_bucket
+        from drive_migration_queue_workers w
+        join drive_migration_queue_jobs q on q.id=w.current_job_id
+          and q.migration_id=w.migration_id and q.generation=w.generation
+        cross join lateral jsonb_array_elements(case when jsonb_typeof(q.payload->'items')='array' then q.payload->'items' else '[]'::jsonb end) item
+        where w.migration_id=$1 and w.generation=$2 and w.status='online'
+          and w.last_heartbeat_at>now()-interval '90 seconds' and q.status in('claimed','running')
+          and nullif(item->>'sourceBucket','') is not null`, [MIGRATION_ID, meta.generation])).rows
+        .map((row) => String(row.source_bucket))
+      const claimableStatus = `(q.status='pending' or (q.status in('claimed','running') and q.lease_expires_at<now()))`
+      const pendingInNewBucket = activeBuckets.length < MAX_CONCURRENT_BUCKET_TRANSFERS
+        ? await db.query(`select q.id,q.payload,q.progress,q.result,q.status
+            from drive_migration_queue_jobs q
+            cross join lateral jsonb_array_elements(case when jsonb_typeof(q.payload->'items')='array' then q.payload->'items' else '[]'::jsonb end) item
+            where q.migration_id=$1 and q.generation=$2 and ${claimableStatus}
+              and nullif(item->>'sourceBucket','') is not null
+              and not ((item->>'sourceBucket')=any($3::text[]))
+            order by q.created_at,q.id for update of q skip locked limit 1`, [MIGRATION_ID, meta.generation, activeBuckets])
+        : { rows: [] }
+      const candidate = pendingInNewBucket.rowCount
+        ? pendingInNewBucket
+        : activeBuckets.length
+          ? await db.query(`select q.id,q.payload,q.progress,q.result,q.status
+              from drive_migration_queue_jobs q
+              cross join lateral jsonb_array_elements(case when jsonb_typeof(q.payload->'items')='array' then q.payload->'items' else '[]'::jsonb end) item
+              where q.migration_id=$1 and q.generation=$2 and ${claimableStatus}
+                and (item->>'sourceBucket')=any($3::text[])
+              order by q.created_at,q.id for update of q skip locked limit 1`, [MIGRATION_ID, meta.generation, activeBuckets])
+          : { rows: [] }
       if (!candidate.rowCount) {
         const counts = await db.query(`select count(*) filter(where status in('pending','claimed','running')) remaining from drive_migration_queue_jobs where migration_id=$1 and generation=$2`, [MIGRATION_ID, meta.generation])
         const complete = meta.seed_complete === true && Number(counts.rows[0]?.remaining || 0) === 0
