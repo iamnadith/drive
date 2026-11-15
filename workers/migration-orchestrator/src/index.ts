@@ -2042,14 +2042,23 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
   // Every registered GitHub workflow contributes its configured capacity to
   // every active worker-pool migration. Re-read this set on every cycle so a
   // workflow registered mid-migration joins automatically.
-  const agents = await db.query(`select id,github_repo_owner,github_repo_name,github_workflow_file,github_ref,github_token,least(5,greatest(1,coalesce(worker_count,1))) worker_count from drive_agents where provider='github_actions' and status<>'disabled' and capabilities @> '["bulk_migrate"]'::jsonb and github_token is not null and github_repo_owner is not null and github_repo_name is not null and github_workflow_file is not null order by created_at,id`)
+  const agents = await db.query(`select id,github_repo_owner,github_repo_name,github_workflow_file,github_ref,github_token,last_error,updated_at,least(5,greatest(1,coalesce(worker_count,1))) worker_count from drive_agents where provider='github_actions' and status<>'disabled' and capabilities @> '["bulk_migrate"]'::jsonb and github_token is not null and github_repo_owner is not null and github_repo_name is not null and github_workflow_file is not null order by created_at,id`)
   const githubRunsByWorkflow = new Map<string, Row[]>()
   const activeByWorkflow = new Map<string, Set<string>>()
   const blockedWorkflows = new Set<string>()
+  const actionsDisabledAgents = new Set<string>()
   let exactRunLookups = 0
   for (const agent of agents.rows) {
     const account = String(agent.github_repo_owner).toLowerCase()
     const workflowKey = `${account}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
+    const previousError = String(agent.last_error || "")
+    const disabledSince = Date.parse(String(agent.updated_at || ""))
+    if (previousError.startsWith("GitHub Actions temporarily unavailable:")
+      && Number.isFinite(disabledSince) && Date.now() - disabledSince < 15 * 60_000) {
+      blockedWorkflows.add(workflowKey)
+      actionsDisabledAgents.add(String(agent.id))
+      continue
+    }
     if (!githubRunsByWorkflow.has(workflowKey) && !blockedWorkflows.has(workflowKey)) {
       try {
         const url = `https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/workflows/${encodeURIComponent(String(agent.github_workflow_file).split("/").pop()!)}/runs?branch=${encodeURIComponent(agent.github_ref || "main")}&per_page=100`
@@ -2078,10 +2087,32 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
     for (const run of active) if (run.id) workflowRuns.add(String(run.id))
     activeByWorkflow.set(workflowKey, workflowRuns)
   }
+  // If GitHub has platform-paused one registered fork, keep its configured
+  // capacity available through a healthy registered workflow. GitHub Free
+  // currently permits 20 concurrent standard hosted jobs; this pool remains
+  // capped at the ten workers the user configured across both registrations.
+  const fallbackAgent = agents.rows.find((agent) => {
+    const key = `${String(agent.github_repo_owner).toLowerCase()}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
+    return !blockedWorkflows.has(key)
+  })
+  const redistributedCapacity = actionsDisabledAgents.size
+    ? agents.rows.filter((agent) => actionsDisabledAgents.has(String(agent.id))).reduce((sum, agent) => sum + Number(agent.worker_count || 1), 0)
+    : 0
   for (const agent of agents.rows) {
     const account = String(agent.github_repo_owner).toLowerCase()
     const workflowKey = `${account}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
-    if (blockedWorkflows.has(workflowKey)) continue
+    if (blockedWorkflows.has(workflowKey)) {
+      if (actionsDisabledAgents.has(String(agent.id))) {
+        await db.query(`update drive_agent_runs set status='failed',completed_at=now(),
+            summary='GitHub Actions is unavailable for this repository; worker capacity reassigned to another registered workflow',
+            payload=payload||jsonb_build_object('phase','dispatch_failed','lastDispatchError','GitHub Actions is unavailable for this repository'),updated_at=now()
+          where agent_id=$1 and run_type='github_dispatch' and status='pending'
+            and external_run_id is null and payload->>'migrationId'=$2
+            and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$3
+            and coalesce(payload->>'phase','created') in('created','queued')`, [agent.id, migration.id, generation])
+      }
+      continue
+    }
     const remoteRuns = githubRunsByWorkflow.get(workflowKey) || []
     const trackedRuns = await db.query(`select id,status,payload,external_run_id,created_at,updated_at from drive_agent_runs where agent_id=$1 and run_type='github_dispatch' and (status in('pending','running') or (status='failed' and payload->>'workerInstanceId'=any($4::text[]))) and payload->>'migrationId'=$2 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$3`, [agent.id, migration.id, generation, activeQueueWorkerInstances])
     let agentOccupancy = 0
@@ -2090,6 +2121,11 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
     for (const tracked of trackedRuns.rows) {
       const instanceId = String(tracked.payload?.workerInstanceId || "")
       let remote = remoteRuns.find((run) => (tracked.external_run_id && String(run.id) === String(tracked.external_run_id)) || (instanceId && String(run.display_title || "").includes(instanceId)))
+      if (remote?.id && ["queued", "in_progress", "waiting", "requested", "pending"].includes(String(remote.status || "").toLowerCase())) {
+        // Mark the remote run as matched before heartbeat recovery continues;
+        // otherwise this exact run is counted again as an untracked slot.
+        matchedRemoteRunIds.add(String(remote.id))
+      }
       // The workflow listing is bounded and can briefly omit a known run. Ask
       // GitHub for that exact run before deciding whether its slot is free.
       if (!remote && tracked.external_run_id && exactRunLookups < 3) {
@@ -2205,7 +2241,9 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
       && ["queued", "in_progress", "waiting", "requested", "pending"].includes(String(run.status || "").toLowerCase())
       && !matchedRemoteRunIds.has(String(run.id))).length
     agentOccupancy += untrackedRemoteRuns
-    const vacancies = Math.max(0, Number(agent.worker_count || 1) - agentOccupancy)
+    const agentCapacity = Number(agent.worker_count || 1)
+      + (fallbackAgent && String(fallbackAgent.id) === String(agent.id) ? redistributedCapacity : 0)
+    const vacancies = Math.max(0, agentCapacity - agentOccupancy)
     const pendingToDispatch = Math.min(vacancies, Math.max(0, budget - dispatchIntents.length), undispatchedIntentIds.length)
     dispatchIntents.push(...undispatchedIntentIds.slice(0, pendingToDispatch))
     const excessIntents = undispatchedIntentIds.slice(pendingToDispatch)
@@ -2656,6 +2694,12 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
         `Dispatch deferred; will retry: ${safeError}`,
         JSON.stringify({ lastDispatchError: safeError, lastDispatchErrorAt: failureAt, lastDispatchAttempt: attempts }),
       ]).catch(() => undefined)
+      if (/Actions has been disabled for this repository/i.test(safeError)) {
+        await db.query(`update drive_agents set last_error=$2,updated_at=now() where id=(select agent_id from drive_agent_runs where id=$1)`, [
+          intentId,
+          `GitHub Actions temporarily unavailable: ${safeError}`,
+        ]).catch(() => undefined)
+      }
       throw error
     }
   })
