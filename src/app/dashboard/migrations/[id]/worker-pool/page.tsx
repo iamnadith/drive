@@ -29,7 +29,7 @@ type BucketStat = { id: string; sourceBucket: string; targetBucket: string; stat
 type PoolSnapshot = { workerGeneration?: number; onlineWorkers?: number; activeTransfers?: number; totalJobs?: number; queuedJobs?: number; runningJobs?: number; remainingJobs?: number; completedJobs?: number; failedJobs?: number; canceledJobs?: number; totalObjects?: number; transferred?: number; inProgressFiles?: number; skipped?: number; failed?: number; processedFiles?: number; completedBytes?: number; inProgressBytes?: number; workerRuntimeSeconds?: number; buckets?: BucketStat[]; updatedAt?: string; sampledAt?: string }
 type Pagination = { pageIndex: number; pageSize: number; pageCount: number; total: number }
 type PoolAttempt = { generation: number; status: string; workerCount: number; runningWorkers: number; onlineWorkers: number; totalJobs: number; queuedJobs: number; runningJobs: number; remainingJobs?: number; completedJobs: number; failedJobs: number; canceledJobs: number; createdAt?: string; updatedAt?: string }
-type PoolWorkerRun = { id: string; agentId: string; status: string; online: boolean; abortRequested?: boolean; externalRunId?: string; instanceId?: string; jobId?: string; currentStatus?: string; lastHeartbeatAt?: string; completedJobs?: number; failedJobs?: number; finishedJobs?: number; completedFiles?: number; failedFiles?: number; completedBytes?: number; createdAt?: string; updatedAt?: string }
+type PoolWorkerRun = { id: string; agentId: string; status: string; online: boolean; abortRequested?: boolean; externalRunId?: string; instanceId?: string; jobId?: string; currentStatus?: string; error?: string; dispatchPhase?: string; lastHeartbeatAt?: string; completedJobs?: number; failedJobs?: number; finishedJobs?: number; completedFiles?: number; failedFiles?: number; completedBytes?: number; createdAt?: string; updatedAt?: string }
 type BackendWorkerRun = { id: string; agentId: string; status: string; phase: string; workerInstanceId: string; externalRunId?: string; repository?: string; summary?: string; error?: string; createdAt?: string; updatedAt?: string }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null }
@@ -56,6 +56,7 @@ function statusBadge(status?: string) {
   if (["completed", "complete", "copied", "verified"].includes(value)) return <Badge>Completed</Badge>
   if (value === "processing") return <Badge variant="secondary">Processing</Badge>
   if (value === "dispatching") return <Badge variant="secondary">Dispatching</Badge>
+  if (value === "awaiting_github") return <Badge variant="secondary">Awaiting GitHub</Badge>
   if (value === "retrying") return <Badge className="bg-amber-600">Retrying</Badge>
   if (["running", "copying", "transferring"].includes(value)) return <Badge>Running</Badge>
   if (["scanning", "verifying"].includes(value)) return <Badge variant="secondary">{value === "scanning" ? "Scanning" : "Verifying"}</Badge>
@@ -317,7 +318,7 @@ export default function MigrationWorkerPoolDetailsPage() {
       accessorKey: "status",
       header: "Status",
       meta: { width: "min-w-[120px]", align: "center" },
-      cell: ({ row }) => <div className="flex min-h-10 items-center justify-center">{statusBadge(row.original.online ? "running" : row.original.status)}</div>,
+      cell: ({ row }) => <div className="flex min-h-10 flex-col items-center justify-center gap-1" title={row.original.error}>{statusBadge(row.original.online ? "running" : row.original.status)}{row.original.error ? <span className="max-w-[220px] truncate text-[10px] text-destructive" title={row.original.error}>{row.original.error}</span> : null}</div>,
     },
     {
       id: "heartbeat",

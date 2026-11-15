@@ -20,32 +20,43 @@ async function getDispatchedWorkers(migrationId: string, generation: number) {
   const cached = dispatchedWorkersCache.get(key)
   if (cached && cached.expiresAt > now) return cached.value
   const { rows } = await queryDb<Record<string, unknown>>(`select distinct on (r.payload->>'workerInstanceId')
-      r.id,r.agent_id,r.status,r.external_run_id,r.job_reference,r.payload,r.created_at,r.updated_at
+      r.id,r.agent_id,r.status,r.external_run_id,r.job_reference,r.payload,r.summary,r.created_at,r.updated_at
     from drive_agent_runs r
     where r.run_type='github_dispatch' and r.payload->>'migrationId'=$1
       and greatest(1,coalesce(nullif(r.payload->>'workerGeneration','')::int,1))=$2
       and nullif(r.payload->>'workerInstanceId','') is not null
       and r.created_at>now()-interval '24 hours'
     order by r.payload->>'workerInstanceId',r.created_at desc,r.updated_at desc limit 1000`, [migrationId, generation])
-  const value = rows.map((row) => ({
-    id: String(row.payload && typeof row.payload === "object" ? (row.payload as Record<string, unknown>).workerInstanceId || row.id : row.id),
-    agentId: row.agent_id,
-    status: String(row.status || "pending"),
-    online: false,
-    instanceId: String(row.payload && typeof row.payload === "object" ? (row.payload as Record<string, unknown>).workerInstanceId || "" : ""),
-    jobId: row.job_reference || undefined,
-    externalRunId: row.external_run_id || undefined,
-    currentStatus: String(row.status || "pending") === "pending" ? "dispatching" : String(row.status || "offline"),
-    lastHeartbeatAt: row.payload && typeof row.payload === "object" ? (row.payload as Record<string, unknown>).queueHeartbeatAt || (row.payload as Record<string, unknown>).workerHeartbeatAt : undefined,
-    completedJobs: 0,
-    failedJobs: 0,
-    finishedJobs: 0,
-    completedFiles: 0,
-    failedFiles: 0,
-    completedBytes: 0,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }))
+  const value = rows.map((row) => {
+    const payload = isRecord(row.payload) ? row.payload : {}
+    const status = String(row.status || "pending")
+    const phase = String(payload.phase || "created")
+    const dispatchError = typeof payload.lastDispatchError === "string" ? payload.lastDispatchError : undefined
+    const displayStatus = status === "pending"
+      ? dispatchError ? "retrying" : phase === "accepted" ? "awaiting_github" : "dispatching"
+      : status
+    return {
+      id: String(payload.workerInstanceId || row.id),
+      agentId: row.agent_id,
+      status: displayStatus,
+      online: false,
+      instanceId: String(payload.workerInstanceId || ""),
+      jobId: row.job_reference || undefined,
+      externalRunId: row.external_run_id || undefined,
+      currentStatus: displayStatus,
+      dispatchPhase: phase,
+      error: dispatchError || (status === "failed" && !row.external_run_id ? String(row.summary || "GitHub did not start this workflow") : undefined),
+      lastHeartbeatAt: payload.queueHeartbeatAt || payload.workerHeartbeatAt,
+      completedJobs: 0,
+      failedJobs: 0,
+      finishedJobs: 0,
+      completedFiles: 0,
+      failedFiles: 0,
+      completedBytes: 0,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }
+  })
   dispatchedWorkersCache.set(key, { expiresAt: now + 20_000, value })
   if (dispatchedWorkersCache.size > 100) {
     for (const [cacheKey, entry] of dispatchedWorkersCache) if (entry.expiresAt <= now) dispatchedWorkersCache.delete(cacheKey)
@@ -287,7 +298,14 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       try { dispatchedWorkers = await getDispatchedWorkers(id, generation) }
       catch (error) { console.error("Migration worker dispatch projection failed", error instanceof Error ? error.message : String(error)) }
       const selectedPool = queueAttempts.find((attempt) => attempt.generation === generation)
-      if (selectedPool) selectedPool.workerCount = Math.max(selectedPool.workerCount, dispatchedWorkers.length)
+      // Worker counts come from Neon heartbeats and confirmed GitHub run IDs.
+      // Pending/failed dispatch intents remain visible in history without
+      // inflating the number of workers actually dispatched.
+      if (selectedPool) selectedPool.workerCount = Math.max(
+        selectedPool.workerCount,
+        workerRuns.length,
+        dispatchedWorkers.filter((worker) => Boolean(worker.externalRunId)).length,
+      )
       const queueWorkerIds = new Set(workerRuns.map((worker) => worker.instanceId))
       for (const dispatched of dispatchedWorkers) {
         if (!queueWorkerIds.has(dispatched.instanceId)) workerRuns.push(dispatched)

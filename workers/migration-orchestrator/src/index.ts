@@ -7,7 +7,7 @@ type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; M
 // Database rows are dynamically shaped by the PostgreSQL queries below.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-const BUILD = 52
+const BUILD = 53
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -2032,10 +2032,11 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
   // five-minute quota cooldown when the public endpoint first recovers.
   const recovery = await db.query(`select options->>'workerEndpointRecoveryUntil' recovery_until from drive_migrations where id=$1`, [migration.id])
   const endpointRecoveryGrace = Date.parse(String(recovery.rows[0]?.recovery_until || "")) > Date.now()
-  // Each registered GitHub workflow can consume several external subrequests
-  // (lookup, code sync, and dispatch). Keep one cron cycle below the free-plan
-  // limit; the durable intents continue on the next minute.
-  const budget = Math.min(2, integer(orchestration.maxDispatchesPerCycle, 100, 1, 100))
+  // Respect the configured dispatch budget, up to the supported ten-worker
+  // pool. Dispatches are still sent in small concurrent batches below so a
+  // migration with several registered repositories can fill its pool in this
+  // cycle without creating an unbounded GitHub/API or database burst.
+  const budget = Math.min(10, integer(orchestration.maxDispatchesPerCycle, 10, 1, 10))
   let queued = 0
   const dispatchIntents: string[] = []
   // Every registered GitHub workflow contributes its configured capacity to
@@ -2578,8 +2579,14 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
       }
     }
     if (intent.agent_status === "disabled" || !intent.github_token) throw new Error("Registered workflow is disabled or missing its GitHub token")
-    if (await reconcileGitHubIntent(db, intent, intent)) { await db.query("commit"); transactionOpen = false; return "reconciled" }
     const phase = String(intent.payload?.phase || "created")
+    // A freshly created intent has never been submitted to GitHub. Looking up
+    // its run first only adds API calls and can block a valid dispatch when
+    // run-list reconciliation is throttled or temporarily unavailable.
+    if (!["created", "queued"].includes(phase)
+      && await reconcileGitHubIntent(db, intent, intent)) {
+      await db.query("commit"); transactionOpen = false; return "reconciled"
+    }
     const dispatchStartedAt = Date.parse(String(intent.payload?.dispatchStartedAt || ""))
     const acceptedAt = Date.parse(String(intent.payload?.acceptedAt || intent.payload?.dispatchStartedAt || intent.updated_at || ""))
     const acceptedDispatchStillInGrace = phase === "accepted" && Number.isFinite(acceptedAt) && Date.now() - acceptedAt < 5 * 60_000
@@ -2614,6 +2621,26 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
     return "accepted"
     } catch (error) {
       if (transactionOpen) await db.query("rollback").catch(() => undefined)
+      // Dispatch and repository-sync failures must survive the transaction
+      // rollback. Keep the intent pending and retryable, but expose the last
+      // cause so a broken GitHub registration cannot look like a worker that
+      // is simply waiting in the Actions queue forever.
+      const rawError = error instanceof Error ? error.message : String(error)
+      const safeError = rawError
+        .replace(/postgres(?:ql)?:\/\/[^\s]+/gi, "[database URL redacted]")
+        .replace(/(authorization|token|secret|password)(\s*[:=]\s*)[^\s,;]+/gi, "$1$2[redacted]")
+        .slice(0, 500)
+      const failureAt = new Date().toISOString()
+      await db.query(`update drive_agent_runs set
+          summary=$2,
+          payload=payload||$3::jsonb,
+          updated_at=now()
+        where id=$1 and status='pending'
+          and coalesce(payload->>'phase','created') not in('accepted','reconciled')`, [
+        intentId,
+        `Dispatch deferred; will retry: ${safeError}`,
+        JSON.stringify({ lastDispatchError: safeError, lastDispatchErrorAt: failureAt, lastDispatchAttempt: attempts }),
+      ]).catch(() => undefined)
       throw error
     }
   })

@@ -1,13 +1,37 @@
-import { Client } from "pg"
+import { createHash } from "node:crypto"
+import { Client, Pool } from "pg"
 import { readMigrationQueueLiveProjectionFromClient } from "./migration-queue-projection"
 export { readMigrationQueueLiveProjectionFromClient } from "./migration-queue-projection"
 
+type QueuePoolRegistry = typeof globalThis & { __driveMigrationQueuePools?: Map<string, Pool> }
+
+function migrationQueuePool(url: string, ssl: boolean) {
+  const normalized = new URL(url)
+  normalized.searchParams.delete("sslmode")
+  const key = createHash("sha256").update(`${normalized.toString()}\n${ssl ? "ssl" : "no-ssl"}`).digest("hex")
+  const registry = globalThis as QueuePoolRegistry
+  registry.__driveMigrationQueuePools ??= new Map<string, Pool>()
+  let pool = registry.__driveMigrationQueuePools.get(key)
+  if (!pool) {
+    pool = new Pool({
+      connectionString: normalized.toString(),
+      ssl: ssl ? true : false,
+      keepAlive: true,
+      connectionTimeoutMillis: 15_000,
+      idleTimeoutMillis: 5_000,
+      max: 1,
+      allowExitOnIdle: true,
+      application_name: "drive-migration-queue-control",
+    })
+    pool.on("error", (error) => console.error("Migration queue database pool error", "code" in error ? error.code : error.name || "unknown"))
+    registry.__driveMigrationQueuePools.set(key, pool)
+  }
+  return pool
+}
+
 export async function withMigrationQueueDatabase<T>(url: string, operation: (db: Client) => Promise<T>, ssl = true): Promise<T> {
-  const connectionString = new URL(url)
-  connectionString.searchParams.delete("sslmode")
-  const client = new Client({ connectionString: connectionString.toString(), ssl: ssl ? true : false, connectionTimeoutMillis: 15_000, keepAlive: true, application_name: "drive-migration-queue-control" })
-  await client.connect()
-  try { return await operation(client) } finally { await client.end().catch(() => undefined) }
+  const client = await migrationQueuePool(url, ssl).connect()
+  try { return await operation(client as unknown as Client) } finally { client.release() }
 }
 
 export async function deleteMigrationQueueData(url: string, migrationId: string, ssl = true) {
