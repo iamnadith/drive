@@ -7,7 +7,7 @@ type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; M
 // Database rows are dynamically shaped by the PostgreSQL queries below.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-const BUILD = 53
+const BUILD = 54
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -2125,6 +2125,13 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
       if (!remote && ["created", "queued"].includes(String(tracked.payload?.phase || "created")) && !tracked.payload?.dispatchStartedAt) {
         // A durable intent that has never been submitted is pending work, not
         // a dead worker. Keep it for this cycle's bounded dispatch batch.
+        const queueEnqueuedAt = Date.parse(String(tracked.payload?.queueEnqueuedAt || ""))
+        if (String(tracked.payload?.phase || "created") === "queued"
+          && Number.isFinite(queueEnqueuedAt)
+          && Date.now() - queueEnqueuedAt < 90_000) {
+          agentOccupancy += 1
+          continue
+        }
         undispatchedIntentIds.push(String(tracked.id))
         continue
       }
@@ -2221,22 +2228,26 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
       dispatchIntents.push(String(intent.rows[0].id))
     }
   }
-  // Dispatch in small concurrent batches. The old serial loop could take
-  // minutes to fill a configured pool, while each dispatch held a database
-  // transaction open across GitHub API calls. Three concurrent slots keep
-  // connection pressure bounded while allowing the worker pool to start.
-  const dispatchConcurrency = 2
-  for (let offset = 0; offset < dispatchIntents.length; offset += dispatchConcurrency) {
-    const batch = dispatchIntents.slice(offset, offset + dispatchConcurrency)
-    const outcomes = await Promise.all(batch.map(async (intentId) => {
-      try {
-        return await consumeDispatch(env, intentId, 0)
-      } catch (error) {
-        console.error("New durable GitHub dispatch intent deferred", intentId, error instanceof Error ? error.message : String(error))
-        return "deferred"
-      }
-    }))
-    queued += outcomes.filter((outcome) => ["accepted", "awaiting_reconciliation", "reconciled"].includes(outcome)).length
+  // Each GitHub dispatch performs code sync, reconciliation, and API calls.
+  // Run one intent per Queue invocation so a ten-worker pool cannot exhaust
+  // the Cloudflare subrequest budget inside a single cron invocation. This is
+  // only the small dispatch-control queue; file jobs stay in Neon.
+  if (dispatchIntents.length) {
+    await db.query(`update drive_agent_runs set
+        payload=payload||jsonb_build_object('phase','queued','queueEnqueuedAt',now()),
+        summary='Durable GitHub dispatch intent queued for isolated worker invocation',updated_at=now()
+      where id=any($1::uuid[]) and status='pending' and coalesce(payload->>'phase','created') in('created','queued')`, [dispatchIntents])
+    try {
+      await env.GITHUB_DISPATCH_QUEUE.sendBatch(dispatchIntents.map((intentId) => ({ body: { intentId } })))
+      queued = dispatchIntents.length
+    } catch (error) {
+      const rawError = error instanceof Error ? error.message : String(error)
+      const safeError = rawError.replace(/postgres(?:ql)?:\/\/[^\s]+/gi, "[database URL redacted]").slice(0, 400)
+      await db.query(`update drive_agent_runs set payload=(payload-'queueEnqueuedAt')||jsonb_build_object('phase','created','lastDispatchError',$2::text,'lastDispatchErrorAt',now()),
+        summary=$3,updated_at=now() where id=any($1::uuid[]) and status='pending'`,
+        [dispatchIntents, safeError, `Dispatch queue deferred; will retry: ${safeError}`])
+      throw error
+    }
   }
   return queued
 }
@@ -2615,7 +2626,11 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
         ? { ref: codeSync.defaultBranch, inputs: dispatchPayload }
         : { event_type: "drive-migration-worker", client_payload: { ...dispatchPayload, worker_generation: intent.payload.workerGeneration, max_runtime_seconds: GITHUB_WORKER_MAX_RUNTIME_SECONDS } }), signal: AbortSignal.timeout(20_000),
     })
-    if (!response.ok) throw new Error(`GitHub dispatch HTTP ${response.status}`)
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({})) as Row
+      const detail = typeof failure.message === "string" ? failure.message.replace(/(authorization|token|secret|password)(\s*[:=]\s*)[^\s,;]+/gi, "$1$2[redacted]").slice(0, 300) : ""
+      throw new Error(`GitHub dispatch HTTP ${response.status}${detail ? `: ${detail}` : ""}`)
+    }
     await db.query(`update drive_agent_runs set payload=payload||$2::jsonb,summary='GitHub accepted workflow dispatch; awaiting run reconciliation',updated_at=now() where id=$1`, [intent.id, JSON.stringify({ phase: "accepted", acceptedAt: new Date().toISOString() })])
     await db.query("commit"); transactionOpen = false
     return "accepted"
