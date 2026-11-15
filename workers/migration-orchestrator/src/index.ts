@@ -7,7 +7,7 @@ type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; M
 // Database rows are dynamically shaped by the PostgreSQL queries below.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-const BUILD = 50
+const BUILD = 51
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -2301,7 +2301,9 @@ async function dispatchBackendWorkers(db: Client, env: Env, migration: Row, dire
   }
   const stranded = await db.query(`select id from drive_agent_runs where run_type='github_backend_dispatch' and status='pending'
     and payload->>'migrationId'=$1 and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$2
-    and coalesce(payload->>'phase','created') in('created','queued') order by created_at limit 1`, [migration.id, generation])
+    and (coalesce(payload->>'phase','created') in('created','queued')
+      or (payload->>'phase' in('accepted','dispatching') and updated_at<=now()-interval '5 minutes'))
+    order by created_at limit 1`, [migration.id, generation])
   let dispatched = 0
   let dispatchAttempts = 0
   for (let offset = 0; offset < stranded.rows.length && dispatchAttempts < 1; offset += 1) {
