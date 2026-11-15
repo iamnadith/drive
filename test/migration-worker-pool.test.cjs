@@ -209,6 +209,15 @@ test('orchestrator reconciles GitHub worker runs whose migration is deleted or t
   assert.match(orchestrator, /idle: true, canceledWorkerJobs, orphanedWorkerRuns/)
 })
 
+test('accepted GitHub dispatches are retried when no workflow run appears', () => {
+  const orchestrator = read('workers/migration-orchestrator/src/index.ts')
+  const consume = orchestrator.slice(orchestrator.indexOf('async function consumeDispatch'), orchestrator.indexOf('async function wakeFileScanner'))
+  assert.match(consume, /const acceptedAt = Date\.parse\(String\(intent\.payload\?\.acceptedAt \|\| intent\.payload\?\.dispatchStartedAt \|\| intent\.updated_at/)
+  assert.match(consume, /phase === "accepted" && Number\.isFinite\(acceptedAt\) && Date\.now\(\) - acceptedAt < 5 \* 60_000/)
+  assert.match(consume, /if \(acceptedDispatchStillInGrace \|\| dispatchStillInFlight\)/)
+  assert.doesNotMatch(consume, /if \(phase === "accepted" \|\|/)
+})
+
 test('GitHub cancellation compares migration ids consistently as text', () => {
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   const abort = orchestrator.slice(orchestrator.indexOf('async function abortMigrationWorkers'), orchestrator.indexOf('async function reconcileCanceledWorkerRepairJobs'))

@@ -7,7 +7,7 @@ type Env = { POSTGRES_URL?: string; HYPERDRIVE?: { connectionString: string }; M
 // Database rows are dynamically shaped by the PostgreSQL queries below.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>
-const BUILD = 49
+const BUILD = 50
 const MIN_QUEUE_BATCH_SIZE = 500
 const DEFAULT_QUEUE_BATCH_SIZE = 2_000
 const MAX_QUEUE_BATCH_SIZE = 4_000
@@ -2571,7 +2571,10 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
     if (await reconcileGitHubIntent(db, intent, intent)) { await db.query("commit"); transactionOpen = false; return "reconciled" }
     const phase = String(intent.payload?.phase || "created")
     const dispatchStartedAt = Date.parse(String(intent.payload?.dispatchStartedAt || ""))
-    if (phase === "accepted" || (phase === "dispatching" && Number.isFinite(dispatchStartedAt) && Date.now() - dispatchStartedAt < 5 * 60_000)) { await db.query("commit"); transactionOpen = false; return "awaiting_reconciliation" }
+    const acceptedAt = Date.parse(String(intent.payload?.acceptedAt || intent.payload?.dispatchStartedAt || intent.updated_at || ""))
+    const acceptedDispatchStillInGrace = phase === "accepted" && Number.isFinite(acceptedAt) && Date.now() - acceptedAt < 5 * 60_000
+    const dispatchStillInFlight = phase === "dispatching" && Number.isFinite(dispatchStartedAt) && Date.now() - dispatchStartedAt < 5 * 60_000
+    if (acceptedDispatchStillInGrace || dispatchStillInFlight) { await db.query("commit"); transactionOpen = false; return "awaiting_reconciliation" }
     if (endpointConfiguration && !(await workerEndpointAvailable(db, String(intent.payload.migrationId), endpointConfiguration))) {
       await db.query(`update drive_agent_runs set status='failed',summary='Worker endpoint unavailable; dispatch deferred until recovery',completed_at=now(),updated_at=now() where id=$1 and status='pending'`, [intent.id])
       await db.query("commit"); transactionOpen = false
