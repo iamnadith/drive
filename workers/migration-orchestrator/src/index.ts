@@ -2087,24 +2087,16 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
     for (const run of active) if (run.id) workflowRuns.add(String(run.id))
     activeByWorkflow.set(workflowKey, workflowRuns)
   }
-  // If GitHub has platform-paused one registered fork, keep its configured
-  // capacity available through a healthy registered workflow. GitHub Free
-  // currently permits 20 concurrent standard hosted jobs; this pool remains
-  // capped at the ten workers the user configured across both registrations.
-  const fallbackAgent = agents.rows.find((agent) => {
-    const key = `${String(agent.github_repo_owner).toLowerCase()}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
-    return !blockedWorkflows.has(key)
-  })
-  const redistributedCapacity = actionsDisabledAgents.size
-    ? agents.rows.filter((agent) => actionsDisabledAgents.has(String(agent.id))).reduce((sum, agent) => sum + Number(agent.worker_count || 1), 0)
-    : 0
+  // Capacity belongs to each registered workflow. Never transfer the slots
+  // of a disabled/unavailable workflow to another GitHub account or repo;
+  // doing so silently exceeds that registration's configured worker_count.
   for (const agent of agents.rows) {
     const account = String(agent.github_repo_owner).toLowerCase()
     const workflowKey = `${account}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
     if (blockedWorkflows.has(workflowKey)) {
       if (actionsDisabledAgents.has(String(agent.id))) {
         await db.query(`update drive_agent_runs set status='failed',completed_at=now(),
-            summary='GitHub Actions is unavailable for this repository; worker capacity reassigned to another registered workflow',
+            summary='GitHub Actions is unavailable for this repository; its configured worker capacity remains unavailable',
             payload=payload||jsonb_build_object('phase','dispatch_failed','lastDispatchError','GitHub Actions is unavailable for this repository'),updated_at=now()
           where agent_id=$1 and run_type='github_dispatch' and status='pending'
             and external_run_id is null and payload->>'migrationId'=$2
@@ -2241,8 +2233,7 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
       && ["queued", "in_progress", "waiting", "requested", "pending"].includes(String(run.status || "").toLowerCase())
       && !matchedRemoteRunIds.has(String(run.id))).length
     agentOccupancy += untrackedRemoteRuns
-    const agentCapacity = Number(agent.worker_count || 1)
-      + (fallbackAgent && String(fallbackAgent.id) === String(agent.id) ? redistributedCapacity : 0)
+    const agentCapacity = Math.min(5, Math.max(1, Number(agent.worker_count || 1)))
     const vacancies = Math.max(0, agentCapacity - agentOccupancy)
     const pendingToDispatch = Math.min(vacancies, Math.max(0, budget - dispatchIntents.length), undispatchedIntentIds.length)
     dispatchIntents.push(...undispatchedIntentIds.slice(0, pendingToDispatch))
