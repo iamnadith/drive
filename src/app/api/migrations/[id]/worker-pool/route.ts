@@ -780,7 +780,12 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
     const pageSize = Math.max(10, Math.min(100, Math.floor(Number(url.searchParams.get("pageSize") || 25) || 25)))
     const selectedGeneration = Math.max(0, Math.floor(Number(url.searchParams.get("generation") || 0) || 0))
     const saved = await cachedPool(id, pageIndex, pageSize, selectedGeneration)
-    const backendWorkerStatus = await getBackendWorkerStatus(id, saved.selectedGeneration)
+    let backendWorkerStatus: Awaited<ReturnType<typeof getBackendWorkerStatus>> = { backendWorkerRuns: [], backendDispatch: null }
+    try {
+      backendWorkerStatus = await getBackendWorkerStatus(id, saved.selectedGeneration)
+    } catch (error) {
+      console.error("Migration backend-worker status projection unavailable", error instanceof Error ? error.message : String(error))
+    }
     const jobId = url.searchParams.get("jobId")
     let selectedJob: Record<string, unknown> | null = null
     if (jobId && /^[0-9a-f-]{36}$/i.test(jobId)) {
