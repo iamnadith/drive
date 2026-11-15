@@ -218,6 +218,9 @@ test('accepted GitHub dispatches are retried when no workflow run appears', () =
   assert.match(consume, /if \(acceptedDispatchStillInGrace \|\| dispatchStillInFlight\)/)
   assert.doesNotMatch(consume, /if \(phase === "accepted" \|\|/)
   assert.match(dispatchBackend, /payload->>'phase' in\('accepted','dispatching'\) and updated_at<=now\(\)-interval '5 minutes'/)
+  assert.match(consume, /workerKind === "backend"\s*\? `https:\/\/api\.github\.com\/repos\/.*\/actions\/workflows\/.*\/dispatches`/)
+  assert.match(consume, /ref: codeSync\.defaultBranch, inputs: dispatchPayload/)
+  assert.match(orchestrator, /intent\.run_type === "github_backend_dispatch" \? "workflow_dispatch" : "repository_dispatch"/)
 })
 
 test('GitHub cancellation compares migration ids consistently as text', () => {

@@ -271,6 +271,16 @@ test('migration worker workflow exposes the dispatch contract used by the panel'
   assert.doesNotMatch(workflowFile, /^\s+inputs:/m)
 })
 
+test('backend worker workflow supports direct GitHub workflow dispatches', () => {
+  const workflowFile = fs.readFileSync(path.resolve('.github/workflows/backend-worker.yml'), 'utf8')
+  assert.match(workflowFile, /workflow_dispatch:/)
+  assert.match(workflowFile, /types: \[drive-backend-worker\]/)
+  assert.match(workflowFile, /github\.event\.inputs\.worker_instance_id/)
+  assert.match(workflowFile, /github\.event\.inputs\.server_url/)
+  assert.match(workflowFile, /github\.event\.inputs\.worker_secret/)
+  assert.match(workflowFile, /github\.event\.inputs\.workflow_file/)
+})
+
 test('registered workflows dispatch only vacant independent worker capacity', () => {
   const dispatchRoute = fs.readFileSync(path.resolve('src/app/api/agents/[id]/dispatch/route.ts'), 'utf8')
   const workerRoute = fs.readFileSync(path.resolve('src/app/api/workers/[id]/route.ts'), 'utf8')
