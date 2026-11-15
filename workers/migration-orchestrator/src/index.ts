@@ -2047,9 +2047,12 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
   const activeByWorkflow = new Map<string, Set<string>>()
   const blockedWorkflows = new Set<string>()
   const actionsDisabledAgents = new Set<string>()
+  const configuredCapacityByAccount = new Map<string, number>()
+  const accountOccupancy = new Map<string, number>()
   let exactRunLookups = 0
   for (const agent of agents.rows) {
     const account = String(agent.github_repo_owner).toLowerCase()
+    configuredCapacityByAccount.set(account, (configuredCapacityByAccount.get(account) || 0) + Number(agent.worker_count || 1))
     const workflowKey = `${account}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
     const previousError = String(agent.last_error || "")
     const disabledSince = Date.parse(String(agent.updated_at || ""))
@@ -2087,9 +2090,10 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
     for (const run of active) if (run.id) workflowRuns.add(String(run.id))
     activeByWorkflow.set(workflowKey, workflowRuns)
   }
-  // Capacity belongs to each registered workflow. Never transfer the slots
-  // of a disabled/unavailable workflow to another GitHub account or repo;
-  // doing so silently exceeds that registration's configured worker_count.
+  // Each GitHub account has a hard five-worker ceiling, even if several
+  // workflow registrations belong to that owner. Individual registrations
+  // also remain bounded by their own configured worker_count. Disabled
+  // capacity is never transferred across accounts.
   for (const agent of agents.rows) {
     const account = String(agent.github_repo_owner).toLowerCase()
     const workflowKey = `${account}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
@@ -2103,6 +2107,16 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
             and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$3
             and coalesce(payload->>'phase','created') in('created','queued')`, [agent.id, migration.id, generation])
       }
+      // Preserve any already-running slots on this unavailable workflow so
+      // another registration under the same GitHub owner cannot exceed the
+      // account-wide limit while its run list is inaccessible.
+      const blockedRuns = await db.query(`select count(distinct payload->>'workerInstanceId')::int active_count
+        from drive_agent_runs where agent_id=$1 and run_type='github_dispatch'
+          and payload->>'migrationId'=$2
+          and greatest(1,coalesce(nullif(payload->>'workerGeneration','')::int,1))=$3
+          and (status='running' or (status='pending' and coalesce(payload->>'phase','') in('accepted','dispatching','reconciled'))
+            or payload->>'workerInstanceId'=any($4::text[]))`, [agent.id, migration.id, generation, activeQueueWorkerInstances])
+      accountOccupancy.set(account, (accountOccupancy.get(account) || 0) + Number(blockedRuns.rows[0]?.active_count || 0))
       continue
     }
     const remoteRuns = githubRunsByWorkflow.get(workflowKey) || []
@@ -2227,17 +2241,20 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
     }
     // A GitHub run may already be live even when its durable row was
     // incorrectly failed by an older release. Count every unmatched live run
-    // against this repo's own capacity so one linked account cannot steal
-    // another account's worker slots.
+    // against this account's capacity.
     const untrackedRemoteRuns = remoteRuns.filter((run) => run.id
       && ["queued", "in_progress", "waiting", "requested", "pending"].includes(String(run.status || "").toLowerCase())
       && !matchedRemoteRunIds.has(String(run.id))).length
     agentOccupancy += untrackedRemoteRuns
     const agentCapacity = Math.min(5, Math.max(1, Number(agent.worker_count || 1)))
     const vacancies = Math.max(0, agentCapacity - agentOccupancy)
-    const pendingToDispatch = Math.min(vacancies, Math.max(0, budget - dispatchIntents.length), undispatchedIntentIds.length)
+    const occupiedInAccount = accountOccupancy.get(account) || 0
+    const accountCapacity = Math.min(5, configuredCapacityByAccount.get(account) || agentCapacity)
+    const accountVacancies = Math.max(0, accountCapacity - occupiedInAccount - agentOccupancy)
+    const pendingToDispatch = Math.min(vacancies, accountVacancies, Math.max(0, budget - dispatchIntents.length), undispatchedIntentIds.length)
     dispatchIntents.push(...undispatchedIntentIds.slice(0, pendingToDispatch))
     const excessIntents = undispatchedIntentIds.slice(pendingToDispatch)
+    accountOccupancy.set(account, occupiedInAccount + agentOccupancy + pendingToDispatch)
     if (excessIntents.length) {
       await db.query(`update drive_agent_runs set status='canceled',summary='Undispatched intent canceled; linked repository is at worker capacity',completed_at=now(),updated_at=now(),payload=payload||jsonb_build_object('phase','canceled_capacity','canceledAt',now()) where id=any($1::uuid[]) and status='pending' and coalesce(payload->>'phase','created') in('created','queued')`, [excessIntents])
     }
