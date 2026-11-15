@@ -16,8 +16,8 @@ function validateDispatchConfiguration(input: {
   }
 }
 
-// Worker credentials travel with each repository_dispatch event so shared
-// worker repositories never need deployment-specific GitHub Actions secrets.
+// Worker credentials travel in each orchestrator dispatch so shared worker
+// repositories never need deployment-specific GitHub Actions secrets.
 export function validateGitHubWorkerDispatchConfiguration(input: {
   token: string
   owner: string

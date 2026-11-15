@@ -2051,15 +2051,18 @@ async function dispatchWorkers(db: Client, env: Env, migration: Row, activeQueue
     const workflowKey = `${account}/${String(agent.github_repo_name).toLowerCase()}/${agent.github_workflow_file}/${agent.github_ref || "main"}`
     if (!githubRunsByWorkflow.has(workflowKey) && !blockedWorkflows.has(workflowKey)) {
       try {
-        const url = `https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/workflows/${encodeURIComponent(String(agent.github_workflow_file).split("/").pop()!)}/runs?event=repository_dispatch&branch=${encodeURIComponent(agent.github_ref || "main")}&per_page=100`
-        const response = await fetch(url, { headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" }, signal: AbortSignal.timeout(15_000) })
-        if (!response.ok) {
-          const failure = await response.json().catch(() => ({})) as Row
-          throw new Error(`GitHub workflow capacity check HTTP ${response.status}${typeof failure.message === "string" ? `: ${failure.message.slice(0, 250)}` : ""}`)
+        const url = `https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/workflows/${encodeURIComponent(String(agent.github_workflow_file).split("/").pop()!)}/runs?branch=${encodeURIComponent(agent.github_ref || "main")}&per_page=100`
+        const responses = await Promise.all(["workflow_dispatch", "repository_dispatch"].map((event) => fetch(`${url}&event=${event}`, { headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" }, signal: AbortSignal.timeout(15_000) })))
+        const payloads: Array<{ workflow_runs?: Row[] }> = []
+        for (const response of responses) {
+          if (!response.ok) {
+            const failure = await response.json().catch(() => ({})) as Row
+            throw new Error(`GitHub workflow capacity check HTTP ${response.status}${typeof failure.message === "string" ? `: ${failure.message.slice(0, 250)}` : ""}`)
+          }
+          payloads.push(await response.json() as { workflow_runs?: Row[] })
         }
-        const payload = await response.json() as { workflow_runs?: Row[] }
-        if (!Array.isArray(payload.workflow_runs)) throw new Error("GitHub returned an incomplete workflow run list")
-        githubRunsByWorkflow.set(workflowKey, payload.workflow_runs)
+        if (payloads.some((payload) => !Array.isArray(payload.workflow_runs))) throw new Error("GitHub returned an incomplete workflow run list")
+        githubRunsByWorkflow.set(workflowKey, payloads.flatMap((payload) => payload.workflow_runs || []))
         await db.query(`update drive_agents set last_error=null,updated_at=now() where id=$1 and last_error like 'GitHub dispatch capacity check failed:%'`, [agent.id])
       } catch (error) {
         blockedWorkflows.add(workflowKey)
@@ -2391,14 +2394,16 @@ async function abortMigrationWorkers(db: Client, migrationId: string, reason: st
     if (!remoteId) {
       const instanceId = String(run.payload?.workerInstanceId || "")
       if (!instanceId) continue
-      const listUrl = `https://api.github.com/repos/${encodeURIComponent(run.github_repo_owner)}/${encodeURIComponent(run.github_repo_name)}/actions/workflows/${encodeURIComponent(String(run.github_workflow_file || "migration-worker.yml").split("/").pop()!)}/runs?event=repository_dispatch&branch=${encodeURIComponent(run.github_ref || "main")}&per_page=100`
-      const list = await fetch(listUrl, { headers, signal: AbortSignal.timeout(15_000) }).catch(() => null)
-      if (!list?.ok) {
-        warnings.push({ runId: String(run.id), reason: `GitHub run lookup failed${list ? ` (HTTP ${list.status})` : " (network error)"}` })
+      const listUrl = `https://api.github.com/repos/${encodeURIComponent(run.github_repo_owner)}/${encodeURIComponent(run.github_repo_name)}/actions/workflows/${encodeURIComponent(String(run.github_workflow_file || "migration-worker.yml").split("/").pop()!)}/runs?branch=${encodeURIComponent(run.github_ref || "main")}&per_page=100`
+      const events = run.payload?.dispatchMethod === "workflow_dispatch" ? ["workflow_dispatch"] : ["repository_dispatch", "workflow_dispatch"]
+      const lists = await Promise.all(events.map((event) => fetch(`${listUrl}&event=${event}`, { headers, signal: AbortSignal.timeout(15_000) }).catch(() => null)))
+      const failed = lists.find((list) => !list?.ok)
+      if (failed) {
+        warnings.push({ runId: String(run.id), reason: `GitHub run lookup failed${failed ? ` (HTTP ${failed.status})` : " (network error)"}` })
         continue
       }
-      const payload = await list.json() as { workflow_runs?: Row[] }
-      remoteId = String(payload.workflow_runs?.find((entry) => String(entry.display_title || "").includes(instanceId))?.id || "")
+      const payloads = await Promise.all(lists.map((list) => list!.json() as Promise<{ workflow_runs?: Row[] }>))
+      remoteId = String(payloads.flatMap((payload) => payload.workflow_runs || []).find((entry) => String(entry.display_title || "").includes(instanceId))?.id || "")
     }
     if (!remoteId) {
       warnings.push({ runId: String(run.id), reason: "Could not resolve the GitHub Actions run" })
@@ -2510,13 +2515,15 @@ async function reconcileOrphanedGitHubDispatches(db: Client) {
 async function reconcileGitHubIntent(db: Client, intent: Row, agent: Row) {
   const instanceId = String(intent.payload?.workerInstanceId || "")
   if (!instanceId) throw new Error("Dispatch intent is missing workerInstanceId")
-  const workflowEvent = intent.run_type === "github_backend_dispatch" ? "workflow_dispatch" : "repository_dispatch"
-  const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/workflows/${encodeURIComponent(String(agent.github_workflow_file || "migration-worker.yml").split("/").pop()!)}/runs?event=${workflowEvent}&branch=${encodeURIComponent(agent.github_ref || "main")}&per_page=50`, {
-    headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" }, signal: AbortSignal.timeout(15_000),
-  })
-  if (!response.ok) throw new Error(`GitHub reconciliation HTTP ${response.status}`)
-  const payload = await response.json() as { workflow_runs?: Array<{ id?: number; display_title?: string; html_url?: string; status?: string; conclusion?: string | null }> }
-  const match = payload.workflow_runs?.find((run) => String(run.display_title || "").includes(instanceId))
+  const workflowEvents = intent.run_type === "github_backend_dispatch" || intent.payload?.dispatchMethod === "workflow_dispatch" ? ["workflow_dispatch"] : ["repository_dispatch", "workflow_dispatch"]
+  const payloads = await Promise.all(workflowEvents.map(async (event) => {
+    const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(agent.github_repo_owner)}/${encodeURIComponent(agent.github_repo_name)}/actions/workflows/${encodeURIComponent(String(agent.github_workflow_file || "migration-worker.yml").split("/").pop()!)}/runs?event=${event}&branch=${encodeURIComponent(agent.github_ref || "main")}&per_page=50`, {
+      headers: { Authorization: `Bearer ${agent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator" }, signal: AbortSignal.timeout(15_000),
+    })
+    if (!response.ok) throw new Error(`GitHub reconciliation HTTP ${response.status}`)
+    return await response.json() as { workflow_runs?: Array<{ id?: number; display_title?: string; html_url?: string; status?: string; conclusion?: string | null }> }
+  }))
+  const match = payloads.flatMap((payload) => payload.workflow_runs || []).find((run) => String(run.display_title || "").includes(instanceId))
   if (!match?.id) return false
   const terminal = String(match.status || "").toLowerCase() === "completed"
   const successful = terminal && String(match.conclusion || "").toLowerCase() === "success"
@@ -2590,12 +2597,14 @@ async function consumeDispatch(env: Env, intentId: string, attempts: number) {
     await db.query(`update drive_agent_runs set payload=payload||$2::jsonb where id=$1`, [intent.id, JSON.stringify({ sourceCommit: codeSync.sourceSha, workerCommit: codeSync.targetSha, ref: codeSync.defaultBranch })])
     await db.query(`update drive_agent_runs set payload=payload||$2::jsonb,summary='Submitting GitHub workflow dispatch',updated_at=now() where id=$1`, [intent.id, JSON.stringify({ phase: "dispatching", dispatchStartedAt: new Date().toISOString(), dispatchAttempt: attempts })])
     const dispatchPayload = { migration_id: String(intent.payload.migrationId), worker_generation: String(intent.payload.workerGeneration || 1), agent_id: String(intent.agent_id), worker_instance_id: workerInstanceId, server_url: String(endpointConfiguration?.orchestratorUrl || ""), worker_secret: String(workerSettings.sharedSecret || ""), workflow_file: workerWorkflow, code_ref: codeSync.targetSha, max_runtime_seconds: String(GITHUB_WORKER_MAX_RUNTIME_SECONDS) }
-    const dispatchUrl = workerKind === "backend"
+    const workflowDispatch = workerKind === "backend" || intent.payload?.pool === true
+    const dispatchUrl = workflowDispatch
       ? `https://api.github.com/repos/${encodeURIComponent(intent.github_repo_owner)}/${encodeURIComponent(intent.github_repo_name)}/actions/workflows/${encodeURIComponent(workerWorkflow.split("/").pop()!)}/dispatches`
       : `https://api.github.com/repos/${encodeURIComponent(intent.github_repo_owner)}/${encodeURIComponent(intent.github_repo_name)}/dispatches`
+    if (workflowDispatch) await db.query(`update drive_agent_runs set payload=payload||jsonb_build_object('dispatchMethod','workflow_dispatch') where id=$1`, [intent.id])
     const response = await fetch(dispatchUrl, {
       method: "POST", headers: { Authorization: `Bearer ${intent.github_token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Drive-Migration-Orchestrator", "Content-Type": "application/json" },
-      body: JSON.stringify(workerKind === "backend"
+      body: JSON.stringify(workflowDispatch
         ? { ref: codeSync.defaultBranch, inputs: dispatchPayload }
         : { event_type: "drive-migration-worker", client_payload: { ...dispatchPayload, worker_generation: intent.payload.workerGeneration, max_runtime_seconds: GITHUB_WORKER_MAX_RUNTIME_SECONDS } }), signal: AbortSignal.timeout(20_000),
     })

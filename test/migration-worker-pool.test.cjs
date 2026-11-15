@@ -99,14 +99,15 @@ test('a completed GitHub pool file releases the run link for the next file', () 
   assert.match(jobsRoute, /keepPoolRunAlive\s*\?\s*"online"/)
 })
 
-test('the GitHub workflow exposes no manual dispatch fields and receives system context', () => {
+test('the GitHub workflow supports orchestrated dispatch and legacy repository events', () => {
   const workflow = read('.github/workflows/migration-worker.yml')
-  assert.doesNotMatch(workflow, /workflow_dispatch:/)
+  assert.match(workflow, /workflow_dispatch:/)
   assert.match(workflow, /repository_dispatch:/)
+  assert.match(workflow, /inputs\.worker_secret \|\| github\.event\.client_payload\.worker_secret/)
   assert.match(workflow, /DRIVE_REPAIR_JOB_ID: \$\{\{ github\.event\.client_payload\.repair_job_id \|\| '' \}\}/)
   assert.doesNotMatch(workflow, /POSTGRES_URL|POSTGRES_SSL/)
   assert.match(workflow, /Validate worker configuration/)
-  assert.match(workflow, /DRIVE_MIGRATION_ORCHESTRATOR_URL GitHub secret is missing/)
+  assert.match(workflow, /Dispatch payload is missing the Migration Orchestrator URL/)
   assert.doesNotMatch(workflow, /DRIVE_REPAIR_JOB_ID:.*vars\.DRIVE_REPAIR_JOB_ID/)
 })
 
@@ -114,12 +115,11 @@ test('GitHub migration workers receive only Orchestrator URL and shared worker s
   const route = read('src/app/api/agents/[id]/dispatch/route.ts')
   const helper = read('src/lib/github-worker-secrets.ts')
   const workflow = read('.github/workflows/migration-worker.yml')
-  assert.match(route, /syncGitHubWorkerSecrets/)
-  assert.match(helper, /DRIVE_MIGRATION_ORCHESTRATOR_URL/)
-  assert.match(helper, /DRIVE_WORKER_SHARED_SECRET/)
+  assert.match(route, /validateGitHubWorkerDispatchConfiguration/)
+  assert.match(helper, /validateDispatchConfiguration/)
   assert.doesNotMatch(helper, /POSTGRES_URL|postgresUrl/)
-  assert.match(workflow, /SERVER_URL: \$\{\{ secrets\.DRIVE_MIGRATION_ORCHESTRATOR_URL \}\}/)
-  assert.match(workflow, /TOKEN: \$\{\{ secrets\.DRIVE_WORKER_SHARED_SECRET \}\}/)
+  assert.match(workflow, /SERVER_URL: \$\{\{ inputs\.server_url \|\| github\.event\.client_payload\.server_url \}\}/)
+  assert.match(workflow, /TOKEN: \$\{\{ inputs\.worker_secret \|\| github\.event\.client_payload\.worker_secret \}\}/)
 })
 
 test('GitHub pool workers rotate before the six-hour limit and release unfinished work durably', () => {
@@ -127,7 +127,7 @@ test('GitHub pool workers rotate before the six-hour limit and release unfinishe
   const runtime = read('workers/migration-worker/migration-worker.mjs')
   const orchestrator = read('workers/migration-orchestrator/src/index.ts')
   assert.match(workflow, /timeout-minutes: 360/)
-  assert.match(workflow, /MAX_RUNTIME_SECONDS: \$\{\{ github\.event\.client_payload\.max_runtime_seconds \|\| '21300' \}\}/)
+  assert.match(workflow, /MAX_RUNTIME_SECONDS: \$\{\{ inputs\.max_runtime_seconds \|\| github\.event\.client_payload\.max_runtime_seconds \|\| '21300' \}\}/)
   assert.match(orchestrator, /GITHUB_WORKER_MAX_RUNTIME_SECONDS = 21_300/)
   assert.match(orchestrator, /max_runtime_seconds: GITHUB_WORKER_MAX_RUNTIME_SECONDS/)
   assert.match(runtime, /RUNTIME_DEADLINE/)
@@ -218,9 +218,9 @@ test('accepted GitHub dispatches are retried when no workflow run appears', () =
   assert.match(consume, /if \(acceptedDispatchStillInGrace \|\| dispatchStillInFlight\)/)
   assert.doesNotMatch(consume, /if \(phase === "accepted" \|\|/)
   assert.match(dispatchBackend, /payload->>'phase' in\('accepted','dispatching'\) and updated_at<=now\(\)-interval '5 minutes'/)
-  assert.match(consume, /workerKind === "backend"\s*\? `https:\/\/api\.github\.com\/repos\/.*\/actions\/workflows\/.*\/dispatches`/)
+  assert.match(consume, /const workflowDispatch = workerKind === "backend" \|\| intent\.payload\?\.pool === true/)
   assert.match(consume, /ref: codeSync\.defaultBranch, inputs: dispatchPayload/)
-  assert.match(orchestrator, /intent\.run_type === "github_backend_dispatch" \? "workflow_dispatch" : "repository_dispatch"/)
+  assert.match(orchestrator, /intent\.payload\?\.dispatchMethod === "workflow_dispatch"/)
 })
 
 test('GitHub cancellation compares migration ids consistently as text', () => {
@@ -739,6 +739,12 @@ test('worker-pool queue failures cannot be mistaken for an empty successful migr
   assert.match(orchestrator, /if \(objects > 0\)[\s\S]*?queue_materialization_failed[\s\S]*?status='failed'[\s\S]*?terminalFailure: true/)
   assert.match(orchestrator, /work_key like \$2[\s\S]*?generation:\$\{generation\}:inventory/)
   assert.match(orchestrator, /Superseded migration worker-pool generation; dispatch skipped/)
+})
+
+test('worker-pool queue counts survive a missing or unavailable verification overlay', () => {
+  const route = read('src/app/api/migrations/[id]/worker-pool/route.ts')
+  assert.match(route, /count\(v\.migration_item_id\)=count\(\*\)/)
+  assert.match(route, /Migration worker-pool verification overlay unavailable/)
 })
 
 test('worker-pool repair reconciles destinations before copy and bucket preparation stays worker-owned', () => {

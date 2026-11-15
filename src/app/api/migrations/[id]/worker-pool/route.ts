@@ -295,10 +295,12 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
       return { snapshot: { migrationId: id, workerGeneration: generation, totalJobs: liveProjection.stats.totalJobs, queuedJobs: liveProjection.stats.queuedJobs, runningJobs: liveProjection.stats.runningJobs, remainingJobs: liveProjection.stats.remainingJobs, completedJobs: liveProjection.stats.completedJobs, failedJobs: liveProjection.stats.failedJobs, canceledJobs: liveProjection.stats.canceledJobs, totalObjects: buckets.reduce((sum, bucket) => sum + Number(bucket.totalObjects || 0), 0), transferred: liveProjection.stats.transferred, inProgressFiles: active.rowCount || 0, completedBytes: Number(stats?.completed_bytes || 0), inProgressBytes: Number(stats?.in_progress_bytes || 0), workerRuntimeSeconds: Number(stats?.worker_runtime_seconds || 0), skipped: liveProjection.stats.skipped, failed: liveProjection.stats.failed, onlineWorkers, activeTransfers: active.rowCount || 0, buckets, updatedAt, sampledAt: new Date().toISOString() }, snapshotUpdatedAt: updatedAt, jobs: recent.rows, liveFiles: active.rows.map((row) => ({ ...(row.progress?.currentFile || {}), jobId: row.id, workerId: row.claimed_by, lastHeartbeatAt: row.last_heartbeat_at, operation: row.mode })), jobPage, jobPagination: { pageIndex, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)), total }, attempts: queueAttempts, workerRuns, selectedGeneration: generation, queueStatus, dataSource: "queue_database" }
     }, queueSettings.queueDatabaseSsl)
     if (queueProjection) {
-      const bucketVerification = await queryDb<{ source_bucket: string; target_bucket: string; verification_status: string | null; failed_objects: string | number }>(`
+      let verificationRows: Array<{ source_bucket: string; target_bucket: string; verification_status: string | null; failed_objects: string | number }> = []
+      try {
+        const bucketVerification = await queryDb<{ source_bucket: string; target_bucket: string; verification_status: string | null; failed_objects: string | number }>(`
         select i.source_bucket,i.target_bucket,
           case when bool_or(v.status='failed') then 'failed'
-            when count(v.id)=count(*) and bool_and(v.status='completed') then 'completed'
+            when count(v.migration_item_id)=count(*) and bool_and(v.status='completed') then 'completed'
             when bool_or(v.status='running') then 'running'
             when bool_or(v.status='pending') then 'pending'
             else null end verification_status,
@@ -308,7 +310,11 @@ async function readPool(id: string, pageIndex: number, pageSize: number, selecte
         left join drive_migration_verification_state v on v.migration_item_id=i.id and v.migration_id=i.migration_id and v.generation=$2
         where i.migration_id=$1
         group by i.source_bucket,i.target_bucket`, [id, queueProjection.selectedGeneration])
-      const verificationByBucket = new Map(bucketVerification.rows.map((row) => [`${row.source_bucket}\u0000${row.target_bucket}`, { status: String(row.verification_status || "").toLowerCase(), failed: Number(row.failed_objects || 0) }]))
+        verificationRows = bucketVerification.rows
+      } catch (error) {
+        console.error("Migration worker-pool verification overlay unavailable", error instanceof Error ? error.message : String(error))
+      }
+      const verificationByBucket = new Map(verificationRows.map((row) => [`${row.source_bucket}\u0000${row.target_bucket}`, { status: String(row.verification_status || "").toLowerCase(), failed: Number(row.failed_objects || 0) }]))
       const buckets = Array.isArray(queueProjection.snapshot.buckets) ? queueProjection.snapshot.buckets as Array<Record<string, unknown>> : []
       for (const bucket of buckets) {
         const verification = verificationByBucket.get(`${String(bucket.sourceBucket || "")}\u0000${String(bucket.targetBucket || "")}`)
