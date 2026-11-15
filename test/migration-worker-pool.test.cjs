@@ -745,6 +745,8 @@ test('worker-pool queue counts survive a missing or unavailable verification ove
   const route = read('src/app/api/migrations/[id]/worker-pool/route.ts')
   assert.match(route, /count\(v\.migration_item_id\)=count\(\*\)/)
   assert.match(route, /Migration worker-pool verification overlay unavailable/)
+  assert.match(route, /r\.payload->>'error' error/)
+  assert.doesNotMatch(route, /r\.summary,r\.error/)
 })
 
 test('worker-pool repair reconciles destinations before copy and bucket preparation stays worker-owned', () => {

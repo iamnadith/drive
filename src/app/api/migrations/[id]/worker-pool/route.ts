@@ -55,7 +55,7 @@ async function getDispatchedWorkers(migrationId: string, generation: number) {
 
 async function getBackendWorkerStatus(migrationId: string, generation: number) {
   const [runs, state] = await Promise.all([
-    queryDb<Record<string, unknown>>(`select r.id,r.agent_id,r.status,r.external_run_id,r.payload,r.summary,r.error,r.created_at,r.updated_at,
+    queryDb<Record<string, unknown>>(`select r.id,r.agent_id,r.status,r.external_run_id,r.payload,r.summary,r.payload->>'error' error,r.created_at,r.updated_at,
         a.github_repo_owner,a.github_repo_name
       from drive_agent_runs r join drive_agents a on a.id=r.agent_id
       where r.run_type='github_backend_dispatch' and r.payload->>'migrationId'=$1
